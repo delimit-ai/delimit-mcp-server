@@ -1,0 +1,4 @@
+#!/bin/bash
+# Delimit pre-commit hook
+echo "[DELIMIT] Running pre-commit governance check..."
+node /home/delimit/npm-delimit/bin/delimit-cli.js hook pre-commit

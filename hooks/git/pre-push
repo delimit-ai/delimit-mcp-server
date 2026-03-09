@@ -1,0 +1,4 @@
+#!/bin/bash
+# Delimit pre-push hook
+echo "[DELIMIT] Running pre-push governance check..."
+node /home/delimit/npm-delimit/bin/delimit-cli.js hook pre-push

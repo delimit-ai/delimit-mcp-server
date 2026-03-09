@@ -1,0 +1,24 @@
+name: API Governance
+
+on:
+  pull_request:
+    paths:
+      - '**.json'
+      - '**.yaml'
+      - '**.yml'
+      - 'openapi/**'
+      - 'api/**'
+      - 'swagger/**'
+
+jobs:
+  api-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+          
+      - name: Detect API breaking changes
+        uses: delimit-ai/delimit-action@v1
+        with:
+          advisory_mode: true

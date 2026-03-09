@@ -1,0 +1,19 @@
+defaultMode: advisory
+
+rules:
+  - name: "Production Protection"
+    mode: enforce
+    triggers:
+      - gitBranch: [main, master, production]
+      
+  - name: "Payment Code Security"
+    mode: enforce
+    triggers:
+      - path: "**/payment/**"
+      - content: ["stripe", "payment", "billing"]
+      
+  - name: "Documentation Freedom"
+    mode: advisory
+    triggers:
+      - path: "**/*.md"
+    final: true

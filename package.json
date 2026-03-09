@@ -1,0 +1,53 @@
+{
+  "name": "delimit",
+  "version": "2.0.0",
+  "description": "Dynamic AI governance with seamless mode switching - advisory, guarded, or enforce based on context",
+  "main": "index.js",
+  "bin": {
+    "delimit": "./bin/delimit-cli.js"
+  },
+  "scripts": {
+    "postinstall": "echo 'Run \"delimit install\" to set up governance'",
+    "install": "bash ./hooks/install-hooks.sh install",
+    "install-mcp": "bash ./hooks/install-hooks.sh mcp-only", 
+    "test-mcp": "bash ./hooks/install-hooks.sh troubleshoot",
+    "fix-mcp": "bash ./hooks/install-hooks.sh fix-mcp",
+    "test": "echo 'Governance is context-aware' && exit 0"
+  },
+  "keywords": [
+    "governance",
+    "ai",
+    "security",
+    "compliance",
+    "git-hooks",
+    "development",
+    "dynamic",
+    "context-aware",
+    "claude",
+    "gemini",
+    "copilot",
+    "delimit",
+    "mcp",
+    "model-context-protocol",
+    "troubleshooting"
+  ],
+  "author": "Delimit Team",
+  "license": "MIT",
+  "homepage": "https://delimit.ai",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/delimit-ai/delimit-cli.git"
+  },
+  "dependencies": {
+    "commander": "^9.0.0",
+    "axios": "^1.0.0",
+    "chalk": "^4.1.2",
+    "inquirer": "^8.2.0",
+    "express": "^4.18.0",
+    "js-yaml": "^4.1.0",
+    "minimatch": "^5.1.0"
+  },
+  "engines": {
+    "node": ">=14.0.0"
+  }
+}
