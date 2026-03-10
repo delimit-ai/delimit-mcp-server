@@ -1,5 +1,5 @@
 {
-  "name": "delimit",
+  "name": "delimit-cli",
   "version": "2.1.0",
   "description": "ESLint for API contracts — detect breaking changes, enforce semver, and generate migration guides for OpenAPI specs",
   "main": "index.js",
