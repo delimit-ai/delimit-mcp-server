@@ -36,7 +36,7 @@
   "homepage": "https://delimit.ai",
   "repository": {
     "type": "git",
-    "url": "https://github.com/delimit-ai/delimit-cli.git"
+    "url": "https://github.com/delimit-ai/delimit.git"
   },
   "dependencies": {
     "commander": "^9.0.0",
