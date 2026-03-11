@@ -3,22 +3,41 @@ name: API Governance
 on:
   pull_request:
     paths:
-      - '**.json'
-      - '**.yaml'
-      - '**.yml'
-      - 'openapi/**'
-      - 'api/**'
-      - 'swagger/**'
+      - '**/*.yaml'
+      - '**/*.yml'
+      - '**/*.json'
+      - 'lib/**'
 
 jobs:
   api-check:
+    name: Delimit API Check
     runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
-          
-      - name: Detect API breaking changes
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base
+
+      - name: Check for spec changes
+        id: spec-check
+        run: |
+          # Find any OpenAPI/Swagger specs in the repo
+          SPECS=$(find . -path ./base -prune -o \( -name "openapi*.yaml" -o -name "openapi*.yml" -o -name "openapi*.json" -o -name "swagger*.yaml" -o -name "swagger*.json" \) -print | head -1)
+          if [ -n "$SPECS" ]; then
+            echo "spec_found=true" >> $GITHUB_OUTPUT
+            echo "spec_path=$SPECS" >> $GITHUB_OUTPUT
+          else
+            echo "spec_found=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run Delimit
+        if: steps.spec-check.outputs.spec_found == 'true'
         uses: delimit-ai/delimit-action@v1
         with:
-          advisory_mode: true
+          old_spec: base/${{ steps.spec-check.outputs.spec_path }}
+          new_spec: ${{ steps.spec-check.outputs.spec_path }}
+          mode: advisory
