@@ -950,7 +950,7 @@ program
 program
     .command('lint [old_spec] [new_spec]')
     .description('Lint API specs for breaking changes and policy violations')
-    .option('-p, --policy <file>', 'Custom policy file')
+    .option('-p, --policy <preset|file>', 'Policy preset (strict/default/relaxed) or file path')
     .option('--current-version <ver>', 'Current API version for semver bump')
     .option('-n, --name <name>', 'API name for context')
     .option('--json', 'Output raw JSON')
