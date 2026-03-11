@@ -741,29 +741,72 @@ program
 
 const apiEngine = require('../lib/api-engine');
 
-// Init command — scaffold .delimit/ config
-program
-    .command('init')
-    .description('Initialize Delimit API governance in this project')
-    .action(async () => {
-        const configDir = path.join(process.cwd(), '.delimit');
-        const policyFile = path.join(configDir, 'policies.yml');
+// Policy preset templates
+const POLICY_PRESETS = {
+    strict: `# Delimit Policy Preset: strict
+# For public APIs, payment systems, and regulated environments.
+# Zero tolerance for breaking changes.
 
-        if (fs.existsSync(policyFile)) {
-            console.log(chalk.yellow('Already initialized — .delimit/policies.yml exists'));
-            return;
-        }
+override_defaults: true
 
-        fs.mkdirSync(configDir, { recursive: true });
+rules:
+  - id: no_endpoint_removal
+    name: Forbid Endpoint Removal
+    change_types: [endpoint_removed]
+    severity: error
+    action: forbid
+    message: "Endpoint {path} cannot be removed. Deprecate with Sunset header first."
 
-        const template = `# Delimit API Governance Policy
-# https://github.com/delimit-ai/delimit
+  - id: no_method_removal
+    name: Forbid Method Removal
+    change_types: [method_removed]
+    severity: error
+    action: forbid
+    message: "HTTP method removed from {path}. This breaks all clients."
 
-# Override built-in rules (default: false)
+  - id: no_required_param_addition
+    name: Forbid Required Parameter Addition
+    change_types: [required_param_added]
+    severity: error
+    action: forbid
+    message: "Cannot add required parameter to {path}. Make it optional."
+
+  - id: no_field_removal
+    name: Forbid Response Field Removal
+    change_types: [field_removed]
+    severity: error
+    action: forbid
+    message: "Cannot remove field from {path}. Deprecate it first."
+
+  - id: no_type_change
+    name: Forbid Type Changes
+    change_types: [type_changed]
+    severity: error
+    action: forbid
+    message: "Type change at {path} breaks client deserialization."
+
+  - id: no_enum_removal
+    name: Forbid Enum Value Removal
+    change_types: [enum_value_removed]
+    severity: error
+    action: forbid
+    message: "Enum value removed at {path}."
+
+  - id: no_param_removal
+    name: Forbid Parameter Removal
+    change_types: [param_removed]
+    severity: error
+    action: forbid
+    message: "Parameter removed from {path}."
+`,
+    default: `# Delimit Policy Preset: default
+# Balanced rules for most teams. Blocks destructive changes, warns on risky ones.
+# Uses built-in defaults — customize by adding rules below.
+
 override_defaults: false
 
 rules: []
-# Example:
+# Add custom rules here. Example:
 #   - id: protect_v1
 #     name: Protect V1 API
 #     change_types: [endpoint_removed, method_removed, field_removed]
@@ -772,9 +815,80 @@ rules: []
 #     conditions:
 #       path_pattern: "^/v1/.*"
 #     message: "V1 API is frozen. Make changes in V2."
-`;
-        fs.writeFileSync(policyFile, template);
-        console.log(chalk.green('Created .delimit/policies.yml'));
+`,
+    relaxed: `# Delimit Policy Preset: relaxed
+# For internal APIs, early-stage startups, and rapid iteration.
+# Only warns — never blocks CI.
+
+override_defaults: true
+
+rules:
+  - id: warn_endpoint_removal
+    name: Warn on Endpoint Removal
+    change_types: [endpoint_removed]
+    severity: warning
+    action: warn
+    message: "Endpoint {path} was removed. Check downstream consumers."
+
+  - id: warn_method_removal
+    name: Warn on Method Removal
+    change_types: [method_removed]
+    severity: warning
+    action: warn
+    message: "HTTP method removed from {path}."
+
+  - id: warn_required_param
+    name: Warn on Required Parameter Addition
+    change_types: [required_param_added]
+    severity: warning
+    action: warn
+    message: "New required parameter at {path}."
+
+  - id: warn_type_change
+    name: Warn on Type Changes
+    change_types: [type_changed]
+    severity: warning
+    action: warn
+    message: "Type changed at {path}."
+
+  - id: allow_field_removal
+    name: Allow Field Removal
+    change_types: [field_removed]
+    severity: info
+    action: allow
+    message: "Field removed from {path}."
+`,
+};
+
+// Init command — scaffold .delimit/ config
+program
+    .command('init')
+    .description('Initialize Delimit API governance in this project')
+    .option('--preset <name>', 'Policy preset: strict, default, or relaxed', 'default')
+    .action(async (options) => {
+        const configDir = path.join(process.cwd(), '.delimit');
+        const policyFile = path.join(configDir, 'policies.yml');
+
+        if (fs.existsSync(policyFile)) {
+            console.log(chalk.yellow('Already initialized — .delimit/policies.yml exists'));
+            return;
+        }
+
+        const preset = options.preset.toLowerCase();
+        if (!POLICY_PRESETS[preset]) {
+            console.log(chalk.red(`Unknown preset "${preset}". Choose: strict, default, or relaxed`));
+            return;
+        }
+
+        fs.mkdirSync(configDir, { recursive: true });
+        fs.writeFileSync(policyFile, POLICY_PRESETS[preset]);
+        console.log(chalk.green(`Created .delimit/policies.yml (preset: ${preset})`));
+        console.log('');
+        console.log(`  ${chalk.bold('strict')}  — zero tolerance, all breaking changes are errors`);
+        console.log(`  ${chalk.bold('default')} — balanced, blocks destructive changes, warns on risky`);
+        console.log(`  ${chalk.bold('relaxed')} — warnings only, never blocks CI`);
+        console.log('');
+        console.log(`Switch preset: ${chalk.bold('delimit init --preset strict')}`);
         console.log('');
         console.log('Next steps:');
         console.log(`  ${chalk.bold('delimit lint')} old.yaml new.yaml   — check for breaking changes`);
