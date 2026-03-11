@@ -1000,9 +1000,21 @@ program
                     { policy: options.policy, version: options.currentVersion, name: options.name }
                 );
             } else {
+                const resolvedOld = path.resolve(oldSpec);
+                const resolvedNew = path.resolve(newSpec);
+                if (!fs.existsSync(resolvedOld)) {
+                    console.error(chalk.red(`\n  File not found: ${resolvedOld}\n`));
+                    process.exit(1);
+                    return;
+                }
+                if (!fs.existsSync(resolvedNew)) {
+                    console.error(chalk.red(`\n  File not found: ${resolvedNew}\n`));
+                    process.exit(1);
+                    return;
+                }
                 result = apiEngine.lint(
-                    path.resolve(oldSpec),
-                    path.resolve(newSpec),
+                    resolvedOld,
+                    resolvedNew,
                     { policy: options.policy, version: options.currentVersion, name: options.name }
                 );
             }
@@ -1068,10 +1080,11 @@ program
     .option('--json', 'Output raw JSON')
     .action(async (oldSpec, newSpec, options) => {
         try {
-            const result = apiEngine.diff(
-                path.resolve(oldSpec),
-                path.resolve(newSpec)
-            );
+            const resolvedOld = path.resolve(oldSpec);
+            const resolvedNew = path.resolve(newSpec);
+            if (!fs.existsSync(resolvedOld)) { console.error(chalk.red(`\n  File not found: ${resolvedOld}\n`)); process.exit(1); return; }
+            if (!fs.existsSync(resolvedNew)) { console.error(chalk.red(`\n  File not found: ${resolvedNew}\n`)); process.exit(1); return; }
+            const result = apiEngine.diff(resolvedOld, resolvedNew);
 
             if (options.json) {
                 console.log(JSON.stringify(result, null, 2));
@@ -1102,9 +1115,13 @@ program
     .option('--json', 'Output raw JSON')
     .action(async (oldSpec, newSpec, options) => {
         try {
+            const resolvedOld = path.resolve(oldSpec);
+            const resolvedNew = path.resolve(newSpec);
+            if (!fs.existsSync(resolvedOld)) { console.error(chalk.red(`\n  File not found: ${resolvedOld}\n`)); process.exit(1); return; }
+            if (!fs.existsSync(resolvedNew)) { console.error(chalk.red(`\n  File not found: ${resolvedNew}\n`)); process.exit(1); return; }
             const result = apiEngine.explain(
-                path.resolve(oldSpec),
-                path.resolve(newSpec),
+                resolvedOld,
+                resolvedNew,
                 {
                     template: options.template,
                     oldVersion: options.oldVersion,
