@@ -412,115 +412,8 @@ program
         });
     });
 
-// Doctor command - diagnose issues
-program
-    .command('doctor')
-    .description('Diagnose Delimit configuration and issues')
-    .action(async () => {
-        console.log(chalk.blue.bold('\n🩺 Delimit Doctor\n'));
-        const issues = [];
-        const warnings = [];
-        const info = [];
-        
-        // Check agent status
-        const agentRunning = await checkAgent();
-        if (!agentRunning) {
-            issues.push('Agent is not running. Run "delimit status" to start it.');
-        } else {
-            info.push('Agent is running and responsive');
-        }
-        
-        // Check Git hooks
-        try {
-            const hooksPath = execSync('git config --global core.hooksPath').toString().trim();
-            if (hooksPath.includes('.delimit')) {
-                info.push('Git hooks are configured correctly');
-                
-                // Check hook files exist
-                const hookFiles = ['pre-commit', 'pre-push'];
-                hookFiles.forEach(hook => {
-                    const hookFile = path.join(hooksPath, hook);
-                    if (!fs.existsSync(hookFile)) {
-                        warnings.push(`Missing hook file: ${hook}`);
-                    }
-                });
-            } else {
-                warnings.push('Git hooks not pointing to Delimit. Run "delimit install" to fix.');
-            }
-        } catch (e) {
-            issues.push('Git hooks not configured. Run "delimit install" to set up.');
-        }
-        
-        // Check PATH
-        const pathHasDelimit = process.env.PATH.includes('.delimit/shims');
-        if (pathHasDelimit) {
-            warnings.push('PATH hijacking is active (for AI tool interception)');
-        } else {
-            info.push('PATH is clean (no AI tool interception)');
-        }
-        
-        // Check policy files
-        const policies = [];
-        if (fs.existsSync('delimit.yml')) {
-            policies.push('project');
-            // Validate policy
-            try {
-                const policy = yaml.load(fs.readFileSync('delimit.yml', 'utf8'));
-                if (!policy.rules) {
-                    warnings.push('Project policy has no rules defined');
-                }
-            } catch (e) {
-                issues.push(`Project policy is invalid: ${e.message}`);
-            }
-        }
-        
-        const userPolicyPath = path.join(process.env.HOME, '.config', 'delimit', 'delimit.yml');
-        if (fs.existsSync(userPolicyPath)) {
-            policies.push('user');
-        }
-        
-        if (policies.length === 0) {
-            warnings.push('No policy files found. Run "delimit policy --init" to create one.');
-        } else {
-            info.push(`Policy files loaded: ${policies.join(', ')}`);
-        }
-        
-        // Check audit log
-        const auditDir = path.join(process.env.HOME, '.delimit', 'audit');
-        if (fs.existsSync(auditDir)) {
-            const files = fs.readdirSync(auditDir);
-            info.push(`Audit log has ${files.length} day(s) of history`);
-        } else {
-            warnings.push('No audit logs found yet');
-        }
-        
-        // Display results
-        if (issues.length > 0) {
-            console.log(chalk.red.bold('❌ Issues Found:\n'));
-            issues.forEach(issue => console.log(chalk.red(`  • ${issue}`)));
-            console.log();
-        }
-        
-        if (warnings.length > 0) {
-            console.log(chalk.yellow.bold('⚠️  Warnings:\n'));
-            warnings.forEach(warning => console.log(chalk.yellow(`  • ${warning}`)));
-            console.log();
-        }
-        
-        if (info.length > 0) {
-            console.log(chalk.green.bold('✅ Working Correctly:\n'));
-            info.forEach(item => console.log(chalk.green(`  • ${item}`)));
-            console.log();
-        }
-        
-        // Overall status
-        if (issues.length === 0) {
-            console.log(chalk.green.bold('🎉 Delimit is healthy!'));
-        } else {
-            console.log(chalk.red.bold('🔧 Please fix the issues above'));
-            process.exit(1);
-        }
-    });
+// Doctor command - verify setup for API governance
+// (legacy doctor replaced with v1-focused checks)
 
 // Explain-decision command - show governance decision reasoning
 program
@@ -937,6 +830,110 @@ program
         console.log(`  ${chalk.bold('delimit lint')} old.yaml new.yaml   — check for breaking changes`);
         console.log(`  ${chalk.bold('delimit diff')} old.yaml new.yaml   — see all changes`);
         console.log(`  ${chalk.bold('delimit explain')} old.yaml new.yaml — human-readable summary`);
+    });
+
+// Doctor command — verify setup is correct
+program
+    .command('doctor')
+    .description('Verify Delimit setup and diagnose common issues')
+    .action(async () => {
+        console.log(chalk.bold('\n  Delimit Doctor\n'));
+        let ok = 0;
+        let warn = 0;
+        let fail = 0;
+
+        // Check policy file
+        const policyPath = path.join(process.cwd(), '.delimit', 'policies.yml');
+        if (fs.existsSync(policyPath)) {
+            console.log(chalk.green('  ✓ .delimit/policies.yml found'));
+            ok++;
+            try {
+                const yaml = require('js-yaml');
+                const policy = yaml.load(fs.readFileSync(policyPath, 'utf8'));
+                if (policy && (policy.rules !== undefined || policy.override_defaults !== undefined)) {
+                    console.log(chalk.green('  ✓ Policy file is valid YAML'));
+                    ok++;
+                } else {
+                    console.log(chalk.yellow('  ⚠ Policy file has no rules section'));
+                    warn++;
+                }
+            } catch (e) {
+                console.log(chalk.red(`  ✗ Policy file has invalid YAML: ${e.message}`));
+                fail++;
+            }
+        } else {
+            console.log(chalk.red('  ✗ No .delimit/policies.yml — run: delimit init'));
+            fail++;
+        }
+
+        // Check for OpenAPI spec
+        const specPatterns = [
+            'openapi.yaml', 'openapi.yml', 'openapi.json',
+            'swagger.yaml', 'swagger.yml', 'swagger.json',
+            'docs/openapi.yaml', 'docs/openapi.yml', 'docs/openapi.json',
+            'spec/openapi.yaml', 'spec/openapi.json',
+            'api/openapi.yaml', 'api/openapi.json',
+            'contrib/openapi.json',
+        ];
+        const foundSpecs = specPatterns.filter(p => fs.existsSync(path.join(process.cwd(), p)));
+        if (foundSpecs.length > 0) {
+            console.log(chalk.green(`  ✓ OpenAPI spec found: ${foundSpecs[0]}`));
+            ok++;
+        } else {
+            // Check for framework (Zero-Spec candidate)
+            const pkgJson = path.join(process.cwd(), 'package.json');
+            const reqTxt = path.join(process.cwd(), 'requirements.txt');
+            if (fs.existsSync(pkgJson) || fs.existsSync(reqTxt)) {
+                console.log(chalk.yellow('  ⚠ No OpenAPI spec file — Zero-Spec Mode may work if this is a FastAPI/NestJS/Express project'));
+                warn++;
+            } else {
+                console.log(chalk.red('  ✗ No OpenAPI spec file found'));
+                fail++;
+            }
+        }
+
+        // Check for GitHub workflow
+        const workflowDir = path.join(process.cwd(), '.github', 'workflows');
+        if (fs.existsSync(workflowDir)) {
+            const workflows = fs.readdirSync(workflowDir);
+            const hasDelimit = workflows.some(f => {
+                try {
+                    const content = fs.readFileSync(path.join(workflowDir, f), 'utf8');
+                    return content.includes('delimit-ai/delimit') || content.includes('delimit');
+                } catch { return false; }
+            });
+            if (hasDelimit) {
+                console.log(chalk.green('  ✓ GitHub Action workflow found'));
+                ok++;
+            } else {
+                console.log(chalk.yellow('  ⚠ No Delimit GitHub Action workflow — run delimit init for setup instructions'));
+                warn++;
+            }
+        } else {
+            console.log(chalk.yellow('  ⚠ No .github/workflows/ directory'));
+            warn++;
+        }
+
+        // Check git
+        try {
+            const { execSync } = require('child_process');
+            execSync('git rev-parse --git-dir', { stdio: 'pipe' });
+            console.log(chalk.green('  ✓ Git repository detected'));
+            ok++;
+        } catch {
+            console.log(chalk.yellow('  ⚠ Not a git repository'));
+            warn++;
+        }
+
+        // Summary
+        console.log('');
+        if (fail === 0 && warn === 0) {
+            console.log(chalk.green.bold('  All checks passed! Ready to lint.\n'));
+        } else if (fail === 0) {
+            console.log(chalk.yellow.bold(`  ${ok} passed, ${warn} warning(s). Setup looks good.\n`));
+        } else {
+            console.log(chalk.red.bold(`  ${ok} passed, ${warn} warning(s), ${fail} error(s). Fix errors above.\n`));
+        }
     });
 
 // Lint command — diff + policy (primary command)
