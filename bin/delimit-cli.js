@@ -783,20 +783,66 @@ rules: []
     });
 
 // Lint command — diff + policy (primary command)
+// Supports zero-spec mode: `delimit lint` (no args) auto-extracts from FastAPI
 program
-    .command('lint <old_spec> <new_spec>')
+    .command('lint [old_spec] [new_spec]')
     .description('Lint API specs for breaking changes and policy violations')
     .option('-p, --policy <file>', 'Custom policy file')
     .option('--current-version <ver>', 'Current API version for semver bump')
     .option('-n, --name <name>', 'API name for context')
     .option('--json', 'Output raw JSON')
+    .option('-d, --dir <path>', 'Project directory for zero-spec mode', '.')
     .action(async (oldSpec, newSpec, options) => {
         try {
-            const result = apiEngine.lint(
-                path.resolve(oldSpec),
-                path.resolve(newSpec),
-                { policy: options.policy, version: options.currentVersion, name: options.name }
-            );
+            let result;
+
+            if (!oldSpec || !newSpec) {
+                // Zero-spec mode: extract from framework source
+                console.log(chalk.gray('No spec files provided — detecting framework...'));
+                const zeroResult = apiEngine.zeroSpec(path.resolve(options.dir));
+
+                if (!zeroResult.success) {
+                    console.error(chalk.red(`\n  ${zeroResult.error}\n`));
+                    if (zeroResult.error_type === 'no_framework') {
+                        console.log('  Usage: delimit lint <old_spec> <new_spec>');
+                        console.log('  Or run from a FastAPI project directory.\n');
+                    }
+                    process.exit(1);
+                    return;
+                }
+
+                console.log(chalk.green(`  ${zeroResult.message}`));
+                console.log(`  Extracted: ${zeroResult.paths_count} paths, ${zeroResult.schemas_count} schemas`);
+                console.log(`  Spec: ${zeroResult.spec_path}\n`);
+
+                // Check for baseline
+                const baselineDir = path.join(path.resolve(options.dir), '.delimit');
+                const baselinePath = path.join(baselineDir, 'baseline.yaml');
+
+                if (!fs.existsSync(baselinePath)) {
+                    // First run: save baseline
+                    fs.mkdirSync(baselineDir, { recursive: true });
+                    const yaml = require('js-yaml');
+                    fs.writeFileSync(baselinePath, yaml.dump(zeroResult.spec));
+                    console.log(chalk.green('  Saved baseline to .delimit/baseline.yaml'));
+                    console.log('  Run again after making changes to see the diff.\n');
+                    process.exit(0);
+                    return;
+                }
+
+                // Compare against baseline
+                result = apiEngine.lint(
+                    baselinePath,
+                    zeroResult.spec_path,
+                    { policy: options.policy, version: options.currentVersion, name: options.name }
+                );
+            } else {
+                result = apiEngine.lint(
+                    path.resolve(oldSpec),
+                    path.resolve(newSpec),
+                    { policy: options.policy, version: options.currentVersion, name: options.name }
+                );
+            }
 
             if (options.json) {
                 console.log(JSON.stringify(result, null, 2));
