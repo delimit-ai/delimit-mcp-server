@@ -50,7 +50,7 @@ async function ensureAgent() {
 program
     .name('delimit')
     .description('Prevent breaking API changes before they reach production')
-    .version('2.3.0');
+    .version(require('../package.json').version);
 
 // Install command with modes
 program
