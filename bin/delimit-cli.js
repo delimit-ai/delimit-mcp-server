@@ -49,8 +49,8 @@ async function ensureAgent() {
 
 program
     .name('delimit')
-    .description('Dynamic AI Governance with seamless mode switching')
-    .version('2.0.0');
+    .description('Prevent breaking API changes before they reach production')
+    .version('2.3.0');
 
 // Install command with modes
 program
@@ -158,6 +158,7 @@ program
 program
     .command('mode [mode]')
     .description('Switch governance mode (advisory, guarded, enforce, auto)')
+
     .action(async (mode) => {
         await ensureAgent();
         
@@ -181,6 +182,7 @@ program
 program
     .command('status')
     .description('Show governance status')
+
     .option('--verbose', 'Show detailed status')
     .action(async (options) => {
         const agentRunning = await checkAgent();
@@ -274,6 +276,7 @@ program
 program
     .command('policy')
     .description('Manage governance policies')
+
     .option('--init', 'Create example policy file')
     .option('--validate', 'Validate policy syntax')
     .action(async (options) => {
@@ -326,6 +329,7 @@ overrides:
 program
     .command('auth')
     .description('Setup authentication and credentials for services')
+
     .option('--all', 'Setup all available services')
     .option('--github', 'Setup GitHub authentication')
     .option('--ai', 'Setup AI tools authentication')
@@ -387,6 +391,7 @@ program
 program
     .command('audit')
     .description('View governance audit log')
+
     .option('--tail <n>', 'Show last N entries', '10')
     .action(async (options) => {
         await ensureAgent();
@@ -419,6 +424,7 @@ program
 program
     .command('explain-decision [decision-id]')
     .description('Explain a governance decision')
+
     .action(async (decisionId) => {
         await ensureAgent();
         
@@ -438,6 +444,7 @@ program
 program
     .command('uninstall')
     .description('Remove Delimit governance')
+
     .action(async () => {
         const { confirm } = await inquirer.prompt([{
             type: 'confirm',
@@ -530,6 +537,7 @@ program
     .command('proxy <tool>')
     .allowUnknownOption()
     .description('Proxy AI tool execution with governance')
+
     .action(async (tool, options) => {
         const { proxyAITool } = require('../lib/proxy-handler');
         // Get all args after the tool name
@@ -542,6 +550,7 @@ program
 program
     .command('hook <type>')
     .description('Internal hook handler')
+
     .action(async (type) => {
         await ensureAgent();
         
@@ -1117,5 +1126,12 @@ program
             process.exit(1);
         }
     });
+
+// Hide legacy/internal commands from --help
+['install', 'mode', 'status', 'policy', 'auth', 'audit',
+ 'explain-decision', 'uninstall', 'proxy', 'hook'].forEach(name => {
+    const cmd = program.commands.find(c => c.name() === name);
+    if (cmd) cmd._hidden = true;
+});
 
 program.parse();
