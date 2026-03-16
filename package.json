@@ -12,7 +12,7 @@
     "install-mcp": "bash ./hooks/install-hooks.sh mcp-only",
     "test-mcp": "bash ./hooks/install-hooks.sh troubleshoot",
     "fix-mcp": "bash ./hooks/install-hooks.sh fix-mcp",
-    "test": "echo 'Governance is context-aware' && exit 0"
+    "test": "node --test tests/cli.test.js"
   },
   "keywords": [
     "openapi",
