@@ -26,14 +26,9 @@ jobs:
       pull-requests: write
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.base.sha }}
-          path: base
       - uses: delimit-ai/delimit-action@v1
         with:
-          old_spec: base/api/openapi.yaml
-          new_spec: api/openapi.yaml
+          spec: api/openapi.yaml
 ```
 
 Runs in **advisory mode** by default -- posts a PR comment but never fails your build. Set `mode: enforce` when you are ready to block merges on breaking changes.
