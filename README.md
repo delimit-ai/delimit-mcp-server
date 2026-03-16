@@ -1,141 +1,108 @@
-# delimit-cli
+# delimit
 
-**Prevent breaking API changes before they reach production.**
-
-Deterministic diff engine + policy enforcement + semver classification for OpenAPI specs. The independent successor to Optic.
+Catch breaking API changes before they ship.
 
 [![npm](https://img.shields.io/npm/v/delimit-cli)](https://www.npmjs.com/package/delimit-cli)
+[![GitHub Action](https://img.shields.io/badge/Marketplace-Delimit-blue)](https://github.com/marketplace/actions/delimit-api-governance)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![Tests](https://img.shields.io/badge/tests-299%20passing-brightgreen)](#)
 
-## Install
+Deterministic diff engine for OpenAPI specs. Detects breaking changes, classifies semver, enforces policy, and posts PR comments with migration guides. No API keys, no external services.
 
-```bash
-npm install -g delimit-cli
-```
+---
 
-## Quick Start (Under 5 Minutes)
+## GitHub Action (recommended)
 
-```bash
-# 1. Initialize with a policy preset
-delimit init --preset default
-
-# 2. Detect breaking changes
-delimit lint api/openapi-old.yaml api/openapi-new.yaml
-
-# 3. Add the GitHub Action for automated PR checks
-#    Copy .github/workflows/api-governance.yml (see CI section below)
-```
-
-## What It Catches
-
-Delimit deterministically detects 23 types of API changes, including 10 breaking patterns:
-
-- Endpoint or method removal
-- Required parameter addition
-- Response field removal
-- Type changes
-- Enum value removal
-- And more
-
-Every change is classified as `MAJOR`, `MINOR`, `PATCH`, or `NONE` per semver.
-
-## Commands
-
-| Command | Description |
-|---------|-------------|
-| `delimit init` | Create `.delimit/policies.yml` with a policy preset |
-| `delimit lint <old> <new>` | Diff + policy check — returns exit code 1 on violations |
-| `delimit diff <old> <new>` | Raw diff with `[BREAKING]`/`[safe]` tags |
-| `delimit explain <old> <new>` | Human-readable change explanation |
-
-## Policy Presets
-
-Choose a preset that fits your team:
-
-```bash
-delimit init --preset strict    # Public APIs, payments — zero tolerance
-delimit init --preset default   # Most teams — balanced rules
-delimit init --preset relaxed   # Internal APIs, startups — warnings only
-```
-
-| Preset | Breaking changes | Type changes | Field removal |
-|--------|-----------------|--------------|---------------|
-| `strict` | Error (blocks) | Error (blocks) | Error (blocks) |
-| `default` | Error (blocks) | Warning | Error (blocks) |
-| `relaxed` | Warning | Warning | Info |
-
-Pass a preset directly to lint:
-
-```bash
-delimit lint --policy strict old.yaml new.yaml
-```
-
-## Options
-
-```bash
-# Semver classification with version bump
-delimit lint old.yaml new.yaml --current-version 1.0.0
-
-# Explainer templates
-delimit explain old.yaml new.yaml -t migration
-delimit explain old.yaml new.yaml -t pr_comment
-delimit explain old.yaml new.yaml -t changelog
-
-# JSON output for scripting
-delimit lint old.yaml new.yaml --json
-```
-
-### Explainer Templates
-
-| Template | Audience |
-|----------|----------|
-| `developer` | Technical details for engineers |
-| `team_lead` | Summary for engineering managers |
-| `product` | Non-technical overview for PMs |
-| `migration` | Step-by-step migration guide |
-| `changelog` | Ready-to-paste changelog entry |
-| `pr_comment` | GitHub PR comment format |
-| `slack` | Slack message format |
-
-## CI/CD Integration
-
-Add this workflow to `.github/workflows/api-governance.yml`:
+Add `.github/workflows/api-check.yml`:
 
 ```yaml
-name: API Governance
-on:
-  pull_request:
-    paths:
-      - 'path/to/openapi.yaml'  # adjust to your spec path
-permissions:
-  contents: read
-  pull-requests: write
+name: API Contract Check
+on: pull_request
+
 jobs:
-  api-governance:
+  delimit:
     runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.base.sha }}
-          path: _base
-      - uses: delimit-ai/delimit@v1
+          path: base
+      - uses: delimit-ai/delimit-action@v1
         with:
-          old_spec: _base/path/to/openapi.yaml
-          new_spec: path/to/openapi.yaml
-          mode: advisory  # or 'enforce' to block PRs
+          old_spec: base/api/openapi.yaml
+          new_spec: api/openapi.yaml
 ```
 
-The action posts a PR comment with:
-- Semver badge (`MAJOR` / `MINOR` / `PATCH`)
-- Violation table with severity
-- Expandable migration guide for breaking changes
+Runs in **advisory mode** by default -- posts a PR comment but never fails your build. Set `mode: enforce` when you are ready to block merges on breaking changes.
 
-See [Delimit API Governance](https://github.com/marketplace/actions/delimit-api-governance) on the GitHub Marketplace.
+---
 
-## Custom Policies
+## CLI
 
-Create `.delimit/policies.yml` or start from a preset:
+```bash
+npx delimit-cli lint api/openapi.yaml
+npx delimit-cli diff old.yaml new.yaml
+npx delimit-cli explain old.yaml new.yaml --template migration
+```
+
+Or install globally:
+
+```bash
+npm install -g delimit-cli
+delimit init --preset default
+delimit lint old.yaml new.yaml
+```
+
+### Commands
+
+| Command | What it does |
+|---------|-------------|
+| `delimit init [--preset]` | Create `.delimit/policies.yml` |
+| `delimit lint <old> <new>` | Diff + policy check. Exit 1 on violations. |
+| `delimit diff <old> <new>` | Raw diff with `[BREAKING]` / `[safe]` tags |
+| `delimit explain <old> <new>` | Human-readable explanation (7 templates) |
+
+---
+
+## What it catches
+
+10 breaking change types, detected deterministically:
+
+| Breaking change | Example |
+|----------------|---------|
+| Endpoint removed | `DELETE /users/{id}` path deleted |
+| Method removed | `PATCH` dropped from `/orders` |
+| Required parameter added | New required query param on existing endpoint |
+| Parameter removed | `?filter` param deleted |
+| Response removed | `200` response code dropped |
+| Required field added | New required field in request body |
+| Response field removed | `email` field removed from response |
+| Type changed | `age` changed from `string` to `integer` |
+| Format changed | `date` changed to `date-time` |
+| Enum value removed | `status: "pending"` no longer allowed |
+
+Plus 7 non-breaking types (endpoint added, optional field added, etc.) for full change visibility. Every change is classified as `MAJOR`, `MINOR`, `PATCH`, or `NONE`.
+
+---
+
+## Policy presets
+
+```bash
+delimit init --preset strict    # All breaking changes are errors. For public/payment APIs.
+delimit init --preset default   # Breaking changes error, type changes warn. For most teams.
+delimit init --preset relaxed   # Everything is a warning. For internal APIs and prototyping.
+```
+
+Or pass inline: `delimit lint --policy strict old.yaml new.yaml`
+
+---
+
+## Custom policies
+
+Create `.delimit/policies.yml`:
 
 ```yaml
 override_defaults: false
@@ -151,17 +118,22 @@ rules:
     message: "V1 API is frozen. Make changes in V2."
 ```
 
-## Supported Specs
+---
 
-- OpenAPI 3.0.x and 3.1.x
+## Supported formats
+
+- OpenAPI 3.0 and 3.1
 - Swagger 2.0
-- YAML and JSON formats
+- YAML and JSON
+
+---
 
 ## Links
 
-- [GitHub Action](https://github.com/marketplace/actions/delimit-api-governance) — Automated PR checks
-- [GitHub](https://github.com/delimit-ai/delimit) — Source code
-- [Issues](https://github.com/delimit-ai/delimit/issues) — Bug reports and feature requests
+- [delimit.ai](https://delimit.ai) -- Project home
+- [GitHub Action on Marketplace](https://github.com/marketplace/actions/delimit-api-governance) -- Install in one click
+- [delimit-cli on npm](https://www.npmjs.com/package/delimit-cli) -- CLI package
+- [Quickstart repo](https://github.com/delimit-ai/delimit-quickstart) -- Try it in 2 minutes
 
 ## License
 
