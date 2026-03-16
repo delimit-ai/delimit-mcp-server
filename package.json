@@ -1,6 +1,6 @@
 {
   "name": "delimit-cli",
-  "version": "2.3.2",
+  "version": "2.4.0",
   "description": "Prevent breaking API changes before they reach production. Deterministic diff engine + policy enforcement + semver classification.",
   "main": "index.js",
   "bin": {
