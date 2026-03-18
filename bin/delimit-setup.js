@@ -139,6 +139,50 @@ async function main() {
         log(`  ${green('✓')} Added delimit to ${MCP_CONFIG}`);
     }
 
+    // Step 3b: Configure Codex MCP (if installed)
+    const CODEX_CONFIG = path.join(os.homedir(), '.codex', 'config.toml');
+    if (fs.existsSync(CODEX_CONFIG)) {
+        try {
+            let toml = fs.readFileSync(CODEX_CONFIG, 'utf-8');
+            if (toml.includes('[mcp_servers.delimit]')) {
+                log(`  ${green('✓')} Delimit already in Codex config`);
+            } else {
+                const codexEntry = `\n[mcp_servers.delimit]\ncommand = "${python}"\nargs = ["${actualServer}"]\ncwd = "${path.join(DELIMIT_HOME, 'server')}"\n`;
+                toml += codexEntry;
+                fs.writeFileSync(CODEX_CONFIG, toml);
+                log(`  ${green('✓')} Added delimit to Codex (${CODEX_CONFIG})`);
+            }
+        } catch (e) {
+            log(`  ${yellow('!')} Could not configure Codex: ${e.message}`);
+        }
+    }
+
+    // Step 3c: Configure Cursor MCP (if installed)
+    const CURSOR_CONFIG = path.join(os.homedir(), '.cursor', 'mcp.json');
+    if (fs.existsSync(path.join(os.homedir(), '.cursor'))) {
+        try {
+            let cursorConfig = {};
+            if (fs.existsSync(CURSOR_CONFIG)) {
+                cursorConfig = JSON.parse(fs.readFileSync(CURSOR_CONFIG, 'utf-8'));
+            }
+            if (!cursorConfig.mcpServers) cursorConfig.mcpServers = {};
+            if (cursorConfig.mcpServers.delimit) {
+                log(`  ${green('✓')} Delimit already in Cursor config`);
+            } else {
+                cursorConfig.mcpServers.delimit = {
+                    command: python,
+                    args: [actualServer],
+                    cwd: path.join(DELIMIT_HOME, 'server'),
+                    env: { PYTHONPATH: path.join(DELIMIT_HOME, 'server') }
+                };
+                fs.writeFileSync(CURSOR_CONFIG, JSON.stringify(cursorConfig, null, 2));
+                log(`  ${green('✓')} Added delimit to Cursor (${CURSOR_CONFIG})`);
+            }
+        } catch (e) {
+            log(`  ${yellow('!')} Could not configure Cursor: ${e.message}`);
+        }
+    }
+
     // Step 4: Install default agents
     step(4, 'Installing governance agents...');
 
