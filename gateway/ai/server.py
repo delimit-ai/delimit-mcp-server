@@ -36,7 +36,21 @@ logger = logging.getLogger("delimit.ai")
 mcp = FastMCP("delimit")
 mcp.description = "Delimit — The smart lint engine for OpenAPI. Unified agent surface."
 
-VERSION = "2.0.0"
+VERSION = "3.2.0"
+
+# LED-044: Hide STUB and PASS-THROUGH tools from MCP unless opted in.
+# Set DELIMIT_SHOW_EXPERIMENTAL=1 to expose all tools (internal development).
+SHOW_EXPERIMENTAL = os.environ.get("DELIMIT_SHOW_EXPERIMENTAL", "") == "1"
+
+
+def _experimental_tool():
+    """Decorator that only registers the function as an MCP tool if SHOW_EXPERIMENTAL is set.
+    When disabled, the function still exists but is not exposed via MCP."""
+    def decorator(fn):
+        if SHOW_EXPERIMENTAL:
+            return mcp.tool()(fn)
+        return fn
+    return decorator
 
 
 def _safe_call(fn, **kwargs) -> Dict[str, Any]:
@@ -266,7 +280,7 @@ def delimit_init(
 
 @mcp.tool()
 def delimit_os_plan(operation: str, target: str, parameters: Optional[Dict[str, Any]] = None, require_approval: bool = True) -> Dict[str, Any]:
-    """Create a governed execution plan.
+    """Create a governed execution plan (Pro).
 
     Args:
         operation: Operation to plan (e.g. "deploy", "migrate").
@@ -274,24 +288,36 @@ def delimit_os_plan(operation: str, target: str, parameters: Optional[Dict[str, 
         parameters: Operation parameters.
         require_approval: Whether to require approval before execution.
     """
+    from ai.license import require_premium
+    gate = require_premium("os_plan")
+    if gate:
+        return gate
     from backends.os_bridge import create_plan
     return _safe_call(create_plan, operation=operation, target=target, parameters=parameters, require_approval=require_approval)
 
 
 @mcp.tool()
 def delimit_os_status() -> Dict[str, Any]:
-    """Get current Delimit OS status with plan/task/token counts."""
+    """Get current Delimit OS status with plan/task/token counts (Pro)."""
+    from ai.license import require_premium
+    gate = require_premium("os_status")
+    if gate:
+        return gate
     from backends.os_bridge import get_status
     return _safe_call(get_status)
 
 
 @mcp.tool()
 def delimit_os_gates(plan_id: str) -> Dict[str, Any]:
-    """Check governance gates for a plan.
+    """Check governance gates for a plan (Pro).
 
     Args:
         plan_id: The plan ID (e.g. "PLAN-A1B2C3D4").
     """
+    from ai.license import require_premium
+    gate = require_premium("os_gates")
+    if gate:
+        return gate
     from backends.os_bridge import check_gates
     return _safe_call(check_gates, plan_id=plan_id)
 
@@ -300,53 +326,69 @@ def delimit_os_gates(plan_id: str) -> Dict[str, Any]:
 
 @mcp.tool()
 def delimit_gov_health(repo: str = ".") -> Dict[str, Any]:
-    """Check governance system health.
+    """Check governance system health (Pro).
 
     Args:
         repo: Repository path to check.
     """
+    from ai.license import require_premium
+    gate = require_premium("gov_health")
+    if gate:
+        return gate
     from backends.governance_bridge import health
     return _safe_call(health, repo=repo)
 
 
 @mcp.tool()
 def delimit_gov_status(repo: str = ".") -> Dict[str, Any]:
-    """Get current governance status for a repository.
+    """Get current governance status for a repository (Pro).
 
     Args:
         repo: Repository path.
     """
+    from ai.license import require_premium
+    gate = require_premium("gov_status")
+    if gate:
+        return gate
     from backends.governance_bridge import status
     return _safe_call(status, repo=repo)
 
 
 @mcp.tool()
 def delimit_gov_policy(repo: str = ".") -> Dict[str, Any]:
-    """Get governance policy for a repository.
+    """Get governance policy for a repository (Pro).
 
     Args:
         repo: Repository path.
     """
+    from ai.license import require_premium
+    gate = require_premium("gov_policy")
+    if gate:
+        return gate
     from backends.governance_bridge import policy
     return _safe_call(policy, repo=repo)
 
 
 @mcp.tool()
 def delimit_gov_evaluate(action: str, context: Optional[Dict[str, Any]] = None, repo: str = ".") -> Dict[str, Any]:
-    """Evaluate if governance is required for an action (requires governancegate).
+    """Evaluate if governance is required for an action (requires governancegate) (Pro).
 
     Args:
         action: The action to evaluate.
         context: Additional context.
         repo: Repository path.
     """
+    from ai.license import require_premium
+    gate = require_premium("gov_evaluate")
+    if gate:
+        return gate
     from backends.governance_bridge import evaluate_trigger
     return _safe_call(evaluate_trigger, action=action, context=context, repo=repo)
 
 
 @mcp.tool()
 def delimit_gov_new_task(title: str, scope: str, risk_level: str = "medium", repo: str = ".") -> Dict[str, Any]:
-    """Create a new governance task (requires governancegate).
+    """Create a new governance task (requires governancegate) (Pro).
 
     Args:
         title: Task title.
@@ -354,30 +396,42 @@ def delimit_gov_new_task(title: str, scope: str, risk_level: str = "medium", rep
         risk_level: Risk level (low/medium/high/critical).
         repo: Repository path.
     """
+    from ai.license import require_premium
+    gate = require_premium("gov_new_task")
+    if gate:
+        return gate
     from backends.governance_bridge import new_task
     return _safe_call(new_task, title=title, scope=scope, risk_level=risk_level, repo=repo)
 
 
 @mcp.tool()
 def delimit_gov_run(task_id: str, repo: str = ".") -> Dict[str, Any]:
-    """Run a governance task (requires governancegate).
+    """Run a governance task (requires governancegate) (Pro).
 
     Args:
         task_id: Task ID to run.
         repo: Repository path.
     """
+    from ai.license import require_premium
+    gate = require_premium("gov_run")
+    if gate:
+        return gate
     from backends.governance_bridge import run_task
     return _safe_call(run_task, task_id=task_id, repo=repo)
 
 
 @mcp.tool()
 def delimit_gov_verify(task_id: str, repo: str = ".") -> Dict[str, Any]:
-    """Verify a governance task (requires governancegate).
+    """Verify a governance task (requires governancegate) (Pro).
 
     Args:
         task_id: Task ID to verify.
         repo: Repository path.
     """
+    from ai.license import require_premium
+    gate = require_premium("gov_verify")
+    if gate:
+        return gate
     from backends.governance_bridge import verify
     return _safe_call(verify, task_id=task_id, repo=repo)
 
@@ -386,36 +440,48 @@ def delimit_gov_verify(task_id: str, repo: str = ".") -> Dict[str, Any]:
 
 @mcp.tool()
 def delimit_memory_search(query: str, limit: int = 10) -> Dict[str, Any]:
-    """Search conversation memory semantically.
+    """Search conversation memory semantically (Pro).
 
     Args:
         query: Natural language search query.
         limit: Maximum results to return.
     """
+    from ai.license import require_premium
+    gate = require_premium("memory_search")
+    if gate:
+        return gate
     from backends.memory_bridge import search
     return _safe_call(search, query=query, limit=limit)
 
 
 @mcp.tool()
 def delimit_memory_store(content: str, tags: Optional[List[str]] = None, context: Optional[str] = None) -> Dict[str, Any]:
-    """Store a memory entry for future retrieval.
+    """Store a memory entry for future retrieval (Pro).
 
     Args:
         content: The content to remember.
         tags: Optional categorization tags.
         context: Optional context about when/why this was stored.
     """
+    from ai.license import require_premium
+    gate = require_premium("memory_store")
+    if gate:
+        return gate
     from backends.memory_bridge import store
     return _safe_call(store, content=content, tags=tags, context=context)
 
 
 @mcp.tool()
 def delimit_memory_recent(limit: int = 5) -> Dict[str, Any]:
-    """Get recent work summary from memory.
+    """Get recent work summary from memory (Pro).
 
     Args:
         limit: Number of recent entries to return.
     """
+    from ai.license import require_premium
+    gate = require_premium("memory_recent")
+    if gate:
+        return gate
     from backends.memory_bridge import get_recent
     return _safe_call(get_recent, limit=limit)
 
@@ -424,25 +490,37 @@ def delimit_memory_recent(limit: int = 5) -> Dict[str, Any]:
 
 @mcp.tool()
 def delimit_vault_search(query: str) -> Dict[str, Any]:
-    """Search vault entries.
+    """Search vault entries (Pro).
 
     Args:
         query: Search query for vault entries.
     """
+    from ai.license import require_premium
+    gate = require_premium("vault_search")
+    if gate:
+        return gate
     from backends.vault_bridge import search
     return _safe_call(search, query=query)
 
 
 @mcp.tool()
 def delimit_vault_health() -> Dict[str, Any]:
-    """Check vault health status."""
+    """Check vault health status (Pro)."""
+    from ai.license import require_premium
+    gate = require_premium("vault_health")
+    if gate:
+        return gate
     from backends.vault_bridge import health
     return _safe_call(health)
 
 
 @mcp.tool()
 def delimit_vault_snapshot() -> Dict[str, Any]:
-    """Get a vault state snapshot."""
+    """Get a vault state snapshot (Pro)."""
+    from ai.license import require_premium
+    gate = require_premium("vault_snapshot")
+    if gate:
+        return gate
     from backends.vault_bridge import snapshot
     return _safe_call(snapshot)
 
@@ -456,82 +534,106 @@ def delimit_vault_snapshot() -> Dict[str, Any]:
 
 @mcp.tool()
 def delimit_deploy_plan(app: str, env: str, git_ref: Optional[str] = None) -> Dict[str, Any]:
-    """Plan deployment with build steps.
+    """Plan deployment with build steps (Pro).
 
     Args:
         app: Application name.
         env: Target environment (staging/production).
         git_ref: Git reference (branch, tag, or SHA).
     """
+    from ai.license import require_premium
+    gate = require_premium("deploy_plan")
+    if gate:
+        return gate
     from backends.deploy_bridge import plan
     return _safe_call(plan, app=app, env=env, git_ref=git_ref)
 
 
 @mcp.tool()
 def delimit_deploy_build(app: str, git_ref: Optional[str] = None) -> Dict[str, Any]:
-    """Build Docker images with SHA tags.
+    """Build Docker images with SHA tags (Pro).
 
     Args:
         app: Application name.
         git_ref: Git reference.
     """
+    from ai.license import require_premium
+    gate = require_premium("deploy_build")
+    if gate:
+        return gate
     from backends.deploy_bridge import build
     return _safe_call(build, app=app, git_ref=git_ref)
 
 
 @mcp.tool()
 def delimit_deploy_publish(app: str, git_ref: Optional[str] = None) -> Dict[str, Any]:
-    """Publish images to registry.
+    """Publish images to registry (Pro).
 
     Args:
         app: Application name.
         git_ref: Git reference.
     """
+    from ai.license import require_premium
+    gate = require_premium("deploy_publish")
+    if gate:
+        return gate
     from backends.deploy_bridge import publish
     return _safe_call(publish, app=app, git_ref=git_ref)
 
 
-@mcp.tool()
+@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
 def delimit_deploy_verify(app: str, env: str, git_ref: Optional[str] = None) -> Dict[str, Any]:
-    """Verify deployment health (experimental).
+    """Verify deployment health (experimental) (Pro).
 
     Args:
         app: Application name.
         env: Target environment.
         git_ref: Git reference.
     """
+    from ai.license import require_premium
+    gate = require_premium("deploy_verify")
+    if gate:
+        return gate
     from backends.deploy_bridge import verify
     return _safe_call(verify, app=app, env=env, git_ref=git_ref)
 
 
 @mcp.tool()
 def delimit_deploy_rollback(app: str, env: str, to_sha: Optional[str] = None) -> Dict[str, Any]:
-    """Rollback to previous SHA.
+    """Rollback to previous SHA (Pro).
 
     Args:
         app: Application name.
         env: Target environment.
         to_sha: SHA to rollback to.
     """
+    from ai.license import require_premium
+    gate = require_premium("deploy_rollback")
+    if gate:
+        return gate
     from backends.deploy_bridge import rollback
     return _safe_call(rollback, app=app, env=env, to_sha=to_sha)
 
 
 @mcp.tool()
 def delimit_deploy_status(app: str, env: str) -> Dict[str, Any]:
-    """Get deployment status.
+    """Get deployment status (Pro).
 
     Args:
         app: Application name.
         env: Target environment.
     """
+    from ai.license import require_premium
+    gate = require_premium("deploy_status")
+    if gate:
+        return gate
     from backends.deploy_bridge import status
     return _safe_call(status, app=app, env=env)
 
 
 # ─── Intel ──────────────────────────────────────────────────────────────
 
-@mcp.tool()
+@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
 def delimit_intel_dataset_register(name: str, schema: Dict[str, Any], description: Optional[str] = None) -> Dict[str, Any]:
     """Register a new dataset with schema (coming soon).
 
@@ -544,14 +646,14 @@ def delimit_intel_dataset_register(name: str, schema: Dict[str, Any], descriptio
     return _safe_call(dataset_register, name=name, schema=schema, description=description)
 
 
-@mcp.tool()
+@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
 def delimit_intel_dataset_list() -> Dict[str, Any]:
     """List registered datasets (coming soon)."""
     from backends.intel_bridge import dataset_list
     return _safe_call(dataset_list)
 
 
-@mcp.tool()
+@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
 def delimit_intel_dataset_freeze(dataset_id: str) -> Dict[str, Any]:
     """Mark dataset as immutable (coming soon).
 
@@ -562,7 +664,7 @@ def delimit_intel_dataset_freeze(dataset_id: str) -> Dict[str, Any]:
     return _safe_call(dataset_freeze, dataset_id=dataset_id)
 
 
-@mcp.tool()
+@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
 def delimit_intel_snapshot_ingest(data: Dict[str, Any], provenance: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Store research snapshot with provenance (coming soon).
 
@@ -574,7 +676,7 @@ def delimit_intel_snapshot_ingest(data: Dict[str, Any], provenance: Optional[Dic
     return _safe_call(snapshot_ingest, data=data, provenance=provenance)
 
 
-@mcp.tool()
+@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
 def delimit_intel_query(dataset_id: str, query: str, parameters: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Execute deterministic query on dataset (coming soon).
 
@@ -618,46 +720,62 @@ def delimit_generate_scaffold(project_type: str, name: str, packages: Optional[L
 
 # ─── Repo (RepoDoctor + ConfigSentry) ──────────────────────────────────
 
-@mcp.tool()
+@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
 def delimit_repo_diagnose(target: str = ".") -> Dict[str, Any]:
-    """Diagnose repository health issues (experimental).
+    """Diagnose repository health issues (experimental) (Pro).
 
     Args:
         target: Repository path.
     """
+    from ai.license import require_premium
+    gate = require_premium("repo_diagnose")
+    if gate:
+        return gate
     from backends.repo_bridge import diagnose
     return _safe_call(diagnose, target=target)
 
 
-@mcp.tool()
+@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
 def delimit_repo_analyze(target: str = ".") -> Dict[str, Any]:
-    """Analyze repository structure and quality (experimental).
+    """Analyze repository structure and quality (experimental) (Pro).
 
     Args:
         target: Repository path.
     """
+    from ai.license import require_premium
+    gate = require_premium("repo_analyze")
+    if gate:
+        return gate
     from backends.repo_bridge import analyze
     return _safe_call(analyze, target=target)
 
 
-@mcp.tool()
+@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
 def delimit_repo_config_validate(target: str = ".") -> Dict[str, Any]:
-    """Validate configuration files (experimental).
+    """Validate configuration files (experimental) (Pro).
 
     Args:
         target: Repository or config path.
     """
+    from ai.license import require_premium
+    gate = require_premium("repo_config_validate")
+    if gate:
+        return gate
     from backends.repo_bridge import config_validate
     return _safe_call(config_validate, target=target)
 
 
-@mcp.tool()
+@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
 def delimit_repo_config_audit(target: str = ".") -> Dict[str, Any]:
-    """Audit configuration compliance (experimental).
+    """Audit configuration compliance (experimental) (Pro).
 
     Args:
         target: Repository or config path.
     """
+    from ai.license import require_premium
+    gate = require_premium("repo_config_audit")
+    if gate:
+        return gate
     from backends.repo_bridge import config_audit
     return _safe_call(config_audit, target=target)
 
@@ -666,22 +784,30 @@ def delimit_repo_config_audit(target: str = ".") -> Dict[str, Any]:
 
 @mcp.tool()
 def delimit_security_scan(target: str = ".") -> Dict[str, Any]:
-    """Scan for security vulnerabilities.
+    """Scan for security vulnerabilities (Pro).
 
     Args:
         target: Repository or file path.
     """
+    from ai.license import require_premium
+    gate = require_premium("security_scan")
+    if gate:
+        return gate
     from backends.repo_bridge import security_scan
     return _safe_call(security_scan, target=target)
 
 
-@mcp.tool()
+@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
 def delimit_security_audit(target: str = ".") -> Dict[str, Any]:
-    """Audit security compliance (experimental).
+    """Audit security compliance (experimental) (Pro).
 
     Args:
         target: Repository or file path.
     """
+    from ai.license import require_premium
+    gate = require_premium("security_audit")
+    if gate:
+        return gate
     from backends.repo_bridge import security_audit
     return _safe_call(security_audit, target=target)
 
@@ -690,23 +816,31 @@ def delimit_security_audit(target: str = ".") -> Dict[str, Any]:
 
 @mcp.tool()
 def delimit_evidence_collect(target: str = ".") -> Dict[str, Any]:
-    """Collect evidence artifacts for governance.
+    """Collect evidence artifacts for governance (Pro).
 
     Args:
         target: Repository or task path.
     """
+    from ai.license import require_premium
+    gate = require_premium("evidence_collect")
+    if gate:
+        return gate
     from backends.repo_bridge import evidence_collect
     return _safe_call(evidence_collect, target=target)
 
 
 @mcp.tool()
 def delimit_evidence_verify(bundle_id: Optional[str] = None, bundle_path: Optional[str] = None) -> Dict[str, Any]:
-    """Verify evidence bundle integrity.
+    """Verify evidence bundle integrity (Pro).
 
     Args:
         bundle_id: Evidence bundle ID to verify.
         bundle_path: Path to evidence bundle file.
     """
+    from ai.license import require_premium
+    gate = require_premium("evidence_verify")
+    if gate:
+        return gate
     from backends.repo_bridge import evidence_verify
     return _safe_call(evidence_verify, bundle_id=bundle_id, bundle_path=bundle_path)
 
@@ -718,7 +852,7 @@ def delimit_evidence_verify(bundle_id: Optional[str] = None, bundle_path: Option
 
 # ─── ReleasePilot (Governance Primitive) ────────────────────────────────
 
-@mcp.tool()
+@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
 def delimit_release_plan(environment: str, version: str, repository: str, services: Optional[List[str]] = None) -> Dict[str, Any]:
     """Create deployment plan with approval gates (experimental).
 
@@ -732,7 +866,7 @@ def delimit_release_plan(environment: str, version: str, repository: str, servic
     return _safe_call(release_plan, environment=environment, version=version, repository=repository, services=services)
 
 
-@mcp.tool()
+@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
 def delimit_release_validate(environment: str, version: str) -> Dict[str, Any]:
     """Validate release readiness (experimental).
 
@@ -744,7 +878,7 @@ def delimit_release_validate(environment: str, version: str) -> Dict[str, Any]:
     return _safe_call(release_validate, environment=environment, version=version)
 
 
-@mcp.tool()
+@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
 def delimit_release_status(environment: str) -> Dict[str, Any]:
     """Check deployment status (experimental).
 
@@ -755,7 +889,7 @@ def delimit_release_status(environment: str) -> Dict[str, Any]:
     return _safe_call(release_status, environment=environment)
 
 
-@mcp.tool()
+@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
 def delimit_release_rollback(environment: str, version: str, to_version: str) -> Dict[str, Any]:
     """Rollback deployment to previous version (experimental).
 
@@ -768,7 +902,7 @@ def delimit_release_rollback(environment: str, version: str, to_version: str) ->
     return _safe_call(release_rollback, environment=environment, version=version, to_version=to_version)
 
 
-@mcp.tool()
+@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
 def delimit_release_history(environment: str, limit: int = 10) -> Dict[str, Any]:
     """Show release history (experimental).
 
@@ -793,7 +927,7 @@ def delimit_cost_analyze(target: str = ".") -> Dict[str, Any]:
     return _safe_call(cost_analyze, target=target)
 
 
-@mcp.tool()
+@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
 def delimit_cost_optimize(target: str = ".") -> Dict[str, Any]:
     """Generate cost optimization recommendations (experimental).
 
@@ -804,7 +938,7 @@ def delimit_cost_optimize(target: str = ".") -> Dict[str, Any]:
     return _safe_call(cost_optimize, target=target)
 
 
-@mcp.tool()
+@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
 def delimit_cost_alert(action: str = "list") -> Dict[str, Any]:
     """Manage cost alerts and notifications (experimental).
 
@@ -828,7 +962,7 @@ def delimit_data_validate(target: str = ".") -> Dict[str, Any]:
     return _safe_call(data_validate, target=target)
 
 
-@mcp.tool()
+@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
 def delimit_data_migrate(target: str = ".") -> Dict[str, Any]:
     """Execute data migration (experimental, plan-only by default).
 
@@ -839,7 +973,7 @@ def delimit_data_migrate(target: str = ".") -> Dict[str, Any]:
     return _safe_call(data_migrate, target=target)
 
 
-@mcp.tool()
+@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
 def delimit_data_backup(target: str = ".") -> Dict[str, Any]:
     """Create data backups (experimental).
 
@@ -852,7 +986,7 @@ def delimit_data_backup(target: str = ".") -> Dict[str, Any]:
 
 # ─── ObservabilityOps (Internal OS) ────────────────────────────────────
 
-@mcp.tool()
+@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
 def delimit_obs_metrics(query: str, time_range: str = "1h", source: Optional[str] = None) -> Dict[str, Any]:
     """Query and analyze metrics (experimental).
 
@@ -865,7 +999,7 @@ def delimit_obs_metrics(query: str, time_range: str = "1h", source: Optional[str
     return _safe_call(obs_metrics, query=query, time_range=time_range, source=source)
 
 
-@mcp.tool()
+@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
 def delimit_obs_logs(query: str, time_range: str = "1h", source: Optional[str] = None) -> Dict[str, Any]:
     """Query and search logs (experimental).
 
@@ -878,7 +1012,7 @@ def delimit_obs_logs(query: str, time_range: str = "1h", source: Optional[str] =
     return _safe_call(obs_logs, query=query, time_range=time_range, source=source)
 
 
-@mcp.tool()
+@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
 def delimit_obs_alerts(action: str, alert_rule: Optional[Dict[str, Any]] = None, rule_id: Optional[str] = None) -> Dict[str, Any]:
     """Manage alerting rules (experimental).
 
@@ -891,7 +1025,7 @@ def delimit_obs_alerts(action: str, alert_rule: Optional[Dict[str, Any]] = None,
     return _safe_call(obs_alerts, action=action, alert_rule=alert_rule, rule_id=rule_id)
 
 
-@mcp.tool()
+@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
 def delimit_obs_status() -> Dict[str, Any]:
     """Get observability system status (experimental)."""
     from backends.ops_bridge import obs_status
@@ -900,7 +1034,7 @@ def delimit_obs_status() -> Dict[str, Any]:
 
 # ─── DesignSystem (UI Tooling) ──────────────────────────────────────────
 
-@mcp.tool()
+@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
 def delimit_design_extract_tokens(figma_file_key: str, token_types: Optional[List[str]] = None) -> Dict[str, Any]:
     """Extract design tokens from Figma (coming soon).
 
@@ -912,7 +1046,7 @@ def delimit_design_extract_tokens(figma_file_key: str, token_types: Optional[Lis
     return _safe_call(design_extract_tokens, figma_file_key=figma_file_key, token_types=token_types)
 
 
-@mcp.tool()
+@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
 def delimit_design_generate_component(component_name: str, figma_node_id: Optional[str] = None, output_path: Optional[str] = None) -> Dict[str, Any]:
     """Generate Next.js component from Figma design (coming soon).
 
@@ -925,7 +1059,7 @@ def delimit_design_generate_component(component_name: str, figma_node_id: Option
     return _safe_call(design_generate_component, component_name=component_name, figma_node_id=figma_node_id, output_path=output_path)
 
 
-@mcp.tool()
+@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
 def delimit_design_generate_tailwind(figma_file_key: str, output_path: Optional[str] = None) -> Dict[str, Any]:
     """Generate Tailwind config from Figma design tokens (coming soon).
 
@@ -937,7 +1071,7 @@ def delimit_design_generate_tailwind(figma_file_key: str, output_path: Optional[
     return _safe_call(design_generate_tailwind, figma_file_key=figma_file_key, output_path=output_path)
 
 
-@mcp.tool()
+@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
 def delimit_design_validate_responsive(project_path: str, check_types: Optional[List[str]] = None) -> Dict[str, Any]:
     """Validate responsive design patterns (coming soon).
 
@@ -949,7 +1083,7 @@ def delimit_design_validate_responsive(project_path: str, check_types: Optional[
     return _safe_call(design_validate_responsive, project_path=project_path, check_types=check_types)
 
 
-@mcp.tool()
+@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
 def delimit_design_component_library(project_path: str, output_format: str = "json") -> Dict[str, Any]:
     """Generate component library documentation (coming soon).
 
@@ -963,7 +1097,7 @@ def delimit_design_component_library(project_path: str, output_format: str = "js
 
 # ─── Storybook (UI Tooling + Visual Regression) ────────────────────────
 
-@mcp.tool()
+@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
 def delimit_story_generate(component_path: str, story_name: Optional[str] = None, variants: Optional[List[str]] = None) -> Dict[str, Any]:
     """Generate Storybook story for a component (coming soon).
 
@@ -976,7 +1110,7 @@ def delimit_story_generate(component_path: str, story_name: Optional[str] = None
     return _safe_call(story_generate, component_path=component_path, story_name=story_name, variants=variants)
 
 
-@mcp.tool()
+@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
 def delimit_story_visual_test(url: str, project_path: Optional[str] = None, threshold: float = 0.05) -> Dict[str, Any]:
     """Run visual regression test with Playwright screenshots (coming soon).
 
@@ -989,7 +1123,7 @@ def delimit_story_visual_test(url: str, project_path: Optional[str] = None, thre
     return _safe_call(story_visual_test, url=url, project_path=project_path, threshold=threshold)
 
 
-@mcp.tool()
+@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
 def delimit_story_build(project_path: str, output_dir: Optional[str] = None) -> Dict[str, Any]:
     """Build Storybook static site (coming soon).
 
@@ -1001,7 +1135,7 @@ def delimit_story_build(project_path: str, output_dir: Optional[str] = None) -> 
     return _safe_call(story_build, project_path=project_path, output_dir=output_dir)
 
 
-@mcp.tool()
+@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
 def delimit_story_accessibility(project_path: str, standards: str = "WCAG2AA") -> Dict[str, Any]:
     """Run WCAG accessibility tests on components (coming soon).
 
@@ -1015,46 +1149,58 @@ def delimit_story_accessibility(project_path: str, standards: str = "WCAG2AA") -
 
 # ─── TestSmith (Testing) ───────────────────────────────────────────────
 
-@mcp.tool()
+@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
 def delimit_test_generate(project_path: str, source_files: Optional[List[str]] = None, framework: str = "jest") -> Dict[str, Any]:
-    """Generate tests for source code (experimental).
+    """Generate tests for source code (experimental) (Pro).
 
     Args:
         project_path: Project path.
         source_files: Specific files to generate tests for.
         framework: Test framework (jest/pytest/vitest).
     """
+    from ai.license import require_premium
+    gate = require_premium("test_generate")
+    if gate:
+        return gate
     from backends.ui_bridge import test_generate
     return _safe_call(test_generate, project_path=project_path, source_files=source_files, framework=framework)
 
 
-@mcp.tool()
+@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
 def delimit_test_coverage(project_path: str, threshold: int = 80) -> Dict[str, Any]:
-    """Analyze test coverage (experimental).
+    """Analyze test coverage (experimental) (Pro).
 
     Args:
         project_path: Project path.
         threshold: Coverage threshold percentage.
     """
+    from ai.license import require_premium
+    gate = require_premium("test_coverage")
+    if gate:
+        return gate
     from backends.ui_bridge import test_coverage
     return _safe_call(test_coverage, project_path=project_path, threshold=threshold)
 
 
 @mcp.tool()
 def delimit_test_smoke(project_path: str, test_suite: Optional[str] = None) -> Dict[str, Any]:
-    """Run smoke tests (experimental).
+    """Run smoke tests (experimental) (Pro).
 
     Args:
         project_path: Project path.
         test_suite: Specific test suite to run.
     """
+    from ai.license import require_premium
+    gate = require_premium("test_smoke")
+    if gate:
+        return gate
     from backends.ui_bridge import test_smoke
     return _safe_call(test_smoke, project_path=project_path, test_suite=test_suite)
 
 
 # ─── Docs ───────────────────────────────────────────────────────────────
 
-@mcp.tool()
+@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
 def delimit_docs_generate(target: str = ".") -> Dict[str, Any]:
     """Generate documentation for a project (experimental).
 
@@ -1065,7 +1211,7 @@ def delimit_docs_generate(target: str = ".") -> Dict[str, Any]:
     return _safe_call(docs_generate, target=target)
 
 
-@mcp.tool()
+@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
 def delimit_docs_validate(target: str = ".") -> Dict[str, Any]:
     """Validate documentation quality and completeness (experimental).
 
@@ -1359,6 +1505,29 @@ def delimit_diagnose(project_path: str = ".") -> Dict[str, Any]:
 
 
 # ═══════════════════════════════════════════════════════════════════════
+#  LICENSE
+# ═══════════════════════════════════════════════════════════════════════
+
+
+@mcp.tool()
+def delimit_activate(license_key: str) -> Dict[str, Any]:
+    """Activate a Delimit Pro license key.
+
+    Args:
+        license_key: The license key to activate (e.g. DELIMIT-XXXX-XXXX-XXXX).
+    """
+    from ai.license import activate_license
+    return activate_license(license_key)
+
+
+@mcp.tool()
+def delimit_license_status() -> Dict[str, Any]:
+    """Check current Delimit license status -- tier, validity, and expiry."""
+    from ai.license import get_license
+    return get_license()
+
+
+# ═══════════════════════════════════════════════════════════════════════
 #  ENTRY POINT
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -1368,5 +1537,11 @@ async def run_mcp_server(server, server_name="delimit"):
 
 
 if __name__ == "__main__":
+    import asyncio
+    asyncio.run(run_mcp_server(mcp))
+
+
+def main():
+    """Entry point for `delimit-mcp` console script."""
     import asyncio
     asyncio.run(run_mcp_server(mcp))
