@@ -1,0 +1,4 @@
+#!/bin/bash
+# Delimit commit-msg hook
+echo "[DELIMIT] Validating commit message..."
+node /home/delimit/npm-delimit/bin/delimit-cli.js hook commit-msg "$1"

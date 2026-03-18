@@ -1,17 +1,14 @@
 {
   "name": "delimit-cli",
-  "version": "3.0.0",
+  "version": "3.0.2",
   "description": "AI agent guardrails for developers. Install governance tools into Claude Code with one command.",
   "main": "index.js",
   "bin": {
-    "delimit": "./bin/delimit-cli.js"
+    "delimit": "./bin/delimit-cli.js",
+    "delimit-cli": "./bin/delimit-cli.js"
   },
   "scripts": {
-    "postinstall": "echo 'Run \"delimit install\" to set up governance'",
-    "install": "bash ./hooks/install-hooks.sh install",
-    "install-mcp": "bash ./hooks/install-hooks.sh mcp-only",
-    "test-mcp": "bash ./hooks/install-hooks.sh troubleshoot",
-    "fix-mcp": "bash ./hooks/install-hooks.sh fix-mcp",
+    "postinstall": "echo '\\nRun: npx delimit-cli setup\\n'",
     "test": "node --test tests/cli.test.js"
   },
   "keywords": [
