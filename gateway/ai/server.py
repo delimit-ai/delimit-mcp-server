@@ -1250,6 +1250,115 @@ def delimit_version() -> Dict[str, Any]:
 
 
 # ═══════════════════════════════════════════════════════════════════════
+#  META TOOLS (help, diagnose)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+TOOL_HELP = {
+    "init": {"desc": "Initialize governance for a project", "example": "delimit_init(project_path='.', preset='default')", "params": "project_path (str), preset (strict|default|relaxed)"},
+    "lint": {"desc": "Diff two OpenAPI specs and check policy violations", "example": "delimit_lint(old_spec='base.yaml', new_spec='new.yaml')", "params": "old_spec (path), new_spec (path), policy_file (optional path)"},
+    "diff": {"desc": "Pure diff between two specs — no policy, just changes", "example": "delimit_diff(old_spec='base.yaml', new_spec='new.yaml')", "params": "old_spec (path), new_spec (path)"},
+    "semver": {"desc": "Classify the semver bump for a spec change", "example": "delimit_semver(old_spec='base.yaml', new_spec='new.yaml', current_version='1.2.3')", "params": "old_spec, new_spec, current_version (optional)"},
+    "explain": {"desc": "Human-readable explanation of API changes", "example": "delimit_explain(old_spec='base.yaml', new_spec='new.yaml', template='pr_comment')", "params": "old_spec, new_spec, template (developer|pr_comment|migration|changelog)"},
+    "gov_health": {"desc": "Check governance status — is the project initialized?", "example": "delimit_gov_health(repo='.')", "params": "repo (path, default '.')"},
+    "test_coverage": {"desc": "Measure test coverage for a project", "example": "delimit_test_coverage(project_path='.', threshold=80)", "params": "project_path, threshold (default 80)"},
+    "repo_analyze": {"desc": "Full repo health report — code quality, security, dependencies", "example": "delimit_repo_analyze(target='.')", "params": "target (path)"},
+    "zero_spec": {"desc": "Extract OpenAPI spec from source code (FastAPI, Express, NestJS)", "example": "delimit_zero_spec(project_dir='.')", "params": "project_dir (path)"},
+    "sensor_github_issue": {"desc": "Monitor a GitHub issue for new comments", "example": "delimit_sensor_github_issue(repo='owner/repo', issue_number=123)", "params": "repo (owner/name), issue_number (int)"},
+}
+
+
+@mcp.tool()
+def delimit_help(tool_name: str = "") -> Dict[str, Any]:
+    """Get help for a Delimit tool — what it does, parameters, and examples.
+
+    Args:
+        tool_name: Tool name (e.g. 'lint', 'gov_health'). Leave empty for overview.
+    """
+    if not tool_name:
+        return {
+            "message": "Delimit has 77 tools. Here are the most useful ones to start with:",
+            "essential_tools": {k: v["desc"] for k, v in TOOL_HELP.items()},
+            "tip": "Run delimit_help(tool_name='lint') for detailed help on a specific tool.",
+            "all_tools": "Run delimit_version() for the complete list.",
+        }
+
+    # Normalize name
+    clean = tool_name.replace("delimit_", "").replace("mcp__delimit__delimit_", "")
+    info = TOOL_HELP.get(clean)
+    if info:
+        return {"tool": clean, **info}
+    return {"error": f"No help for '{tool_name}'. Try: {', '.join(TOOL_HELP.keys())}"}
+
+
+@mcp.tool()
+def delimit_diagnose(project_path: str = ".") -> Dict[str, Any]:
+    """Diagnose your Delimit setup — check environment, config, and tool status.
+
+    Universal 'get me unstuck' command. Checks Python, MCP config, governance state,
+    and reports any issues with suggested fixes.
+
+    Args:
+        project_path: Project to diagnose.
+    """
+    issues = []
+    checks = {}
+
+    # Python version
+    import sys
+    checks["python"] = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+
+    # Check .delimit/ dir
+    p = Path(project_path).resolve()
+    delimit_dir = p / ".delimit"
+    policies = delimit_dir / "policies.yml"
+    ledger = delimit_dir / "ledger" / "events.jsonl"
+
+    checks["project_path"] = str(p)
+    checks["delimit_initialized"] = delimit_dir.is_dir()
+    checks["policies_file"] = policies.is_file()
+    checks["ledger_file"] = ledger.is_file()
+
+    if not delimit_dir.is_dir():
+        issues.append({
+            "issue": "Project not initialized",
+            "fix": "Run delimit_init(project_path='.') or say 'initialize governance for this project'",
+        })
+    elif not policies.is_file():
+        issues.append({
+            "issue": "Missing policies.yml",
+            "fix": "Run delimit_init(project_path='.', preset='default')",
+        })
+
+    # Check key dependencies
+    for pkg in ["yaml", "pydantic", "packaging"]:
+        try:
+            __import__(pkg)
+            checks[f"dep_{pkg}"] = True
+        except ImportError:
+            checks[f"dep_{pkg}"] = False
+            issues.append({"issue": f"Missing Python package: {pkg}", "fix": f"pip install {pkg}"})
+
+    # Check fastmcp
+    try:
+        import fastmcp
+        checks["fastmcp"] = True
+    except ImportError:
+        checks["fastmcp"] = False
+        issues.append({"issue": "FastMCP not installed", "fix": "pip install fastmcp"})
+
+    # Summary
+    status = "healthy" if not issues else "issues_found"
+    return {
+        "status": status,
+        "checks": checks,
+        "issues": issues,
+        "issue_count": len(issues),
+        "tip": "If everything looks good but tools aren't working, try restarting Claude Code.",
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════
 #  ENTRY POINT
 # ═══════════════════════════════════════════════════════════════════════
 

@@ -262,8 +262,45 @@ Run full governance compliance checks. Verify security, policy compliance, evide
     }
     log(`  ${green('✓')} ${installed} agents installed (${Object.keys(agents).length - installed} already existed)`);
 
-    // Step 5: Summary
-    step(5, 'Done!');
+    // Step 5: Create CLAUDE.md for first-run guidance
+    step(5, 'Setting up first-run guidance...');
+
+    const claudeMd = path.join(os.homedir(), 'CLAUDE.md');
+    if (!fs.existsSync(claudeMd)) {
+        fs.writeFileSync(claudeMd, `# Delimit AI Guardrails
+
+Delimit governance tools are installed. On first use, try:
+
+- "check governance health" — see the status of this project
+- "initialize governance" — set up policies and ledger for this project
+- "run test coverage" — measure test coverage
+- "analyze this repo" — get a health report
+
+## Quick Start
+If this project hasn't been initialized for governance yet, say:
+"initialize governance for this project"
+
+This creates .delimit/policies.yml and a ledger directory.
+
+## Available Agents
+- /lint — check API specs for breaking changes
+- /engineering — build, test, refactor with governance checks
+- /governance — full compliance audit
+
+## Key Tools
+- delimit_init — bootstrap governance for a project
+- delimit_lint — diff two OpenAPI specs
+- delimit_test_coverage — measure test coverage
+- delimit_gov_health — check governance status
+- delimit_repo_analyze — full repo health report
+`);
+        log(`  ${green('✓')} Created ${claudeMd} with first-run guidance`);
+    } else {
+        log(`  ${dim('  CLAUDE.md already exists — skipped')}`);
+    }
+
+    // Step 6: Summary
+    step(6, 'Done!');
     log('');
     log(`  ${green('Delimit is installed.')} Your AI agents are now monitored.`);
     log('');
