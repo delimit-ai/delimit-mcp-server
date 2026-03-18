@@ -1194,6 +1194,39 @@ program
         require('./delimit-setup.js');
     });
 
+// Activate license key
+program
+    .command('activate <key>')
+    .description('Activate a Delimit Pro license key')
+    .action(async (key) => {
+        const os = require('os');
+        const licenseDir = path.join(os.homedir(), '.delimit');
+        const licensePath = path.join(licenseDir, 'license.json');
+
+        if (!key || key.length < 10) {
+            console.error(chalk.red('Invalid license key format. Keys are at least 10 characters.'));
+            process.exit(1);
+        }
+
+        // Write license file
+        const crypto = require('crypto');
+        const machineHash = crypto.createHash('sha256').update(os.homedir()).digest('hex').slice(0, 16);
+        const licenseData = {
+            key: key,
+            tier: 'pro',
+            valid: true,
+            activated_at: Date.now() / 1000,
+            machine_hash: machineHash,
+        };
+
+        if (!fs.existsSync(licenseDir)) {
+            fs.mkdirSync(licenseDir, { recursive: true });
+        }
+        fs.writeFileSync(licensePath, JSON.stringify(licenseData, null, 2));
+        console.log(chalk.green('License activated successfully.'));
+        console.log(chalk.dim('Tier: pro'));
+    });
+
 // Hide legacy/internal commands from --help
 ['install', 'mode', 'status', 'policy', 'auth', 'audit',
  'explain-decision', 'uninstall', 'proxy', 'hook'].forEach(name => {
