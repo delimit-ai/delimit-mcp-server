@@ -1,0 +1,55 @@
+# Delimit Policy Preset: strict
+# For public APIs, payment systems, and regulated environments.
+# Zero tolerance for breaking changes. All breaking changes are errors.
+
+override_defaults: true
+
+rules:
+  - id: no_endpoint_removal
+    name: Forbid Endpoint Removal
+    change_types: [endpoint_removed]
+    severity: error
+    action: forbid
+    message: "Endpoint {path} cannot be removed. Deprecate with Sunset header first."
+
+  - id: no_method_removal
+    name: Forbid Method Removal
+    change_types: [method_removed]
+    severity: error
+    action: forbid
+    message: "HTTP method removed from {path}. This breaks all clients using this method."
+
+  - id: no_required_param_addition
+    name: Forbid Required Parameter Addition
+    change_types: [required_param_added]
+    severity: error
+    action: forbid
+    message: "Cannot add required parameter to {path}. Make it optional with a default."
+
+  - id: no_field_removal
+    name: Forbid Response Field Removal
+    change_types: [field_removed]
+    severity: error
+    action: forbid
+    message: "Cannot remove field from {path}. Deprecate it first."
+
+  - id: no_type_change
+    name: Forbid Type Changes
+    change_types: [type_changed]
+    severity: error
+    action: forbid
+    message: "Type change at {path} breaks client deserialization."
+
+  - id: no_enum_removal
+    name: Forbid Enum Value Removal
+    change_types: [enum_value_removed]
+    severity: error
+    action: forbid
+    message: "Enum value removed at {path}. Clients may be sending this value."
+
+  - id: no_param_removal
+    name: Forbid Parameter Removal
+    change_types: [param_removed]
+    severity: error
+    action: forbid
+    message: "Parameter removed from {path}. Clients may depend on this parameter."

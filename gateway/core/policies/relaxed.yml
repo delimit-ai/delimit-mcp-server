@@ -1,0 +1,48 @@
+# Delimit Policy Preset: relaxed
+# For internal APIs, early-stage startups, and rapid iteration.
+# Only blocks the most destructive changes. Everything else is a warning.
+
+override_defaults: true
+
+rules:
+  - id: no_endpoint_removal
+    name: Warn on Endpoint Removal
+    change_types: [endpoint_removed]
+    severity: warning
+    action: warn
+    message: "Endpoint {path} was removed. Make sure no consumers depend on it."
+
+  - id: no_method_removal
+    name: Warn on Method Removal
+    change_types: [method_removed]
+    severity: warning
+    action: warn
+    message: "HTTP method removed from {path}. Check downstream consumers."
+
+  - id: warn_required_param
+    name: Warn on Required Parameter Addition
+    change_types: [required_param_added]
+    severity: warning
+    action: warn
+    message: "New required parameter at {path}. Existing clients will need to update."
+
+  - id: warn_type_change
+    name: Warn on Type Changes
+    change_types: [type_changed]
+    severity: warning
+    action: warn
+    message: "Type changed at {path}. Verify client compatibility."
+
+  - id: allow_field_removal
+    name: Allow Field Removal (warn)
+    change_types: [field_removed]
+    severity: info
+    action: allow
+    message: "Field removed from {path}."
+
+  - id: allow_enum_changes
+    name: Allow Enum Changes
+    change_types: [enum_value_removed]
+    severity: info
+    action: allow
+    message: "Enum value removed at {path}."
