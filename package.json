@@ -1,6 +1,6 @@
 {
   "name": "delimit-cli",
-  "version": "3.0.2",
+  "version": "3.1.0",
   "description": "AI agent guardrails for developers. Install governance tools into Claude Code with one command.",
   "main": "index.js",
   "bin": {
