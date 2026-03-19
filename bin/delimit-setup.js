@@ -183,6 +183,29 @@ async function main() {
         }
     }
 
+    // Step 3d: Configure Gemini CLI (if installed)
+    const GEMINI_CONFIG = path.join(os.homedir(), '.gemini', 'settings.json');
+    if (fs.existsSync(GEMINI_CONFIG)) {
+        try {
+            let geminiConfig = JSON.parse(fs.readFileSync(GEMINI_CONFIG, 'utf-8'));
+            if (!geminiConfig.mcpServers) geminiConfig.mcpServers = {};
+            if (geminiConfig.mcpServers.delimit) {
+                log(`  ${green('✓')} Delimit already in Gemini CLI config`);
+            } else {
+                geminiConfig.mcpServers.delimit = {
+                    command: python,
+                    args: [actualServer],
+                    cwd: path.join(DELIMIT_HOME, 'server'),
+                    env: { PYTHONPATH: path.join(DELIMIT_HOME, 'server') }
+                };
+                fs.writeFileSync(GEMINI_CONFIG, JSON.stringify(geminiConfig, null, 2));
+                log(`  ${green('✓')} Added delimit to Gemini CLI (${GEMINI_CONFIG})`);
+            }
+        } catch (e) {
+            log(`  ${yellow('!')} Could not configure Gemini CLI: ${e.message}`);
+        }
+    }
+
     // Step 4: Install default agents
     step(4, 'Installing governance agents...');
 
