@@ -246,10 +246,22 @@ NEXT_STEPS_REGISTRY: Dict[str, List[Dict[str, Any]]] = {
 
 
 def _with_next_steps(tool_name: str, result: Dict[str, Any]) -> Dict[str, Any]:
-    """Attach next_steps metadata to a tool response (Consensus 096)."""
-    steps = NEXT_STEPS_REGISTRY.get(tool_name, [])
-    result["next_steps"] = steps
-    return result
+    """Route every tool result through governance (replaces simple next_steps).
+
+    Governance:
+    1. Checks result against rules (thresholds, policies)
+    2. Auto-creates ledger items for failures/warnings
+    3. Adds next_steps to keep the AI building
+    4. Loops back to governance via ledger_context suggestion
+    """
+    try:
+        from ai.governance import govern
+        return govern(tool_name, result)
+    except Exception:
+        # Fallback: just add next_steps from registry
+        steps = NEXT_STEPS_REGISTRY.get(tool_name, [])
+        result["next_steps"] = steps
+        return result
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1799,22 +1811,45 @@ def delimit_license_status() -> Dict[str, Any]:
 # ═══════════════════════════════════════════════════════════════════════
 
 
+def _resolve_venture(venture: str) -> str:
+    """Resolve a venture name or path to an actual directory path."""
+    if not venture:
+        return "."
+    # If it's already a path
+    if venture.startswith("/") or venture.startswith("~"):
+        return str(Path(venture).expanduser())
+    # Check registered ventures
+    from ai.ledger_manager import list_ventures
+    v = list_ventures()
+    for name, info in v.get("ventures", {}).items():
+        if name == venture or venture in name:
+            return info.get("path", ".")
+    # Fallback: assume it's a directory name under common roots
+    for root in ["/home/delimit", "/home/jamsons/ventures", "/home"]:
+        candidate = Path(root) / venture
+        if candidate.exists():
+            return str(candidate)
+    return "."
+
+
 @mcp.tool()
 def delimit_ledger_add(
     title: str,
+    venture: str = "",
     ledger: str = "ops",
     type: str = "task",
     priority: str = "P1",
     description: str = "",
     source: str = "session",
 ) -> Dict[str, Any]:
-    """Add a new item to the strategy or operational ledger.
+    """Add a new item to a project's ledger.
 
-    The ledger tracks what needs to be done across sessions. Use "ops" for
-    tasks/bugs/features, "strategy" for consensus decisions and direction.
+    The ledger tracks what needs to be done across sessions. Specify the venture/project
+    name or path. If empty, auto-detects from current directory.
 
     Args:
         title: What needs to be done.
+        venture: Project name or path (e.g. "delimit-gateway", "/home/delimit/delimit-gateway"). Auto-detects if empty.
         ledger: "ops" (tasks, bugs, features) or "strategy" (decisions, direction).
         type: task, fix, feat, strategy, consensus.
         priority: P0 (urgent), P1 (important), P2 (nice to have).
@@ -1822,49 +1857,70 @@ def delimit_ledger_add(
         source: Where this came from (session, consensus, focus-group, etc).
     """
     from ai.ledger_manager import add_item
+    project = _resolve_venture(venture)
     return add_item(title=title, ledger=ledger, type=type, priority=priority,
-                    description=description, source=source)
+                    description=description, source=source, project_path=project)
 
 
 @mcp.tool()
-def delimit_ledger_done(item_id: str, note: str = "") -> Dict[str, Any]:
+def delimit_ledger_done(item_id: str, note: str = "", venture: str = "") -> Dict[str, Any]:
     """Mark a ledger item as done.
 
     Args:
         item_id: The item ID (e.g. LED-001 or STR-001).
         note: Optional completion note.
+        venture: Project name or path. Auto-detects if empty.
     """
     from ai.ledger_manager import update_item
-    return update_item(item_id=item_id, status="done", note=note)
+    project = _resolve_venture(venture)
+    return update_item(item_id=item_id, status="done", note=note, project_path=project)
 
 
 @mcp.tool()
 def delimit_ledger_list(
+    venture: str = "",
     ledger: str = "both",
     status: str = "",
     priority: str = "",
     limit: int = 20,
 ) -> Dict[str, Any]:
-    """List ledger items — see what's open, done, or in progress.
+    """List ledger items for a venture/project.
 
     Args:
+        venture: Project name or path. Auto-detects if empty.
         ledger: "ops", "strategy", or "both".
         status: Filter by status — "open", "done", "in_progress", or empty for all.
         priority: Filter by priority — "P0", "P1", "P2", or empty for all.
         limit: Max items to return.
     """
     from ai.ledger_manager import list_items
-    return list_items(ledger=ledger, status=status or None, priority=priority or None, limit=limit)
+    project = _resolve_venture(venture)
+    return list_items(ledger=ledger, status=status or None, priority=priority or None, limit=limit, project_path=project)
 
 
 @mcp.tool()
-def delimit_ledger_context() -> Dict[str, Any]:
-    """Get a quick summary of what's open in the ledger — use at session start.
+def delimit_ledger_context(venture: str = "") -> Dict[str, Any]:
+    """Get a quick summary of what's open in the ledger.
 
+    Auto-detects the venture from context. Pass a venture name to check a specific project.
     Returns the top 5 open items by priority so the AI knows what to work on.
+
+    Args:
+        venture: Project name or path. Auto-detects if empty.
     """
     from ai.ledger_manager import get_context
-    return get_context()
+    project = _resolve_venture(venture) if venture else "."
+    return get_context(project_path=project)
+
+
+@mcp.tool()
+def delimit_ventures() -> Dict[str, Any]:
+    """List all registered ventures/projects that Delimit has been used with.
+
+    Ventures are auto-registered when you use any Delimit tool in a project directory.
+    """
+    from ai.ledger_manager import list_ventures
+    return list_ventures()
 
 
 # ═══════════════════════════════════════════════════════════════════════
