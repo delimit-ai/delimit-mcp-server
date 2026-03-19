@@ -1,7 +1,7 @@
 {
   "name": "delimit-cli",
-  "version": "3.3.0",
-  "description": "AI agent guardrails for developers. Install governance tools into Claude Code with one command.",
+  "version": "3.4.0",
+  "description": "Stop Describing. Start Building. 77 MCP governance tools for AI coding assistants.",
   "main": "index.js",
   "bin": {
     "delimit": "./bin/delimit-cli.js",

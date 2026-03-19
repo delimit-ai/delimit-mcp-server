@@ -1,89 +1,61 @@
 # delimit
 
-Catch breaking API changes before they ship.
+Stop Describing. Start Building.
 
 [![npm](https://img.shields.io/npm/v/delimit-cli)](https://www.npmjs.com/package/delimit-cli)
-[![GitHub Action](https://img.shields.io/badge/Marketplace-Delimit-blue)](https://github.com/marketplace/actions/delimit-api-governance)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
-Deterministic diff engine for OpenAPI specs. Detects breaking changes, classifies semver, enforces policy, and posts PR comments with migration guides. No API keys, no external services.
+77 MCP governance tools for AI coding assistants. Prevents hallucinated results, verifies tests actually ran, enforces policies, and catches breaking API changes. Works with Claude Code, Codex, and Cursor.
 
----
+## Install
 
-## GitHub Action (recommended)
+```bash
+npx delimit-cli setup
+```
+
+10 seconds. No API keys. No account. Installs MCP tools into your existing AI coding assistant.
+
+## What happens
+
+Your AI agent gets 77 governance tools that verify its own work:
+
+- **Test verification** — confirms tests actually ran, measures coverage
+- **Security audit** — scans dependencies, detects hardcoded secrets and anti-patterns
+- **API governance** — catches breaking changes in OpenAPI specs before they ship
+- **Repo analysis** — code quality, health checks, config validation
+- **Deploy tracking** — plan, build, publish, verify, rollback
+- **Multi-model consensus** — Grok + Gemini + Codex deliberate on strategic decisions
+
+## Real examples
+
+These happened in a single session:
+
+| Command | Result |
+|---------|--------|
+| "keep building" | Parallel agents replaced 37 dead tools with real implementations |
+| "fix the 502 error" | Traced Vercel → Caddy → Docker, found wrong IP, fixed, verified |
+| "run test coverage" | 299 → 1,113 tests, zero written manually |
+| "run consensus on pricing" | 3 AI models debated, reached unanimous agreement |
+
+## Free vs Pro
+
+**Free (15 tools)**: lint, diff, policy, semver, test coverage, security audit, repo analysis, zero-spec extraction, and more.
+
+**Pro ($10/mo)**: governance, deploy tracking, memory/vault, multi-model deliberation, evidence collection. Activate with `delimit activate YOUR_KEY`.
+
+## Also works in CI
 
 ```yaml
-name: API Contract Check
-on: pull_request
-
-jobs:
-  delimit:
-    runs-on: ubuntu-latest
-    permissions:
-      pull-requests: write
-    steps:
-      - uses: actions/checkout@v4
-      - uses: delimit-ai/delimit-action@v1
-        with:
-          spec: api/openapi.yaml
+- uses: delimit-ai/delimit-action@v1
+  with:
+    spec: api/openapi.yaml
 ```
-
-One input. Delimit fetches the base branch version automatically. Runs in **advisory mode** by default -- posts a PR comment but does not fail your build. Set `mode: enforce` to block merges on breaking changes.
-
----
-
-## CLI
-
-```bash
-npx delimit-cli lint api/openapi.yaml
-npx delimit-cli diff old.yaml new.yaml
-npx delimit-cli explain old.yaml new.yaml --template migration
-```
-
-Or install globally:
-
-```bash
-npm install -g delimit-cli
-delimit init --preset default
-delimit lint api/openapi.yaml
-```
-
-### Commands
-
-| Command | What it does |
-|---------|-------------|
-| `delimit init [--preset]` | Create `.delimit/policies.yml` with a policy preset |
-| `delimit lint <spec>` | Diff + policy check. Exit 1 on violations. |
-| `delimit diff <old> <new>` | Raw diff with `[BREAKING]` / `[safe]` tags |
-| `delimit explain <old> <new>` | Human-readable summary (7 templates) |
-
-### Policy presets
-
-```bash
-delimit init --preset strict    # All breaking changes are errors
-delimit init --preset default   # Breaking = error, type changes = warn
-delimit init --preset relaxed   # Everything is a warning
-```
-
-Or inline: `delimit lint --policy strict api/openapi.yaml`
-
----
-
-## What it catches
-
-10 breaking change types (endpoint removed, method removed, required param added, param removed, response removed, required field added, response field removed, type changed, format changed, enum value removed) plus 7 non-breaking types for full visibility. Every change classified as `MAJOR`, `MINOR`, `PATCH`, or `NONE`.
-
-Supports OpenAPI 3.0, 3.1, and Swagger 2.0 in YAML or JSON.
-
----
 
 ## Links
 
 - [delimit.ai](https://delimit.ai)
-- [GitHub Action](https://github.com/marketplace/actions/delimit-api-governance)
-- [delimit-cli on npm](https://www.npmjs.com/package/delimit-cli)
-- [Quickstart repo](https://github.com/delimit-ai/delimit-quickstart)
+- [GitHub](https://github.com/delimit-ai/delimit)
+- [Pricing](https://delimit.ai/pricing)
+- [Docs](https://delimit.ai/docs)
 
-## License
-
-MIT
+MIT License
