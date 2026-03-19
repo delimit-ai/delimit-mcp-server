@@ -290,48 +290,33 @@ Run full governance compliance checks. Verify security, policy compliance, evide
 
     const claudeMd = path.join(os.homedir(), 'CLAUDE.md');
     if (!fs.existsSync(claudeMd)) {
-        fs.writeFileSync(claudeMd, `# Delimit AI Guardrails
-
-Delimit governance tools are installed. On first use, try:
-
-- "check governance health" — see the status of this project
-- "initialize governance" — set up policies and ledger for this project
-- "run test coverage" — measure test coverage
-- "analyze this repo" — get a health report
-
-## Quick Start
-If this project hasn't been initialized for governance yet, say:
-"initialize governance for this project"
-
-This creates .delimit/policies.yml and a ledger directory.
-
-## Available Agents
-- /lint — check API specs for breaking changes
-- /engineering — build, test, refactor with governance checks
-- /governance — full compliance audit
-
-## Key Tools
-- delimit_init — bootstrap governance for a project
-- delimit_lint — diff two OpenAPI specs
-- delimit_test_coverage — measure test coverage
-- delimit_gov_health — check governance status
-- delimit_repo_analyze — full repo health report
-`);
+        fs.writeFileSync(claudeMd, getClaudeMdContent());
         log(`  ${green('✓')} Created ${claudeMd} with first-run guidance`);
     } else {
-        log(`  ${dim('  CLAUDE.md already exists — skipped')}`);
+        // Check if existing CLAUDE.md is an older Delimit version that should be upgraded
+        const existing = fs.readFileSync(claudeMd, 'utf-8');
+        if (existing.includes('# Delimit AI Guardrails') || existing.includes('delimit_init') || existing.includes('delimit_lint')) {
+            fs.writeFileSync(claudeMd, getClaudeMdContent());
+            log(`  ${green('✓')} Updated ${claudeMd} with improved onboarding`);
+        } else {
+            log(`  ${dim('  CLAUDE.md already exists with custom content — skipped')}`);
+        }
     }
 
-    // Step 6: Summary
+    // Step 6: Try it now
     step(6, 'Done!');
     log('');
-    log(`  ${green('Delimit is installed.')} Your AI agents are now monitored.`);
+    log(`  ${green('Delimit is installed.')} Your AI now has persistent memory and governance.`);
     log('');
-    log('  What happens next:');
-    log(`  ${dim('1.')} Start Claude Code in any project`);
-    log(`  ${dim('2.')} The delimit MCP tools load automatically`);
-    log(`  ${dim('3.')} Use agents: ${blue('/lint')}, ${blue('/governance')}, ${blue('/engineering')}`);
-    log(`  ${dim('4.')} Or ask: "check governance health" / "run test coverage"`);
+    log('  Try it now:');
+    log(`  ${bold('$ claude')}`);
+    log('');
+    log(`  Then say: ${blue('"check this project\'s health"')}`);
+    log('');
+    log('  Or try:');
+    log(`  ${dim('-')} "add to ledger: set up CI pipeline"  ${dim('— start tracking tasks')}`);
+    log(`  ${dim('-')} "what\'s on the ledger?"               ${dim('— see what\'s pending')}`);
+    log(`  ${dim('-')} "delimit help"                        ${dim('— see all capabilities')}`);
     log('');
     log(`  ${dim('Config:')} ${MCP_CONFIG}`);
     log(`  ${dim('Server:')} ${actualServer}`);
@@ -340,6 +325,36 @@ This creates .delimit/policies.yml and a ledger directory.
     log(`  ${dim('Docs:')} https://delimit.ai/docs`);
     log(`  ${dim('GitHub:')} https://github.com/delimit-ai/delimit`);
     log('');
+}
+
+function getClaudeMdContent() {
+    return `# Delimit
+
+Your AI has persistent memory, verified execution, and governance.
+
+## First time? Say one of these:
+- "check this project's health" -- see what Delimit finds
+- "add to ledger: [anything]" -- start tracking tasks
+- "what's on the ledger?" -- see what's pending
+
+## Returning? Your AI remembers:
+- Ledger items persist across sessions
+- Governance rules stay configured
+- Memory carries forward
+
+## On first session, your AI will automatically:
+1. Diagnose the environment to verify everything is connected
+2. Check the ledger for any pending items from previous sessions
+3. If no governance exists yet, suggest initializing it
+
+## Available Agents
+- /lint -- check API specs for breaking changes
+- /engineering -- build, test, refactor with governance checks
+- /governance -- full compliance audit
+
+## Need help?
+Say "delimit help" for docs on any capability.
+`;
 }
 
 function copyDir(src, dest) {
