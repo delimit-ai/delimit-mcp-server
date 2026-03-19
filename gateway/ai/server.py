@@ -65,6 +65,194 @@ def _safe_call(fn, **kwargs) -> Dict[str, Any]:
 
 
 # ═══════════════════════════════════════════════════════════════════════
+#  CONSENSUS 096: Tool Cohesion — next_steps in every response
+# ═══════════════════════════════════════════════════════════════════════
+
+NEXT_STEPS_REGISTRY: Dict[str, List[Dict[str, Any]]] = {
+    # --- Tier 1 Core (Free) ---
+    "lint": [
+        {"tool": "delimit_explain", "reason": "Get migration guide for breaking changes", "suggested_args": {"template": "migration"}, "is_premium": False},
+        {"tool": "delimit_semver", "reason": "Determine the version bump for these changes", "suggested_args": {}, "is_premium": False},
+    ],
+    "diff": [
+        {"tool": "delimit_semver", "reason": "Classify the semver bump for these changes", "suggested_args": {}, "is_premium": False},
+        {"tool": "delimit_policy", "reason": "Check policy violations for these changes", "suggested_args": {}, "is_premium": False},
+    ],
+    "policy": [
+        {"tool": "delimit_lint", "reason": "Run full lint with policy enforcement", "suggested_args": {}, "is_premium": False},
+    ],
+    "ledger": [],
+    "impact": [
+        {"tool": "delimit_ledger", "reason": "Record this impact assessment in the audit ledger", "suggested_args": {}, "is_premium": False},
+    ],
+    "semver": [
+        {"tool": "delimit_explain", "reason": "Generate human-readable changelog for the version bump", "suggested_args": {"template": "changelog"}, "is_premium": False},
+    ],
+    "explain": [],
+    "zero_spec": [
+        {"tool": "delimit_lint", "reason": "Lint the extracted spec against your baseline", "suggested_args": {}, "is_premium": False},
+    ],
+    "init": [
+        {"tool": "delimit_gov_health", "reason": "Verify governance health after initialization", "suggested_args": {}, "is_premium": True},
+        {"tool": "delimit_diagnose", "reason": "Check environment and tool status", "suggested_args": {}, "is_premium": False},
+    ],
+    # --- Tier 2 Platform (Pro) ---
+    "os_plan": [],
+    "os_status": [],
+    "os_gates": [],
+    "gov_health": [
+        {"tool": "delimit_gov_status", "reason": "Get detailed governance status", "suggested_args": {}, "is_premium": True},
+        {"tool": "delimit_repo_analyze", "reason": "Analyze repository structure and quality", "suggested_args": {}, "is_premium": True},
+    ],
+    "gov_status": [
+        {"tool": "delimit_gov_policy", "reason": "Review governance policy configuration", "suggested_args": {}, "is_premium": True},
+    ],
+    "gov_policy": [],
+    "gov_evaluate": [],
+    "gov_new_task": [],
+    "gov_run": [],
+    "gov_verify": [],
+    "memory_search": [
+        {"tool": "delimit_memory_store", "reason": "Store new information if no results found", "suggested_args": {}, "is_premium": True},
+    ],
+    "memory_store": [],
+    "memory_recent": [],
+    "vault_search": [],
+    "vault_health": [
+        {"tool": "delimit_vault_search", "reason": "Search vault entries for details", "suggested_args": {}, "is_premium": True},
+    ],
+    "vault_snapshot": [],
+    # --- Tier 3 Extended (Pro) ---
+    "deploy_plan": [
+        {"tool": "delimit_deploy_build", "reason": "Build Docker images for deployment", "suggested_args": {}, "is_premium": True},
+    ],
+    "deploy_build": [
+        {"tool": "delimit_deploy_publish", "reason": "Publish built images to registry", "suggested_args": {}, "is_premium": True},
+    ],
+    "deploy_publish": [
+        {"tool": "delimit_deploy_verify", "reason": "Verify deployment health after publish", "suggested_args": {}, "is_premium": True},
+    ],
+    "deploy_rollback": [],
+    "deploy_status": [],
+    "generate_template": [],
+    "generate_scaffold": [],
+    "security_scan": [
+        {"tool": "delimit_evidence_collect", "reason": "Collect evidence artifacts from security findings", "suggested_args": {}, "is_premium": True},
+    ],
+    "evidence_collect": [
+        {"tool": "delimit_evidence_verify", "reason": "Verify evidence bundle integrity", "suggested_args": {}, "is_premium": True},
+    ],
+    "evidence_verify": [],
+    "security_audit": [
+        {"tool": "delimit_security_scan", "reason": "Run deeper security scan on flagged areas", "suggested_args": {}, "is_premium": True},
+        {"tool": "delimit_evidence_collect", "reason": "Collect evidence of security findings", "suggested_args": {}, "is_premium": True},
+    ],
+    # --- Tier 4 Ops ---
+    "obs_status": [
+        {"tool": "delimit_obs_metrics", "reason": "Get detailed CPU/memory/disk metrics", "suggested_args": {"query": "all"}, "is_premium": False},
+        {"tool": "delimit_obs_logs", "reason": "Search logs for errors or issues", "suggested_args": {"query": "error"}, "is_premium": False},
+    ],
+    "obs_metrics": [
+        {"tool": "delimit_obs_logs", "reason": "Correlate metrics with log entries", "suggested_args": {}, "is_premium": False},
+        {"tool": "delimit_obs_status", "reason": "Get overall system health", "suggested_args": {}, "is_premium": False},
+    ],
+    "obs_logs": [
+        {"tool": "delimit_obs_metrics", "reason": "Check system metrics for the same time range", "suggested_args": {}, "is_premium": False},
+    ],
+    "release_plan": [
+        {"tool": "delimit_release_status", "reason": "Check current deploy status before releasing", "suggested_args": {}, "is_premium": False},
+        {"tool": "delimit_security_audit", "reason": "Audit security before release", "suggested_args": {}, "is_premium": False},
+    ],
+    "release_status": [
+        {"tool": "delimit_release_plan", "reason": "Create a new release plan", "suggested_args": {}, "is_premium": False},
+    ],
+    "cost_analyze": [
+        {"tool": "delimit_cost_optimize", "reason": "Find optimization opportunities for detected services", "suggested_args": {}, "is_premium": False},
+        {"tool": "delimit_cost_alert", "reason": "Set up cost threshold alerts", "suggested_args": {"action": "create"}, "is_premium": False},
+    ],
+    "cost_optimize": [
+        {"tool": "delimit_cost_analyze", "reason": "Get full cost breakdown for the project", "suggested_args": {}, "is_premium": False},
+    ],
+    "cost_alert": [],
+    "data_validate": [
+        {"tool": "delimit_data_backup", "reason": "Back up validated data files", "suggested_args": {}, "is_premium": False},
+    ],
+    "data_migrate": [
+        {"tool": "delimit_data_validate", "reason": "Validate data integrity after migration check", "suggested_args": {}, "is_premium": False},
+    ],
+    "data_backup": [],
+    "intel_dataset_register": [
+        {"tool": "delimit_intel_snapshot_ingest", "reason": "Ingest data into the registered dataset", "suggested_args": {}, "is_premium": False},
+    ],
+    "intel_dataset_list": [],
+    "intel_dataset_freeze": [],
+    "intel_snapshot_ingest": [
+        {"tool": "delimit_intel_query", "reason": "Query ingested snapshots", "suggested_args": {}, "is_premium": False},
+    ],
+    "intel_query": [],
+    "test_generate": [
+        {"tool": "delimit_test_smoke", "reason": "Run the generated tests to verify they pass", "suggested_args": {}, "is_premium": False},
+        {"tool": "delimit_docs_generate", "reason": "Generate API docs for the tested code", "suggested_args": {}, "is_premium": False},
+    ],
+    "test_smoke": [
+        {"tool": "delimit_test_generate", "reason": "Generate test skeletons for untested files", "suggested_args": {}, "is_premium": False},
+        {"tool": "delimit_docs_validate", "reason": "Check documentation coverage alongside test coverage", "suggested_args": {}, "is_premium": False},
+    ],
+    "docs_generate": [
+        {"tool": "delimit_docs_validate", "reason": "Validate the generated documentation for completeness", "suggested_args": {}, "is_premium": False},
+    ],
+    "docs_validate": [
+        {"tool": "delimit_docs_generate", "reason": "Generate docs to fix missing documentation", "suggested_args": {}, "is_premium": False},
+        {"tool": "delimit_test_generate", "reason": "Generate tests alongside documentation improvements", "suggested_args": {}, "is_premium": False},
+    ],
+    # --- Tier 4 Design/Story ---
+    "design_extract_tokens": [
+        {"tool": "delimit_design_generate_tailwind", "reason": "Generate Tailwind config from extracted tokens", "suggested_args": {}, "is_premium": True},
+        {"tool": "delimit_design_component_library", "reason": "Catalog components that use these tokens", "suggested_args": {}, "is_premium": True},
+    ],
+    "design_generate_component": [
+        {"tool": "delimit_story_generate", "reason": "Generate stories for the new component", "suggested_args": {}, "is_premium": True},
+        {"tool": "delimit_story_accessibility", "reason": "Check accessibility of the generated component", "suggested_args": {}, "is_premium": True},
+    ],
+    "design_generate_tailwind": [
+        {"tool": "delimit_design_extract_tokens", "reason": "Extract tokens to verify config coverage", "suggested_args": {}, "is_premium": True},
+    ],
+    "design_validate_responsive": [
+        {"tool": "delimit_story_visual_test", "reason": "Take screenshots at different viewports", "suggested_args": {}, "is_premium": True},
+    ],
+    "design_component_library": [
+        {"tool": "delimit_story_generate", "reason": "Generate stories for cataloged components", "suggested_args": {}, "is_premium": True},
+        {"tool": "delimit_story_accessibility", "reason": "Run accessibility audit on all components", "suggested_args": {}, "is_premium": True},
+    ],
+    "story_generate": [
+        {"tool": "delimit_story_visual_test", "reason": "Capture visual baseline for the component", "suggested_args": {}, "is_premium": True},
+        {"tool": "delimit_story_accessibility", "reason": "Check accessibility of the component", "suggested_args": {}, "is_premium": True},
+    ],
+    "story_visual_test": [
+        {"tool": "delimit_story_accessibility", "reason": "Also run accessibility checks", "suggested_args": {}, "is_premium": True},
+    ],
+    "story_accessibility": [
+        {"tool": "delimit_design_validate_responsive", "reason": "Also validate responsive patterns", "suggested_args": {}, "is_premium": True},
+    ],
+    # --- Sensing ---
+    "sensor_github_issue": [],
+    # --- Meta ---
+    "version": [],
+    "help": [],
+    "diagnose": [],
+    "activate": [],
+    "license_status": [],
+}
+
+
+def _with_next_steps(tool_name: str, result: Dict[str, Any]) -> Dict[str, Any]:
+    """Attach next_steps metadata to a tool response (Consensus 096)."""
+    steps = NEXT_STEPS_REGISTRY.get(tool_name, [])
+    result["next_steps"] = steps
+    return result
+
+
+# ═══════════════════════════════════════════════════════════════════════
 #  TIER 1: CORE — API Lint Engine
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -80,7 +268,7 @@ def delimit_lint(old_spec: str, new_spec: str, policy_file: Optional[str] = None
         policy_file: Optional path to a .delimit/policies.yml file.
     """
     from backends.gateway_core import run_lint
-    return _safe_call(run_lint, old_spec=old_spec, new_spec=new_spec, policy_file=policy_file)
+    return _with_next_steps("lint", _safe_call(run_lint, old_spec=old_spec, new_spec=new_spec, policy_file=policy_file))
 
 
 @mcp.tool()
@@ -92,7 +280,7 @@ def delimit_diff(old_spec: str, new_spec: str) -> Dict[str, Any]:
         new_spec: Path to the new OpenAPI spec file.
     """
     from backends.gateway_core import run_diff
-    return _safe_call(run_diff, old_spec=old_spec, new_spec=new_spec)
+    return _with_next_steps("diff", _safe_call(run_diff, old_spec=old_spec, new_spec=new_spec))
 
 
 @mcp.tool()
@@ -104,7 +292,7 @@ def delimit_policy(spec_files: List[str], policy_file: Optional[str] = None) -> 
         policy_file: Optional custom policy file path.
     """
     from backends.gateway_core import run_policy
-    return _safe_call(run_policy, spec_files=spec_files, policy_file=policy_file)
+    return _with_next_steps("policy", _safe_call(run_policy, spec_files=spec_files, policy_file=policy_file))
 
 
 @mcp.tool()
@@ -118,7 +306,7 @@ def delimit_ledger(ledger_path: str, api_name: Optional[str] = None, repository:
         validate_chain: Validate hash chain integrity.
     """
     from backends.gateway_core import query_ledger
-    return _safe_call(query_ledger, ledger_path=ledger_path, api_name=api_name, repository=repository, validate_chain=validate_chain)
+    return _with_next_steps("ledger", _safe_call(query_ledger, ledger_path=ledger_path, api_name=api_name, repository=repository, validate_chain=validate_chain))
 
 
 @mcp.tool()
@@ -130,7 +318,7 @@ def delimit_impact(api_name: str, dependency_file: Optional[str] = None) -> Dict
         dependency_file: Optional path to dependency manifest.
     """
     from backends.gateway_core import run_impact
-    return _safe_call(run_impact, api_name=api_name, dependency_file=dependency_file)
+    return _with_next_steps("impact", _safe_call(run_impact, api_name=api_name, dependency_file=dependency_file))
 
 
 @mcp.tool()
@@ -146,7 +334,7 @@ def delimit_semver(old_spec: str, new_spec: str, current_version: Optional[str] 
         current_version: Optional current version (e.g. "1.2.3") to compute next version.
     """
     from backends.gateway_core import run_semver
-    return _safe_call(run_semver, old_spec=old_spec, new_spec=new_spec, current_version=current_version)
+    return _with_next_steps("semver", _safe_call(run_semver, old_spec=old_spec, new_spec=new_spec, current_version=current_version))
 
 
 @mcp.tool()
@@ -171,7 +359,7 @@ def delimit_explain(
         api_name: API/service name for context.
     """
     from backends.gateway_core import run_explain
-    return _safe_call(run_explain, old_spec=old_spec, new_spec=new_spec, template=template, old_version=old_version, new_version=new_version, api_name=api_name)
+    return _with_next_steps("explain", _safe_call(run_explain, old_spec=old_spec, new_spec=new_spec, template=template, old_version=old_version, new_version=new_version, api_name=api_name))
 
 
 @mcp.tool()
@@ -190,7 +378,7 @@ def delimit_zero_spec(
         python_bin: Optional Python binary path (auto-detected if omitted).
     """
     from backends.gateway_core import run_zero_spec
-    return _safe_call(run_zero_spec, project_dir=project_dir, python_bin=python_bin)
+    return _with_next_steps("zero_spec", _safe_call(run_zero_spec, project_dir=project_dir, python_bin=python_bin))
 
 
 
@@ -221,13 +409,13 @@ def delimit_init(
 
     # Idempotency check
     if policies_file.exists() and ledger_dir.exists() and events_file.exists():
-        return {
+        return _with_next_steps("init", {
             "tool": "init",
             "status": "already_initialized",
             "project_path": str(root),
             "preset": preset,
             "message": f"Project already initialized at {delimit_dir}. No files overwritten.",
-        }
+        })
 
     created = []
 
@@ -262,14 +450,14 @@ def delimit_init(
         events_file.touch()
         created.append(str(events_file))
 
-    return {
+    return _with_next_steps("init", {
         "tool": "init",
         "status": "initialized",
         "project_path": str(root),
         "preset": preset,
         "created": created,
         "message": f"Governance initialized with '{preset}' preset. {len(created)} items created.",
-    }
+    })
 
 # ═══════════════════════════════════════════════════════════════════════
 #  TIER 2: PLATFORM — OS, Governance, Memory, Vault
@@ -293,7 +481,7 @@ def delimit_os_plan(operation: str, target: str, parameters: Optional[Dict[str, 
     if gate:
         return gate
     from backends.os_bridge import create_plan
-    return _safe_call(create_plan, operation=operation, target=target, parameters=parameters, require_approval=require_approval)
+    return _with_next_steps("os_plan", _safe_call(create_plan, operation=operation, target=target, parameters=parameters, require_approval=require_approval))
 
 
 @mcp.tool()
@@ -304,7 +492,7 @@ def delimit_os_status() -> Dict[str, Any]:
     if gate:
         return gate
     from backends.os_bridge import get_status
-    return _safe_call(get_status)
+    return _with_next_steps("os_status", _safe_call(get_status))
 
 
 @mcp.tool()
@@ -319,7 +507,7 @@ def delimit_os_gates(plan_id: str) -> Dict[str, Any]:
     if gate:
         return gate
     from backends.os_bridge import check_gates
-    return _safe_call(check_gates, plan_id=plan_id)
+    return _with_next_steps("os_gates", _safe_call(check_gates, plan_id=plan_id))
 
 
 # ─── Governance ─────────────────────────────────────────────────────────
@@ -336,7 +524,7 @@ def delimit_gov_health(repo: str = ".") -> Dict[str, Any]:
     if gate:
         return gate
     from backends.governance_bridge import health
-    return _safe_call(health, repo=repo)
+    return _with_next_steps("gov_health", _safe_call(health, repo=repo))
 
 
 @mcp.tool()
@@ -351,7 +539,7 @@ def delimit_gov_status(repo: str = ".") -> Dict[str, Any]:
     if gate:
         return gate
     from backends.governance_bridge import status
-    return _safe_call(status, repo=repo)
+    return _with_next_steps("gov_status", _safe_call(status, repo=repo))
 
 
 @mcp.tool()
@@ -366,7 +554,7 @@ def delimit_gov_policy(repo: str = ".") -> Dict[str, Any]:
     if gate:
         return gate
     from backends.governance_bridge import policy
-    return _safe_call(policy, repo=repo)
+    return _with_next_steps("gov_policy", _safe_call(policy, repo=repo))
 
 
 @mcp.tool()
@@ -383,7 +571,7 @@ def delimit_gov_evaluate(action: str, context: Optional[Dict[str, Any]] = None, 
     if gate:
         return gate
     from backends.governance_bridge import evaluate_trigger
-    return _safe_call(evaluate_trigger, action=action, context=context, repo=repo)
+    return _with_next_steps("gov_evaluate", _safe_call(evaluate_trigger, action=action, context=context, repo=repo))
 
 
 @mcp.tool()
@@ -401,7 +589,7 @@ def delimit_gov_new_task(title: str, scope: str, risk_level: str = "medium", rep
     if gate:
         return gate
     from backends.governance_bridge import new_task
-    return _safe_call(new_task, title=title, scope=scope, risk_level=risk_level, repo=repo)
+    return _with_next_steps("gov_new_task", _safe_call(new_task, title=title, scope=scope, risk_level=risk_level, repo=repo))
 
 
 @mcp.tool()
@@ -417,7 +605,7 @@ def delimit_gov_run(task_id: str, repo: str = ".") -> Dict[str, Any]:
     if gate:
         return gate
     from backends.governance_bridge import run_task
-    return _safe_call(run_task, task_id=task_id, repo=repo)
+    return _with_next_steps("gov_run", _safe_call(run_task, task_id=task_id, repo=repo))
 
 
 @mcp.tool()
@@ -433,7 +621,7 @@ def delimit_gov_verify(task_id: str, repo: str = ".") -> Dict[str, Any]:
     if gate:
         return gate
     from backends.governance_bridge import verify
-    return _safe_call(verify, task_id=task_id, repo=repo)
+    return _with_next_steps("gov_verify", _safe_call(verify, task_id=task_id, repo=repo))
 
 
 # ─── Memory ─────────────────────────────────────────────────────────────
@@ -451,7 +639,7 @@ def delimit_memory_search(query: str, limit: int = 10) -> Dict[str, Any]:
     if gate:
         return gate
     from backends.memory_bridge import search
-    return _safe_call(search, query=query, limit=limit)
+    return _with_next_steps("memory_search", _safe_call(search, query=query, limit=limit))
 
 
 @mcp.tool()
@@ -468,7 +656,7 @@ def delimit_memory_store(content: str, tags: Optional[List[str]] = None, context
     if gate:
         return gate
     from backends.memory_bridge import store
-    return _safe_call(store, content=content, tags=tags, context=context)
+    return _with_next_steps("memory_store", _safe_call(store, content=content, tags=tags, context=context))
 
 
 @mcp.tool()
@@ -483,7 +671,7 @@ def delimit_memory_recent(limit: int = 5) -> Dict[str, Any]:
     if gate:
         return gate
     from backends.memory_bridge import get_recent
-    return _safe_call(get_recent, limit=limit)
+    return _with_next_steps("memory_recent", _safe_call(get_recent, limit=limit))
 
 
 # ─── Vault ──────────────────────────────────────────────────────────────
@@ -500,7 +688,7 @@ def delimit_vault_search(query: str) -> Dict[str, Any]:
     if gate:
         return gate
     from backends.vault_bridge import search
-    return _safe_call(search, query=query)
+    return _with_next_steps("vault_search", _safe_call(search, query=query))
 
 
 @mcp.tool()
@@ -511,7 +699,7 @@ def delimit_vault_health() -> Dict[str, Any]:
     if gate:
         return gate
     from backends.vault_bridge import health
-    return _safe_call(health)
+    return _with_next_steps("vault_health", _safe_call(health))
 
 
 @mcp.tool()
@@ -522,7 +710,7 @@ def delimit_vault_snapshot() -> Dict[str, Any]:
     if gate:
         return gate
     from backends.vault_bridge import snapshot
-    return _safe_call(snapshot)
+    return _with_next_steps("vault_snapshot", _safe_call(snapshot))
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -546,7 +734,7 @@ def delimit_deploy_plan(app: str, env: str, git_ref: Optional[str] = None) -> Di
     if gate:
         return gate
     from backends.deploy_bridge import plan
-    return _safe_call(plan, app=app, env=env, git_ref=git_ref)
+    return _with_next_steps("deploy_plan", _safe_call(plan, app=app, env=env, git_ref=git_ref))
 
 
 @mcp.tool()
@@ -562,7 +750,7 @@ def delimit_deploy_build(app: str, git_ref: Optional[str] = None) -> Dict[str, A
     if gate:
         return gate
     from backends.deploy_bridge import build
-    return _safe_call(build, app=app, git_ref=git_ref)
+    return _with_next_steps("deploy_build", _safe_call(build, app=app, git_ref=git_ref))
 
 
 @mcp.tool()
@@ -578,7 +766,7 @@ def delimit_deploy_publish(app: str, git_ref: Optional[str] = None) -> Dict[str,
     if gate:
         return gate
     from backends.deploy_bridge import publish
-    return _safe_call(publish, app=app, git_ref=git_ref)
+    return _with_next_steps("deploy_publish", _safe_call(publish, app=app, git_ref=git_ref))
 
 
 @_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
@@ -612,7 +800,7 @@ def delimit_deploy_rollback(app: str, env: str, to_sha: Optional[str] = None) ->
     if gate:
         return gate
     from backends.deploy_bridge import rollback
-    return _safe_call(rollback, app=app, env=env, to_sha=to_sha)
+    return _with_next_steps("deploy_rollback", _safe_call(rollback, app=app, env=env, to_sha=to_sha))
 
 
 @mcp.tool()
@@ -628,65 +816,65 @@ def delimit_deploy_status(app: str, env: str) -> Dict[str, Any]:
     if gate:
         return gate
     from backends.deploy_bridge import status
-    return _safe_call(status, app=app, env=env)
+    return _with_next_steps("deploy_status", _safe_call(status, app=app, env=env))
 
 
 # ─── Intel ──────────────────────────────────────────────────────────────
 
-@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
-def delimit_intel_dataset_register(name: str, schema: Dict[str, Any], description: Optional[str] = None) -> Dict[str, Any]:
-    """Register a new dataset with schema (coming soon).
+@mcp.tool()
+def delimit_intel_dataset_register(name: str, schema: Optional[Dict[str, Any]] = None, description: Optional[str] = None) -> Dict[str, Any]:
+    """Register a new dataset in the file-based intel registry.
 
     Args:
         name: Dataset name.
-        schema: JSON schema for the dataset.
+        schema: Optional JSON schema for the dataset.
         description: Human-readable description.
     """
-    from backends.intel_bridge import dataset_register
-    return _safe_call(dataset_register, name=name, schema=schema, description=description)
+    from backends.tools_data import intel_dataset_register
+    return _with_next_steps("intel_dataset_register", _safe_call(intel_dataset_register, name=name, schema=schema, description=description))
 
 
-@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
+@mcp.tool()
 def delimit_intel_dataset_list() -> Dict[str, Any]:
-    """List registered datasets (coming soon)."""
-    from backends.intel_bridge import dataset_list
-    return _safe_call(dataset_list)
+    """List all registered datasets from the intel registry."""
+    from backends.tools_data import intel_dataset_list
+    return _with_next_steps("intel_dataset_list", _safe_call(intel_dataset_list))
 
 
-@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
+@mcp.tool()
 def delimit_intel_dataset_freeze(dataset_id: str) -> Dict[str, Any]:
-    """Mark dataset as immutable (coming soon).
+    """Mark a dataset as immutable (frozen). Prevents further modifications.
 
     Args:
         dataset_id: Dataset identifier.
     """
-    from backends.intel_bridge import dataset_freeze
-    return _safe_call(dataset_freeze, dataset_id=dataset_id)
+    from backends.tools_data import intel_dataset_freeze
+    return _with_next_steps("intel_dataset_freeze", _safe_call(intel_dataset_freeze, dataset_id=dataset_id))
 
 
-@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
+@mcp.tool()
 def delimit_intel_snapshot_ingest(data: Dict[str, Any], provenance: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """Store research snapshot with provenance (coming soon).
+    """Store a research snapshot with provenance metadata in the local intel store.
 
     Args:
-        data: Snapshot data.
-        provenance: Provenance metadata.
+        data: Snapshot data (any JSON-serializable dict).
+        provenance: Optional provenance metadata (source, author, etc.).
     """
-    from backends.intel_bridge import snapshot_ingest
-    return _safe_call(snapshot_ingest, data=data, provenance=provenance)
+    from backends.tools_data import intel_snapshot_ingest
+    return _with_next_steps("intel_snapshot_ingest", _safe_call(intel_snapshot_ingest, data=data, provenance=provenance))
 
 
-@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
-def delimit_intel_query(dataset_id: str, query: str, parameters: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """Execute deterministic query on dataset (coming soon).
+@mcp.tool()
+def delimit_intel_query(dataset_id: Optional[str] = None, query: str = "", parameters: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Search saved intel snapshots by keyword, date, or dataset.
 
     Args:
-        dataset_id: Dataset to query.
-        query: Query string.
-        parameters: Query parameters.
+        dataset_id: Optional dataset to filter by.
+        query: Keyword search string.
+        parameters: Optional params (date_from, date_to, limit).
     """
-    from backends.intel_bridge import query_run
-    return _safe_call(query_run, dataset_id=dataset_id, query=query, parameters=parameters)
+    from backends.tools_data import intel_query
+    return _with_next_steps("intel_query", _safe_call(intel_query, dataset_id=dataset_id, query=query, parameters=parameters))
 
 
 # ─── Generate ───────────────────────────────────────────────────────────
@@ -702,7 +890,7 @@ def delimit_generate_template(template_type: str, name: str, framework: str = "n
         features: Optional feature flags.
     """
     from backends.generate_bridge import template
-    return _safe_call(template, template_type=template_type, name=name, framework=framework, features=features)
+    return _with_next_steps("generate_template", _safe_call(template, template_type=template_type, name=name, framework=framework, features=features))
 
 
 @mcp.tool()
@@ -715,7 +903,7 @@ def delimit_generate_scaffold(project_type: str, name: str, packages: Optional[L
         packages: Packages to include.
     """
     from backends.generate_bridge import scaffold
-    return _safe_call(scaffold, project_type=project_type, name=name, packages=packages)
+    return _with_next_steps("generate_scaffold", _safe_call(scaffold, project_type=project_type, name=name, packages=packages))
 
 
 # ─── Repo (RepoDoctor + ConfigSentry) ──────────────────────────────────
@@ -794,22 +982,26 @@ def delimit_security_scan(target: str = ".") -> Dict[str, Any]:
     if gate:
         return gate
     from backends.repo_bridge import security_scan
-    return _safe_call(security_scan, target=target)
+    return _with_next_steps("security_scan", _safe_call(security_scan, target=target))
 
 
-@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
+@mcp.tool()
 def delimit_security_audit(target: str = ".") -> Dict[str, Any]:
-    """Audit security compliance (experimental) (Pro).
+    """Audit security: dependency vulnerabilities, anti-patterns, and secret detection.
+
+    Scans for:
+    - Dependency vulnerabilities (pip-audit, npm audit)
+    - Hardcoded secrets (API keys, tokens, passwords)
+    - Dangerous patterns (eval, exec, SQL injection, XSS)
+    - .env files tracked in git
+
+    Optional: Set SNYK_TOKEN or install Trivy for enhanced scanning.
 
     Args:
-        target: Repository or file path.
+        target: Repository or file path to audit.
     """
-    from ai.license import require_premium
-    gate = require_premium("security_audit")
-    if gate:
-        return gate
-    from backends.repo_bridge import security_audit
-    return _safe_call(security_audit, target=target)
+    from backends.tools_infra import security_audit
+    return _with_next_steps("security_audit", _safe_call(security_audit, target=target))
 
 
 # ─── Evidence ───────────────────────────────────────────────────────────
@@ -826,7 +1018,7 @@ def delimit_evidence_collect(target: str = ".") -> Dict[str, Any]:
     if gate:
         return gate
     from backends.repo_bridge import evidence_collect
-    return _safe_call(evidence_collect, target=target)
+    return _with_next_steps("evidence_collect", _safe_call(evidence_collect, target=target))
 
 
 @mcp.tool()
@@ -842,7 +1034,7 @@ def delimit_evidence_verify(bundle_id: Optional[str] = None, bundle_path: Option
     if gate:
         return gate
     from backends.repo_bridge import evidence_verify
-    return _safe_call(evidence_verify, bundle_id=bundle_id, bundle_path=bundle_path)
+    return _with_next_steps("evidence_verify", _safe_call(evidence_verify, bundle_id=bundle_id, bundle_path=bundle_path))
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -852,18 +1044,22 @@ def delimit_evidence_verify(bundle_id: Optional[str] = None, bundle_path: Option
 
 # ─── ReleasePilot (Governance Primitive) ────────────────────────────────
 
-@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
-def delimit_release_plan(environment: str, version: str, repository: str, services: Optional[List[str]] = None) -> Dict[str, Any]:
-    """Create deployment plan with approval gates (experimental).
+@mcp.tool()
+def delimit_release_plan(environment: str = "production", version: str = "", repository: str = ".", services: Optional[List[str]] = None) -> Dict[str, Any]:
+    """Generate a release plan from git history.
+
+    Reads git log since last tag, counts commits and changed files,
+    suggests a semver version, and generates a release checklist.
+    Saves plan to ~/.delimit/deploys/ for tracking.
 
     Args:
         environment: Target environment (staging/production).
-        version: Release version.
-        repository: Repository name.
+        version: Release version (auto-detected if empty).
+        repository: Repository path (default: current directory).
         services: Optional service list.
     """
-    from backends.ops_bridge import release_plan
-    return _safe_call(release_plan, environment=environment, version=version, repository=repository, services=services)
+    from backends.tools_infra import release_plan
+    return _with_next_steps("release_plan", _safe_call(release_plan, environment=environment, version=version, repository=repository, services=services))
 
 
 @_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
@@ -878,15 +1074,18 @@ def delimit_release_validate(environment: str, version: str) -> Dict[str, Any]:
     return _safe_call(release_validate, environment=environment, version=version)
 
 
-@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
-def delimit_release_status(environment: str) -> Dict[str, Any]:
-    """Check deployment status (experimental).
+@mcp.tool()
+def delimit_release_status(environment: str = "production") -> Dict[str, Any]:
+    """Check release/deploy status from file-based tracker and git state.
+
+    Shows latest deploy plan, current git tag, how many commits HEAD
+    is ahead of the tag, and recent deploy history.
 
     Args:
-        environment: Target environment.
+        environment: Target environment (staging/production).
     """
-    from backends.ops_bridge import release_status
-    return _safe_call(release_status, environment=environment)
+    from backends.tools_infra import release_status
+    return _with_next_steps("release_status", _safe_call(release_status, environment=environment))
 
 
 @_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
@@ -918,98 +1117,112 @@ def delimit_release_history(environment: str, limit: int = 10) -> Dict[str, Any]
 
 @mcp.tool()
 def delimit_cost_analyze(target: str = ".") -> Dict[str, Any]:
-    """Analyze cost and spending patterns (experimental).
+    """Analyze project costs by scanning Dockerfiles, dependencies, and cloud configs.
 
     Args:
-        target: Project or infrastructure path.
+        target: Project or infrastructure path to analyze.
     """
-    from backends.ops_bridge import cost_analyze
-    return _safe_call(cost_analyze, target=target)
+    from backends.tools_data import cost_analyze
+    return _with_next_steps("cost_analyze", _safe_call(cost_analyze, target=target))
 
 
-@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
+@mcp.tool()
 def delimit_cost_optimize(target: str = ".") -> Dict[str, Any]:
-    """Generate cost optimization recommendations (experimental).
+    """Find cost optimization opportunities: unused deps, oversized images, uncompressed assets.
 
     Args:
-        target: Project or infrastructure path.
+        target: Project or infrastructure path to analyze.
     """
-    from backends.ops_bridge import cost_optimize
-    return _safe_call(cost_optimize, target=target)
+    from backends.tools_data import cost_optimize
+    return _with_next_steps("cost_optimize", _safe_call(cost_optimize, target=target))
 
 
-@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
-def delimit_cost_alert(action: str = "list") -> Dict[str, Any]:
-    """Manage cost alerts and notifications (experimental).
+@mcp.tool()
+def delimit_cost_alert(action: str = "list", name: Optional[str] = None,
+                       threshold: Optional[float] = None, alert_id: Optional[str] = None) -> Dict[str, Any]:
+    """Manage cost alerts (file-based). CRUD operations on spending thresholds.
 
     Args:
-        action: Action (list/create/delete/update).
+        action: Action (list/create/delete/toggle).
+        name: Alert name (required for create).
+        threshold: Cost threshold in USD (required for create).
+        alert_id: Alert ID (required for delete/toggle).
     """
-    from backends.ops_bridge import cost_alert
-    return _safe_call(cost_alert, action=action)
+    from backends.tools_data import cost_alert
+    return _with_next_steps("cost_alert", _safe_call(cost_alert, action=action, name=name, threshold=threshold, alert_id=alert_id))
 
 
 # ─── DataSteward (Governance Primitive) ────────────────────────────────
 
 @mcp.tool()
 def delimit_data_validate(target: str = ".") -> Dict[str, Any]:
-    """Validate data integrity (experimental).
+    """Validate data files: JSON parse, CSV structure, SQLite integrity check.
 
     Args:
-        target: Data source or path.
+        target: Directory or file path containing data files.
     """
-    from backends.ops_bridge import data_validate
-    return _safe_call(data_validate, target=target)
+    from backends.tools_data import data_validate
+    return _with_next_steps("data_validate", _safe_call(data_validate, target=target))
 
 
-@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
+@mcp.tool()
 def delimit_data_migrate(target: str = ".") -> Dict[str, Any]:
-    """Execute data migration (experimental, plan-only by default).
+    """Check for migration files (alembic, Django, Prisma, Knex) and report status.
 
     Args:
-        target: Data source or migration path.
+        target: Project path to scan for migration files.
     """
-    from backends.ops_bridge import data_migrate
-    return _safe_call(data_migrate, target=target)
+    from backends.tools_data import data_migrate
+    return _with_next_steps("data_migrate", _safe_call(data_migrate, target=target))
 
 
-@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
+@mcp.tool()
 def delimit_data_backup(target: str = ".") -> Dict[str, Any]:
-    """Create data backups (experimental).
+    """Back up SQLite and JSON data files to ~/.delimit/backups/ with timestamp.
 
     Args:
-        target: Data source to back up.
+        target: Directory or file to back up.
     """
-    from backends.ops_bridge import data_backup
-    return _safe_call(data_backup, target=target)
+    from backends.tools_data import data_backup
+    return _with_next_steps("data_backup", _safe_call(data_backup, target=target))
 
 
 # ─── ObservabilityOps (Internal OS) ────────────────────────────────────
 
-@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
-def delimit_obs_metrics(query: str, time_range: str = "1h", source: Optional[str] = None) -> Dict[str, Any]:
-    """Query and analyze metrics (experimental).
+@mcp.tool()
+def delimit_obs_metrics(query: str = "system", time_range: str = "1h", source: Optional[str] = None) -> Dict[str, Any]:
+    """Query live system metrics (CPU, memory, disk I/O, network).
+
+    Query types: cpu, memory, disk, io, network, system (default), all.
+    Reads directly from /proc for real-time data.
+
+    Optional: Set PROMETHEUS_URL for remote metrics.
 
     Args:
-        query: Metrics query.
+        query: Metrics query type (cpu|memory|disk|io|network|system|all).
         time_range: Time range (e.g. "1h", "24h", "7d").
-        source: Optional metrics source.
+        source: Optional metrics source (prometheus, local).
     """
-    from backends.ops_bridge import obs_metrics
-    return _safe_call(obs_metrics, query=query, time_range=time_range, source=source)
+    from backends.tools_infra import obs_metrics
+    return _with_next_steps("obs_metrics", _safe_call(obs_metrics, query=query, time_range=time_range, source=source))
 
 
-@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
+@mcp.tool()
 def delimit_obs_logs(query: str, time_range: str = "1h", source: Optional[str] = None) -> Dict[str, Any]:
-    """Query and search logs (experimental).
+    """Search system and application logs.
+
+    Searches journalctl, /var/log/*, and application log directories.
+    Returns matching log lines with source attribution.
+
+    Optional: Set ELASTICSEARCH_URL or LOKI_URL for centralized log search.
 
     Args:
-        query: Log search query.
-        time_range: Time range.
-        source: Optional log source.
+        query: Log search query string.
+        time_range: Time range (5m, 15m, 1h, 6h, 24h, 7d).
+        source: Log source path or integration name (journalctl, elasticsearch).
     """
-    from backends.ops_bridge import obs_logs
-    return _safe_call(obs_logs, query=query, time_range=time_range, source=source)
+    from backends.tools_infra import obs_logs
+    return _with_next_steps("obs_logs", _safe_call(obs_logs, query=query, time_range=time_range, source=source))
 
 
 @_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
@@ -1025,107 +1238,119 @@ def delimit_obs_alerts(action: str, alert_rule: Optional[Dict[str, Any]] = None,
     return _safe_call(obs_alerts, action=action, alert_rule=alert_rule, rule_id=rule_id)
 
 
-@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
+@mcp.tool()
 def delimit_obs_status() -> Dict[str, Any]:
-    """Get observability system status (experimental)."""
-    from backends.ops_bridge import obs_status
-    return _safe_call(obs_status)
+    """System health check: disk space, memory, running services, uptime.
+
+    Checks disk usage, memory, process count, load average, and probes
+    common service ports (Node, PostgreSQL, Redis, Nginx, etc.).
+    No external integration needed.
+    """
+    from backends.tools_infra import obs_status
+    return _with_next_steps("obs_status", _safe_call(obs_status))
 
 
 # ─── DesignSystem (UI Tooling) ──────────────────────────────────────────
 
-@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
-def delimit_design_extract_tokens(figma_file_key: str, token_types: Optional[List[str]] = None) -> Dict[str, Any]:
-    """Extract design tokens from Figma (coming soon).
+@mcp.tool()
+def delimit_design_extract_tokens(figma_file_key: Optional[str] = None, token_types: Optional[List[str]] = None, project_path: Optional[str] = None) -> Dict[str, Any]:
+    """Extract design tokens from project CSS/SCSS/Tailwind config (or Figma if FIGMA_TOKEN set).
 
     Args:
-        figma_file_key: Figma file key.
-        token_types: Token types to extract (colors, typography, spacing, etc.).
+        figma_file_key: Optional Figma file key (uses Figma API if FIGMA_TOKEN env var is set).
+        token_types: Token types to extract (colors, typography, spacing, breakpoints).
+        project_path: Project directory to scan. Defaults to cwd.
     """
     from backends.ui_bridge import design_extract_tokens
-    return _safe_call(design_extract_tokens, figma_file_key=figma_file_key, token_types=token_types)
+    return _with_next_steps("design_extract_tokens", _safe_call(design_extract_tokens, figma_file_key=figma_file_key, token_types=token_types, project_path=project_path))
 
 
-@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
-def delimit_design_generate_component(component_name: str, figma_node_id: Optional[str] = None, output_path: Optional[str] = None) -> Dict[str, Any]:
-    """Generate Next.js component from Figma design (coming soon).
+@mcp.tool()
+def delimit_design_generate_component(component_name: str, figma_node_id: Optional[str] = None, output_path: Optional[str] = None, project_path: Optional[str] = None) -> Dict[str, Any]:
+    """Generate a React/Next.js component skeleton with props interface and Tailwind support.
 
     Args:
-        component_name: Component name.
-        figma_node_id: Figma node ID.
-        output_path: Output file path.
+        component_name: Component name (PascalCase).
+        figma_node_id: Optional Figma node ID (reserved for future use).
+        output_path: Output file path. Defaults to components/<Name>/<Name>.tsx.
+        project_path: Project root for Tailwind detection.
     """
     from backends.ui_bridge import design_generate_component
-    return _safe_call(design_generate_component, component_name=component_name, figma_node_id=figma_node_id, output_path=output_path)
+    return _with_next_steps("design_generate_component", _safe_call(design_generate_component, component_name=component_name, figma_node_id=figma_node_id, output_path=output_path, project_path=project_path))
 
 
-@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
-def delimit_design_generate_tailwind(figma_file_key: str, output_path: Optional[str] = None) -> Dict[str, Any]:
-    """Generate Tailwind config from Figma design tokens (coming soon).
+@mcp.tool()
+def delimit_design_generate_tailwind(figma_file_key: Optional[str] = None, output_path: Optional[str] = None, project_path: Optional[str] = None) -> Dict[str, Any]:
+    """Read existing tailwind.config or generate one from detected CSS tokens.
 
     Args:
-        figma_file_key: Figma file key.
-        output_path: Output file path.
+        figma_file_key: Optional Figma file key (reserved for future use).
+        output_path: Output file path for generated config.
+        project_path: Project root to scan for existing config or CSS tokens.
     """
     from backends.ui_bridge import design_generate_tailwind
-    return _safe_call(design_generate_tailwind, figma_file_key=figma_file_key, output_path=output_path)
+    return _with_next_steps("design_generate_tailwind", _safe_call(design_generate_tailwind, figma_file_key=figma_file_key, output_path=output_path, project_path=project_path))
 
 
-@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
+@mcp.tool()
 def delimit_design_validate_responsive(project_path: str, check_types: Optional[List[str]] = None) -> Dict[str, Any]:
-    """Validate responsive design patterns (coming soon).
+    """Validate responsive design patterns via static CSS analysis.
+
+    Scans for media queries, viewport meta, mobile-first patterns, fixed widths.
 
     Args:
         project_path: Project path to validate.
         check_types: Check types (breakpoints, containers, fluid-type, etc.).
     """
     from backends.ui_bridge import design_validate_responsive
-    return _safe_call(design_validate_responsive, project_path=project_path, check_types=check_types)
+    return _with_next_steps("design_validate_responsive", _safe_call(design_validate_responsive, project_path=project_path, check_types=check_types))
 
 
-@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
+@mcp.tool()
 def delimit_design_component_library(project_path: str, output_format: str = "json") -> Dict[str, Any]:
-    """Generate component library documentation (coming soon).
+    """Scan for React/Vue/Svelte components and generate a component catalog.
 
     Args:
-        project_path: Project path.
+        project_path: Project path to scan.
         output_format: Output format (json/markdown).
     """
     from backends.ui_bridge import design_component_library
-    return _safe_call(design_component_library, project_path=project_path, output_format=output_format)
+    return _with_next_steps("design_component_library", _safe_call(design_component_library, project_path=project_path, output_format=output_format))
 
 
-# ─── Storybook (UI Tooling + Visual Regression) ────────────────────────
+# ─── Story (Component Stories + Visual/A11y Testing) ────────────────────
 
-@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
+@mcp.tool()
 def delimit_story_generate(component_path: str, story_name: Optional[str] = None, variants: Optional[List[str]] = None) -> Dict[str, Any]:
-    """Generate Storybook story for a component (coming soon).
+    """Generate a .stories.tsx file for a component (no Storybook install required).
 
     Args:
         component_path: Path to the component file.
-        story_name: Custom story name.
-        variants: Variants to generate.
+        story_name: Custom story name. Defaults to component name.
+        variants: Variants to generate. Defaults to [Default, WithChildren].
     """
     from backends.ui_bridge import story_generate
-    return _safe_call(story_generate, component_path=component_path, story_name=story_name, variants=variants)
+    return _with_next_steps("story_generate", _safe_call(story_generate, component_path=component_path, story_name=story_name, variants=variants))
 
 
-@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
+@mcp.tool()
 def delimit_story_visual_test(url: str, project_path: Optional[str] = None, threshold: float = 0.05) -> Dict[str, Any]:
-    """Run visual regression test with Playwright screenshots (coming soon).
+    """Run visual regression test -- screenshot with Playwright and compare to baseline.
+
+    Falls back to guidance if Playwright is not installed.
 
     Args:
-        url: URL to test.
+        url: URL to screenshot.
         project_path: Project path for baseline storage.
         threshold: Diff threshold (0.0-1.0).
     """
     from backends.ui_bridge import story_visual_test
-    return _safe_call(story_visual_test, url=url, project_path=project_path, threshold=threshold)
+    return _with_next_steps("story_visual_test", _safe_call(story_visual_test, url=url, project_path=project_path, threshold=threshold))
 
 
-@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
+@_experimental_tool()  # HIDDEN: requires Storybook installed (LED-044)
 def delimit_story_build(project_path: str, output_dir: Optional[str] = None) -> Dict[str, Any]:
-    """Build Storybook static site (coming soon).
+    """Build Storybook static site (requires Storybook installed).
 
     Args:
         project_path: Project path.
@@ -1135,35 +1360,36 @@ def delimit_story_build(project_path: str, output_dir: Optional[str] = None) -> 
     return _safe_call(story_build, project_path=project_path, output_dir=output_dir)
 
 
-@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
+@mcp.tool()
 def delimit_story_accessibility(project_path: str, standards: str = "WCAG2AA") -> Dict[str, Any]:
-    """Run WCAG accessibility tests on components (coming soon).
+    """Run WCAG accessibility checks by scanning HTML/JSX/TSX for common issues.
+
+    Checks: missing alt, missing labels, empty buttons, heading order, aria-hidden on focusable.
 
     Args:
-        project_path: Project path.
+        project_path: Project path to scan.
         standards: Accessibility standard (WCAG2A/WCAG2AA/WCAG2AAA).
     """
     from backends.ui_bridge import story_accessibility_test
-    return _safe_call(story_accessibility_test, project_path=project_path, standards=standards)
+    return _with_next_steps("story_accessibility", _safe_call(story_accessibility_test, project_path=project_path, standards=standards))
 
 
-# ─── TestSmith (Testing) ───────────────────────────────────────────────
+# ─── TestSmith (Testing — Real implementations) ──────────────────────
 
-@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
+@mcp.tool()
 def delimit_test_generate(project_path: str, source_files: Optional[List[str]] = None, framework: str = "jest") -> Dict[str, Any]:
-    """Generate tests for source code (experimental) (Pro).
+    """Generate test skeletons for source code.
+
+    Scans source files using AST parsing (Python) or regex (JS/TS),
+    extracts public function signatures, and generates test file skeletons.
 
     Args:
         project_path: Project path.
         source_files: Specific files to generate tests for.
         framework: Test framework (jest/pytest/vitest).
     """
-    from ai.license import require_premium
-    gate = require_premium("test_generate")
-    if gate:
-        return gate
     from backends.ui_bridge import test_generate
-    return _safe_call(test_generate, project_path=project_path, source_files=source_files, framework=framework)
+    return _with_next_steps("test_generate", _safe_call(test_generate, project_path=project_path, source_files=source_files, framework=framework))
 
 
 @_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
@@ -1184,42 +1410,47 @@ def delimit_test_coverage(project_path: str, threshold: int = 80) -> Dict[str, A
 
 @mcp.tool()
 def delimit_test_smoke(project_path: str, test_suite: Optional[str] = None) -> Dict[str, Any]:
-    """Run smoke tests (experimental) (Pro).
+    """Run smoke tests for a project.
+
+    Detects the test framework (pytest/jest/vitest/mocha) from project config,
+    runs the test suite, and parses pass/fail/error counts.
 
     Args:
         project_path: Project path.
         test_suite: Specific test suite to run.
     """
-    from ai.license import require_premium
-    gate = require_premium("test_smoke")
-    if gate:
-        return gate
     from backends.ui_bridge import test_smoke
-    return _safe_call(test_smoke, project_path=project_path, test_suite=test_suite)
+    return _with_next_steps("test_smoke", _safe_call(test_smoke, project_path=project_path, test_suite=test_suite))
 
 
-# ─── Docs ───────────────────────────────────────────────────────────────
+# ─── Docs (Real implementations) ─────────────────────────────────────
 
-@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
+@mcp.tool()
 def delimit_docs_generate(target: str = ".") -> Dict[str, Any]:
-    """Generate documentation for a project (experimental).
+    """Generate API reference documentation for a project.
+
+    Scans Python files for docstrings and JS/TS files for JSDoc comments.
+    Produces a markdown API reference organized by source file.
 
     Args:
         target: Project path.
     """
     from backends.ui_bridge import docs_generate
-    return _safe_call(docs_generate, target=target)
+    return _with_next_steps("docs_generate", _safe_call(docs_generate, target=target))
 
 
-@_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
+@mcp.tool()
 def delimit_docs_validate(target: str = ".") -> Dict[str, Any]:
-    """Validate documentation quality and completeness (experimental).
+    """Validate documentation quality and completeness.
+
+    Checks README existence, docstring coverage on public functions,
+    and broken internal links in markdown files.
 
     Args:
         target: Project path.
     """
     from backends.ui_bridge import docs_validate
-    return _safe_call(docs_validate, target=target)
+    return _with_next_steps("docs_validate", _safe_call(docs_validate, target=target))
 
 
 
@@ -1271,10 +1502,10 @@ async def delimit_sensor_github_issue(
             timeout=30,
         )
         if comments_proc.returncode != 0:
-            return {
+            return _with_next_steps("sensor_github_issue", {
                 "error": f"gh api comments failed: {comments_proc.stderr.strip()}",
                 "has_new_activity": False,
-            }
+            })
 
         all_comments = json.loads(comments_proc.stdout) if comments_proc.stdout.strip() else []
 
@@ -1294,10 +1525,10 @@ async def delimit_sensor_github_issue(
             timeout=30,
         )
         if issue_proc.returncode != 0:
-            return {
+            return _with_next_steps("sensor_github_issue", {
                 "error": f"gh api issue failed: {issue_proc.stderr.strip()}",
                 "has_new_activity": False,
-            }
+            })
 
         issue_info = json.loads(issue_proc.stdout) if issue_proc.stdout.strip() else {}
         issue_state = issue_info.get("state", "unknown")
@@ -1321,7 +1552,7 @@ async def delimit_sensor_github_issue(
         latest_comment_id = max((c["id"] for c in all_comments), default=since_comment_id)
 
         repo_key = repo.replace("/", "_")
-        return {
+        return _with_next_steps("sensor_github_issue", {
             "signal": {
                 "id": f"sensor:github_issue:{repo_key}:{issue_number}",
                 "venture": "delimit",
@@ -1335,15 +1566,15 @@ async def delimit_sensor_github_issue(
             "latest_comment_id": latest_comment_id,
             "total_comments": len(all_comments),
             "has_new_activity": len(new_comments) > 0,
-        }
+        })
 
     except subprocess.TimeoutExpired:
-        return {"error": "gh command timed out after 30s", "has_new_activity": False}
+        return _with_next_steps("sensor_github_issue", {"error": "gh command timed out after 30s", "has_new_activity": False})
     except json.JSONDecodeError as e:
-        return {"error": f"Failed to parse gh output: {e}", "has_new_activity": False}
+        return _with_next_steps("sensor_github_issue", {"error": f"Failed to parse gh output: {e}", "has_new_activity": False})
     except Exception as e:
         logger.error("Sensor error: %s\n%s", e, traceback.format_exc())
-        return {"error": str(e), "has_new_activity": False}
+        return _with_next_steps("sensor_github_issue", {"error": str(e), "has_new_activity": False})
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1385,14 +1616,14 @@ def delimit_version() -> Dict[str, Any]:
         ],
     }
     total = sum(len(v) for v in tiers.values()) + 1  # +1 for version itself
-    return {
+    return _with_next_steps("version", {
         "version": VERSION,
         "server": "delimit-unified",
         "total_tools": total,
         "tiers": tiers,
         "adapter_contract": "v1.0",
         "authority": "delimit-gateway",
-    }
+    })
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1414,6 +1645,35 @@ TOOL_HELP = {
 }
 
 
+STANDARD_WORKFLOWS = [
+    {
+        "name": "Project Onboarding",
+        "description": "Set up governance for a new project",
+        "steps": ["delimit_init", "delimit_gov_health", "delimit_lint", "delimit_test_coverage", "delimit_security_scan"],
+    },
+    {
+        "name": "Pre-Commit Check",
+        "description": "Validate changes before committing",
+        "steps": ["delimit_lint", "delimit_test_coverage", "delimit_semver"],
+    },
+    {
+        "name": "Security Audit",
+        "description": "Full security scan with evidence collection",
+        "steps": ["delimit_security_scan", "delimit_evidence_collect", "delimit_evidence_verify"],
+    },
+    {
+        "name": "API Change Review",
+        "description": "Review and document an API change",
+        "steps": ["delimit_diff", "delimit_semver", "delimit_explain", "delimit_lint"],
+    },
+    {
+        "name": "Deploy Pipeline",
+        "description": "Build, publish, and verify a deployment",
+        "steps": ["delimit_deploy_build", "delimit_deploy_publish", "delimit_deploy_verify"],
+    },
+]
+
+
 @mcp.tool()
 def delimit_help(tool_name: str = "") -> Dict[str, Any]:
     """Get help for a Delimit tool — what it does, parameters, and examples.
@@ -1422,19 +1682,20 @@ def delimit_help(tool_name: str = "") -> Dict[str, Any]:
         tool_name: Tool name (e.g. 'lint', 'gov_health'). Leave empty for overview.
     """
     if not tool_name:
-        return {
+        return _with_next_steps("help", {
             "message": "Delimit has 77 tools. Here are the most useful ones to start with:",
             "essential_tools": {k: v["desc"] for k, v in TOOL_HELP.items()},
+            "workflows": STANDARD_WORKFLOWS,
             "tip": "Run delimit_help(tool_name='lint') for detailed help on a specific tool.",
             "all_tools": "Run delimit_version() for the complete list.",
-        }
+        })
 
     # Normalize name
     clean = tool_name.replace("delimit_", "").replace("mcp__delimit__delimit_", "")
     info = TOOL_HELP.get(clean)
     if info:
-        return {"tool": clean, **info}
-    return {"error": f"No help for '{tool_name}'. Try: {', '.join(TOOL_HELP.keys())}"}
+        return _with_next_steps("help", {"tool": clean, **info})
+    return _with_next_steps("help", {"error": f"No help for '{tool_name}'. Try: {', '.join(TOOL_HELP.keys())}"})
 
 
 @mcp.tool()
@@ -1495,13 +1756,19 @@ def delimit_diagnose(project_path: str = ".") -> Dict[str, Any]:
 
     # Summary
     status = "healthy" if not issues else "issues_found"
-    return {
+    result = {
         "status": status,
         "checks": checks,
         "issues": issues,
         "issue_count": len(issues),
         "tip": "If everything looks good but tools aren't working, try restarting Claude Code.",
     }
+    # Dynamic next_steps: suggest init if not initialized
+    diagnose_next = []
+    if not delimit_dir.is_dir():
+        diagnose_next.append({"tool": "delimit_init", "reason": "Initialize governance for this project", "suggested_args": {"preset": "default"}, "is_premium": False})
+    result["next_steps"] = diagnose_next
+    return result
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1517,14 +1784,161 @@ def delimit_activate(license_key: str) -> Dict[str, Any]:
         license_key: The license key to activate (e.g. DELIMIT-XXXX-XXXX-XXXX).
     """
     from ai.license import activate_license
-    return activate_license(license_key)
+    return _with_next_steps("activate", activate_license(license_key))
 
 
 @mcp.tool()
 def delimit_license_status() -> Dict[str, Any]:
     """Check current Delimit license status -- tier, validity, and expiry."""
     from ai.license import get_license
-    return get_license()
+    return _with_next_steps("license_status", get_license())
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  LEDGER (Strategy + Operational Task Tracking)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+@mcp.tool()
+def delimit_ledger_add(
+    title: str,
+    ledger: str = "ops",
+    type: str = "task",
+    priority: str = "P1",
+    description: str = "",
+    source: str = "session",
+) -> Dict[str, Any]:
+    """Add a new item to the strategy or operational ledger.
+
+    The ledger tracks what needs to be done across sessions. Use "ops" for
+    tasks/bugs/features, "strategy" for consensus decisions and direction.
+
+    Args:
+        title: What needs to be done.
+        ledger: "ops" (tasks, bugs, features) or "strategy" (decisions, direction).
+        type: task, fix, feat, strategy, consensus.
+        priority: P0 (urgent), P1 (important), P2 (nice to have).
+        description: Details.
+        source: Where this came from (session, consensus, focus-group, etc).
+    """
+    from ai.ledger_manager import add_item
+    return add_item(title=title, ledger=ledger, type=type, priority=priority,
+                    description=description, source=source)
+
+
+@mcp.tool()
+def delimit_ledger_done(item_id: str, note: str = "") -> Dict[str, Any]:
+    """Mark a ledger item as done.
+
+    Args:
+        item_id: The item ID (e.g. LED-001 or STR-001).
+        note: Optional completion note.
+    """
+    from ai.ledger_manager import update_item
+    return update_item(item_id=item_id, status="done", note=note)
+
+
+@mcp.tool()
+def delimit_ledger_list(
+    ledger: str = "both",
+    status: str = "",
+    priority: str = "",
+    limit: int = 20,
+) -> Dict[str, Any]:
+    """List ledger items — see what's open, done, or in progress.
+
+    Args:
+        ledger: "ops", "strategy", or "both".
+        status: Filter by status — "open", "done", "in_progress", or empty for all.
+        priority: Filter by priority — "P0", "P1", "P2", or empty for all.
+        limit: Max items to return.
+    """
+    from ai.ledger_manager import list_items
+    return list_items(ledger=ledger, status=status or None, priority=priority or None, limit=limit)
+
+
+@mcp.tool()
+def delimit_ledger_context() -> Dict[str, Any]:
+    """Get a quick summary of what's open in the ledger — use at session start.
+
+    Returns the top 5 open items by priority so the AI knows what to work on.
+    """
+    from ai.ledger_manager import get_context
+    return get_context()
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  DELIBERATION (Multi-Round Consensus)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+@mcp.tool()
+def delimit_models(action: str = "list") -> Dict[str, Any]:
+    """View and configure AI models for multi-model deliberation.
+
+    Shows which models are available for consensus runs. Models auto-detect
+    from environment variables (XAI_API_KEY, GEMINI_API_KEY, OPENAI_API_KEY).
+
+    Args:
+        action: 'list' to show configured models.
+    """
+    from ai.deliberation import configure_models
+    return configure_models()
+
+
+@mcp.tool()
+def delimit_deliberate(
+    question: str,
+    context: str = "",
+    mode: str = "dialogue",
+    max_rounds: int = 3,
+    save_path: str = "",
+) -> Dict[str, Any]:
+    """Run multi-model consensus via real AI-to-AI deliberation.
+
+    This is the consensus tool. Models (Grok 4, Gemini, Codex) debate each other
+    directly until they reach unanimous agreement.
+
+    Modes:
+      - "dialogue": Short conversational turns like a group chat (default, 6 rounds)
+      - "debate": Long-form essays with full counter-arguments (3 rounds)
+
+    Args:
+        question: The question to reach consensus on.
+        context: Background context for all models.
+        mode: "dialogue" (short turns) or "debate" (long essays).
+        max_rounds: Maximum rounds (default 3 for debate, 6 for dialogue).
+        save_path: Optional file path to save the full transcript.
+    """
+    from ai.deliberation import deliberate
+    result = deliberate(
+        question=question,
+        context=context,
+        mode=mode,
+        max_rounds=max_rounds,
+        save_path=save_path or "",
+    )
+
+    # Add summary for Claude to review
+    rounds_count = len(result.get("rounds", []))
+    unanimous = result.get("unanimous", False)
+
+    summary = {
+        "status": "unanimous" if unanimous else "no_consensus",
+        "rounds": rounds_count,
+        "agreed_at_round": result.get("agreed_at_round"),
+        "final_verdict": result.get("final_verdict"),
+        "transcript_saved": result.get("saved_to", save_path),
+        "note": "Review the full transcript. As orchestrator, provide your own analysis and final synthesis.",
+    }
+
+    # Include last round responses for immediate review
+    if result.get("rounds"):
+        last_round = result["rounds"][-1]
+        summary["gemini_final_response"] = last_round["responses"].get("gemini", "")[:2000]
+        summary["grok_final_response"] = last_round["responses"].get("grok", "")[:2000]
+
+    return summary
 
 
 # ═══════════════════════════════════════════════════════════════════════

@@ -42,53 +42,35 @@ def _call(pkg: str, factory_name: str, method: str, args: Dict, tool_label: str)
         return {"tool": tool_label, "error": str(e)}
 
 
-# ─── DesignSystem (custom classes, no BaseMCPServer) ───────────────────
-# designsystem uses DesignSystemGenerator, not the _tool_* pattern.
-# Provide graceful pass-through until refactored.
-
-def design_validate_responsive(project_path: str, check_types: Optional[List[str]] = None) -> Dict[str, Any]:
-    return {"tool": "design.validate_responsive", "project_path": project_path, "status": "pass-through"}
-
-
-def design_extract_tokens(figma_file_key: str, token_types: Optional[List[str]] = None) -> Dict[str, Any]:
-    return {"tool": "design.extract_tokens", "figma_file_key": figma_file_key, "status": "pass-through"}
-
-
-def design_generate_component(component_name: str, figma_node_id: Optional[str] = None, output_path: Optional[str] = None) -> Dict[str, Any]:
-    return {"tool": "design.generate_component", "component_name": component_name, "status": "pass-through"}
-
-
-def design_generate_tailwind(figma_file_key: str, output_path: Optional[str] = None) -> Dict[str, Any]:
-    return {"tool": "design.generate_tailwind", "figma_file_key": figma_file_key, "status": "pass-through"}
-
-
-def design_component_library(project_path: str, output_format: str = "json") -> Dict[str, Any]:
-    return {"tool": "design.component_library", "project_path": project_path, "status": "pass-through"}
-
-
-# ─── Storybook (custom classes, no BaseMCPServer) ─────────────────────
-
-def story_generate(component_path: str, story_name: Optional[str] = None, variants: Optional[List[str]] = None) -> Dict[str, Any]:
-    return {"tool": "story.generate", "component_path": component_path, "status": "pass-through"}
-
-
-def story_visual_test(url: str, project_path: Optional[str] = None, threshold: float = 0.05) -> Dict[str, Any]:
-    return {"tool": "story.visual_test", "url": url, "status": "pass-through"}
+# ─── DesignSystem (real implementations in tools_design.py) ────────────
+from .tools_design import (
+    design_extract_tokens,
+    design_generate_component,
+    design_generate_tailwind,
+    design_validate_responsive,
+    design_component_library,
+    story_generate,
+    story_visual_test,
+    story_accessibility,
+)
 
 
 def story_build(project_path: str, output_dir: Optional[str] = None) -> Dict[str, Any]:
-    return {"tool": "story.build", "project_path": project_path, "status": "pass-through"}
+    """Story build remains a stub — requires Storybook installed."""
+    return {"tool": "story.build", "project_path": project_path, "status": "not_available",
+            "message": "Storybook build requires Storybook installed. Run: npx storybook init"}
 
 
 def story_accessibility_test(project_path: str, standards: str = "WCAG2AA") -> Dict[str, Any]:
-    return {"tool": "story.accessibility_test", "project_path": project_path, "status": "pass-through"}
+    """Delegate to story_accessibility (renamed for backward compat)."""
+    return story_accessibility(project_path=project_path, standards=standards)
 
 
-# ─── TestSmith (BaseMCPServer pattern) ─────────────────────────────────
+# ─── TestSmith (Real implementations — tools_real.py) ─────────────────
 
 def test_generate(project_path: str, source_files: Optional[List[str]] = None, framework: str = "jest") -> Dict[str, Any]:
-    return _call("testsmith", "create_testsmith_server", "_tool_generate",
-                 {"project_path": project_path, "source_files": source_files, "framework": framework}, "test.generate")
+    from .tools_real import test_generate as _real_test_generate
+    return _real_test_generate(project_path=project_path, source_files=source_files, framework=framework)
 
 
 def test_coverage(project_path: str, threshold: int = 80) -> Dict[str, Any]:
@@ -97,22 +79,17 @@ def test_coverage(project_path: str, threshold: int = 80) -> Dict[str, Any]:
 
 
 def test_smoke(project_path: str, test_suite: Optional[str] = None) -> Dict[str, Any]:
-    result = _call("testsmith", "create_testsmith_server", "_tool_smoke",
-                   {"project_path": project_path}, "test.smoke")
-    # Guard against stub that says "passed" with 0 tests actually run
-    if result.get("tests_run", -1) == 0 and result.get("passed") is True:
-        return {"tool": "test.smoke", "status": "no_tests",
-                "error": "No smoke tests configured. The test runner found 0 tests to execute."}
-    return result
+    from .tools_real import test_smoke as _real_test_smoke
+    return _real_test_smoke(project_path=project_path, test_suite=test_suite)
 
 
-# ─── DocsWeaver (BaseMCPServer pattern) ────────────────────────────────
+# ─── DocsWeaver (Real implementations — tools_real.py) ────────────────
 
 def docs_generate(target: str = ".", options: Optional[Dict] = None) -> Dict[str, Any]:
-    return _call("docsweaver", "create_docsweaver_server", "_tool_generate",
-                 {"project_path": target, "doc_types": ["api", "readme"], **(options or {})}, "docs.generate")
+    from .tools_real import docs_generate as _real_docs_generate
+    return _real_docs_generate(target=target, options=options)
 
 
 def docs_validate(target: str = ".", options: Optional[Dict] = None) -> Dict[str, Any]:
-    return _call("docsweaver", "create_docsweaver_server", "_tool_validate",
-                 {"docs_path": target, **(options or {})}, "docs.validate")
+    from .tools_real import docs_validate as _real_docs_validate
+    return _real_docs_validate(target=target, options=options)
