@@ -1,6 +1,6 @@
 {
   "name": "delimit-cli",
-  "version": "3.5.0",
+  "version": "3.5.1",
   "description": "Stop Describing. Start Building. 77 MCP governance tools for AI coding assistants.",
   "main": "index.js",
   "bin": {
