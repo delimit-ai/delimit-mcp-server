@@ -166,7 +166,8 @@ async function main() {
             if (toml.includes('[mcp_servers.delimit]')) {
                 log(`  ${green('✓')} Delimit already in Codex config`);
             } else {
-                const codexEntry = `\n[mcp_servers.delimit]\ncommand = "${python}"\nargs = ["${actualServer}"]\ncwd = "${path.join(DELIMIT_HOME, 'server')}"\n`;
+                const serverDir = path.join(DELIMIT_HOME, 'server');
+                const codexEntry = `\n[mcp_servers.delimit]\ncommand = "${python}"\nargs = ["${actualServer}"]\ncwd = "${serverDir}"\n\n[mcp_servers.delimit.env]\nPYTHONPATH = "${serverDir}:${path.join(serverDir, 'ai')}"\n`;
                 toml += codexEntry;
                 fs.writeFileSync(CODEX_CONFIG, toml);
                 log(`  ${green('✓')} Added delimit to Codex (${CODEX_CONFIG})`);
@@ -326,8 +327,78 @@ Run full governance compliance checks. Verify security, policy compliance, evide
         }
     }
 
-    // Step 6: Try it now
-    step(6, 'Done!');
+    // Step 6: Auto-detect API keys for multi-model deliberation
+    step(6, 'Detecting AI model API keys...');
+
+    const modelsPath = path.join(DELIMIT_HOME, 'models.json');
+    const keyDetection = {
+        grok: { env: 'XAI_API_KEY', name: 'Grok (xAI)', found: false },
+        gemini: { env: 'GOOGLE_APPLICATION_CREDENTIALS', name: 'Gemini (Vertex AI)', found: false },
+        codex: { env: 'OPENAI_API_KEY', name: 'Codex (OpenAI)', found: false },
+    };
+
+    // Check which keys exist in environment
+    for (const [id, info] of Object.entries(keyDetection)) {
+        if (process.env[info.env]) {
+            info.found = true;
+        }
+    }
+
+    const foundKeys = Object.entries(keyDetection).filter(([, v]) => v.found);
+    const missingKeys = Object.entries(keyDetection).filter(([, v]) => !v.found);
+
+    if (foundKeys.length > 0 && !fs.existsSync(modelsPath)) {
+        // Auto-generate models.json from detected keys
+        const models = {};
+        if (keyDetection.grok.found) {
+            models.grok = {
+                name: 'Grok 4',
+                api_url: 'https://api.x.ai/v1/chat/completions',
+                model: 'grok-4-0709',
+                env_key: 'XAI_API_KEY',
+                enabled: true,
+            };
+        }
+        if (keyDetection.gemini.found) {
+            const project = process.env.GOOGLE_CLOUD_PROJECT || 'default';
+            models.gemini = {
+                name: 'Gemini 2.5 Flash',
+                api_url: `https://us-central1-aiplatform.googleapis.com/v1/projects/{project}/locations/us-central1/publishers/google/models/gemini-2.5-flash:generateContent`,
+                model: 'gemini-2.5-flash',
+                format: 'vertex_ai',
+                enabled: true,
+            };
+        }
+        if (keyDetection.codex.found) {
+            models.codex = {
+                name: 'Codex (GPT-5.4)',
+                format: 'codex_cli',
+                model: 'gpt-5.4',
+                enabled: true,
+            };
+        }
+        fs.writeFileSync(modelsPath, JSON.stringify(models, null, 2));
+        log(`  ${green('✓')} Auto-configured ${foundKeys.length} model(s) for deliberation:`);
+        foundKeys.forEach(([, v]) => log(`    ${green('✓')} ${v.name}`));
+    } else if (fs.existsSync(modelsPath)) {
+        try {
+            const existing = JSON.parse(fs.readFileSync(modelsPath, 'utf-8'));
+            const enabled = Object.values(existing).filter(m => m.enabled);
+            log(`  ${green('✓')} ${enabled.length} model(s) already configured for deliberation`);
+        } catch {
+            log(`  ${yellow('!')} models.json exists but could not be read`);
+        }
+    } else {
+        log(`  ${dim('  No AI API keys detected in environment')}`);
+    }
+
+    if (missingKeys.length > 0 && foundKeys.length < 2 && !fs.existsSync(modelsPath)) {
+        log(`  ${dim('  For multi-model deliberation, set 2+ of:')}`);
+        missingKeys.forEach(([, v]) => log(`    ${dim(`export ${v.env}=your-key`)}`));
+    }
+
+    // Step 7: Done
+    step(7, 'Done!');
     log('');
     log(`  ${green('Delimit is installed.')} Your AI now has persistent memory and governance.`);
     log('');
@@ -337,6 +408,17 @@ Run full governance compliance checks. Verify security, policy compliance, evide
     if (fs.existsSync(path.join(os.homedir(), '.cursor'))) tools.push('Cursor');
     if (fs.existsSync(GEMINI_DIR)) tools.push('Gemini CLI');
     log(`  ${green('✓')} ${tools.join(', ')}`);
+
+    // Show deliberation status
+    if (foundKeys.length >= 2) {
+        log(`  ${green('✓')} Multi-model deliberation: ${foundKeys.map(([,v]) => v.name).join(' + ')}`);
+    } else if (foundKeys.length === 1) {
+        log(`  ${yellow('!')} Deliberation: needs 1 more API key (${missingKeys.slice(0,2).map(([,v]) => v.env).join(' or ')})`);
+    } else if (fs.existsSync(modelsPath)) {
+        log(`  ${green('✓')} Deliberation: configured via ~/.delimit/models.json`);
+    } else {
+        log(`  ${dim('  Deliberation: not configured (optional — set API keys to enable)')}`);
+    }
     log('');
     log('  Try it now:');
     log(`  ${bold('$ claude')}`);
