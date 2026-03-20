@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("delimit.ai.generate_bridge")
 
-GEN_PACKAGE = Path(os.environ.get("DELIMIT_HOME", Path.home() / ".delimit")) / "server" / "packages" / "delimit-generator"
+GEN_PACKAGE = Path(os.environ.get("DELIMIT_HOME", str(Path.home() / ".delimit"))) / "server" / "packages" / "delimit-generator"
 
 
 def _ensure_gen_path():

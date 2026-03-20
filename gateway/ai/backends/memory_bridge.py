@@ -13,7 +13,7 @@ from typing import Any, Dict, Optional
 
 logger = logging.getLogger("delimit.ai.memory_bridge")
 
-MEM_PACKAGE = Path(os.environ.get("DELIMIT_HOME", Path.home() / ".delimit")) / "server" / "packages" / "delimit-memory"
+MEM_PACKAGE = Path(os.environ.get("DELIMIT_HOME", str(Path.home() / ".delimit"))) / "server" / "packages" / "delimit-memory"
 
 _server = None
 

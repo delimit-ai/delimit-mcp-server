@@ -1,6 +1,6 @@
 {
   "name": "delimit-cli",
-  "version": "3.6.10",
+  "version": "3.6.11",
   "description": "Catch breaking API changes before they ship. GitHub Action + CLI for OpenAPI specs.",
   "main": "index.js",
   "files": [

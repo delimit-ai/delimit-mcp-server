@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("delimit.ai.intel_bridge")
 
-INTEL_PACKAGE = Path(os.environ.get("DELIMIT_HOME", Path.home() / ".delimit")) / "server" / "packages" / "wireintel"
+INTEL_PACKAGE = Path(os.environ.get("DELIMIT_HOME", str(Path.home() / ".delimit"))) / "server" / "packages" / "wireintel"
 
 
 def _ensure_intel_path():

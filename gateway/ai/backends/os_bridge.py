@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("delimit.ai.os_bridge")
 
-OS_PACKAGE = Path(os.environ.get("DELIMIT_HOME", Path.home() / ".delimit")) / "server" / "packages" / "delimit-os"
+OS_PACKAGE = Path(os.environ.get("DELIMIT_HOME", str(Path.home() / ".delimit"))) / "server" / "packages" / "delimit-os"
 
 _NOT_INIT_MSG = (
     "Project not initialized for governance. "
