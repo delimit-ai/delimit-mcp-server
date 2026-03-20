@@ -14,7 +14,7 @@ from .async_utils import run_async
 
 logger = logging.getLogger("delimit.ai.vault_bridge")
 
-VAULT_PACKAGE = Path(os.environ.get("DELIMIT_HOME", Path.home() / ".delimit")) / "server" / "packages" / "delimit-vault"
+VAULT_PACKAGE = Path(os.environ.get("DELIMIT_HOME", str(Path.home() / ".delimit"))) / "server" / "packages" / "delimit-vault"
 
 _server = None
 

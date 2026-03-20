@@ -1807,6 +1807,59 @@ def delimit_license_status() -> Dict[str, Any]:
 
 
 # ═══════════════════════════════════════════════════════════════════════
+#  SITE DEPLOY
+# ═══════════════════════════════════════════════════════════════════════
+
+
+@mcp.tool()
+def delimit_deploy_site(
+    project_path: str = ".",
+    message: str = "",
+) -> Dict[str, Any]:
+    """Deploy a site — git commit, push, Vercel build, and deploy in one step.
+
+    Handles the full chain: stages changes, commits, pushes to remote,
+    builds with Vercel, deploys to production. No manual steps needed.
+
+    Args:
+        project_path: Path to the site project (must have .vercel/ configured).
+        message: Git commit message. Auto-generated if empty.
+    """
+    from backends.tools_infra import deploy_site
+    env_vars = {}
+    # Auto-detect Delimit UI env vars
+    if "delimit-ui" in project_path or "delimit-ui" in str(Path(project_path).resolve()):
+        chatops_token = os.environ.get("CHATOPS_AUTH_TOKEN", "")
+        env_vars = {
+            "NEXT_PUBLIC_CHATOPS_URL": "https://chatops.delimit.ai",
+            "NEXT_PUBLIC_CHATOPS_TOKEN": chatops_token,
+        }
+    return _with_next_steps("deploy_site", deploy_site(project_path, message, env_vars))
+
+
+@mcp.tool()
+def delimit_deploy_npm(
+    project_path: str = ".",
+    bump: str = "patch",
+    tag: str = "latest",
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    """Publish an npm package — bump version, publish to registry, verify.
+
+    Full chain: check auth, bump version, npm publish, verify on registry,
+    git commit + push the version bump. Use dry_run=true to preview first.
+
+    Args:
+        project_path: Path to the npm package (must have package.json).
+        bump: Version bump type — "patch", "minor", or "major".
+        tag: npm dist-tag (default "latest").
+        dry_run: If true, preview without actually publishing.
+    """
+    from backends.tools_infra import deploy_npm
+    return _with_next_steps("deploy_npm", deploy_npm(project_path, bump, tag, dry_run))
+
+
+# ═══════════════════════════════════════════════════════════════════════
 #  LEDGER (Strategy + Operational Task Tracking)
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -1825,8 +1878,8 @@ def _resolve_venture(venture: str) -> str:
         if name == venture or venture in name:
             return info.get("path", ".")
     # Fallback: assume it's a directory name under common roots
-    for root in [Path.home(), Path.home() / "ventures", Path("/home")]:
-        candidate = root / venture
+    for root in [str(Path.home()), str(Path.home() / "ventures"), "/home"]:
+        candidate = Path(root) / venture
         if candidate.exists():
             return str(candidate)
     return "."
@@ -1837,7 +1890,7 @@ def delimit_ledger_add(
     title: str,
     venture: str = "",
     ledger: str = "ops",
-    type: str = "task",
+    item_type: str = "task",
     priority: str = "P1",
     description: str = "",
     source: str = "session",
@@ -1849,16 +1902,16 @@ def delimit_ledger_add(
 
     Args:
         title: What needs to be done.
-        venture: Project name or path (e.g. "delimit-gateway", "~/delimit-gateway"). Auto-detects if empty.
+        venture: Project name or path (e.g. "my-project", "./path/to/project"). Auto-detects if empty.
         ledger: "ops" (tasks, bugs, features) or "strategy" (decisions, direction).
-        type: task, fix, feat, strategy, consensus.
+        item_type: task, fix, feat, strategy, consensus.
         priority: P0 (urgent), P1 (important), P2 (nice to have).
         description: Details.
         source: Where this came from (session, consensus, focus-group, etc).
     """
     from ai.ledger_manager import add_item
     project = _resolve_venture(venture)
-    return add_item(title=title, ledger=ledger, type=type, priority=priority,
+    return add_item(title=title, ledger=ledger, type=item_type, priority=priority,
                     description=description, source=source, project_path=project)
 
 
@@ -1994,7 +2047,85 @@ def delimit_deliberate(
         summary["gemini_final_response"] = last_round["responses"].get("gemini", "")[:2000]
         summary["grok_final_response"] = last_round["responses"].get("grok", "")[:2000]
 
+    # Auto-create ledger items from deliberation findings
+    if unanimous and result.get("rounds"):
+        try:
+            from ai.ledger_manager import add_item, list_items
+            # Extract action items from final round responses
+            actions = _extract_deliberation_actions(result, question)
+            # Dedup against existing open items
+            existing = list_items()
+            open_titles = {i.get("title", "") for i in existing.get("items", []) if i.get("status") == "open"}
+            created = []
+            for action in actions:
+                if action["title"] not in open_titles:
+                    entry = add_item(
+                        title=action["title"],
+                        type="strategy",
+                        priority="P1",
+                        source=f"deliberation:{result.get('saved_to', 'unknown')}",
+                        description=action.get("detail", ""),
+                    )
+                    created.append(entry.get("added", {}).get("id", ""))
+            if created:
+                summary["ledger_items_created"] = created
+        except Exception as e:
+            logger.warning("Deliberation auto-ledger failed: %s", e)
+
     return summary
+
+
+def _extract_deliberation_actions(result: Dict, question: str) -> List[Dict[str, str]]:
+    """Parse deliberation transcript for actionable items.
+
+    Looks for numbered lists, bullet points, and recommendation patterns
+    in the final round of model responses.
+    """
+    import re
+    actions = []
+    seen = set()
+
+    if not result.get("rounds"):
+        return actions
+
+    last_round = result["rounds"][-1]
+    q_short = question[:60].rstrip()
+
+    for model_id, response in last_round.get("responses", {}).items():
+        if not response or "[error" in response.lower():
+            continue
+
+        # Look for numbered items (1. Do X, 2. Do Y)
+        numbered = re.findall(r'(?:^|\n)\s*\d+[\.\)]\s*\*?\*?(.+?)(?:\n|$)', response)
+        for item in numbered:
+            clean = item.strip().rstrip('.*')
+            # Skip very short or verdict lines
+            if len(clean) < 15 or 'verdict' in clean.lower():
+                continue
+            key = clean[:50].lower()
+            if key not in seen:
+                seen.add(key)
+                actions.append({
+                    "title": f"[Consensus] {clean[:100]}",
+                    "detail": f"From deliberation on: {q_short}. Source model: {model_id}.",
+                })
+
+        # Look for bullet points (- Do X, * Do Y)
+        bullets = re.findall(r'(?:^|\n)\s*[\-\*]\s*\*?\*?(.+?)(?:\n|$)', response)
+        for item in bullets:
+            clean = item.strip().rstrip('.*')
+            if len(clean) < 15 or 'verdict' in clean.lower():
+                continue
+            key = clean[:50].lower()
+            if key not in seen:
+                seen.add(key)
+                actions.append({
+                    "title": f"[Consensus] {clean[:100]}",
+                    "detail": f"From deliberation on: {q_short}. Source model: {model_id}.",
+                })
+
+    # Cap at 10 items to avoid noise
+    return actions[:10]
 
 
 # ═══════════════════════════════════════════════════════════════════════
