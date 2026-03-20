@@ -1,8 +1,17 @@
 {
   "name": "delimit-cli",
-  "version": "3.6.3",
-  "description": "Stop Describing. Start Building. 77 MCP governance tools for AI coding assistants.",
+  "version": "3.6.5",
+  "description": "Catch breaking API changes before they ship. GitHub Action + CLI for OpenAPI specs.",
   "main": "index.js",
+  "files": [
+    "bin/",
+    "lib/",
+    "gateway/",
+    "server.json",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
   "bin": {
     "delimit": "./bin/delimit-cli.js",
     "delimit-cli": "./bin/delimit-cli.js"
