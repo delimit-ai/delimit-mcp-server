@@ -98,13 +98,32 @@ async function main() {
         fs.copyFileSync(serverSource, path.join(DELIMIT_HOME, 'server', 'mcp-server.py'));
     }
 
-    // Install Python deps
+    // Install Python deps into isolated venv with pinned versions
     log(`  ${dim('  Installing Python dependencies...')}`);
+    const venvDir = path.join(DELIMIT_HOME, 'venv');
+    const reqFile = path.join(DELIMIT_HOME, 'server', 'requirements.txt');
     try {
-        execSync(`${python} -m pip install --quiet fastmcp pyyaml pydantic packaging 2>/dev/null`, { stdio: 'pipe' });
-        log(`  ${green('✓')} Python dependencies installed`);
+        if (!fs.existsSync(venvDir)) {
+            execSync(`${python} -m venv "${venvDir}"`, { stdio: 'pipe' });
+        }
+        const venvPython = path.join(venvDir, 'bin', 'python');
+        const venvPythonWin = path.join(venvDir, 'Scripts', 'python.exe');
+        const venvPy = fs.existsSync(venvPython) ? venvPython : venvPythonWin;
+        if (fs.existsSync(reqFile)) {
+            execSync(`"${venvPy}" -m pip install --quiet -r "${reqFile}" 2>/dev/null`, { stdio: 'pipe' });
+        } else {
+            execSync(`"${venvPy}" -m pip install --quiet fastmcp==3.1.0 pyyaml==6.0.3 pydantic==2.12.5 packaging==26.0 2>/dev/null`, { stdio: 'pipe' });
+        }
+        python = venvPy;  // Use venv python for MCP config
+        log(`  ${green('✓')} Python dependencies installed (isolated venv)`);
     } catch {
-        log(`  ${yellow('!')} pip install failed — run manually: pip install fastmcp pyyaml pydantic packaging`);
+        log(`  ${yellow('!')} venv install failed — trying global pip`);
+        try {
+            execSync(`${python} -m pip install --quiet fastmcp==3.1.0 pyyaml==6.0.3 pydantic==2.12.5 packaging==26.0 2>/dev/null`, { stdio: 'pipe' });
+            log(`  ${green('✓')} Python dependencies installed (global)`);
+        } catch {
+            log(`  ${yellow('!')} pip install failed — run manually: pip install fastmcp pyyaml pydantic packaging`);
+        }
     }
 
     // Step 3: Configure Claude Code MCP

@@ -1,0 +1,6 @@
+# Delimit MCP server dependencies — pinned for supply chain security
+# Update these when upgrading deps, then re-publish npm package
+fastmcp==3.1.0
+pyyaml==6.0.3
+pydantic==2.12.5
+packaging==26.0
