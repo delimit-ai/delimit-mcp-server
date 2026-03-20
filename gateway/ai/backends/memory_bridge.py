@@ -3,6 +3,7 @@ Bridge to delimit-memory package.
 Tier 2 Platform tools — semantic memory search and store.
 """
 
+import os
 import sys
 import json
 import asyncio
@@ -12,7 +13,7 @@ from typing import Any, Dict, Optional
 
 logger = logging.getLogger("delimit.ai.memory_bridge")
 
-MEM_PACKAGE = Path("/home/delimit/.delimit_suite/packages/delimit-memory")
+MEM_PACKAGE = Path(os.environ.get("DELIMIT_HOME", Path.home() / ".delimit")) / "server" / "packages" / "delimit-memory"
 
 _server = None
 

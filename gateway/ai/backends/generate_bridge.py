@@ -3,6 +3,7 @@ Bridge to delimit-generator MCP server.
 Tier 3 Extended — code generation and project scaffolding.
 """
 
+import os
 import sys
 import logging
 from pathlib import Path
@@ -10,7 +11,7 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("delimit.ai.generate_bridge")
 
-GEN_PACKAGE = Path("/home/delimit/.delimit_suite/packages/delimit-generator")
+GEN_PACKAGE = Path(os.environ.get("DELIMIT_HOME", Path.home() / ".delimit")) / "server" / "packages" / "delimit-generator"
 
 
 def _ensure_gen_path():

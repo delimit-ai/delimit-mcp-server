@@ -3,6 +3,7 @@ Bridge to delimit-vault package.
 Tier 2 Platform tools — artifact and credential storage.
 """
 
+import os
 import sys
 import json
 import asyncio
@@ -13,7 +14,7 @@ from .async_utils import run_async
 
 logger = logging.getLogger("delimit.ai.vault_bridge")
 
-VAULT_PACKAGE = Path("/home/delimit/.delimit_suite/packages/delimit-vault")
+VAULT_PACKAGE = Path(os.environ.get("DELIMIT_HOME", Path.home() / ".delimit")) / "server" / "packages" / "delimit-vault"
 
 _server = None
 

@@ -6,6 +6,7 @@ These do NOT re-implement OS logic. They translate requests
 and forward to the running delimit-os server via direct import.
 """
 
+import os
 import sys
 import logging
 from pathlib import Path
@@ -13,7 +14,7 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("delimit.ai.os_bridge")
 
-OS_PACKAGE = Path("/home/delimit/.delimit_suite/packages/delimit-os")
+OS_PACKAGE = Path(os.environ.get("DELIMIT_HOME", Path.home() / ".delimit")) / "server" / "packages" / "delimit-os"
 
 _NOT_INIT_MSG = (
     "Project not initialized for governance. "
