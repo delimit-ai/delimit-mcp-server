@@ -1825,8 +1825,8 @@ def _resolve_venture(venture: str) -> str:
         if name == venture or venture in name:
             return info.get("path", ".")
     # Fallback: assume it's a directory name under common roots
-    for root in ["/home/delimit", "/home/jamsons/ventures", "/home"]:
-        candidate = Path(root) / venture
+    for root in [Path.home(), Path.home() / "ventures", Path("/home")]:
+        candidate = root / venture
         if candidate.exists():
             return str(candidate)
     return "."
@@ -1849,7 +1849,7 @@ def delimit_ledger_add(
 
     Args:
         title: What needs to be done.
-        venture: Project name or path (e.g. "delimit-gateway", "/home/delimit/delimit-gateway"). Auto-detects if empty.
+        venture: Project name or path (e.g. "delimit-gateway", "~/delimit-gateway"). Auto-detects if empty.
         ledger: "ops" (tasks, bugs, features) or "strategy" (decisions, direction).
         type: task, fix, feat, strategy, consensus.
         priority: P0 (urgent), P1 (important), P2 (nice to have).

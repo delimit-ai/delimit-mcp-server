@@ -15,7 +15,7 @@ from .async_utils import run_async
 
 logger = logging.getLogger("delimit.ai.repo_bridge")
 
-PACKAGES = Path("/home/delimit/.delimit_suite/packages")
+PACKAGES = Path(os.environ.get("DELIMIT_HOME", Path.home() / ".delimit")) / "server" / "packages"
 
 # Add PACKAGES dir so `from shared.base_server import BaseMCPServer` resolves
 _packages = str(PACKAGES)

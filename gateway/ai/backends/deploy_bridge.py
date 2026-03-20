@@ -84,7 +84,7 @@ def build(app: str, git_ref: Optional[str] = None) -> Dict[str, Any]:
     dockerfile = Path.cwd() / "Dockerfile"
     if not dockerfile.exists():
         # Check app-specific paths
-        for candidate in [Path(f"/home/delimit/{app}/Dockerfile"), Path(f"./{app}/Dockerfile")]:
+        for candidate in [Path.home() / app / "Dockerfile", Path(f"./{app}/Dockerfile")]:
             if candidate.exists():
                 dockerfile = candidate
                 break

@@ -3,6 +3,7 @@ Bridge to delimit-intel (wireintel) MCP server.
 Tier 3 Extended — data intelligence and versioned datasets.
 """
 
+import os
 import sys
 import logging
 from pathlib import Path
@@ -10,7 +11,7 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("delimit.ai.intel_bridge")
 
-INTEL_PACKAGE = Path("/home/delimit/.delimit_suite/packages/wireintel")
+INTEL_PACKAGE = Path(os.environ.get("DELIMIT_HOME", Path.home() / ".delimit")) / "server" / "packages" / "wireintel"
 
 
 def _ensure_intel_path():
