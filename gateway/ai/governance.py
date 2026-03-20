@@ -231,6 +231,10 @@ def govern(tool_name: str, result: Dict[str, Any], project_path: str = ".") -> D
                 "reason": "Check ledger for what's next",
                 "premium": False,
             })
+    else:
+        # Excluded tools still get the next_steps field (empty) for schema consistency
+        if "next_steps" not in governed_result:
+            governed_result["next_steps"] = []
 
     return governed_result
 
