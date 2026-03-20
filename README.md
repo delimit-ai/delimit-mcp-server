@@ -39,7 +39,7 @@ That's it. Delimit auto-fetches the base branch spec, diffs it, and posts a PR c
 - Step-by-step migration guide
 - Policy violations
 
-[View on GitHub Marketplace →](https://github.com/marketplace/actions/delimit-api-governance)
+[View on GitHub Marketplace →](https://github.com/marketplace/actions/delimit-api-governance) · [See a live PR comment →](https://github.com/delimit-ai/delimit-quickstart/pull/1)
 
 ### Example PR comment
 
