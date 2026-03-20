@@ -18,7 +18,7 @@
   },
   "scripts": {
     "postinstall": "echo '\\nRun: npx delimit-cli setup\\n'",
-    "test": "node --test tests/cli.test.js"
+    "test": "node --test tests/setup-onboarding.test.js"
   },
   "keywords": [
     "openapi",
