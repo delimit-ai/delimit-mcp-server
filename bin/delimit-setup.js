@@ -327,6 +327,25 @@ Run full governance compliance checks. Verify security, policy compliance, evide
         }
     }
 
+    // Create instruction files for other platforms
+    const instructionContent = getClaudeMdContent();
+
+    // Codex instructions
+    const codexInstructions = path.join(os.homedir(), '.codex', 'instructions.md');
+    if (fs.existsSync(path.join(os.homedir(), '.codex'))) {
+        if (!fs.existsSync(codexInstructions) || fs.readFileSync(codexInstructions, 'utf-8').includes('# Delimit')) {
+            fs.writeFileSync(codexInstructions, instructionContent);
+        }
+    }
+
+    // Cursor rules
+    const cursorRules = path.join(os.homedir(), '.cursorrules');
+    if (fs.existsSync(path.join(os.homedir(), '.cursor'))) {
+        if (!fs.existsSync(cursorRules) || fs.readFileSync(cursorRules, 'utf-8').includes('# Delimit')) {
+            fs.writeFileSync(cursorRules, instructionContent);
+        }
+    }
+
     // Silent: auto-detect API keys and configure models.json (no output)
     const modelsPath = path.join(DELIMIT_HOME, 'models.json');
     if (!fs.existsSync(modelsPath)) {
@@ -385,6 +404,11 @@ function getClaudeMdContent() {
     return `# Delimit
 
 One workspace for every AI coding assistant.
+
+## On every session start:
+1. Call \`delimit_ledger_context\` to check for open tasks
+2. If returning user, summarize what's pending
+3. If new project, call \`delimit_scan\` to discover what Delimit can do
 
 ## Try these:
 - "scan this project" -- discover what Delimit can do here
