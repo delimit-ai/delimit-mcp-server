@@ -350,29 +350,35 @@ def test_smoke(project_path: str, test_suite: Optional[str] = None) -> Dict[str,
     framework = detected["framework"]
     cmd = detected["cmd"]
 
-    # If a specific suite is requested, append it
+    # Build command as list (never shell=True with user input)
+    import shlex
+    cmd_list = shlex.split(cmd)
+
+    # If a specific suite is requested, validate and append
     if test_suite:
-        cmd = f"{cmd} {test_suite}"
+        # Sanitize: only allow alphanumeric, slashes, dots, underscores, hyphens, colons
+        import re
+        if not re.match(r'^[\w/.\-:*\[\]]+$', test_suite):
+            return {"tool": "test.smoke", "status": "error", "error": f"Invalid test_suite: {test_suite}"}
+        cmd_list.append(test_suite)
 
     # Detect the right Python executable
     if framework == "pytest":
         python_found = False
-        # Check for venv
         for venv_dir in ["venv", ".venv", "env"]:
             venv_python = project / venv_dir / "bin" / "python"
             if venv_python.exists():
-                cmd = cmd.replace("python", str(venv_python), 1)
+                cmd_list[0] = str(venv_python)
                 python_found = True
                 break
-        # Fallback to the current interpreter (handles systems where `python` is missing)
         if not python_found:
             import sys as _sys
-            cmd = cmd.replace("python", _sys.executable, 1)
+            cmd_list[0] = _sys.executable
 
     try:
         result = subprocess.run(
-            cmd,
-            shell=True,
+            cmd_list,
+            shell=False,
             cwd=str(project),
             capture_output=True,
             text=True,

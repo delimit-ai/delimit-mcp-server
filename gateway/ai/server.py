@@ -1497,6 +1497,13 @@ async def delimit_sensor_github_issue(
         issue_number: The issue number to monitor.
         since_comment_id: Last seen comment ID. Pass 0 to get all comments.
     """
+    import re as _re
+    # Validate inputs to prevent injection
+    if not _re.match(r'^[\w.-]+/[\w.-]+$', repo):
+        return _with_next_steps("sensor_github_issue", {"error": f"Invalid repo format: {repo}. Use owner/repo."})
+    if not isinstance(issue_number, int) or issue_number <= 0:
+        return _with_next_steps("sensor_github_issue", {"error": f"Invalid issue number: {issue_number}"})
+
     try:
         # Fetch comments
         comments_jq = (
@@ -1982,17 +1989,110 @@ def delimit_ventures() -> Dict[str, Any]:
 
 
 @mcp.tool()
-def delimit_models(action: str = "list") -> Dict[str, Any]:
+def delimit_models(
+    action: str = "list",
+    provider: str = "",
+    api_key: str = "",
+    model_name: str = "",
+) -> Dict[str, Any]:
     """View and configure AI models for multi-model deliberation.
 
-    Shows which models are available for consensus runs. Models auto-detect
-    from environment variables (XAI_API_KEY, GEMINI_API_KEY, OPENAI_API_KEY).
+    Actions:
+      - "list": show configured models and what's available
+      - "detect": auto-detect API keys from environment and configure
+      - "add": add a model provider (set provider + api_key)
+      - "remove": remove a model provider (set provider)
+
+    Supported providers: grok, gemini, openai, anthropic, codex
 
     Args:
-        action: 'list' to show configured models.
+        action: list, detect, add, or remove.
+        provider: Model provider for add/remove (grok, gemini, openai, anthropic, codex).
+        api_key: API key for the provider (only used with action=add).
+        model_name: Optional model name override (e.g. "gpt-4o", "claude-sonnet-4-5-20250514").
     """
-    from ai.deliberation import configure_models
-    return configure_models()
+    from ai.deliberation import configure_models, get_models_config, MODELS_CONFIG, DEFAULT_MODELS
+    import json as _json
+
+    if action == "list":
+        return configure_models()
+
+    if action == "detect":
+        # Auto-detect from env vars and save
+        config = get_models_config()
+        detected = []
+        env_map = {
+            "grok": "XAI_API_KEY",
+            "gemini": "GOOGLE_APPLICATION_CREDENTIALS",
+            "openai": "OPENAI_API_KEY",
+            "anthropic": "ANTHROPIC_API_KEY",
+        }
+        for pid, env_key in env_map.items():
+            if os.environ.get(env_key) and pid not in config:
+                defaults = DEFAULT_MODELS.get(pid, {})
+                config[pid] = {**defaults, "enabled": True}
+                if "api_key" in defaults:
+                    config[pid]["api_key"] = os.environ[env_key]
+                detected.append(pid)
+        # Check codex CLI
+        import shutil
+        if shutil.which("codex") and "codex" not in config:
+            config["codex"] = {**DEFAULT_MODELS.get("codex", {}), "enabled": True}
+            detected.append("codex")
+
+        if detected:
+            MODELS_CONFIG.parent.mkdir(parents=True, exist_ok=True)
+            MODELS_CONFIG.write_text(_json.dumps(config, indent=2))
+            return {"action": "detect", "detected": detected, "total_models": len(config), "config_path": str(MODELS_CONFIG)}
+        return {"action": "detect", "detected": [], "note": "No new API keys found in environment."}
+
+    if action == "add":
+        if not provider:
+            return {"error": "Specify provider: grok, gemini, openai, anthropic, or codex"}
+
+        config = {}
+        if MODELS_CONFIG.exists():
+            try:
+                config = _json.loads(MODELS_CONFIG.read_text())
+            except Exception:
+                pass
+
+        # Provider templates
+        templates = {
+            "grok": {"name": "Grok", "api_url": "https://api.x.ai/v1/chat/completions", "model": model_name or "grok-4-0709", "env_key": "XAI_API_KEY"},
+            "openai": {"name": "OpenAI", "api_url": "https://api.openai.com/v1/chat/completions", "model": model_name or "gpt-4o", "env_key": "OPENAI_API_KEY", "prefer_cli": True},
+            "anthropic": {"name": "Claude", "api_url": "https://api.anthropic.com/v1/messages", "model": model_name or "claude-sonnet-4-5-20250514", "env_key": "ANTHROPIC_API_KEY", "format": "anthropic"},
+            "gemini": {"name": "Gemini", "api_url": "https://us-central1-aiplatform.googleapis.com/v1/projects/{project}/locations/us-central1/publishers/google/models/gemini-2.5-flash:generateContent", "model": model_name or "gemini-2.5-flash", "format": "vertex_ai"},
+        }
+
+        if provider not in templates:
+            return {"error": f"Unknown provider '{provider}'. Supported: {', '.join(templates.keys())}"}
+
+        entry = {**templates[provider], "enabled": True}
+        if api_key:
+            entry["api_key"] = api_key
+
+        config[provider] = entry
+        MODELS_CONFIG.parent.mkdir(parents=True, exist_ok=True)
+        MODELS_CONFIG.write_text(_json.dumps(config, indent=2))
+        return {"action": "add", "provider": provider, "model": entry.get("model"), "config_path": str(MODELS_CONFIG)}
+
+    if action == "remove":
+        if not provider:
+            return {"error": "Specify provider to remove"}
+        config = {}
+        if MODELS_CONFIG.exists():
+            try:
+                config = _json.loads(MODELS_CONFIG.read_text())
+            except Exception:
+                pass
+        if provider in config:
+            del config[provider]
+            MODELS_CONFIG.write_text(_json.dumps(config, indent=2))
+            return {"action": "remove", "provider": provider, "remaining": list(config.keys())}
+        return {"action": "remove", "provider": provider, "note": "Provider not found in config"}
+
+    return {"error": f"Unknown action '{action}'. Use: list, detect, add, remove"}
 
 
 @mcp.tool()
@@ -2126,6 +2226,22 @@ def _extract_deliberation_actions(result: Dict, question: str) -> List[Dict[str,
 
     # Cap at 10 items to avoid noise
     return actions[:10]
+
+
+@mcp.tool()
+def delimit_release_sync(action: str = "audit") -> Dict[str, Any]:
+    """Audit or sync all public surfaces for consistency.
+
+    Checks GitHub repos, npm, site meta tags, CLAUDE.md, and releases
+    against a central config. Reports what's stale and what needs updating.
+
+    Args:
+        action: "audit" to check all surfaces, "config" to view/edit the release config.
+    """
+    from ai.release_sync import audit, get_release_config
+    if action == "config":
+        return get_release_config()
+    return _with_next_steps("release_sync", audit())
 
 
 # ═══════════════════════════════════════════════════════════════════════

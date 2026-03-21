@@ -924,7 +924,11 @@ def deploy_site(project_path: str = ".", message: str = "", env_vars: dict = Non
     # 4. Vercel build
     env = {**os.environ}
     if env_vars:
-        env.update(env_vars)
+        # Whitelist safe env var prefixes — block LD_PRELOAD, PATH overrides, etc.
+        blocked = {"LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_", "PATH", "HOME", "USER", "SHELL"}
+        for k, v in env_vars.items():
+            if not any(k.startswith(b) for b in blocked):
+                env[str(k)] = str(v)
 
     try:
         result = subprocess.run(

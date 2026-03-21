@@ -339,7 +339,7 @@ Run full governance compliance checks. Verify security, policy compliance, evide
             models.gemini = { name: 'Gemini', api_url: `https://us-central1-aiplatform.googleapis.com/v1/projects/{project}/locations/us-central1/publishers/google/models/gemini-2.5-flash:generateContent`, model: 'gemini-2.5-flash', format: 'vertex_ai', enabled: true };
         }
         if (process.env.OPENAI_API_KEY) {
-            models.openai = { name: 'GPT', api_url: 'https://api.openai.com/v1/chat/completions', model: 'gpt-4o', env_key: 'OPENAI_API_KEY', enabled: true };
+            models.openai = { name: 'OpenAI', api_url: 'https://api.openai.com/v1/chat/completions', model: 'gpt-4o', env_key: 'OPENAI_API_KEY', prefer_cli: true, enabled: true };
         }
         if (process.env.ANTHROPIC_API_KEY) {
             models.anthropic = { name: 'Claude', api_url: 'https://api.anthropic.com/v1/messages', model: 'claude-sonnet-4-5-20250514', env_key: 'ANTHROPIC_API_KEY', format: 'anthropic', enabled: true };
