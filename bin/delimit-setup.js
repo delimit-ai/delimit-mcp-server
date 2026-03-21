@@ -31,8 +31,12 @@ function step(n, msg) { log(`\n${blue(`[${n}]`)} ${msg}`); }
 
 async function main() {
     log('');
-    log(bold('  Delimit Setup'));
-    log(dim('  AI agent guardrails for developers'));
+    log(blue('    ____  ________    ______  _____________'));
+    log(blue('   / __ \\/ ____/ /   /  _/  |/  /  _/_  __/'));
+    log(blue('  / / / / __/ / /    / // /|_/ // /  / /   '));
+    log(blue(' / /_/ / /___/ /____/ // /  / // /  / /    '));
+    log(blue('/_____/_____/_____/___/_/  /_/___/ /_/     '));
+    log(dim('  One workspace for every AI coding assistant'));
     log('');
 
     // Step 1: Check prerequisites
