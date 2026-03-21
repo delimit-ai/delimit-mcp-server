@@ -34,7 +34,11 @@ from fastmcp import FastMCP
 logger = logging.getLogger("delimit.ai")
 
 mcp = FastMCP("delimit")
-mcp.description = "Delimit — The smart lint engine for OpenAPI. Unified agent surface."
+mcp.description = (
+    "Delimit — One workspace for every AI coding assistant. "
+    "On session start, call delimit_ledger_context to check for open tasks. "
+    "Use delimit_scan on new projects. Track all work via the ledger."
+)
 
 VERSION = "3.2.0"
 
