@@ -2244,6 +2244,135 @@ def delimit_release_sync(action: str = "audit") -> Dict[str, Any]:
     return _with_next_steps("release_sync", audit())
 
 
+@mcp.tool()
+def delimit_scan(project_path: str = ".") -> Dict[str, Any]:
+    """Scan a project and show what Delimit can do for it.
+
+    First-run discovery tool. Finds OpenAPI specs, checks for security issues,
+    detects frameworks, and suggests what to track. Use this when you first
+    install Delimit or open a new project.
+
+    Args:
+        project_path: Path to the project to scan.
+    """
+    import glob as _glob
+    p = Path(project_path).resolve()
+    findings = []
+    suggestions = []
+
+    # 1. Find OpenAPI specs
+    spec_patterns = ["**/openapi.yaml", "**/openapi.yml", "**/openapi.json",
+                     "**/swagger.yaml", "**/swagger.yml", "**/swagger.json",
+                     "**/*api*.yaml", "**/*api*.yml"]
+    specs_found = []
+    for pattern in spec_patterns:
+        for match in p.glob(pattern):
+            rel = str(match.relative_to(p))
+            if "node_modules" not in rel and ".next" not in rel and "venv" not in rel:
+                specs_found.append(rel)
+    specs_found = list(set(specs_found))[:10]
+
+    if specs_found:
+        findings.append({"type": "openapi_specs", "count": len(specs_found), "files": specs_found})
+        suggestions.append({"action": "lint", "detail": f"Run delimit_lint on {specs_found[0]} to check for issues"})
+        suggestions.append({"action": "github_action", "detail": "Add the Delimit GitHub Action to catch breaking changes on PRs"})
+    else:
+        # Check for framework that could generate a spec
+        framework = None
+        if (p / "requirements.txt").exists() or (p / "pyproject.toml").exists():
+            for py_file in p.rglob("*.py"):
+                if "node_modules" in str(py_file):
+                    continue
+                try:
+                    content = py_file.read_text(errors="ignore")[:2000]
+                    if "FastAPI" in content or "fastapi" in content:
+                        framework = "FastAPI"
+                        break
+                except Exception:
+                    pass
+        if (p / "package.json").exists():
+            try:
+                pkg = json.loads((p / "package.json").read_text())
+                deps = {**pkg.get("dependencies", {}), **pkg.get("devDependencies", {})}
+                if "@nestjs/core" in deps:
+                    framework = "NestJS"
+                elif "express" in deps:
+                    framework = "Express"
+            except Exception:
+                pass
+
+        if framework:
+            findings.append({"type": "framework_detected", "framework": framework, "has_spec": False})
+            suggestions.append({"action": "zero_spec", "detail": f"Run delimit_zero_spec to extract an OpenAPI spec from your {framework} code"})
+        else:
+            findings.append({"type": "no_api_detected", "note": "No OpenAPI spec or supported framework found"})
+
+    # 2. Check for security patterns (quick scan)
+    security_issues = []
+    for pattern_name, pattern_glob, check in [
+        ("env_file_in_git", ".env", lambda f: True),
+        ("hardcoded_key", "**/*.py", lambda f: "API_KEY" in f.read_text(errors="ignore")[:5000] and "os.environ" not in f.read_text(errors="ignore")[:5000]),
+        ("hardcoded_key_js", "**/*.js", lambda f: "apiKey" in f.read_text(errors="ignore")[:5000] and "process.env" not in f.read_text(errors="ignore")[:5000]),
+    ]:
+        try:
+            for match in p.glob(pattern_glob):
+                rel = str(match.relative_to(p))
+                if "node_modules" in rel or ".next" in rel or "venv" in rel or "__pycache__" in rel:
+                    continue
+                if check(match):
+                    security_issues.append({"issue": pattern_name, "file": rel})
+                    break  # One per pattern is enough
+        except Exception:
+            pass
+
+    if security_issues:
+        findings.append({"type": "security_concerns", "count": len(security_issues), "issues": security_issues})
+        suggestions.append({"action": "security_audit", "detail": "Run delimit_security_audit for a full scan"})
+
+    # 3. Check git status
+    try:
+        import subprocess
+        result = subprocess.run(["git", "log", "--oneline", "-1"], capture_output=True, text=True, timeout=5, cwd=str(p))
+        if result.returncode == 0:
+            findings.append({"type": "git_repo", "latest_commit": result.stdout.strip()})
+    except Exception:
+        pass
+
+    # 4. Check for existing tests
+    test_files = list(p.glob("**/test_*.py")) + list(p.glob("**/*.test.js")) + list(p.glob("**/*.test.ts")) + list(p.glob("**/*.spec.js"))
+    test_files = [f for f in test_files if "node_modules" not in str(f)]
+    if test_files:
+        findings.append({"type": "tests_found", "count": len(test_files)})
+        suggestions.append({"action": "test_coverage", "detail": "Run delimit_test_smoke to verify tests pass and measure coverage"})
+
+    # 5. Check ledger
+    from ai.ledger_manager import list_items
+    ledger = list_items(project_path=str(p))
+    open_items = [i for i in ledger.get("items", []) if isinstance(i, dict) and i.get("status") == "open"]
+    if open_items:
+        findings.append({"type": "ledger_active", "open_items": len(open_items), "top": [i.get("title", "") for i in open_items[:3]]})
+    else:
+        suggestions.append({"action": "ledger", "detail": "Say 'add to ledger: [task]' to start tracking work across sessions"})
+
+    # 6. Check deliberation models
+    from ai.deliberation import get_models_config
+    models = get_models_config()
+    enabled = [v.get("name", k) for k, v in models.items() if v.get("enabled")]
+    if len(enabled) >= 2:
+        findings.append({"type": "deliberation_ready", "models": enabled})
+    elif len(enabled) == 1:
+        suggestions.append({"action": "models", "detail": f"Add 1 more AI model for multi-model deliberation (have {enabled[0]})"})
+    else:
+        suggestions.append({"action": "models", "detail": "Configure AI models for deliberation: say 'configure delimit models'"})
+
+    return _with_next_steps("scan", {
+        "project": str(p),
+        "findings": findings,
+        "suggestions": suggestions,
+        "summary": f"Found {len(findings)} things, {len(suggestions)} suggestions",
+    })
+
+
 # ═══════════════════════════════════════════════════════════════════════
 #  ENTRY POINT
 # ═══════════════════════════════════════════════════════════════════════
