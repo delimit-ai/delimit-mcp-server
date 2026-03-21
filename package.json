@@ -1,7 +1,7 @@
 {
   "name": "delimit-cli",
   "version": "3.6.11",
-  "description": "Catch breaking API changes before they ship. GitHub Action + CLI for OpenAPI specs.",
+  "description": "Governance toolkit for AI coding assistants — API checks, persistent memory, consensus, security.",
   "main": "index.js",
   "files": [
     "bin/",
