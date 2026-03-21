@@ -127,21 +127,18 @@ describe('CLAUDE.md upgrade detection', () => {
 });
 
 describe('setup script output messaging', () => {
-    it('setup script file contains try-it-now messaging', () => {
+    it('setup script file contains install completion messaging', () => {
         const setupPath = path.join(__dirname, '..', 'bin', 'delimit-setup.js');
         const setupContent = fs.readFileSync(setupPath, 'utf-8');
-        assert.ok(setupContent.includes('Try it now:'), 'Should have "Try it now:" prompt');
+        assert.ok(setupContent.includes('Delimit is installed'), 'Should confirm installation');
         assert.ok(setupContent.includes('$ claude'), 'Should suggest running claude');
-        assert.ok(setupContent.includes('check this project\'s health'), 'Should suggest health check');
+        assert.ok(setupContent.includes('scan this project'), 'Should suggest scanning');
     });
 
-    it('setup script does not list tool names in output', () => {
+    it('setup script contains governance wrapping step', () => {
         const setupPath = path.join(__dirname, '..', 'bin', 'delimit-setup.js');
         const setupContent = fs.readFileSync(setupPath, 'utf-8');
-        // Check that Step 6 output area does not reference internal tool names
-        const step6Onwards = setupContent.split('// Step 6')[1];
-        assert.ok(step6Onwards, 'Should have Step 6 section');
-        assert.ok(!step6Onwards.includes('delimit_init'), 'Step 6 should not mention delimit_init');
-        assert.ok(!step6Onwards.includes('delimit_gov_health'), 'Step 6 should not mention delimit_gov_health');
+        assert.ok(setupContent.includes('Governance wrapping'), 'Should have governance wrapping step');
+        assert.ok(setupContent.includes('shims'), 'Should mention shims');
     });
 });
