@@ -98,6 +98,25 @@ async function main() {
         fs.copyFileSync(serverSource, path.join(DELIMIT_HOME, 'server', 'mcp-server.py'));
     }
 
+    // Download compiled Pro modules (platform-specific)
+    const proDir = path.join(DELIMIT_HOME, 'server', 'ai');
+    const pyVer = (() => { try { return execSync(`${python} -c "import sys; print(f'cp{sys.version_info.major}{sys.version_info.minor}')"`, { encoding: 'utf-8' }).trim(); } catch { return 'cp310'; } })();
+    const arch = (() => { try { return execSync('uname -m', { encoding: 'utf-8' }).trim(); } catch { return 'x86_64'; } })();
+    const osName = process.platform === 'darwin' ? 'macos' : 'linux';
+    const artifact = `${osName}-${arch}-${pyVer}`;
+    const proVersion = '3.8.2';
+    const proUrl = `https://github.com/delimit-ai/delimit-pro/releases/download/v${proVersion}/delimit-pro-${artifact}.tar.gz`;
+
+    try {
+        const proTarball = path.join(DELIMIT_HOME, 'pro.tar.gz');
+        execSync(`curl -sL "${proUrl}" -o "${proTarball}" --fail`, { stdio: 'pipe', timeout: 30000 });
+        execSync(`tar -xzf "${proTarball}" -C "${proDir}"`, { stdio: 'pipe' });
+        fs.unlinkSync(proTarball);
+        log(`  ${green('✓')} Pro modules installed (${artifact})`);
+    } catch {
+        log(`  ${dim('  Pro modules not available for ${artifact} — free tools work fine')}`);
+    }
+
     // Install Python deps into isolated venv with pinned versions
     log(`  ${dim('  Installing Python dependencies...')}`);
     const venvDir = path.join(DELIMIT_HOME, 'venv');
