@@ -365,12 +365,12 @@ Run full governance compliance checks. Verify security, policy compliance, evide
     log('  Try it now:');
     log(`  ${bold('$ claude')}`);
     log('');
-    log(`  Then say: ${blue('"check this project\'s health"')}`);
+    log(`  Then say: ${blue('"scan this project"')}`);
     log('');
     log('  Or try:');
-    log(`  ${dim('-')} "add to ledger: set up CI pipeline"  ${dim('— start tracking tasks')}`);
-    log(`  ${dim('-')} "what\'s on the ledger?"               ${dim('— see what\'s pending')}`);
-    log(`  ${dim('-')} "delimit help"                        ${dim('— see all capabilities')}`);
+    log(`  ${dim('-')} "lint my API spec"                    ${dim('— catch breaking changes')}`);
+    log(`  ${dim('-')} "add to ledger: set up CI pipeline"  ${dim('— track tasks across sessions')}`);
+    log(`  ${dim('-')} "deliberate [question]"               ${dim('— multi-model AI consensus')}`);
     log('');
     log(`  ${dim('Config:')} ${MCP_CONFIG}`);
     log(`  ${dim('Server:')} ${actualServer}`);
@@ -387,10 +387,11 @@ function getClaudeMdContent() {
 One workspace for every AI coding assistant.
 
 ## Try these:
+- "scan this project" -- discover what Delimit can do here
 - "lint my API spec" -- catch breaking changes in your OpenAPI spec
 - "add to ledger: [anything]" -- track tasks across sessions
 - "what's on the ledger?" -- pick up where you left off
-- "check this project's health" -- run governance diagnostics
+- "deliberate [question]" -- get multi-model AI consensus
 
 ## What Delimit does:
 - **API governance** -- lint, diff, semver classification, migration guides
