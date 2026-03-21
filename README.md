@@ -1,12 +1,12 @@
 # Delimit
 
-Governance toolkit for AI coding assistants — API checks, persistent memory, consensus, security.
+One workspace for every AI coding assistant. Switch models, not context.
 
 [![npm](https://img.shields.io/npm/v/delimit-cli)](https://www.npmjs.com/package/delimit-cli)
 [![GitHub Action](https://img.shields.io/badge/GitHub%20Action-v1.5.0-blue)](https://github.com/marketplace/actions/delimit-api-governance)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
-Delimit gives your AI coding assistant governance tools — API breaking change detection, persistent task ledger, security audit, test verification, and multi-model deliberation. Works with Claude Code, Codex, Cursor, and Gemini CLI.
+Your tasks, memory, and governance carry between Claude Code, Codex, and Gemini CLI. Persistent ledger, API breaking change detection, security audit, multi-model deliberation — all shared across assistants.
 
 ---
 

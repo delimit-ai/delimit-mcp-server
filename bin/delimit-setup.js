@@ -384,7 +384,7 @@ Run full governance compliance checks. Verify security, policy compliance, evide
 function getClaudeMdContent() {
     return `# Delimit
 
-Governance toolkit for AI coding assistants.
+One workspace for every AI coding assistant.
 
 ## Try these:
 - "lint my API spec" -- catch breaking changes in your OpenAPI spec

@@ -1,7 +1,7 @@
 {
   "name": "delimit-cli",
-  "version": "3.6.12",
-  "description": "Governance toolkit for AI coding assistants — API checks, persistent memory, consensus, security.",
+  "version": "3.7.0",
+  "description": "One workspace for every AI coding assistant. Tasks, memory, and governance carry between Claude Code, Codex, and Gemini CLI.",
   "main": "index.js",
   "files": [
     "bin/",
