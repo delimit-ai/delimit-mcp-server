@@ -3,7 +3,7 @@
 One workspace for every AI coding assistant. Switch models, not context.
 
 [![npm](https://img.shields.io/npm/v/delimit-cli)](https://www.npmjs.com/package/delimit-cli)
-[![GitHub Action](https://img.shields.io/badge/GitHub%20Action-v1.5.2-blue)](https://github.com/marketplace/actions/delimit-api-governance)
+[![GitHub Action](https://img.shields.io/badge/GitHub%20Action-v1.6.0-blue)](https://github.com/marketplace/actions/delimit-api-governance)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![delimit MCP server](https://glama.ai/mcp/servers/delimit-ai/delimit/badges/score.svg)](https://glama.ai/mcp/servers/delimit-ai/delimit)
 
