@@ -57,25 +57,11 @@ def _experimental_tool():
     return decorator
 
 
-# Pro tools — these require a valid license to execute
-PRO_TOOLS = {
-    "delimit_gov_evaluate",
-    "delimit_gov_policy", "delimit_gov_run", "delimit_gov_verify",
-    "delimit_deploy_plan", "delimit_deploy_build", "delimit_deploy_publish",
-    "delimit_deploy_verify", "delimit_deploy_rollback", "delimit_deploy_status",
-    "delimit_deploy_site", "delimit_deploy_npm",
-    "delimit_memory_store", "delimit_memory_search", "delimit_memory_recent",
-    "delimit_vault_search", "delimit_vault_snapshot", "delimit_vault_health",
-    "delimit_evidence_collect", "delimit_evidence_verify",
-    "delimit_deliberate", "delimit_models",
-    "delimit_obs_metrics", "delimit_obs_logs", "delimit_obs_status",
-    "delimit_release_plan", "delimit_release_status", "delimit_release_sync",
-    "delimit_cost_analyze", "delimit_cost_optimize", "delimit_cost_alert",
-}
+# Pro tools — single source of truth is license_core.py
+# Import at module level; fallback to license.py shim if core unavailable
+from ai.license import PRO_TOOLS
 
-# Free tools — always available
-# lint, diff, semver, explain, policy, init, diagnose, help, version,
-# ledger_context, ledger_add, ledger_done, ledger_list, scan, zero_spec,
+# Free tools — everything NOT in PRO_TOOLS
 # security_audit, security_scan, test_generate, test_smoke, activate, license_status
 
 
@@ -567,30 +553,22 @@ def delimit_os_gates(plan_id: str) -> Dict[str, Any]:
 
 @mcp.tool()
 def delimit_gov_health(repo: str = ".") -> Dict[str, Any]:
-    """Check governance system health (Pro).
+    """Check governance system health.
 
     Args:
         repo: Repository path to check.
     """
-    from ai.license import require_premium
-    gate = require_premium("gov_health")
-    if gate:
-        return gate
     from backends.governance_bridge import health
     return _with_next_steps("gov_health", _safe_call(health, repo=repo))
 
 
 @mcp.tool()
 def delimit_gov_status(repo: str = ".") -> Dict[str, Any]:
-    """Get current governance status for a repository (Pro).
+    """Get current governance status for a repository.
 
     Args:
         repo: Repository path.
     """
-    from ai.license import require_premium
-    gate = require_premium("gov_status")
-    if gate:
-        return gate
     from backends.governance_bridge import status
     return _with_next_steps("gov_status", _safe_call(status, repo=repo))
 
@@ -1025,15 +1003,11 @@ def delimit_repo_config_audit(target: str = ".") -> Dict[str, Any]:
 
 @mcp.tool()
 def delimit_security_scan(target: str = ".") -> Dict[str, Any]:
-    """Scan for security vulnerabilities (Pro).
+    """Scan for security vulnerabilities.
 
     Args:
         target: Repository or file path.
     """
-    from ai.license import require_premium
-    gate = require_premium("security_scan")
-    if gate:
-        return gate
     from backends.repo_bridge import security_scan
     return _with_next_steps("security_scan", _safe_call(security_scan, target=target))
 
@@ -1099,7 +1073,8 @@ def delimit_evidence_verify(bundle_id: Optional[str] = None, bundle_path: Option
 
 @mcp.tool()
 def delimit_release_plan(environment: str = "production", version: str = "", repository: str = ".", services: Optional[List[str]] = None) -> Dict[str, Any]:
-    """Generate a release plan from git history.
+    """ (Pro).
+        Generate a release plan from git history.
 
     Reads git log since last tag, counts commits and changed files,
     suggests a semver version, and generates a release checklist.
@@ -1111,6 +1086,10 @@ def delimit_release_plan(environment: str = "production", version: str = "", rep
         repository: Repository path (default: current directory).
         services: Optional service list.
     """
+    from ai.license import require_premium
+    gate = require_premium("release_plan")
+    if gate:
+        return gate
     from backends.tools_infra import release_plan
     return _with_next_steps("release_plan", _safe_call(release_plan, environment=environment, version=version, repository=repository, services=services))
 
@@ -1129,7 +1108,8 @@ def delimit_release_validate(environment: str, version: str) -> Dict[str, Any]:
 
 @mcp.tool()
 def delimit_release_status(environment: str = "production") -> Dict[str, Any]:
-    """Check release/deploy status from file-based tracker and git state.
+    """ (Pro).
+        Check release/deploy status from file-based tracker and git state.
 
     Shows latest deploy plan, current git tag, how many commits HEAD
     is ahead of the tag, and recent deploy history.
@@ -1137,6 +1117,10 @@ def delimit_release_status(environment: str = "production") -> Dict[str, Any]:
     Args:
         environment: Target environment (staging/production).
     """
+    from ai.license import require_premium
+    gate = require_premium("release_status")
+    if gate:
+        return gate
     from backends.tools_infra import release_status
     return _with_next_steps("release_status", _safe_call(release_status, environment=environment))
 
@@ -1170,22 +1154,32 @@ def delimit_release_history(environment: str, limit: int = 10) -> Dict[str, Any]
 
 @mcp.tool()
 def delimit_cost_analyze(target: str = ".") -> Dict[str, Any]:
-    """Analyze project costs by scanning Dockerfiles, dependencies, and cloud configs.
+    """ (Pro).
+        Analyze project costs by scanning Dockerfiles, dependencies, and cloud configs.
 
     Args:
         target: Project or infrastructure path to analyze.
     """
+    from ai.license import require_premium
+    gate = require_premium("cost_analyze")
+    if gate:
+        return gate
     from backends.tools_data import cost_analyze
     return _with_next_steps("cost_analyze", _safe_call(cost_analyze, target=target))
 
 
 @mcp.tool()
 def delimit_cost_optimize(target: str = ".") -> Dict[str, Any]:
-    """Find cost optimization opportunities: unused deps, oversized images, uncompressed assets.
+    """ (Pro).
+        Find cost optimization opportunities: unused deps, oversized images, uncompressed assets.
 
     Args:
         target: Project or infrastructure path to analyze.
     """
+    from ai.license import require_premium
+    gate = require_premium("cost_optimize")
+    if gate:
+        return gate
     from backends.tools_data import cost_optimize
     return _with_next_steps("cost_optimize", _safe_call(cost_optimize, target=target))
 
@@ -1193,7 +1187,8 @@ def delimit_cost_optimize(target: str = ".") -> Dict[str, Any]:
 @mcp.tool()
 def delimit_cost_alert(action: str = "list", name: Optional[str] = None,
                        threshold: Optional[float] = None, alert_id: Optional[str] = None) -> Dict[str, Any]:
-    """Manage cost alerts (file-based). CRUD operations on spending thresholds.
+    """ (Pro).
+        Manage cost alerts (file-based). CRUD operations on spending thresholds.
 
     Args:
         action: Action (list/create/delete/toggle).
@@ -1201,6 +1196,10 @@ def delimit_cost_alert(action: str = "list", name: Optional[str] = None,
         threshold: Cost threshold in USD (required for create).
         alert_id: Alert ID (required for delete/toggle).
     """
+    from ai.license import require_premium
+    gate = require_premium("cost_alert")
+    if gate:
+        return gate
     from backends.tools_data import cost_alert
     return _with_next_steps("cost_alert", _safe_call(cost_alert, action=action, name=name, threshold=threshold, alert_id=alert_id))
 
@@ -1244,7 +1243,8 @@ def delimit_data_backup(target: str = ".") -> Dict[str, Any]:
 
 @mcp.tool()
 def delimit_obs_metrics(query: str = "system", time_range: str = "1h", source: Optional[str] = None) -> Dict[str, Any]:
-    """Query live system metrics (CPU, memory, disk I/O, network).
+    """ (Pro).
+        Query live system metrics (CPU, memory, disk I/O, network).
 
     Query types: cpu, memory, disk, io, network, system (default), all.
     Reads directly from /proc for real-time data.
@@ -1256,13 +1256,18 @@ def delimit_obs_metrics(query: str = "system", time_range: str = "1h", source: O
         time_range: Time range (e.g. "1h", "24h", "7d").
         source: Optional metrics source (prometheus, local).
     """
+    from ai.license import require_premium
+    gate = require_premium("obs_metrics")
+    if gate:
+        return gate
     from backends.tools_infra import obs_metrics
     return _with_next_steps("obs_metrics", _safe_call(obs_metrics, query=query, time_range=time_range, source=source))
 
 
 @mcp.tool()
 def delimit_obs_logs(query: str, time_range: str = "1h", source: Optional[str] = None) -> Dict[str, Any]:
-    """Search system and application logs.
+    """ (Pro).
+        Search system and application logs.
 
     Searches journalctl, /var/log/*, and application log directories.
     Returns matching log lines with source attribution.
@@ -1274,6 +1279,10 @@ def delimit_obs_logs(query: str, time_range: str = "1h", source: Optional[str] =
         time_range: Time range (5m, 15m, 1h, 6h, 24h, 7d).
         source: Log source path or integration name (journalctl, elasticsearch).
     """
+    from ai.license import require_premium
+    gate = require_premium("obs_logs")
+    if gate:
+        return gate
     from backends.tools_infra import obs_logs
     return _with_next_steps("obs_logs", _safe_call(obs_logs, query=query, time_range=time_range, source=source))
 
@@ -1293,12 +1302,17 @@ def delimit_obs_alerts(action: str, alert_rule: Optional[Dict[str, Any]] = None,
 
 @mcp.tool()
 def delimit_obs_status() -> Dict[str, Any]:
-    """System health check: disk space, memory, running services, uptime.
+    """ (Pro).
+        System health check: disk space, memory, running services, uptime.
 
     Checks disk usage, memory, process count, load average, and probes
     common service ports (Node, PostgreSQL, Redis, Nginx, etc.).
     No external integration needed.
     """
+    from ai.license import require_premium
+    gate = require_premium("obs_status")
+    if gate:
+        return gate
     from backends.tools_infra import obs_status
     return _with_next_steps("obs_status", _safe_call(obs_status))
 
@@ -1864,7 +1878,8 @@ def delimit_deploy_site(
     project_path: str = ".",
     message: str = "",
 ) -> Dict[str, Any]:
-    """Deploy a site — git commit, push, Vercel build, and deploy in one step.
+    """ (Pro).
+        Deploy a site — git commit, push, Vercel build, and deploy in one step.
 
     Handles the full chain: stages changes, commits, pushes to remote,
     builds with Vercel, deploys to production. No manual steps needed.
@@ -1873,6 +1888,10 @@ def delimit_deploy_site(
         project_path: Path to the site project (must have .vercel/ configured).
         message: Git commit message. Auto-generated if empty.
     """
+    from ai.license import require_premium
+    gate = require_premium("deploy_site")
+    if gate:
+        return gate
     from backends.tools_infra import deploy_site
     env_vars = {}
     # Auto-detect Delimit UI env vars
@@ -1892,7 +1911,8 @@ def delimit_deploy_npm(
     tag: str = "latest",
     dry_run: bool = False,
 ) -> Dict[str, Any]:
-    """Publish an npm package — bump version, publish to registry, verify.
+    """ (Pro).
+        Publish an npm package — bump version, publish to registry, verify.
 
     Full chain: check auth, bump version, npm publish, verify on registry,
     git commit + push the version bump. Use dry_run=true to preview first.
@@ -1903,6 +1923,10 @@ def delimit_deploy_npm(
         tag: npm dist-tag (default "latest").
         dry_run: If true, preview without actually publishing.
     """
+    from ai.license import require_premium
+    gate = require_premium("deploy_npm")
+    if gate:
+        return gate
     from backends.tools_infra import deploy_npm
     return _with_next_steps("deploy_npm", deploy_npm(project_path, bump, tag, dry_run))
 
@@ -2036,7 +2060,8 @@ def delimit_models(
     api_key: str = "",
     model_name: str = "",
 ) -> Dict[str, Any]:
-    """View and configure AI models for multi-model deliberation.
+    """ (Pro).
+        View and configure AI models for multi-model deliberation.
 
     Actions:
       - "list": show configured models and what's available
@@ -2052,6 +2077,10 @@ def delimit_models(
         api_key: API key for the provider (only used with action=add).
         model_name: Optional model name override (e.g. "gpt-4o", "claude-sonnet-4-5-20250514").
     """
+    from ai.license import require_premium
+    gate = require_premium("models")
+    if gate:
+        return gate
     from ai.deliberation import configure_models, get_models_config, MODELS_CONFIG, DEFAULT_MODELS
     import json as _json
 
@@ -2144,14 +2173,9 @@ def delimit_deliberate(
     max_rounds: int = 3,
     save_path: str = "",
 ) -> Dict[str, Any]:
-    """Run multi-model consensus via real AI-to-AI deliberation.
+    """Run multi-model consensus via real AI-to-AI deliberation (Pro).
 
-    This is the consensus tool. Models (Grok 4, Gemini, Codex) debate each other
-    directly until they reach unanimous agreement.
-
-    Modes:
-      - "dialogue": Short conversational turns like a group chat (default, 6 rounds)
-      - "debate": Long-form essays with full counter-arguments (3 rounds)
+    Models (Grok 4, Gemini, Codex) debate each other directly until unanimous agreement.
 
     Args:
         question: The question to reach consensus on.
@@ -2160,6 +2184,10 @@ def delimit_deliberate(
         max_rounds: Maximum rounds (default 3 for debate, 6 for dialogue).
         save_path: Optional file path to save the full transcript.
     """
+    from ai.license import require_premium
+    gate = require_premium("deliberate")
+    if gate:
+        return gate
     from ai.deliberation import deliberate
     result = deliberate(
         question=question,
@@ -2271,7 +2299,8 @@ def _extract_deliberation_actions(result: Dict, question: str) -> List[Dict[str,
 
 @mcp.tool()
 def delimit_release_sync(action: str = "audit") -> Dict[str, Any]:
-    """Audit or sync all public surfaces for consistency.
+    """ (Pro).
+        Audit or sync all public surfaces for consistency.
 
     Checks GitHub repos, npm, site meta tags, CLAUDE.md, and releases
     against a central config. Reports what's stale and what needs updating.
@@ -2279,6 +2308,10 @@ def delimit_release_sync(action: str = "audit") -> Dict[str, Any]:
     Args:
         action: "audit" to check all surfaces, "config" to view/edit the release config.
     """
+    from ai.license import require_premium
+    gate = require_premium("release_sync")
+    if gate:
+        return gate
     from ai.release_sync import audit, get_release_config
     if action == "config":
         return get_release_config()

@@ -1,6 +1,6 @@
 {
   "name": "delimit-cli",
-  "version": "3.10.1",
+  "version": "3.10.2",
   "description": "One workspace for every AI coding assistant. Tasks, memory, and governance carry between Claude Code, Codex, and Gemini CLI.",
   "main": "index.js",
   "files": [
