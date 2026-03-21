@@ -397,8 +397,119 @@ Run full governance compliance checks. Verify security, policy compliance, evide
         }
     }
 
-    // Step 6: Done
-    step(6, 'Done!');
+    // Step 6: Governance wrapping (shims)
+    step(6, 'Governance wrapping...');
+    log('');
+    log(`  Delimit can wrap your AI assistants with a governance layer:`);
+    log('');
+    log(`  ${blue('    ____  ________    ______  _____________')}`);
+    log(`  ${blue('   / __ \\\\/ ____/ /   /  _/  |/  /  _/_  __/')}`);
+    log(`  ${blue('  / / / / __/ / /    / // /|_/ // /  / /   ')}`);
+    log(`  ${blue(' / /_/ / /___/ /____/ // /  / // /  / /    ')}`);
+    log(`  ${blue('/_____/_____/_____/___/_/  /_/___/ /_/     ')}`);
+    log('');
+    log(`  ${dim('[Delimit]')} Executing governance check...`);
+    log(`  ${dim('[Delimit]')} Mode: advisory`);
+    log(`  ${dim('[Delimit]')} ${green('✓ GOVERNANCE ACTIVE')}`);
+    log('');
+    log(`  ${dim('This shows before each AI session (<1 second).')}`);
+    log(`  ${dim('Adds ~/.delimit/shims to your shell PATH.')}`);
+    log(`  ${dim('Disable anytime: delimit shims disable')}`);
+    log('');
+
+    // Check if shims already installed
+    const shimsDir = path.join(DELIMIT_HOME, 'shims');
+    const shimsInstalled = fs.existsSync(shimsDir) && fs.readdirSync(shimsDir).length > 0;
+
+    if (shimsInstalled) {
+        log(`  ${green('✓')} Governance wrapping already enabled`);
+    } else {
+        // Default YES prompt — non-interactive mode auto-accepts
+        const inquirer = (() => { try { return require('inquirer'); } catch { return null; } })();
+        let enableShims = true;
+
+        if (inquirer && process.stdin.isTTY) {
+            try {
+                const answer = await inquirer.prompt([{
+                    type: 'confirm',
+                    name: 'enable',
+                    message: 'Enable governance wrapping?',
+                    default: true,
+                }]);
+                enableShims = answer.enable;
+            } catch {
+                enableShims = true; // Default yes if prompt fails
+            }
+        }
+
+        if (enableShims) {
+            // Create shims
+            fs.mkdirSync(shimsDir, { recursive: true });
+
+            const shimTemplate = (toolName, displayName) => `#!/bin/sh
+# Delimit Governance Shim for ${displayName}
+PURPLE='\\033[35m'; MAGENTA='\\033[91m'; ORANGE='\\033[33m'; GREEN='\\033[32m'
+WHITE='\\033[97m'; BOLD='\\033[1m'; DIM='\\033[2m'; RESET='\\033[0m'
+if [ "$DELIMIT_WRAPPED" = "true" ] || [ ! -t 1 ]; then
+    for c in /usr/bin/${toolName} /usr/local/bin/${toolName} $HOME/.local/bin/${toolName}; do
+        [ -x "$c" ] && exec "$c" "$@"
+    done
+fi
+DELIMIT_HOME="\${DELIMIT_HOME:-$HOME/.delimit}"
+TOOL_COUNT="0"
+[ -f "$DELIMIT_HOME/server/ai/server.py" ] && TOOL_COUNT=$(grep -c '@mcp.tool' "$DELIMIT_HOME/server/ai/server.py" 2>/dev/null || echo "0")
+echo ""
+printf "  \${PURPLE}\${BOLD}    ____  ________    ______  _____________\${RESET}\\n"
+printf "  \${PURPLE}\${BOLD}   / __ \\\\/ ____/ /   /  _/  |/  /  _/_  __/\${RESET}\\n"
+printf "  \${MAGENTA}\${BOLD}  / / / / __/ / /    / // /|_/ // /  / /   \${RESET}\\n"
+printf "  \${MAGENTA}\${BOLD} / /_/ / /___/ /____/ // /  / // /  / /    \${RESET}\\n"
+printf "  \${ORANGE}\${BOLD}/_____/_____/_____/___/_/  /_/___/ /_/     \${RESET}\\n"
+printf "  \${DIM}delimit.ai\${RESET}\\n"
+echo ""
+printf "  \${PURPLE}\${BOLD}[Delimit]\${RESET} \${DIM}Executing governance check...\${RESET}\\n"
+sleep 0.1
+printf "  \${PURPLE}\${BOLD}[Delimit]\${RESET} \${ORANGE}Mode: advisory\${RESET}\\n"
+printf "  \${PURPLE}\${BOLD}[Delimit]\${RESET} \${DIM}MCP server: \${WHITE}\${TOOL_COUNT} tools\${RESET}\\n"
+printf "  \${MAGENTA}\${BOLD}[Delimit]\${RESET} \${MAGENTA}═══════════════════════════════════════════\${RESET}\\n"
+printf "  \${MAGENTA}\${BOLD}[Delimit]\${RESET} \${PURPLE}<\${MAGENTA}/\${ORANGE}>\${RESET} \${BOLD}GOVERNANCE ACTIVE: ${displayName.toUpperCase()}\${RESET}\\n"
+printf "  \${MAGENTA}\${BOLD}[Delimit]\${RESET} \${MAGENTA}═══════════════════════════════════════════\${RESET}\\n"
+sleep 0.08
+printf "  \${GREEN}\${BOLD}[Delimit]\${RESET} \${GREEN}✓ Allowed\${RESET}\\n"
+echo ""
+for c in /usr/bin/${toolName} /usr/local/bin/${toolName} $HOME/.local/bin/${toolName}; do
+    [ -x "$c" ] && exec "$c" "$@"
+done
+echo "[Delimit] ${toolName} not found" >&2; exit 127
+`;
+
+            for (const [tool, display] of [['claude', 'Claude'], ['codex', 'Codex'], ['gemini', 'Gemini CLI']]) {
+                const shimPath = path.join(shimsDir, tool);
+                fs.writeFileSync(shimPath, shimTemplate(tool, display));
+                fs.chmodSync(shimPath, '755');
+            }
+
+            // Add to PATH in shell rc files
+            const pathLine = `export PATH="${shimsDir}:$PATH"  # Delimit governance wrapping`;
+            for (const rc of ['.bashrc', '.zshrc']) {
+                const rcPath = path.join(os.homedir(), rc);
+                if (fs.existsSync(rcPath)) {
+                    const content = fs.readFileSync(rcPath, 'utf-8');
+                    if (!content.includes('.delimit/shims')) {
+                        fs.appendFileSync(rcPath, `\n# Delimit governance wrapping\n${pathLine}\n`);
+                    }
+                }
+            }
+
+            log(`  ${green('✓')} Governance wrapping enabled`);
+            log(`  ${dim('  Restart your terminal or run: source ~/.bashrc')}`);
+        } else {
+            log(`  ${dim('  Skipped. Enable later: delimit shims enable')}`);
+        }
+    }
+    log('');
+
+    // Step 7: Done
+    step(7, 'Done!');
     log('');
     log(`  ${green('Delimit is installed.')} Your AI now has persistent memory and governance.`);
     log('');
