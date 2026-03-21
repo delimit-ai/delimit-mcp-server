@@ -105,7 +105,7 @@ async function main() {
     const osName = process.platform === 'darwin' ? 'macos' : 'linux';
     const artifact = `${osName}-${arch}-${pyVer}`;
     const proVersion = '3.8.2';
-    const proUrl = `https://github.com/delimit-ai/delimit-pro/releases/download/v${proVersion}/delimit-pro-${artifact}.tar.gz`;
+    const proUrl = `https://delimit.ai/releases/v${proVersion}/delimit-pro-${artifact}.tar.gz`;
 
     try {
         const proTarball = path.join(DELIMIT_HOME, 'pro.tar.gz');
