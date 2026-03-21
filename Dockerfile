@@ -1,9 +1,15 @@
-FROM node:20-slim
-RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-pip && rm -rf /var/lib/apt/lists/*
-RUN pip3 install --break-system-packages pyyaml pydantic packaging
+FROM python:3.10-slim
+
 WORKDIR /app
-COPY package*.json ./
-RUN npm install --production --ignore-scripts
-COPY . .
-ENV DELIMIT_GATEWAY_ROOT=/app/gateway
-ENTRYPOINT ["node", "bin/delimit-cli.js"]
+
+# Install Python dependencies
+COPY gateway/requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt 2>/dev/null || pip install pyyaml pydantic packaging fastmcp
+
+# Copy the MCP server
+COPY gateway/ ./gateway/
+
+ENV PYTHONPATH=/app/gateway:/app/gateway/ai
+
+# MCP server runs via stdio
+ENTRYPOINT ["python", "gateway/ai/server.py"]
