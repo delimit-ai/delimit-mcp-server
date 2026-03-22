@@ -472,8 +472,58 @@ program
             }
         });
         console.log(chalk.green('✓ Removed PATH modifications'));
-        
-        console.log(chalk.yellow('\nRestart your terminal to complete uninstallation'));
+
+        // Remove MCP config from Claude Code
+        const mcpPath = path.join(process.env.HOME, '.mcp.json');
+        if (fs.existsSync(mcpPath)) {
+            try {
+                const mcp = JSON.parse(fs.readFileSync(mcpPath, 'utf8'));
+                if (mcp.mcpServers && mcp.mcpServers.delimit) {
+                    delete mcp.mcpServers.delimit;
+                    fs.writeFileSync(mcpPath, JSON.stringify(mcp, null, 2));
+                    console.log(chalk.green('✓ Removed from Claude Code MCP config'));
+                }
+            } catch (e) {}
+        }
+
+        // Remove from Codex config
+        const codexConfig = path.join(process.env.HOME, '.codex', 'config.json');
+        if (fs.existsSync(codexConfig)) {
+            try {
+                const cfg = JSON.parse(fs.readFileSync(codexConfig, 'utf8'));
+                if (cfg.mcpServers && cfg.mcpServers.delimit) {
+                    delete cfg.mcpServers.delimit;
+                    fs.writeFileSync(codexConfig, JSON.stringify(cfg, null, 2));
+                    console.log(chalk.green('✓ Removed from Codex MCP config'));
+                }
+            } catch (e) {}
+        }
+
+        // Remove from Gemini CLI config
+        const geminiConfig = path.join(process.env.HOME, '.gemini', 'settings.json');
+        if (fs.existsSync(geminiConfig)) {
+            try {
+                const cfg = JSON.parse(fs.readFileSync(geminiConfig, 'utf8'));
+                if (cfg.mcpServers && cfg.mcpServers.delimit) {
+                    delete cfg.mcpServers.delimit;
+                    fs.writeFileSync(geminiConfig, JSON.stringify(cfg, null, 2));
+                    console.log(chalk.green('✓ Removed from Gemini CLI MCP config'));
+                }
+            } catch (e) {}
+        }
+
+        // Remove shims
+        const shimsDir = path.join(process.env.HOME, '.delimit', 'shims');
+        if (fs.existsSync(shimsDir)) {
+            try {
+                fs.rmSync(shimsDir, { recursive: true });
+                console.log(chalk.green('✓ Removed CLI shims'));
+            } catch (e) {}
+        }
+
+        console.log(chalk.green('\n  Delimit has been completely removed.'));
+        console.log(chalk.gray('  Your data in ~/.delimit/ has been preserved.'));
+        console.log(chalk.gray('  Delete it manually if you want: rm -rf ~/.delimit\n'));
     });
 
 // Helper function for installation
