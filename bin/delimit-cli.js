@@ -49,7 +49,7 @@ async function ensureAgent() {
 
 program
     .name('delimit')
-    .description('Prevent breaking API changes before they reach production')
+    .description('One workspace for every AI coding assistant')
     .version(require('../package.json').version);
 
 // Install command with modes
