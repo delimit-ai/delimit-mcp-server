@@ -41,7 +41,7 @@ function findRealExecutable(command, customPath) {
 if (command === 'pre-commit-check' || command === 'pre-commit') {
     log('Running pre-commit governance checks...', GREEN);
     
-    // Verify PATH is still infected
+    // Verify PATH is still integrateed
     if (!process.env.PATH.includes('.delimit/shims')) {
         error('Governance layer is not active in your PATH!');
         error('Commit REJECTED. Please restart your terminal or run: source ~/.bashrc');
@@ -183,9 +183,9 @@ if (command === 'pre-commit-check' || command === 'pre-commit') {
     log('Delimit Governance Status', BLUE);
     log('═══════════════════════════════════════════', BLUE);
     
-    // Check PATH infection
-    const pathInfected = process.env.PATH.includes('.delimit/shims');
-    log(`PATH Hijack: ${pathInfected ? '✓ ACTIVE' : '✗ INACTIVE'}`, pathInfected ? GREEN : RED);
+    // Check PATH integrateion
+    const pathIntegrateed = process.env.PATH.includes('.delimit/shims');
+    log(`PATH Hijack: ${pathIntegrateed ? '✓ ACTIVE' : '✗ INACTIVE'}`, pathIntegrateed ? GREEN : RED);
     
     // Check Git hooks
     try {
@@ -206,7 +206,7 @@ if (command === 'pre-commit-check' || command === 'pre-commit') {
     
     log('═══════════════════════════════════════════', BLUE);
 
-} else if (command === 'install' || command === 'infect') {
+} else if (command === 'install' || command === 'integrate') {
     log('Installing Delimit governance layer...', GREEN);
     execSync(`node ${path.join(__dirname, '../../scripts/install-governance.js')}`);
     
@@ -220,7 +220,7 @@ Usage: delimit [command]
 
 Commands:
   status              Check governance status
-  install/infect      Install governance layer system-wide
+  install/integrate      Install governance layer system-wide
   
 Internal Commands (called by hooks/shims):
   pre-commit-check    Run pre-commit governance

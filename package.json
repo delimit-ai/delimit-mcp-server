@@ -1,7 +1,7 @@
 {
   "name": "delimit-cli",
   "mcpName": "io.github.delimit-ai/delimit",
-  "version": "3.11.2",
+  "version": "3.11.3",
   "description": "One workspace for every AI coding assistant. Tasks, memory, and governance carry between Claude Code, Codex, and Gemini CLI.",
   "main": "index.js",
   "files": [
