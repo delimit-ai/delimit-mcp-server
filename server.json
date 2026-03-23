@@ -7,13 +7,13 @@
     "url": "https://github.com/delimit-ai/delimit",
     "source": "github"
   },
-  "version": "3.11.6",
+  "version": "3.11.7",
   "websiteUrl": "https://delimit.ai",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "delimit-cli",
-      "version": "3.11.6",
+      "version": "3.11.7",
       "transport": {
         "type": "stdio"
       }
