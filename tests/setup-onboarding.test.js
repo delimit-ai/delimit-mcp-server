@@ -18,10 +18,27 @@ function getDelimitSection() {
 One workspace for every AI coding assistant.
 
 ## On every session start:
-1. Call \`delimit_gov_health\` to show governance status
-2. Call \`delimit_ledger_context\` to check for open tasks
+1. Call \`delimit_ledger_context\` to check for open tasks
+2. Call \`delimit_gov_health\` to check governance status
 3. If returning user, summarize what's pending
 4. If new project, call \`delimit_scan\` to discover what Delimit can do
+
+## After editing code:
+- After editing UI/CSS: call \`delimit_design_validate_responsive\`
+- After editing API specs: call \`delimit_lint\`
+- After editing tests: call \`delimit_test_smoke\`
+
+## Before deploying:
+1. Call \`delimit_security_audit\`
+2. Call \`delimit_test_smoke\`
+3. Call \`delimit_deploy_plan\`
+
+## Before committing:
+- Call \`delimit_repo_diagnose\` to check for common issues
+
+## When starting a new project:
+- Call \`delimit_scan\` to discover what Delimit can do
+- Call \`delimit_init\` to set up governance
 
 ## Try these:
 - "scan this project" -- discover what Delimit can do here
@@ -127,6 +144,18 @@ describe('CLAUDE.md content', () => {
         assert.ok(content.includes('delimit_gov_health'), 'Should have gov_health trigger');
         assert.ok(content.includes('delimit_ledger_context'), 'Should have ledger_context trigger');
         assert.ok(content.includes('delimit_scan'), 'Should have scan trigger');
+    });
+
+    it('contains workflow-specific triggers', () => {
+        const content = getClaudeMdContent();
+        assert.ok(content.includes('After editing code'), 'Should have after-editing section');
+        assert.ok(content.includes('delimit_lint'), 'Should have lint trigger for API specs');
+        assert.ok(content.includes('delimit_test_smoke'), 'Should have test_smoke trigger');
+        assert.ok(content.includes('Before deploying'), 'Should have before-deploying section');
+        assert.ok(content.includes('delimit_security_audit'), 'Should have security_audit trigger');
+        assert.ok(content.includes('Before committing'), 'Should have before-committing section');
+        assert.ok(content.includes('delimit_repo_diagnose'), 'Should have repo_diagnose trigger');
+        assert.ok(content.includes('delimit_init'), 'Should have init trigger for new projects');
     });
 
     it('contains natural language prompts', () => {

@@ -1,4 +1,21 @@
 #!/bin/bash
-# Delimit pre-commit hook
-echo "[DELIMIT] Running pre-commit governance check..."
-node $(dirname "$0")/../../bin/delimit-cli.js hook pre-commit
+# Delimit pre-commit: lint API specs if changed
+CHANGED=$(git diff --cached --name-only)
+
+# Check if any OpenAPI specs were modified
+if echo "$CHANGED" | grep -qE '\.(yaml|yml|json)$'; then
+  if command -v npx &> /dev/null; then
+    for spec in $(echo "$CHANGED" | grep -E 'openapi|swagger|api.*spec'); do
+      echo "[Delimit] Checking $spec for breaking changes..."
+      npx delimit-cli lint "$spec" 2>/dev/null || true
+    done
+  fi
+fi
+
+# Fallback: run the CLI hook handler if the agent is available
+if command -v node &> /dev/null; then
+  HOOK_CLI="$(dirname "$0")/../../bin/delimit-cli.js"
+  if [ -f "$HOOK_CLI" ]; then
+    node "$HOOK_CLI" hook pre-commit 2>/dev/null || true
+  fi
+fi

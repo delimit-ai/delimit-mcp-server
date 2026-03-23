@@ -38,7 +38,7 @@ async function checkGovernance(toolContext) {
                 '/usr/bin/',
                 '/boot/',
                 '/.ssh/',
-                '/root/.ssh/',
+                process.env.HOME + '/.ssh/',
                 '/.aws/',
                 '/.config/gcloud/',
                 '/credentials/',

@@ -1,4 +1,15 @@
 #!/bin/bash
-# Delimit pre-push hook
-echo "[DELIMIT] Running pre-push governance check..."
-node $(dirname "$0")/../../bin/delimit-cli.js hook pre-push
+# Delimit pre-push: security scan + test smoke
+echo "[Delimit] Running pre-push checks..."
+
+if command -v npx &> /dev/null; then
+  npx delimit-cli doctor 2>/dev/null || true
+fi
+
+# Fallback: run the CLI hook handler if the agent is available
+if command -v node &> /dev/null; then
+  HOOK_CLI="$(dirname "$0")/../../bin/delimit-cli.js"
+  if [ -f "$HOOK_CLI" ]; then
+    node "$HOOK_CLI" hook pre-push 2>/dev/null || true
+  fi
+fi

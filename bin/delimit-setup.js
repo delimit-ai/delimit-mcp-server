@@ -29,6 +29,24 @@ const bold = (s) => `\x1b[1m${s}\x1b[0m`;
 function log(msg) { console.log(msg); }
 function step(n, msg) { log(`\n${blue(`[${n}]`)} ${msg}`); }
 
+function findGitDir(startDir) {
+    let dir = startDir;
+    while (dir !== path.dirname(dir)) {
+        const gitPath = path.join(dir, '.git');
+        if (fs.existsSync(gitPath)) {
+            // Handle both regular .git dirs and worktree .git files
+            const stat = fs.statSync(gitPath);
+            if (stat.isDirectory()) return gitPath;
+            // .git file (worktree) — read the gitdir path
+            const content = fs.readFileSync(gitPath, 'utf-8').trim();
+            const match = content.match(/^gitdir:\s*(.+)$/);
+            if (match) return match[1];
+        }
+        dir = path.dirname(dir);
+    }
+    return null;
+}
+
 async function main() {
     log('');
     log(blue('    ____  ________    ______  _____________'));
@@ -338,6 +356,41 @@ Run full governance compliance checks. Verify security, policy compliance, evide
     }
     log(`  ${green('✓')} ${installed} agents installed (${Object.keys(agents).length - installed} already existed)`);
 
+    // Step 4b: Install Git hooks if inside a git repository
+    const gitDir = findGitDir(process.cwd());
+    if (gitDir) {
+        const gitHooksDir = path.join(gitDir, 'hooks');
+        const srcHooksDir = path.join(__dirname, '..', 'hooks', 'git');
+        if (fs.existsSync(srcHooksDir)) {
+            fs.mkdirSync(gitHooksDir, { recursive: true });
+            let hooksInstalled = 0;
+            for (const hookFile of ['pre-commit', 'pre-push', 'commit-msg']) {
+                const src = path.join(srcHooksDir, hookFile);
+                const dest = path.join(gitHooksDir, hookFile);
+                if (fs.existsSync(src)) {
+                    // Only install if hook doesn't already exist or is a delimit hook
+                    let shouldInstall = !fs.existsSync(dest);
+                    if (!shouldInstall) {
+                        const existing = fs.readFileSync(dest, 'utf-8');
+                        shouldInstall = existing.includes('Delimit') || existing.includes('delimit');
+                    }
+                    if (shouldInstall) {
+                        fs.copyFileSync(src, dest);
+                        fs.chmodSync(dest, '755');
+                        hooksInstalled++;
+                    }
+                }
+            }
+            if (hooksInstalled > 0) {
+                log(`  ${green('✓')} ${hooksInstalled} Git hooks installed to ${gitHooksDir}`);
+            } else {
+                log(`  ${dim('  Git hooks already present (non-Delimit hooks preserved)')}`);
+            }
+        }
+    } else {
+        log(`  ${dim('  Not inside a git repo — git hooks will be installed on next delimit setup inside a repo')}`);
+    }
+
     // Step 5: Create/update CLAUDE.md and platform instruction files
     step(5, 'Setting up AI instruction files...');
 
@@ -558,10 +611,27 @@ function getDelimitSection() {
 One workspace for every AI coding assistant.
 
 ## On every session start:
-1. Call \`delimit_gov_health\` to show governance status
-2. Call \`delimit_ledger_context\` to check for open tasks
+1. Call \`delimit_ledger_context\` to check for open tasks
+2. Call \`delimit_gov_health\` to check governance status
 3. If returning user, summarize what's pending
 4. If new project, call \`delimit_scan\` to discover what Delimit can do
+
+## After editing code:
+- After editing UI/CSS: call \`delimit_design_validate_responsive\`
+- After editing API specs: call \`delimit_lint\`
+- After editing tests: call \`delimit_test_smoke\`
+
+## Before deploying:
+1. Call \`delimit_security_audit\`
+2. Call \`delimit_test_smoke\`
+3. Call \`delimit_deploy_plan\`
+
+## Before committing:
+- Call \`delimit_repo_diagnose\` to check for common issues
+
+## When starting a new project:
+- Call \`delimit_scan\` to discover what Delimit can do
+- Call \`delimit_init\` to set up governance
 
 ## Try these:
 - "scan this project" -- discover what Delimit can do here
