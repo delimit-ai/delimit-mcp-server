@@ -22,8 +22,7 @@ paths:
                   version:
                     type: string
                   uptime:
-                    type: string
-                    description: Uptime as ISO 8601 duration
+                    type: integer
   /api/lint:
     post:
       summary: Lint an OpenAPI spec for issues
@@ -73,9 +72,9 @@ paths:
                   summary:
                     type: object
                     properties:
-                      error_count:
+                      errors:
                         type: integer
-                      warning_count:
+                      warnings:
                         type: integer
                       passed:
                         type: boolean
