@@ -5,15 +5,21 @@ Unify Claude Code, Codex, Cursor, and Gemini CLI with persistent context, govern
 [![npm](https://img.shields.io/npm/v/delimit-cli)](https://www.npmjs.com/package/delimit-cli)
 [![GitHub Action](https://img.shields.io/badge/GitHub%20Action-v1.6.0-blue)](https://github.com/marketplace/actions/delimit-api-governance)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-[![delimit MCP server](https://glama.ai/mcp/servers/delimit-ai/delimit/badges/score.svg)](https://glama.ai/mcp/servers/delimit-ai/delimit)
+[![Glama](https://glama.ai/mcp/servers/delimit-ai/delimit-mcp-server/badges/score.svg)](https://glama.ai/mcp/servers/delimit-ai/delimit-mcp-server)
 
-Your tasks, memory, and governance carry between Claude Code, Codex, and Gemini CLI. Persistent ledger, API breaking change detection, security audit, multi-model deliberation — all shared across assistants.
+Persistent ledger, API governance, security orchestration, and multi-model deliberation — all shared across Claude Code, Codex, Cursor, and Gemini CLI.
 
 ---
 
 ## GitHub Action
 
-Add to any repo with an OpenAPI spec:
+Zero-config — auto-detects your OpenAPI spec:
+
+```yaml
+- uses: delimit-ai/delimit-action@v1
+```
+
+Or with full configuration:
 
 ```yaml
 name: API Contract Check
