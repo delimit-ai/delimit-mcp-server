@@ -9,6 +9,7 @@
     "lib/",
     "adapters/",
     "gateway/",
+    "scripts/",
     "server.json",
     "README.md",
     "LICENSE",
@@ -19,7 +20,7 @@
     "delimit-cli": "./bin/delimit-cli.js"
   },
   "scripts": {
-    "postinstall": "echo '\\nRun: npx delimit-cli setup\\n'",
+    "postinstall": "node scripts/postinstall.js",
     "test": "node --test tests/setup-onboarding.test.js tests/setup-matrix.test.js tests/config-export-import.test.js tests/cross-model-hooks.test.js"
   },
   "keywords": [

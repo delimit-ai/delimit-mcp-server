@@ -240,8 +240,10 @@ describe('setup script structure', () => {
         const setupPath = path.join(__dirname, '..', 'bin', 'delimit-setup.js');
         const setupContent = fs.readFileSync(setupPath, 'utf-8');
         assert.ok(setupContent.includes('Delimit is installed'), 'Should confirm installation');
-        assert.ok(setupContent.includes('$ claude'), 'Should suggest running claude');
-        assert.ok(setupContent.includes('scan this project'), 'Should suggest scanning');
+        assert.ok(setupContent.includes('What\'s next'), 'Should show what\'s next box');
+        assert.ok(setupContent.includes('Keep Building'), 'Should end with Keep Building');
+        assert.ok(setupContent.includes('npx delimit-cli lint'), 'Should suggest lint command');
+        assert.ok(setupContent.includes('npx delimit-cli doctor'), 'Should suggest doctor command');
     });
 
     it('setup script contains governance wrapping step', () => {
@@ -264,5 +266,56 @@ describe('setup script structure', () => {
         const setupContent = fs.readFileSync(setupPath, 'utf-8');
         assert.ok(setupContent.includes('codexInstructions'), 'Should handle codex instructions');
         assert.ok(setupContent.includes('cursorRules'), 'Should handle cursor rules');
+    });
+});
+
+describe('spec auto-detection', () => {
+    it('setup script contains findSpecFiles function', () => {
+        const setupPath = path.join(__dirname, '..', 'bin', 'delimit-setup.js');
+        const setupContent = fs.readFileSync(setupPath, 'utf-8');
+        assert.ok(setupContent.includes('findSpecFiles'), 'Should have findSpecFiles function');
+        assert.ok(setupContent.includes('openapi'), 'Should search for openapi files');
+        assert.ok(setupContent.includes('swagger'), 'Should search for swagger files');
+    });
+
+    it('setup script reports found specs', () => {
+        const setupPath = path.join(__dirname, '..', 'bin', 'delimit-setup.js');
+        const setupContent = fs.readFileSync(setupPath, 'utf-8');
+        assert.ok(setupContent.includes('API spec(s)'), 'Should report found specs');
+        assert.ok(setupContent.includes('Scanning for API specs'), 'Should have scanning step');
+    });
+});
+
+describe('postinstall telemetry', () => {
+    it('postinstall script exists and sends anonymous ping', () => {
+        const postinstallPath = path.join(__dirname, '..', 'scripts', 'postinstall.js');
+        assert.ok(fs.existsSync(postinstallPath), 'postinstall.js should exist');
+        const content = fs.readFileSync(postinstallPath, 'utf-8');
+        assert.ok(content.includes("event: 'install'"), 'Should send install event');
+        assert.ok(content.includes('delimit.ai'), 'Should ping delimit.ai');
+        assert.ok(content.includes('/api/telemetry'), 'Should hit telemetry endpoint');
+        assert.ok(content.includes('timeout: 3000'), 'Should have 3 second timeout');
+        assert.ok(content.includes('silent fail'), 'Should fail silently');
+    });
+
+    it('postinstall does not collect PII', () => {
+        const postinstallPath = path.join(__dirname, '..', 'scripts', 'postinstall.js');
+        const content = fs.readFileSync(postinstallPath, 'utf-8');
+        assert.ok(!content.includes('username'), 'Should not collect username');
+        assert.ok(!content.includes('os.hostname'), 'Should not collect hostname');
+        assert.ok(!content.includes('os.homedir'), 'Should not collect home directory');
+        assert.ok(!content.includes('email'), 'Should not collect email');
+        assert.ok(content.includes('process.version'), 'Should include node version');
+        assert.ok(content.includes('process.platform'), 'Should include platform');
+    });
+
+    it('package.json postinstall points to script', () => {
+        const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf-8'));
+        assert.ok(pkg.scripts.postinstall.includes('postinstall.js'), 'Should run postinstall.js');
+    });
+
+    it('package.json files includes scripts/', () => {
+        const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf-8'));
+        assert.ok(pkg.files.includes('scripts/'), 'Should include scripts/ in published files');
     });
 });

@@ -47,6 +47,27 @@ function findGitDir(startDir) {
     return null;
 }
 
+/**
+ * Recursively find OpenAPI/Swagger spec files, ignoring node_modules.
+ */
+function findSpecFiles(dir, depth = 0) {
+    if (depth > 5) return [];
+    const results = [];
+    try {
+        const entries = fs.readdirSync(dir, { withFileTypes: true });
+        for (const entry of entries) {
+            if (entry.name === 'node_modules' || entry.name === '.git' || entry.name === 'vendor') continue;
+            const fullPath = path.join(dir, entry.name);
+            if (entry.isDirectory()) {
+                results.push(...findSpecFiles(fullPath, depth + 1));
+            } else if (/^(openapi|swagger)[^/]*\.(ya?ml|json)$/i.test(entry.name)) {
+                results.push(path.relative(process.cwd(), fullPath));
+            }
+        }
+    } catch {}
+    return results;
+}
+
 async function main() {
     log('');
     log(blue('    ____  ________    ______  _____________'));
@@ -717,8 +738,28 @@ echo "[Delimit] ${toolName} not found" >&2; exit 127
     }
     log('');
 
-    // Step 9: Done
-    step(10, 'Done!');
+    // Step 10: Auto-detect OpenAPI specs
+    step(10, 'Scanning for API specs...');
+
+    let detectedSpecs = [];
+    try {
+        const { minimatch } = (() => { try { return require('minimatch'); } catch { return { minimatch: null }; } })();
+        // Simple recursive glob for spec files
+        detectedSpecs = findSpecFiles(process.cwd());
+    } catch {}
+
+    if (detectedSpecs.length > 0) {
+        log(`  ${green('✓')} Found ${detectedSpecs.length} API spec(s):`);
+        detectedSpecs.forEach(s => log(`    ${s}`));
+        log('');
+        log(`  Try: ${bold(`npx delimit-cli lint ${detectedSpecs[0]}`)}`);
+    } else {
+        log(`  ${dim('  No OpenAPI/Swagger specs found in current directory')}`);
+    }
+    log('');
+
+    // Step 11: Done
+    step(11, 'Done!');
     log('');
     log(`  ${green('Delimit is installed.')} Your AI now has persistent memory and governance.`);
     log('');
@@ -730,22 +771,24 @@ echo "[Delimit] ${toolName} not found" >&2; exit 127
     log(`  ${green('✓')} ${tools.join(', ')}`);
 
     log('');
-    log('  Try it now:');
-    log(`  ${bold('$ claude')}`);
-    log('');
-    log(`  Then say: ${blue('"scan this project"')}`);
-    log('');
-    log('  Or try:');
-    log(`  ${dim('-')} "lint my API spec"                    ${dim('— catch breaking changes')}`);
-    log(`  ${dim('-')} "add to ledger: set up CI pipeline"  ${dim('— track tasks across sessions')}`);
-    log(`  ${dim('-')} "deliberate [question]"               ${dim('— multi-model AI consensus')}`);
+
+    // "What's next" box
+    log('  \u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510');
+    log(`  \u2502  ${bold('What\'s next:')}                           \u2502`);
+    log('  \u2502                                         \u2502');
+    log(`  \u2502  1. ${blue('npx delimit-cli lint')}                \u2502`);
+    log(`  \u2502  2. ${blue('npx delimit-cli doctor')}              \u2502`);
+    log(`  \u2502  3. Add the GitHub Action to your repo  \u2502`);
+    log('  \u2502                                         \u2502');
+    log(`  \u2502  Docs: ${dim('https://delimit.ai/docs')}          \u2502`);
+    log(`  \u2502  Try:  ${dim('https://delimit.ai/try')}           \u2502`);
+    log('  \u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518');
     log('');
     log(`  ${dim('Config:')} ${MCP_CONFIG}`);
     log(`  ${dim('Server:')} ${actualServer}`);
     log(`  ${dim('Agents:')} ${AGENTS_DIR}`);
     log('');
-    log(`  ${dim('Docs:')} https://delimit.ai/docs`);
-    log(`  ${dim('GitHub:')} https://github.com/delimit-ai/delimit-mcp-server`);
+    log(`  ${bold('Keep Building.')}`);
     log('');
 }
 
