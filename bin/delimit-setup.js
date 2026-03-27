@@ -556,10 +556,17 @@ printf "  \${MAGENTA}\${BOLD}[Delimit]\${RESET} \${MAGENTA}═══════
 sleep 0.08
 printf "  \${GREEN}\${BOLD}[Delimit]\${RESET} \${GREEN}✓ Allowed\${RESET}\\n"
 echo ""
-for c in /usr/bin/${toolName} /usr/local/bin/${toolName} $HOME/.local/bin/${toolName}; do
-    [ -x "$c" ] && exec "$c" "$@"
+# Find real binary — check common paths then fallback to PATH search (excluding shim dir)
+SELF="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+for c in /usr/bin/${toolName} /usr/local/bin/${toolName} "$HOME/.local/bin/${toolName}" "$(npm bin -g 2>/dev/null)/${toolName}"; do
+    [ -x "$c" ] && [ "$(readlink -f "$c" 2>/dev/null)" != "$SELF" ] && exec "$c" "$@"
 done
-echo "[Delimit] ${toolName} not found" >&2; exit 127
+# Last resort: search PATH excluding shim directory
+REAL=$(PATH=$(echo "$PATH" | tr ':' '\\n' | grep -v '.delimit/shims' | tr '\\n' ':') command -v ${toolName} 2>/dev/null)
+[ -x "$REAL" ] && exec "$REAL" "$@"
+echo "[Delimit] ${toolName} not found in PATH" >&2
+echo "  Install: npm install -g @anthropic-ai/claude-code" >&2
+exit 127
 `;
 
             for (const [tool, display] of [['claude', 'Claude'], ['codex', 'Codex'], ['gemini', 'Gemini CLI']]) {
