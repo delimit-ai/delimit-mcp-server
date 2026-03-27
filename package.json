@@ -1,7 +1,7 @@
 {
   "name": "delimit-cli",
   "mcpName": "io.github.delimit-ai/delimit-mcp-server",
-  "version": "3.11.11",
+  "version": "3.12.0",
   "description": "Unify Claude Code, Codex, Cursor, and Gemini CLI with persistent context, governance, and multi-model debate.",
   "main": "index.js",
   "files": [
@@ -20,7 +20,7 @@
   },
   "scripts": {
     "postinstall": "echo '\\nRun: npx delimit-cli setup\\n'",
-    "test": "node --test tests/setup-onboarding.test.js tests/setup-matrix.test.js"
+    "test": "node --test tests/setup-onboarding.test.js tests/setup-matrix.test.js tests/config-export-import.test.js tests/cross-model-hooks.test.js"
   },
   "keywords": [
     "openapi",

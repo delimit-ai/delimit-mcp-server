@@ -567,8 +567,56 @@ echo "[Delimit] ${toolName} not found" >&2; exit 127
     }
     log('');
 
-    // Step 7: Local dashboard API server
-    step(7, 'Local dashboard API...');
+    // Step 7: Install cross-model governance hooks (LED-202)
+    step(7, 'Installing AI assistant hooks...');
+
+    try {
+        const crossModelHooks = require('../lib/cross-model-hooks');
+        const hookConfig = crossModelHooks.loadHookConfig();
+        const detected = crossModelHooks.detectAITools();
+
+        if (detected.length === 0) {
+            log(`  ${dim('  No AI assistants detected -- hooks will be installed when tools are found')}`);
+        } else {
+            log(`  ${dim('  Detected: ' + detected.map(t => t.name).join(', '))}`);
+
+            // Install hooks (auto-accept in non-interactive or prompt if TTY)
+            let installHooks = true;
+            const inq = (() => { try { return require('inquirer'); } catch { return null; } })();
+            if (inq && process.stdin.isTTY) {
+                try {
+                    const answer = await inq.prompt([{
+                        type: 'confirm',
+                        name: 'install',
+                        message: `Install governance hooks for ${detected.map(t => t.name).join(', ')}?`,
+                        default: true,
+                    }]);
+                    installHooks = answer.install;
+                } catch {
+                    installHooks = true;
+                }
+            }
+
+            if (installHooks) {
+                for (const tool of detected) {
+                    const result = crossModelHooks.installHooksForTool(tool, hookConfig);
+                    if (result.changes.length > 0) {
+                        log(`  ${green('✓')} ${tool.name}: ${result.changes.join(', ')}`);
+                    } else {
+                        log(`  ${dim('  ' + tool.name + ': hooks already installed')}`);
+                    }
+                }
+            } else {
+                log(`  ${dim('  Skipped. Install later: delimit hook install')}`);
+            }
+        }
+    } catch (e) {
+        log(`  ${dim('  Hook installation skipped: ' + e.message)}`);
+    }
+    log('');
+
+    // Step 8: Local dashboard API server
+    step(8, 'Local dashboard API...');
 
     const localServerPath = path.join(DELIMIT_HOME, 'server', 'ai', 'local_server.py');
     if (fs.existsSync(localServerPath)) {
@@ -580,8 +628,8 @@ echo "[Delimit] ${toolName} not found" >&2; exit 127
     }
     log('');
 
-    // Step 8: Post-install config validation (LED-098)
-    step(8, 'Validating config integrity...');
+    // Step 9: Post-install config validation (LED-098)
+    step(9, 'Validating config integrity...');
 
     let validationIssues = 0;
     const configFiles = [
@@ -670,7 +718,7 @@ echo "[Delimit] ${toolName} not found" >&2; exit 127
     log('');
 
     // Step 9: Done
-    step(9, 'Done!');
+    step(10, 'Done!');
     log('');
     log(`  ${green('Delimit is installed.')} Your AI now has persistent memory and governance.`);
     log('');

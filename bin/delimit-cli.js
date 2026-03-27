@@ -9,6 +9,7 @@ const chalk = require('chalk');
 const inquirer = require('inquirer');
 const DelimitAuthSetup = require('../lib/auth-setup');
 const DelimitHooksInstaller = require('../lib/hooks-installer');
+const crossModelHooks = require('../lib/cross-model-hooks');
 
 const AGENT_URL = `http://127.0.0.1:${process.env.DELIMIT_AGENT_PORT || 7823}`;
 const program = new Command();
@@ -535,6 +536,36 @@ program
             changes.push({ target: '~/.delimit/shims/', action: 'Remove CLI shims directory' });
         }
 
+        // 8. Cross-model governance hooks (LED-202)
+        const claudeSettingsPath = path.join(HOME, '.claude', 'settings.json');
+        if (fs.existsSync(claudeSettingsPath)) {
+            try {
+                const cfg = JSON.parse(fs.readFileSync(claudeSettingsPath, 'utf8'));
+                if (cfg.hooks) {
+                    const hasDelimitHook = Object.values(cfg.hooks).some(arr =>
+                        Array.isArray(arr) && arr.some(h => h.command && h.command.includes('delimit-cli'))
+                    );
+                    if (hasDelimitHook) {
+                        changes.push({ target: '~/.claude/settings.json', action: 'Remove Delimit governance hooks' });
+                    }
+                }
+            } catch (e) {}
+        }
+        const codexInstructions = path.join(HOME, '.codex', 'instructions.md');
+        if (fs.existsSync(codexInstructions)) {
+            const content = fs.readFileSync(codexInstructions, 'utf8');
+            if (content.includes('delimit:hooks-start')) {
+                changes.push({ target: '~/.codex/instructions.md', action: 'Remove Delimit hook instructions' });
+            }
+        }
+        const geminiGovMd = path.join(HOME, '.gemini', 'GEMINI.md');
+        if (fs.existsSync(geminiGovMd)) {
+            const content = fs.readFileSync(geminiGovMd, 'utf8');
+            if (content.includes('Delimit Governance')) {
+                changes.push({ target: '~/.gemini/GEMINI.md', action: 'Remove Delimit governance file' });
+            }
+        }
+
         if (changes.length === 0) {
             console.log(chalk.green('\nNo Delimit integrations found. Nothing to remove.\n'));
             return;
@@ -625,6 +656,14 @@ program
             } catch (e) {}
         }
 
+        // Remove cross-model governance hooks (LED-202)
+        try {
+            const removedFrom = crossModelHooks.removeAllHooks();
+            if (removedFrom.length > 0) {
+                console.log(chalk.green(`✓ Removed governance hooks from: ${removedFrom.join(', ')}`));
+            }
+        } catch (e) { /* cross-model-hooks module not critical */ }
+
         console.log(chalk.green('\n  Delimit has been completely removed.'));
         console.log(chalk.gray(`  Backups saved to: ${backupDir}`));
         console.log(chalk.gray('  Your data in ~/.delimit/ has been preserved.'));
@@ -701,95 +740,86 @@ program
         await proxyAITool(tool, args);
     });
 
-// Hook handler (called by Git hooks)
-program
-    .command('hook <type>')
-    .description('Internal hook handler')
+// ---------------------------------------------------------------------------
+// LED-202: Cross-model hook commands
+// ---------------------------------------------------------------------------
 
-    .action(async (type) => {
-        await ensureAgent();
-        
-        // Gather context
-        const context = {
-            command: type,
-            pwd: process.cwd(),
-            gitBranch: 'unknown',
-            files: [],
-            diff: ''
-        };
-        
-        // Try to get Git info, but don't fail if not in repo
+const hookCmd = program
+    .command('hook <event> [tool_name]')
+    .description('Governance hook handler (session-start | pre-tool | pre-commit)')
+    .action(async (event, toolName) => {
         try {
-            context.gitBranch = execSync('git branch --show-current 2>/dev/null').toString().trim() || 'unknown';
-        } catch (e) {
-            // Not in a Git repo or Git not available
-            context.gitBranch = 'unknown';
-        }
-        
-        if (type === 'pre-commit') {
-            try {
-                context.files = execSync('git diff --cached --name-only 2>/dev/null').toString().split('\n').filter(f => f);
-                context.diff = execSync('git diff --cached 2>/dev/null').toString();
-            } catch (e) {
-                // Not in a Git repo or no staged changes
-                context.files = [];
-                context.diff = '';
+            switch (event) {
+                case 'session-start':
+                    await crossModelHooks.hookSessionStart();
+                    break;
+                case 'pre-tool':
+                    await crossModelHooks.hookPreTool(toolName || 'unknown');
+                    break;
+                case 'pre-commit':
+                    await crossModelHooks.hookPreCommit();
+                    break;
+                default:
+                    // Legacy: fall back to agent-based hook evaluation
+                    await ensureAgent();
+                    const context = {
+                        command: event,
+                        pwd: process.cwd(),
+                        gitBranch: 'unknown',
+                        files: [],
+                        diff: ''
+                    };
+                    try {
+                        context.gitBranch = execSync('git branch --show-current 2>/dev/null').toString().trim() || 'unknown';
+                    } catch (e) { context.gitBranch = 'unknown'; }
+
+                    if (event === 'pre-push') {
+                        try {
+                            context.files = execSync('git diff --name-only @{upstream}...HEAD 2>/dev/null').toString().split('\n').filter(f => f);
+                            context.diff = execSync('git diff @{upstream}...HEAD 2>/dev/null').toString();
+                        } catch (e) {
+                            context.files = [];
+                            context.diff = '';
+                        }
+                    }
+
+                    const { data: decision } = await axios.post(`${AGENT_URL}/evaluate`, context);
+                    if (decision.message) {
+                        const color = decision.action === 'block' ? chalk.red :
+                                     decision.action === 'prompt' ? chalk.yellow :
+                                     chalk.blue;
+                        console.log(color(decision.message));
+                    }
+                    if (decision.action === 'block') {
+                        if (decision.requiresOverride) {
+                            console.log(chalk.red('Action blocked. Cannot override in enforce mode.'));
+                            process.exit(1);
+                        } else {
+                            const { override } = await inquirer.prompt([{
+                                type: 'confirm',
+                                name: 'override',
+                                message: 'Override and continue?',
+                                default: false
+                            }]);
+                            if (!override) process.exit(1);
+                        }
+                    } else if (decision.action === 'prompt') {
+                        const { proceed } = await inquirer.prompt([{
+                            type: 'confirm',
+                            name: 'proceed',
+                            message: 'Continue with this action?',
+                            default: false
+                        }]);
+                        if (!proceed) process.exit(1);
+                    }
+                    process.exit(0);
             }
-        } else if (type === 'pre-push') {
-            try {
-                // Get commits to be pushed
-                context.files = execSync('git diff --name-only @{upstream}...HEAD 2>/dev/null').toString().split('\n').filter(f => f);
-                context.diff = execSync('git diff @{upstream}...HEAD 2>/dev/null').toString();
-            } catch (e) {
-                // No upstream or not in repo
-                context.files = [];
-                context.diff = '';
+        } catch (err) {
+            // Hooks must never block the AI tool -- fail open
+            if (process.env.DELIMIT_DEBUG) {
+                process.stderr.write(`[Delimit] Hook error: ${err.message}\n`);
             }
         }
-        
-        // Query agent for decision
-        const { data: decision } = await axios.post(`${AGENT_URL}/evaluate`, context);
-        
-        // Display decision
-        if (decision.message) {
-            const color = decision.action === 'block' ? chalk.red :
-                         decision.action === 'prompt' ? chalk.yellow :
-                         chalk.blue;
-            console.log(color(decision.message));
-        }
-        
-        // Handle the decision
-        if (decision.action === 'block') {
-            if (decision.requiresOverride) {
-                console.log(chalk.red('Action blocked. Cannot override in enforce mode.'));
-                process.exit(1);
-            } else {
-                const { override } = await inquirer.prompt([{
-                    type: 'confirm',
-                    name: 'override',
-                    message: 'Override and continue?',
-                    default: false
-                }]);
-                
-                if (!override) {
-                    process.exit(1);
-                }
-            }
-        } else if (decision.action === 'prompt') {
-            const { proceed } = await inquirer.prompt([{
-                type: 'confirm',
-                name: 'proceed',
-                message: 'Continue with this action?',
-                default: false
-            }]);
-            
-            if (!proceed) {
-                process.exit(1);
-            }
-        }
-        
-        // Action allowed
-        process.exit(0);
     });
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1135,6 +1165,7 @@ program
         console.log('');
         if (fail === 0 && warn === 0) {
             console.log(chalk.green.bold('  All checks passed! Ready to lint.\n'));
+            console.log('Keep Building.\n');
         } else if (fail === 0) {
             console.log(chalk.yellow.bold(`  ${ok} passed, ${warn} warning(s). Setup looks good.\n`));
         } else {
@@ -1263,6 +1294,10 @@ program
                 console.log('');
             }
 
+            if (decision === 'pass') {
+                console.log('Keep Building.\n');
+            }
+
             process.exit(result.exit_code || 0);
         } catch (err) {
             console.error(chalk.red(`Error: ${err.message}`));
@@ -1295,6 +1330,10 @@ program
                 console.log(`  ${tag} ${c.message}`);
             });
             console.log('');
+
+            if (result.breaking_changes === 0) {
+                console.log('Keep Building.\n');
+            }
         } catch (err) {
             console.error(chalk.red(`Error: ${err.message}`));
             process.exit(1);
@@ -1426,6 +1465,187 @@ program
         fs.writeFileSync(licensePath, JSON.stringify(licenseData, null, 2));
         console.log(chalk.green('License activated successfully.'));
         console.log(chalk.dim('Tier: pro'));
+    });
+
+// ---------------------------------------------------------------------------
+// LED-187: Export governance config as shareable JSON
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a governance config bundle from the current project directory.
+ * Returns a plain object ready for JSON serialization.
+ */
+function buildConfigBundle(cwd) {
+    const bundle = {
+        delimit_config_version: 1,
+        created_at: new Date().toISOString(),
+        project: path.basename(cwd),
+        policies: null,
+        workflow: null,
+    };
+
+    // Read delimit.yml or .delimit/policies.yml
+    const candidates = [
+        path.join(cwd, 'delimit.yml'),
+        path.join(cwd, '.delimit.yml'),
+        path.join(cwd, '.delimit', 'policies.yml'),
+    ];
+    for (const p of candidates) {
+        if (fs.existsSync(p)) {
+            const raw = fs.readFileSync(p, 'utf-8');
+            bundle.policies = { path: path.relative(cwd, p), content: raw };
+            break;
+        }
+    }
+
+    // Read GitHub Action workflow if it exists
+    const workflowPath = path.join(cwd, '.github', 'workflows', 'api-governance.yml');
+    if (fs.existsSync(workflowPath)) {
+        bundle.workflow = {
+            path: '.github/workflows/api-governance.yml',
+            content: fs.readFileSync(workflowPath, 'utf-8'),
+        };
+    }
+
+    return bundle;
+}
+
+program
+    .command('export')
+    .description('Export governance config as shareable JSON')
+    .option('-o, --output <file>', 'Write to file instead of stdout')
+    .option('--url', 'Generate a delimit.ai/import share URL')
+    .action(async (options) => {
+        const cwd = process.cwd();
+        const bundle = buildConfigBundle(cwd);
+
+        if (!bundle.policies) {
+            console.error(chalk.red('No governance config found. Run "delimit init" first.'));
+            process.exit(1);
+        }
+
+        const json = JSON.stringify(bundle, null, 2);
+
+        if (options.url) {
+            const encoded = Buffer.from(json).toString('base64');
+            const shareUrl = `https://delimit.ai/import?config=${encoded}`;
+            console.log(chalk.green('Share URL:\n'));
+            console.log(shareUrl);
+            return;
+        }
+
+        if (options.output) {
+            fs.writeFileSync(options.output, json);
+            console.log(chalk.green(`Exported config to ${options.output}`));
+        } else {
+            console.log(json);
+        }
+    });
+
+// ---------------------------------------------------------------------------
+// LED-187: Import governance config from file, URL, or base64 string
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse a config bundle from various sources: file path, base64 string,
+ * or a delimit.ai/import?config=... URL.
+ */
+function parseConfigSource(source) {
+    // URL form — extract base64 from query param
+    if (source.startsWith('http://') || source.startsWith('https://')) {
+        const url = new URL(source);
+        const encoded = url.searchParams.get('config');
+        if (!encoded) {
+            throw new Error('URL does not contain a config= parameter');
+        }
+        return JSON.parse(Buffer.from(encoded, 'base64').toString('utf-8'));
+    }
+
+    // File path
+    if (fs.existsSync(source)) {
+        return JSON.parse(fs.readFileSync(source, 'utf-8'));
+    }
+
+    // Assume base64
+    try {
+        return JSON.parse(Buffer.from(source, 'base64').toString('utf-8'));
+    } catch {
+        throw new Error('Could not parse source as file path, URL, or base64');
+    }
+}
+
+program
+    .command('import <source>')
+    .description('Import governance config from file, URL, or base64 string')
+    .option('--action', 'Also write the GitHub Action workflow')
+    .option('--yes', 'Skip confirmation prompt')
+    .action(async (source, options) => {
+        let bundle;
+        try {
+            bundle = parseConfigSource(source);
+        } catch (err) {
+            console.error(chalk.red(`Failed to parse config: ${err.message}`));
+            process.exit(1);
+        }
+
+        if (!bundle.policies || !bundle.policies.content) {
+            console.error(chalk.red('Invalid config bundle: missing policies'));
+            process.exit(1);
+        }
+
+        const cwd = process.cwd();
+        const policyDest = path.join(cwd, bundle.policies.path || 'delimit.yml');
+
+        // Show what will change
+        console.log(chalk.blue.bold('\nConfig Import Preview\n'));
+        console.log(`  Project: ${chalk.bold(bundle.project || 'unknown')}`);
+        console.log(`  Created: ${bundle.created_at || 'unknown'}`);
+        console.log(`  Policy file: ${chalk.bold(policyDest)}`);
+        if (options.action && bundle.workflow) {
+            console.log(`  Workflow: ${chalk.bold(path.join(cwd, bundle.workflow.path))}`);
+        }
+
+        // Show diff if policy file already exists
+        if (fs.existsSync(policyDest)) {
+            const existing = fs.readFileSync(policyDest, 'utf-8');
+            if (existing === bundle.policies.content) {
+                console.log(chalk.yellow('\n  No changes -- imported config matches current config.'));
+                return;
+            }
+            console.log(chalk.yellow('\n  Policy file already exists and will be overwritten.'));
+        }
+
+        console.log('');
+
+        if (!options.yes) {
+            const { confirm } = await inquirer.prompt([{
+                type: 'confirm',
+                name: 'confirm',
+                message: 'Apply this config?',
+                default: false,
+            }]);
+            if (!confirm) {
+                console.log(chalk.red('Import cancelled'));
+                return;
+            }
+        }
+
+        // Write policy file
+        const policyDir = path.dirname(policyDest);
+        fs.mkdirSync(policyDir, { recursive: true });
+        fs.writeFileSync(policyDest, bundle.policies.content);
+        console.log(chalk.green(`  Created ${policyDest}`));
+
+        // Optionally write workflow
+        if (options.action && bundle.workflow && bundle.workflow.content) {
+            const workflowDest = path.join(cwd, bundle.workflow.path);
+            const wfDir = path.dirname(workflowDest);
+            fs.mkdirSync(wfDir, { recursive: true });
+            fs.writeFileSync(workflowDest, bundle.workflow.content);
+            console.log(chalk.green(`  Created ${workflowDest}`));
+        }
+
+        console.log(chalk.green('\nConfig imported successfully.'));
     });
 
 // Version subcommand alias (users type 'delimit version' not 'delimit -V')

@@ -1,5 +1,19 @@
 # Changelog
 
+## [3.12.0] - 2026-03-26
+
+### Added
+- Cross-model hook system: session-start, pre-tool, and pre-commit hooks for Claude Code, Codex, and Gemini CLI
+- `delimit export` and `delimit import` commands for shareable governance config
+- `delimit hook <event>` commands for manual hook invocation
+- `delimit uninstall` removes hooks from all AI tools cleanly
+- Pre-push hooks for catching governance violations before remote push
+- Cursor and Codex adapters for native integration
+
+### Changed
+- "Keep Building." success message displayed on lint/diff/doctor pass
+- Zero-config action improvements for smoother CI integration
+
 ## [3.11.10] - 2026-03-24
 
 ### Added
