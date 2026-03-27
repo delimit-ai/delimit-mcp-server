@@ -1648,6 +1648,118 @@ program
         console.log(chalk.green('\nConfig imported successfully.'));
     });
 
+// Deliberate command -- entry point for cross-model deliberation
+program
+    .command('deliberate [question...]')
+    .description('Deliberate on a strategic question using cross-model consensus')
+    .option('--list', 'List pending strategy items from the ledger')
+    .option('--mode <mode>', 'Deliberation mode: quick | dialogue | debate', 'dialogue')
+    .option('--question <q>', 'Question to deliberate (alternative to positional arg)')
+    .action(async (questionParts, options) => {
+        const question = options.question || (questionParts.length > 0 ? questionParts.join(' ') : null);
+
+        if (options.list) {
+            // List pending strategy items
+            const count = crossModelHooks.countPendingStrategyItems();
+            if (count === 0) {
+                console.log(chalk.green('No pending strategy items in the ledger.'));
+            } else {
+                console.log(chalk.blue(`${count} strategic decision${count === 1 ? '' : 's'} pending deliberation.`));
+                const top = crossModelHooks.getTopStrategyItem();
+                if (top) {
+                    console.log('');
+                    console.log(chalk.bold('Highest priority:'));
+                    console.log(`  ${top.id || 'unknown'}: ${top.title || top.description || 'No title'}`);
+                    if (top.priority) console.log(`  Priority: ${top.priority}`);
+                }
+            }
+            return;
+        }
+
+        if (question) {
+            console.log(chalk.blue.bold('\nDelimit Deliberation\n'));
+            console.log(`Question: ${chalk.bold(question)}\n`);
+
+            // Try to run deliberation directly via the gateway
+            const HOME = process.env.HOME || require('os').homedir();
+            const gatewayScript = path.join(HOME, '.delimit', 'server', 'ai', 'deliberation.py');
+            const gatewayAlt = '/home/delimit/delimit-gateway/ai/deliberation.py';
+            const scriptPath = fs.existsSync(gatewayScript) ? gatewayScript : fs.existsSync(gatewayAlt) ? gatewayAlt : null;
+
+            if (scriptPath) {
+                console.log(chalk.dim('Running multi-model deliberation...\n'));
+                try {
+                    const escapedQ = question.replace(/'/g, "\\'");
+                    const pyCmd = `python3 -c "
+import sys, os, json
+sys.path.insert(0, os.path.dirname('${scriptPath}'))
+os.chdir(os.path.dirname('${scriptPath}'))
+from deliberation import run_deliberation
+result = run_deliberation('${escapedQ}', mode='${options.mode}', max_rounds=2)
+if result.get('verdict'):
+    print('VERDICT:', result['verdict'])
+if result.get('confidence'):
+    print('CONFIDENCE:', result['confidence'])
+if result.get('summary'):
+    print()
+    print(result['summary'])
+"`;
+                    const result = execSync(pyCmd, {
+                        encoding: 'utf-8',
+                        timeout: 120000,
+                        env: { ...process.env, PYTHONPATH: path.dirname(scriptPath) },
+                    });
+                    console.log(result);
+                } catch (e) {
+                    // Fallback: guide user to MCP tool
+                    console.log(chalk.yellow('Direct deliberation unavailable. Use the MCP tool instead:\n'));
+                    console.log(chalk.bold('In your AI assistant (Claude Code, Codex, or Gemini CLI):'));
+                    console.log(`   ${chalk.cyan(`delimit_deliberate: ${question}`)}\n`);
+                }
+            } else {
+                console.log('To deliberate, use one of the following approaches:\n');
+                console.log(chalk.bold('1. In your AI assistant (Claude Code, Codex, or Gemini CLI):'));
+                console.log(`   ${chalk.cyan(`delimit_deliberate: ${question}`)}\n`);
+                console.log(chalk.bold('2. Using the MCP tool directly:'));
+                console.log(`   ${chalk.cyan(`Call delimit_deliberate with question="${question}"`)}\n`);
+            }
+
+            // Save pending deliberation to file for reference
+            const deliberationDir = path.join(HOME, '.delimit', 'deliberation');
+            fs.mkdirSync(deliberationDir, { recursive: true });
+            const pending = {
+                question,
+                mode: options.mode,
+                created: new Date().toISOString(),
+                status: 'pending',
+            };
+            fs.writeFileSync(
+                path.join(deliberationDir, 'pending.json'),
+                JSON.stringify(pending, null, 2)
+            );
+            console.log(chalk.dim(`\nSaved to ~/.delimit/deliberation/pending.json`));
+        } else {
+            // No question -- check the ledger for the top strategy item
+            const top = crossModelHooks.getTopStrategyItem();
+            if (top) {
+                const topQuestion = top.title || top.description || 'No description';
+                console.log(chalk.blue.bold('\nDelimit Deliberation\n'));
+                console.log(`Top pending strategy item: ${chalk.bold(topQuestion)}\n`);
+                console.log('To deliberate on this item, use one of the following:\n');
+                console.log(chalk.bold('1. In your AI assistant:'));
+                console.log(`   ${chalk.cyan(`delimit_deliberate: ${topQuestion}`)}\n`);
+                console.log(chalk.bold('2. Using the MCP tool directly:'));
+                console.log(`   ${chalk.cyan(`Call delimit_deliberate with question="${topQuestion}"`)}\n`);
+            } else {
+                console.log(chalk.blue.bold('\nDelimit Deliberation\n'));
+                console.log('No pending strategy items in the ledger.\n');
+                console.log('To start a new deliberation:\n');
+                console.log(`  ${chalk.cyan('delimit deliberate "Should we adopt versioned API contracts?"')}\n`);
+                console.log('Or ask your AI assistant to call the delimit_deliberate MCP tool.');
+            }
+        }
+    });
+
 // Version subcommand alias (users type 'delimit version' not 'delimit -V')
 program
     .command('version')
