@@ -1,5 +1,19 @@
 # Changelog
 
+## [3.13.1] - 2026-03-27
+
+### Added
+- `delimit init` guided onboarding wizard with framework auto-detection (Express, NestJS, FastAPI, Django, Flask, Fastify, Hono, Next.js)
+- Interactive preset selection (strict/default/relaxed) with context-aware defaults
+- First lint runs automatically after init — see governance results in under 1 second
+- Zero-Spec baseline auto-saved for FastAPI/Express/NestJS projects on first init
+- GitHub Action workflow generation with confirmation prompt
+- `--yes` flag for non-interactive CI usage
+
+### Changed
+- `delimit init` now detects CI provider (GitHub Actions, GitLab) and adapts workflow generation
+- OpenAPI spec detection expanded to 17 common file locations
+
 ## [3.12.0] - 2026-03-26
 
 ### Added

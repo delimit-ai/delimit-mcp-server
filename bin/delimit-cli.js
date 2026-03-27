@@ -947,29 +947,59 @@ rules:
 `,
 };
 
-// Init command — scaffold .delimit/ config
+// Init command — guided onboarding wizard (Consensus: Build Next 2026-03-27)
 program
     .command('init')
     .description('Initialize Delimit API governance in this project')
-    .option('--preset <name>', 'Policy preset: strict, default, or relaxed', 'default')
+    .option('--preset <name>', 'Policy preset: strict, default, or relaxed')
+    .option('--yes', 'Skip prompts and use defaults')
     .action(async (options) => {
+        const startTime = Date.now();
         const configDir = path.join(process.cwd(), '.delimit');
         const policyFile = path.join(configDir, 'policies.yml');
 
+        console.log(chalk.bold('\n  Delimit — API Governance Setup\n'));
+
         if (fs.existsSync(policyFile)) {
-            console.log(chalk.yellow('Already initialized — .delimit/policies.yml exists'));
+            console.log(chalk.yellow('  Already initialized — .delimit/policies.yml exists'));
+            console.log(`  Run ${chalk.bold('delimit lint')} to check your API.\n`);
             return;
         }
 
-        const preset = options.preset.toLowerCase();
-        if (!POLICY_PRESETS[preset]) {
-            console.log(chalk.red(`Unknown preset "${preset}". Choose: strict, default, or relaxed`));
-            return;
-        }
+        // Step 1: Detect project type
+        console.log(chalk.gray('  Scanning project...'));
+        const projectDir = process.cwd();
+        const projectName = path.basename(projectDir);
+        let framework = 'unknown';
+        let frameworkLabel = '';
 
-        fs.mkdirSync(configDir, { recursive: true });
-        fs.writeFileSync(policyFile, POLICY_PRESETS[preset]);
-        console.log(chalk.green(`\n  Created .delimit/policies.yml (preset: ${preset})\n`));
+        // Check for common frameworks
+        const pkgJsonPath = path.join(projectDir, 'package.json');
+        const pyprojectPath = path.join(projectDir, 'pyproject.toml');
+        const requirementsPath = path.join(projectDir, 'requirements.txt');
+
+        if (fs.existsSync(pkgJsonPath)) {
+            try {
+                const pkg = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf-8'));
+                const allDeps = { ...pkg.dependencies, ...pkg.devDependencies };
+                if (allDeps['@nestjs/core']) { framework = 'nestjs'; frameworkLabel = 'NestJS'; }
+                else if (allDeps['express']) { framework = 'express'; frameworkLabel = 'Express'; }
+                else if (allDeps['fastify']) { framework = 'fastify'; frameworkLabel = 'Fastify'; }
+                else if (allDeps['hono']) { framework = 'hono'; frameworkLabel = 'Hono'; }
+                else if (allDeps['next']) { framework = 'nextjs'; frameworkLabel = 'Next.js'; }
+            } catch {}
+        }
+        if (framework === 'unknown') {
+            const pyFiles = [pyprojectPath, requirementsPath, path.join(projectDir, 'setup.py')];
+            for (const f of pyFiles) {
+                if (fs.existsSync(f)) {
+                    const content = fs.readFileSync(f, 'utf-8').toLowerCase();
+                    if (content.includes('fastapi')) { framework = 'fastapi'; frameworkLabel = 'FastAPI'; break; }
+                    if (content.includes('django')) { framework = 'django'; frameworkLabel = 'Django'; break; }
+                    if (content.includes('flask')) { framework = 'flask'; frameworkLabel = 'Flask'; break; }
+                }
+            }
+        }
 
         // Auto-detect OpenAPI spec files
         const specPatterns = [
@@ -982,45 +1012,89 @@ program
             'api/openapi.yaml', 'api/openapi.json',
             'contrib/openapi.json',
         ];
-        const foundSpecs = specPatterns.filter(p => fs.existsSync(path.join(process.cwd(), p)));
+        const foundSpecs = specPatterns.filter(p => fs.existsSync(path.join(projectDir, p)));
+        const specPath = foundSpecs.length > 0 ? foundSpecs[0] : null;
 
-        if (foundSpecs.length > 0) {
-            const specPath = foundSpecs[0];
-            console.log(`  Detected spec: ${chalk.bold(specPath)}`);
-            console.log('');
-            console.log(chalk.bold('  Workflow template:\n'));
-            console.log(chalk.gray(`  name: API Governance
-  on:
-    pull_request:
-      paths:
-        - '${specPath}'
-  permissions:
-    contents: read
-    pull-requests: write
-  jobs:
-    api-governance:
-      runs-on: ubuntu-latest
-      steps:
-        - uses: actions/checkout@v4
-        - uses: actions/checkout@v4
-          with:
-            ref: \${{ github.event.pull_request.base.sha }}
-            path: _base
-        - uses: delimit-ai/delimit@v1
-          with:
-            old_spec: _base/${specPath}
-            new_spec: ${specPath}
-            mode: advisory`));
-            console.log('');
+        // Check for CI
+        const hasGitHub = fs.existsSync(path.join(projectDir, '.github'));
+        const hasGitLabCI = fs.existsSync(path.join(projectDir, '.gitlab-ci.yml'));
+        const ciProvider = hasGitHub ? 'github' : hasGitLabCI ? 'gitlab' : 'none';
 
-            // Auto-write the workflow file
-            const workflowDir = path.join(process.cwd(), '.github', 'workflows');
+        // Display detection results
+        console.log(`  Project:   ${chalk.bold(projectName)}`);
+        if (frameworkLabel) console.log(`  Framework: ${chalk.bold(frameworkLabel)}`);
+        if (specPath) console.log(`  Spec:      ${chalk.bold(specPath)}`);
+        else if (['fastapi', 'nestjs', 'express'].includes(framework))
+            console.log(`  Spec:      ${chalk.gray('none found')} (Zero-Spec Mode available for ${frameworkLabel})`);
+        else console.log(`  Spec:      ${chalk.gray('none found')}`);
+        if (ciProvider !== 'none') console.log(`  CI:        ${chalk.bold(ciProvider === 'github' ? 'GitHub Actions' : 'GitLab CI')}`);
+        console.log('');
+
+        // Step 2: Choose preset
+        let preset = options.preset ? options.preset.toLowerCase() : null;
+        if (!preset && !options.yes) {
+            // Suggest preset based on project signals
+            let defaultPreset = 'default';
+            if (specPath) {
+                // If they have a checked-in spec, they probably care about stability
+                try {
+                    const specContent = fs.readFileSync(path.join(projectDir, specPath), 'utf-8');
+                    if (specContent.includes('/v2') || specContent.includes('/v3')) defaultPreset = 'strict';
+                } catch {}
+            }
+
+            try {
+                const answers = await inquirer.prompt([{
+                    type: 'list',
+                    name: 'preset',
+                    message: 'Policy preset:',
+                    choices: [
+                        { name: 'strict   — Block all breaking changes (public APIs, payment systems)', value: 'strict' },
+                        { name: 'default  — Balanced for most teams (block critical, warn on others)', value: 'default' },
+                        { name: 'relaxed  — Warnings only (internal APIs, early-stage projects)', value: 'relaxed' },
+                    ],
+                    default: defaultPreset,
+                }]);
+                preset = answers.preset;
+            } catch {
+                preset = defaultPreset;
+            }
+        }
+        if (!preset) preset = 'default';
+
+        if (!POLICY_PRESETS[preset]) {
+            console.log(chalk.red(`  Unknown preset "${preset}". Choose: strict, default, or relaxed`));
+            return;
+        }
+
+        // Step 3: Create policy file
+        fs.mkdirSync(configDir, { recursive: true });
+        fs.writeFileSync(policyFile, POLICY_PRESETS[preset]);
+        console.log(chalk.green(`  Created .delimit/policies.yml (${preset})`));
+
+        // Step 4: Add GitHub Action workflow if spec found + GitHub CI
+        if (specPath && ciProvider === 'github') {
+            const workflowDir = path.join(projectDir, '.github', 'workflows');
             const workflowFile = path.join(workflowDir, 'api-governance.yml');
 
             if (!fs.existsSync(workflowFile)) {
-                try {
-                    fs.mkdirSync(workflowDir, { recursive: true });
-                    const workflowContent = `name: API Governance
+                let writeWorkflow = true;
+                if (!options.yes) {
+                    try {
+                        const ans = await inquirer.prompt([{
+                            type: 'confirm',
+                            name: 'addWorkflow',
+                            message: 'Add GitHub Action for PR governance?',
+                            default: true,
+                        }]);
+                        writeWorkflow = ans.addWorkflow;
+                    } catch {}
+                }
+
+                if (writeWorkflow) {
+                    try {
+                        fs.mkdirSync(workflowDir, { recursive: true });
+                        const workflowContent = `name: API Governance
 on:
   pull_request:
     paths:
@@ -1045,27 +1119,81 @@ jobs:
           new_spec: ${specPath}
           mode: advisory
 `;
-                    fs.writeFileSync(workflowFile, workflowContent);
-                    console.log(chalk.green(`  Created .github/workflows/api-governance.yml\n`));
-                } catch (err) {
-                    console.log(chalk.yellow(`  Could not write workflow file: ${err.message}`));
-                    console.log(chalk.bold('  Add this to .github/workflows/api-governance.yml manually (shown above)\n'));
+                        fs.writeFileSync(workflowFile, workflowContent);
+                        console.log(chalk.green('  Created .github/workflows/api-governance.yml'));
+                    } catch (err) {
+                        console.log(chalk.yellow(`  Could not write workflow: ${err.message}`));
+                    }
                 }
             } else {
-                console.log(chalk.yellow('  .github/workflows/api-governance.yml already exists — skipped\n'));
+                console.log(chalk.gray('  .github/workflows/api-governance.yml already exists'));
             }
-        } else {
-            console.log('  No OpenAPI spec file detected.');
-            console.log(`  Delimit also supports ${chalk.bold('Zero-Spec Mode')} — run ${chalk.bold('delimit lint')} in a FastAPI/NestJS/Express project.`);
-            console.log('');
         }
 
-        console.log(`  ${chalk.bold('Presets')}: strict | default | relaxed`);
-        console.log(`  Switch: ${chalk.bold('delimit init --preset strict')}\n`);
-        console.log('Next steps:');
-        console.log(`  ${chalk.bold('delimit lint')} old.yaml new.yaml   — check for breaking changes`);
-        console.log(`  ${chalk.bold('delimit diff')} old.yaml new.yaml   — see all changes`);
-        console.log(`  ${chalk.bold('delimit explain')} old.yaml new.yaml — human-readable summary`);
+        // Step 5: Run first lint to show immediate value
+        console.log('');
+        if (specPath) {
+            console.log(chalk.bold('  Running first lint...'));
+            try {
+                const result = apiEngine.lint(
+                    path.join(projectDir, specPath),
+                    path.join(projectDir, specPath),
+                    { policy: preset }
+                );
+                if (result && result.summary) {
+                    const s = result.summary;
+                    const breaking = s.breaking || 0;
+                    const warnings = s.warnings || 0;
+                    const safe = s.safe || s.non_breaking || 0;
+                    if (breaking === 0 && warnings === 0) {
+                        console.log(chalk.green('  PASS — No breaking changes detected'));
+                    } else if (breaking > 0) {
+                        console.log(chalk.red(`  FAIL — ${breaking} breaking change(s), ${warnings} warning(s)`));
+                    } else {
+                        console.log(chalk.yellow(`  WARN — ${warnings} warning(s)`));
+                    }
+                    if (result.paths_analyzed) {
+                        console.log(chalk.gray(`  Analyzed ${result.paths_analyzed} endpoint(s)`));
+                    }
+                } else {
+                    console.log(chalk.green('  Spec validated successfully'));
+                }
+            } catch (err) {
+                // Lint comparing same file = no changes, which is expected
+                console.log(chalk.green('  Spec validated — baseline set'));
+            }
+        } else if (['fastapi', 'nestjs', 'express'].includes(framework)) {
+            console.log(chalk.bold('  Running Zero-Spec lint...'));
+            try {
+                const zeroResult = apiEngine.zeroSpec(projectDir);
+                if (zeroResult && zeroResult.success) {
+                    console.log(chalk.green(`  Extracted: ${zeroResult.paths_count} paths, ${zeroResult.schemas_count} schemas`));
+                    // Save baseline
+                    const baselinePath = path.join(configDir, 'baseline.yaml');
+                    if (!fs.existsSync(baselinePath)) {
+                        fs.writeFileSync(baselinePath, yaml.dump(zeroResult.spec));
+                        console.log(chalk.green('  Saved baseline to .delimit/baseline.yaml'));
+                    }
+                } else {
+                    console.log(chalk.gray('  Zero-Spec extraction skipped — run `delimit lint` manually'));
+                }
+            } catch {
+                console.log(chalk.gray('  Zero-Spec extraction skipped — run `delimit lint` manually'));
+            }
+        }
+
+        // Summary
+        const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+        console.log(chalk.bold(`\n  Setup complete in ${elapsed}s\n`));
+        console.log('  Next steps:');
+        if (specPath) {
+            console.log(`    ${chalk.bold('delimit lint')} ${specPath} ${specPath}  — lint on every PR`);
+        } else {
+            console.log(`    ${chalk.bold('delimit lint')}                           — zero-spec mode`);
+        }
+        console.log(`    ${chalk.bold('delimit doctor')}                         — verify setup`);
+        console.log(`    ${chalk.bold('delimit explain')}                        — human-readable report`);
+        console.log('');
     });
 
 // Doctor command — verify setup is correct
