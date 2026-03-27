@@ -7,6 +7,10 @@ Unify Claude Code, Codex, Cursor, and Gemini CLI with persistent context, govern
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Glama](https://glama.ai/mcp/servers/delimit-ai/delimit-mcp-server/badges/score.svg)](https://glama.ai/mcp/servers/delimit-ai/delimit-mcp-server)
 
+<p align="center">
+  <img src="docs/demo.gif" alt="Delimit detecting breaking API changes" width="700">
+</p>
+
 Persistent ledger, API governance, security orchestration, and multi-model deliberation — all shared across Claude Code, Codex, Cursor, and Gemini CLI.
 
 ---
@@ -111,24 +115,46 @@ When installed into your AI coding assistant, Delimit provides tools across two 
 
 ---
 
-## What it catches
+## What It Detects
 
-10 categories of breaking changes:
+27 change types (17 breaking, 10 non-breaking) -- deterministic rules, not AI inference. Same input always produces the same result.
 
-| Change | Example |
-|--------|---------|
-| Endpoint removed | `DELETE /users/{id}` disappeared |
-| HTTP method removed | `PATCH /orders` no longer exists |
-| Required parameter added | New required header on `GET /items` |
-| Field removed from response | `email` dropped from user object |
-| Type changed | `id` went from string to integer |
-| Enum value removed | `status: "pending"` no longer valid |
-| Response code removed | `200 OK` response dropped |
-| Parameter removed | `sort` query param removed |
-| Required field added to request | Body now requires `tenant_id` |
-| Format changed | `date-time` changed to `date` |
+### Breaking Changes
 
-Detection is deterministic — rules, not AI inference. Same input always produces the same result.
+| # | Change Type | Example |
+|---|-------------|---------|
+| 1 | `endpoint_removed` | `DELETE /users/{id}` removed entirely |
+| 2 | `method_removed` | `PATCH /orders` no longer exists |
+| 3 | `required_param_added` | New required header on `GET /items` |
+| 4 | `param_removed` | `sort` query parameter removed |
+| 5 | `response_removed` | `200 OK` response dropped |
+| 6 | `required_field_added` | Request body now requires `tenant_id` |
+| 7 | `field_removed` | `email` dropped from response object |
+| 8 | `type_changed` | `id` went from `string` to `integer` |
+| 9 | `format_changed` | `date-time` changed to `date` |
+| 10 | `enum_value_removed` | `status: "pending"` no longer valid |
+| 11 | `param_type_changed` | Query param `limit` changed from `integer` to `string` |
+| 12 | `param_required_changed` | `filter` param became required |
+| 13 | `response_type_changed` | Response `data` changed from `array` to `object` |
+| 14 | `security_removed` | OAuth2 security scheme removed |
+| 15 | `security_scope_removed` | `write:pets` scope removed from OAuth2 |
+| 16 | `max_length_decreased` | `name` maxLength reduced from 255 to 100 |
+| 17 | `min_length_increased` | `code` minLength increased from 1 to 5 |
+
+### Non-Breaking Changes
+
+| # | Change Type | Example |
+|---|-------------|---------|
+| 18 | `endpoint_added` | New `POST /webhooks` endpoint |
+| 19 | `method_added` | `PATCH /users/{id}` method added |
+| 20 | `optional_param_added` | Optional `format` query param added |
+| 21 | `response_added` | `201 Created` response added |
+| 22 | `optional_field_added` | Optional `nickname` field added to response |
+| 23 | `enum_value_added` | `status: "archived"` value added |
+| 24 | `description_changed` | Updated description for `/health` endpoint |
+| 25 | `security_added` | API key security scheme added |
+| 26 | `deprecated_added` | `GET /v1/users` marked as deprecated |
+| 27 | `default_changed` | Default value for `page_size` changed from 10 to 20 |
 
 ---
 
