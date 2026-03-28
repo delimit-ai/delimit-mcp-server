@@ -222,6 +222,7 @@ async function main() {
     // Step 3: Configure Claude Code MCP
     step(3, 'Configuring Claude Code MCP...');
 
+    const configuredTools = [];
     let mcpConfig = {};
     if (fs.existsSync(MCP_CONFIG)) {
         try {
@@ -236,6 +237,7 @@ async function main() {
 
     if (mcpConfig.mcpServers.delimit) {
         await logp(`  ${green('✓')} Delimit MCP already configured`);
+        configuredTools.push('Claude Code');
     } else {
         mcpConfig.mcpServers.delimit = {
             type: 'stdio',
@@ -249,6 +251,7 @@ async function main() {
         };
         fs.writeFileSync(MCP_CONFIG, JSON.stringify(mcpConfig, null, 2));
         await logp(`  ${green('✓')} Added delimit to ${MCP_CONFIG}`);
+        configuredTools.push('Claude Code');
     }
 
     // Step 3b: Configure Codex MCP (if installed)
@@ -258,12 +261,14 @@ async function main() {
             let toml = fs.readFileSync(CODEX_CONFIG, 'utf-8');
             if (toml.includes('[mcp_servers.delimit]')) {
                 await logp(`  ${green('✓')} Delimit already in Codex config`);
+                configuredTools.push('Codex');
             } else {
                 const serverDir = path.join(DELIMIT_HOME, 'server');
                 const codexEntry = `\n[mcp_servers.delimit]\ncommand = "${python}"\nargs = ["${actualServer}"]\ncwd = "${serverDir}"\n\n[mcp_servers.delimit.env]\nPYTHONPATH = "${serverDir}:${path.join(serverDir, 'ai')}"\n`;
                 toml += codexEntry;
                 fs.writeFileSync(CODEX_CONFIG, toml);
                 await logp(`  ${green('✓')} Added delimit to Codex (${CODEX_CONFIG})`);
+                configuredTools.push('Codex');
             }
         } catch (e) {
             log(`  ${yellow('!')} Could not configure Codex: ${e.message}`);
@@ -281,6 +286,7 @@ async function main() {
             if (!cursorConfig.mcpServers) cursorConfig.mcpServers = {};
             if (cursorConfig.mcpServers.delimit) {
                 await logp(`  ${green('✓')} Delimit already in Cursor config`);
+                configuredTools.push('Cursor');
             } else {
                 cursorConfig.mcpServers.delimit = {
                     command: python,
@@ -290,6 +296,7 @@ async function main() {
                 };
                 fs.writeFileSync(CURSOR_CONFIG, JSON.stringify(cursorConfig, null, 2));
                 await logp(`  ${green('✓')} Added delimit to Cursor (${CURSOR_CONFIG})`);
+                configuredTools.push('Cursor');
             }
         } catch (e) {
             log(`  ${yellow('!')} Could not configure Cursor: ${e.message}`);
@@ -308,6 +315,7 @@ async function main() {
             if (!geminiConfig.mcpServers) geminiConfig.mcpServers = {};
             if (geminiConfig.mcpServers.delimit) {
                 await logp(`  ${green('✓')} Delimit already in Gemini CLI config`);
+                configuredTools.push('Gemini CLI');
             } else {
                 geminiConfig.mcpServers.delimit = {
                     command: python,
@@ -317,6 +325,7 @@ async function main() {
                 };
                 fs.writeFileSync(GEMINI_CONFIG, JSON.stringify(geminiConfig, null, 2));
                 await logp(`  ${green('✓')} Added delimit to Gemini CLI (${GEMINI_CONFIG})`);
+                configuredTools.push('Gemini CLI');
             }
             // Add governance instructions
             if (!geminiConfig.customInstructions || !geminiConfig.customInstructions.includes('delimit_ledger_context')) {
@@ -833,11 +842,10 @@ exit 127
     log(`  ${green('Delimit is installed.')} Your AI now has persistent memory and governance.`);
     log('');
     log('  Configured for:');
-    const tools = ['Claude Code'];
-    if (fs.existsSync(CODEX_CONFIG)) tools.push('Codex');
-    if (fs.existsSync(path.join(os.homedir(), '.cursor'))) tools.push('Cursor');
-    if (fs.existsSync(GEMINI_DIR)) tools.push('Gemini CLI');
-    log(`  ${green('✓')} ${tools.join(', ')}`);
+    const tools = configuredTools.length > 0 ? [...new Set(configuredTools)] : ['Claude Code'];
+    for (const t of tools) {
+        log(`  ${green('✓')} ${t}`);
+    }
 
     log('');
 
