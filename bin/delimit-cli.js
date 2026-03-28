@@ -1164,6 +1164,69 @@ jobs:
             }
         }
 
+        // Step 4b: Add scheduled drift monitoring workflow (LED-260)
+        if (specPath && ciProvider === 'github') {
+            const driftWorkflowFile = path.join(projectDir, '.github', 'workflows', 'api-drift-monitor.yml');
+            if (!fs.existsSync(driftWorkflowFile)) {
+                let writeDrift = false;
+                if (!options.yes) {
+                    try {
+                        const driftAns = await inquirer.prompt([{
+                            type: 'confirm',
+                            name: 'addDrift',
+                            message: 'Add weekly drift monitoring workflow?',
+                            default: true,
+                        }]);
+                        writeDrift = driftAns.addDrift;
+                    } catch {}
+                }
+                if (writeDrift) {
+                    try {
+                        const driftContent = `name: API Drift Monitor
+on:
+  schedule:
+    - cron: '17 9 * * 1'  # Weekly on Monday at 9:17 AM UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  drift-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      - run: pip install pyyaml 2>/dev/null
+      - name: Check for API drift
+        run: |
+          npx delimit-cli lint ${specPath} ${specPath} --baseline
+          echo "Drift check complete"
+      - name: Create issue on drift
+        if: failure()
+        uses: actions/github-script@v6
+        with:
+          script: |
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: 'API Drift Detected — Governance Review Needed',
+              body: 'The weekly drift monitor detected changes to the API spec that have not been reviewed through governance. Run delimit lint to review.',
+              labels: ['api-governance', 'drift'],
+            });
+`;
+                        fs.writeFileSync(driftWorkflowFile, driftContent);
+                        console.log(chalk.green('  Created .github/workflows/api-drift-monitor.yml'));
+                    } catch (err) {
+                        console.log(chalk.yellow(`  Could not write drift workflow: ${err.message}`));
+                    }
+                }
+            }
+        }
+
         // Step 5: Run first lint to show immediate value
         console.log('');
         if (specPath) {
