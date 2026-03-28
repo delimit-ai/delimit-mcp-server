@@ -1067,9 +1067,43 @@ program
             return;
         }
 
+        // Step 2b: Compliance template selection (LED-258)
+        let complianceTemplate = null;
+        if (!options.yes) {
+            try {
+                const templateAns = await inquirer.prompt([{
+                    type: 'list',
+                    name: 'template',
+                    message: 'Compliance template (optional):',
+                    choices: [
+                        { name: 'none     — Standard governance only', value: 'none' },
+                        { name: 'SOC2     — Service Organization Control evidence', value: 'soc2' },
+                        { name: 'PCI-DSS  — Payment card data protection', value: 'pci-dss' },
+                        { name: 'HIPAA    — Healthcare data safeguards', value: 'hipaa' },
+                        { name: 'startup  — Fast-moving team defaults', value: 'startup' },
+                    ],
+                    default: 'none',
+                }]);
+                if (templateAns.template !== 'none') complianceTemplate = templateAns.template;
+            } catch {}
+        }
+
         // Step 3: Create policy file
         fs.mkdirSync(configDir, { recursive: true });
         fs.writeFileSync(policyFile, POLICY_PRESETS[preset]);
+
+        // Write compliance template config if selected
+        if (complianceTemplate) {
+            const templateConfig = {
+                soc2: { evidence_required: true, audit_trail: true, change_approval: true, retention_days: 365 },
+                'pci-dss': { evidence_required: true, audit_trail: true, change_approval: true, secret_scanning: true, retention_days: 365 },
+                hipaa: { evidence_required: true, audit_trail: true, change_approval: true, phi_detection: true, retention_days: 2190 },
+                startup: { evidence_required: false, audit_trail: true, change_approval: false, retention_days: 90 },
+            };
+            const tmplFile = path.join(configDir, 'compliance.json');
+            fs.writeFileSync(tmplFile, JSON.stringify({ template: complianceTemplate, ...templateConfig[complianceTemplate] }, null, 2));
+            console.log(chalk.green(`  Created .delimit/compliance.json (${complianceTemplate})`));
+        }
         console.log(chalk.green(`  Created .delimit/policies.yml (${preset})`));
 
         // Step 4: Add GitHub Action workflow if spec found + GitHub CI
@@ -1182,9 +1216,50 @@ jobs:
             }
         }
 
+        // Step 6: Save first evidence event (LED-258)
+        const evidenceDir = path.join(configDir, 'evidence');
+        fs.mkdirSync(evidenceDir, { recursive: true });
+        const evidenceEvent = {
+            id: `EVD-${Date.now().toString(36)}`,
+            ts: new Date().toISOString(),
+            type: 'governance_init',
+            tool: 'delimit_init',
+            model: 'cli',
+            status: 'pass',
+            summary: `Governance initialized with ${preset} preset`,
+            detail: [
+                `Project: ${projectName}`,
+                frameworkLabel ? `Framework: ${frameworkLabel}` : null,
+                specPath ? `Spec: ${specPath}` : 'Mode: Zero-Spec',
+                `Preset: ${preset}`,
+                ciProvider !== 'none' ? `CI: ${ciProvider}` : null,
+            ].filter(Boolean).join('\n'),
+            venture: projectName,
+        };
+        try {
+            const evidenceFile = path.join(evidenceDir, 'events.jsonl');
+            fs.appendFileSync(evidenceFile, JSON.stringify(evidenceEvent) + '\n');
+            console.log(chalk.green('  Evidence recorded — first governance event saved'));
+        } catch {}
+
+        // Step 7: Show gate status (LED-258)
+        console.log(chalk.bold('\n  Governance Gates:'));
+        const gates = [
+            { name: 'API Lint', status: specPath || ['fastapi', 'nestjs', 'express'].includes(framework) ? 'active' : 'inactive', chain: 'semver → gov_evaluate' },
+            { name: 'Security Audit', status: 'ready', chain: 'evidence_collect → notify' },
+            { name: 'Deploy Plan', status: 'ready', chain: 'security_audit' },
+            { name: 'Release Validate', status: 'ready', chain: 'evidence_collect → notify → ledger' },
+        ];
+        for (const gate of gates) {
+            const icon = gate.status === 'active' ? chalk.green('●') : gate.status === 'ready' ? chalk.yellow('○') : chalk.gray('○');
+            const statusLabel = gate.status === 'active' ? chalk.green('active') : gate.status === 'ready' ? chalk.yellow('ready') : chalk.gray('inactive');
+            console.log(`    ${icon} ${chalk.bold(gate.name)} ${chalk.gray('→')} ${chalk.gray(gate.chain)} ${chalk.gray('(')}${statusLabel}${chalk.gray(')')}`);
+        }
+
         // Summary
         const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-        console.log(chalk.bold(`\n  Setup complete in ${elapsed}s\n`));
+        console.log(chalk.bold(`\n  Setup complete in ${elapsed}s`));
+        console.log(chalk.gray(`  Evidence saved to .delimit/evidence/events.jsonl\n`));
         console.log('  Next steps:');
         if (specPath) {
             console.log(`    ${chalk.bold('delimit lint')} ${specPath} ${specPath}  — lint on every PR`);
