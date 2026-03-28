@@ -28,6 +28,8 @@ const bold = (s) => `\x1b[1m${s}\x1b[0m`;
 
 function log(msg) { console.log(msg); }
 function step(n, msg) { log(`\n${blue(`[${n}]`)} ${msg}`); }
+function pause(ms = 150) { return new Promise(r => setTimeout(r, ms)); }
+async function logp(msg, ms = 180) { console.log(msg); await pause(ms); }
 
 function findGitDir(startDir) {
     let dir = startDir;
@@ -89,7 +91,7 @@ async function main() {
             const match = ver.match(/(\d+)\.(\d+)/);
             if (match && (parseInt(match[1]) >= 3 && parseInt(match[2]) >= 9)) {
                 python = cmd;
-                log(`  ${green('✓')} ${ver}`);
+                await logp(`  ${green('✓')} ${ver}`);
                 break;
             }
         } catch {}
@@ -104,7 +106,7 @@ async function main() {
     try {
         execSync('claude --version 2>/dev/null', { encoding: 'utf-8' });
         hasClaude = true;
-        log(`  ${green('✓')} Claude Code detected`);
+        await logp(`  ${green('✓')} Claude Code detected`);
     } catch {
         log(`  ${yellow('!')} Claude Code not detected — MCP config will still be created`);
     }
@@ -151,13 +153,13 @@ async function main() {
     const gatewaySource = path.join(__dirname, '..', 'gateway');
     if (fs.existsSync(gatewaySource)) {
         copyDir(gatewaySource, path.join(DELIMIT_HOME, 'server'));
-        log(`  ${green('✓')} Core engine installed`);
+        await logp(`  ${green('✓')} Core engine installed`);
     } else {
         // Fallback: try to clone from GitHub
         log(`  ${dim('  Downloading from GitHub...')}`);
         try {
             execSync(`git clone --depth 1 https://github.com/delimit-ai/delimit-gateway.git "${path.join(DELIMIT_HOME, 'server')}" 2>/dev/null`, { stdio: 'pipe' });
-            log(`  ${green('✓')} Core engine cloned`);
+            await logp(`  ${green('✓')} Core engine cloned`);
         } catch {
             log(`  ${yellow('!')} Could not download. Clone manually: git clone https://github.com/delimit-ai/delimit-gateway.git ~/.delimit/server`);
         }
@@ -184,7 +186,7 @@ async function main() {
         execSync(`curl -sL "${proUrl}" -o "${proTarball}" --fail`, { stdio: 'pipe', timeout: 30000 });
         execSync(`tar -xzf "${proTarball}" -C "${proDir}"`, { stdio: 'pipe' });
         fs.unlinkSync(proTarball);
-        log(`  ${green('✓')} Pro modules installed (${artifact})`);
+        await logp(`  ${green('✓')} Pro modules installed (${artifact})`);
     } catch {
         log(`  ${dim('  Pro modules not available for ${artifact} — free tools work fine')}`);
     }
@@ -206,12 +208,12 @@ async function main() {
             execSync(`"${venvPy}" -m pip install --quiet fastmcp==3.1.0 pyyaml==6.0.3 pydantic==2.12.5 packaging==26.0 2>/dev/null`, { stdio: 'pipe' });
         }
         python = venvPy;  // Use venv python for MCP config
-        log(`  ${green('✓')} Python dependencies installed (isolated venv)`);
+        await logp(`  ${green('✓')} Python dependencies installed (isolated venv)`);
     } catch {
         log(`  ${yellow('!')} venv install failed — trying global pip`);
         try {
             execSync(`${python} -m pip install --quiet fastmcp==3.1.0 pyyaml==6.0.3 pydantic==2.12.5 packaging==26.0 2>/dev/null`, { stdio: 'pipe' });
-            log(`  ${green('✓')} Python dependencies installed (global)`);
+            await logp(`  ${green('✓')} Python dependencies installed (global)`);
         } catch {
             log(`  ${yellow('!')} pip install failed — run manually: pip install fastmcp pyyaml pydantic packaging`);
         }
@@ -233,7 +235,7 @@ async function main() {
     const actualServer = fs.existsSync(serverPath) ? serverPath : serverPathAlt;
 
     if (mcpConfig.mcpServers.delimit) {
-        log(`  ${green('✓')} Delimit MCP already configured`);
+        await logp(`  ${green('✓')} Delimit MCP already configured`);
     } else {
         mcpConfig.mcpServers.delimit = {
             type: 'stdio',
@@ -246,7 +248,7 @@ async function main() {
             description: 'Delimit — AI agent guardrails'
         };
         fs.writeFileSync(MCP_CONFIG, JSON.stringify(mcpConfig, null, 2));
-        log(`  ${green('✓')} Added delimit to ${MCP_CONFIG}`);
+        await logp(`  ${green('✓')} Added delimit to ${MCP_CONFIG}`);
     }
 
     // Step 3b: Configure Codex MCP (if installed)
@@ -255,13 +257,13 @@ async function main() {
         try {
             let toml = fs.readFileSync(CODEX_CONFIG, 'utf-8');
             if (toml.includes('[mcp_servers.delimit]')) {
-                log(`  ${green('✓')} Delimit already in Codex config`);
+                await logp(`  ${green('✓')} Delimit already in Codex config`);
             } else {
                 const serverDir = path.join(DELIMIT_HOME, 'server');
                 const codexEntry = `\n[mcp_servers.delimit]\ncommand = "${python}"\nargs = ["${actualServer}"]\ncwd = "${serverDir}"\n\n[mcp_servers.delimit.env]\nPYTHONPATH = "${serverDir}:${path.join(serverDir, 'ai')}"\n`;
                 toml += codexEntry;
                 fs.writeFileSync(CODEX_CONFIG, toml);
-                log(`  ${green('✓')} Added delimit to Codex (${CODEX_CONFIG})`);
+                await logp(`  ${green('✓')} Added delimit to Codex (${CODEX_CONFIG})`);
             }
         } catch (e) {
             log(`  ${yellow('!')} Could not configure Codex: ${e.message}`);
@@ -278,7 +280,7 @@ async function main() {
             }
             if (!cursorConfig.mcpServers) cursorConfig.mcpServers = {};
             if (cursorConfig.mcpServers.delimit) {
-                log(`  ${green('✓')} Delimit already in Cursor config`);
+                await logp(`  ${green('✓')} Delimit already in Cursor config`);
             } else {
                 cursorConfig.mcpServers.delimit = {
                     command: python,
@@ -287,7 +289,7 @@ async function main() {
                     env: { PYTHONPATH: path.join(DELIMIT_HOME, 'server') }
                 };
                 fs.writeFileSync(CURSOR_CONFIG, JSON.stringify(cursorConfig, null, 2));
-                log(`  ${green('✓')} Added delimit to Cursor (${CURSOR_CONFIG})`);
+                await logp(`  ${green('✓')} Added delimit to Cursor (${CURSOR_CONFIG})`);
             }
         } catch (e) {
             log(`  ${yellow('!')} Could not configure Cursor: ${e.message}`);
@@ -305,7 +307,7 @@ async function main() {
             }
             if (!geminiConfig.mcpServers) geminiConfig.mcpServers = {};
             if (geminiConfig.mcpServers.delimit) {
-                log(`  ${green('✓')} Delimit already in Gemini CLI config`);
+                await logp(`  ${green('✓')} Delimit already in Gemini CLI config`);
             } else {
                 geminiConfig.mcpServers.delimit = {
                     command: python,
@@ -314,7 +316,7 @@ async function main() {
                     env: { PYTHONPATH: path.join(DELIMIT_HOME, 'server') }
                 };
                 fs.writeFileSync(GEMINI_CONFIG, JSON.stringify(geminiConfig, null, 2));
-                log(`  ${green('✓')} Added delimit to Gemini CLI (${GEMINI_CONFIG})`);
+                await logp(`  ${green('✓')} Added delimit to Gemini CLI (${GEMINI_CONFIG})`);
             }
             // Add governance instructions
             if (!geminiConfig.customInstructions || !geminiConfig.customInstructions.includes('delimit_ledger_context')) {
@@ -430,7 +432,7 @@ Run full governance compliance checks. Verify security, policy compliance, evide
             installed++;
         }
     }
-    log(`  ${green('✓')} ${installed} agents installed (${Object.keys(agents).length - installed} already existed)`);
+    await logp(`  ${green('✓')} ${installed} agents installed (${Object.keys(agents).length - installed} already existed)`);
 
     // Step 4b: Install Git hooks if inside a git repository
     const gitDir = findGitDir(process.cwd());
@@ -458,7 +460,7 @@ Run full governance compliance checks. Verify security, policy compliance, evide
                 }
             }
             if (hooksInstalled > 0) {
-                log(`  ${green('✓')} ${hooksInstalled} Git hooks installed to ${gitHooksDir}`);
+                await logp(`  ${green('✓')} ${hooksInstalled} Git hooks installed to ${gitHooksDir}`);
             } else {
                 log(`  ${dim('  Git hooks already present (non-Delimit hooks preserved)')}`);
             }
@@ -473,11 +475,11 @@ Run full governance compliance checks. Verify security, policy compliance, evide
     const claudeMd = path.join(os.homedir(), 'CLAUDE.md');
     const claudeResult = upsertDelimitSection(claudeMd);
     if (claudeResult.action === 'created') {
-        log(`  ${green('✓')} Created ${claudeMd} with governance triggers`);
+        await logp(`  ${green('✓')} Created ${claudeMd} with governance triggers`);
     } else if (claudeResult.action === 'updated') {
-        log(`  ${green('✓')} Updated Delimit section in ${claudeMd} (version changed)`);
+        await logp(`  ${green('✓')} Updated Delimit section in ${claudeMd} (version changed)`);
     } else if (claudeResult.action === 'appended') {
-        log(`  ${green('✓')} Appended Delimit section to ${claudeMd} (user content preserved)`);
+        await logp(`  ${green('✓')} Appended Delimit section to ${claudeMd} (user content preserved)`);
     } else {
         log(`  ${dim('  CLAUDE.md already up to date')}`);
     }
