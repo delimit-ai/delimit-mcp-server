@@ -1,9 +1,9 @@
 # `</>` Delimit
 
-Unify Claude Code, Codex, Cursor, and Gemini CLI with persistent context, governance, and multi-model debate.
+API governance that enforces itself. One workspace for Claude Code, Codex, Cursor, and Gemini CLI.
 
 [![npm](https://img.shields.io/npm/v/delimit-cli)](https://www.npmjs.com/package/delimit-cli)
-[![GitHub Action](https://img.shields.io/badge/GitHub%20Action-v1.6.0-blue)](https://github.com/marketplace/actions/delimit-api-governance)
+[![GitHub Action](https://img.shields.io/badge/GitHub%20Action-v1.8.0-blue)](https://github.com/marketplace/actions/delimit-api-governance)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Glama](https://glama.ai/mcp/servers/delimit-ai/delimit-mcp-server/badges/score.svg)](https://glama.ai/mcp/servers/delimit-ai/delimit-mcp-server)
 [![API Governance](https://delimit-ai.github.io/badge/pass.svg)](https://github.com/marketplace/actions/delimit-api-governance)
@@ -12,13 +12,35 @@ Unify Claude Code, Codex, Cursor, and Gemini CLI with persistent context, govern
   <img src="docs/demo.gif" alt="Delimit detecting breaking API changes" width="700">
 </p>
 
-Persistent ledger, API governance, security orchestration, and multi-model deliberation — all shared across Claude Code, Codex, Cursor, and Gemini CLI.
+---
+
+## Try it in 2 minutes
+
+```bash
+npx delimit-cli demo     # See governance in action — no setup needed
+npx delimit-cli init     # Set up governance for your project
+npx delimit-cli setup    # Configure your AI assistants
+```
+
+No API keys. No account. No config files.
+
+---
+
+## What's New in v3.14
+
+- **Evidence timeline + gate status dashboard** -- see every governance decision and when it happened
+- **Multi-agent orchestration** -- track which AI assistant works on what, across models
+- **Continuous drift monitoring** -- detect spec drift between deployments automatically
+- **PR governance copilot** -- gate status posted directly in PR comments
+- **Compliance templates** -- SOC2, PCI-DSS, and HIPAA presets out of the box
+- **Beta capture in CLI** -- opt into early features from the command line
+- **112+ MCP tools** -- governance, context, shipping, observability, and orchestration
 
 ---
 
 ## GitHub Action
 
-Zero-config — auto-detects your OpenAPI spec:
+Zero-config -- auto-detects your OpenAPI spec:
 
 ```yaml
 - uses: delimit-ai/delimit-action@v1
@@ -44,14 +66,9 @@ jobs:
           spec: api/openapi.yaml
 ```
 
-That's it. Delimit auto-fetches the base branch spec, diffs it, and posts a PR comment with:
+That's it. Delimit auto-fetches the base branch spec, diffs it, and posts a PR comment with breaking changes, semver classification, migration guides, and governance gate results.
 
-- Breaking changes with severity badges
-- Semver classification (major/minor/patch)
-- Step-by-step migration guide
-- Policy violations
-
-[View on GitHub Marketplace →](https://github.com/marketplace/actions/delimit-api-governance) · [See a live demo (23 breaking changes) →](https://github.com/delimit-ai/delimit-action-demo/pull/2)
+[View on GitHub Marketplace](https://github.com/marketplace/actions/delimit-api-governance) | [See a live demo (23 breaking changes)](https://github.com/delimit-ai/delimit-action-demo/pull/2)
 
 ### Example PR comment
 
@@ -60,34 +77,34 @@ That's it. Delimit auto-fetches the base branch spec, diffs it, and posts a PR c
 > | Change | Path | Severity |
 > |--------|------|----------|
 > | endpoint_removed | `DELETE /pets/{petId}` | error |
-> | type_changed | `/pets:GET:200[].id` (string → integer) | warning |
+> | type_changed | `/pets:GET:200[].id` (string -> integer) | warning |
 > | enum_value_removed | `/pets:GET:200[].status` | warning |
 >
-> **Semver**: MAJOR (1.0.0 → 2.0.0)
+> **Semver**: MAJOR (1.0.0 -> 2.0.0)
 >
 > **Migration Guide**: 3 steps to update your integration
+>
+> ### Governance Gates
+> | Gate | Status | Chain |
+> |------|--------|-------|
+> | API Lint | Pass/Fail | lint -> semver -> gov_evaluate |
+> | Policy Compliance | Pass/Fail | policy -> evidence_collect |
+> | Security Audit | Pass | security_audit -> evidence_collect |
+> | Deploy Readiness | Ready/Blocked | deploy_plan -> security_audit |
 
 ---
 
-## CLI + MCP Toolkit
-
-Governance tools for AI coding assistants (Claude Code, Codex, Cursor, Gemini CLI):
+## CLI commands
 
 ```bash
-npx delimit-cli setup
-```
-
-No API keys. No account. Installs in 10 seconds.
-
-### CLI commands (all free)
-
-```bash
+npx delimit-cli demo                             # Self-contained governance demo
+npx delimit-cli init                             # Guided wizard with compliance templates
+npx delimit-cli init --preset strict             # Initialize with strict policy
 npx delimit-cli setup                            # Install into all AI assistants
 npx delimit-cli setup --dry-run                  # Preview changes first
 npx delimit-cli lint api/openapi.yaml            # Check for breaking changes
 npx delimit-cli diff old.yaml new.yaml           # Compare two specs
 npx delimit-cli explain old.yaml new.yaml        # Generate migration guide
-npx delimit-cli init --preset strict             # Initialize policies
 npx delimit-cli doctor                           # Check setup health
 npx delimit-cli uninstall --dry-run              # Preview removal
 ```
@@ -194,6 +211,7 @@ rules:
 ## Links
 
 - [delimit.ai](https://delimit.ai) -- homepage
+- [Dashboard](https://app.delimit.ai) -- governance console
 - [Docs](https://delimit.ai/docs) -- full documentation
 - [GitHub Action](https://github.com/marketplace/actions/delimit-api-governance) -- Marketplace listing
 - [Quickstart](https://github.com/delimit-ai/delimit-mcp-server) -- try it in 2 minutes
