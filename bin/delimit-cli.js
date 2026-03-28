@@ -1119,7 +1119,7 @@ program
                         const ans = await inquirer.prompt([{
                             type: 'confirm',
                             name: 'addWorkflow',
-                            message: 'Add GitHub Action for PR governance?',
+                            message: 'Add GitHub Action for PR governance? (Enter = Yes)',
                             default: true,
                         }]);
                         writeWorkflow = ans.addWorkflow;
@@ -1175,7 +1175,7 @@ jobs:
                         const driftAns = await inquirer.prompt([{
                             type: 'confirm',
                             name: 'addDrift',
-                            message: 'Add weekly drift monitoring workflow?',
+                            message: 'Add weekly drift monitoring workflow? (Enter = Yes)',
                             default: true,
                         }]);
                         writeDrift = driftAns.addDrift;
