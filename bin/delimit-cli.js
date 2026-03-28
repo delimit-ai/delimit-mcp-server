@@ -1148,7 +1148,7 @@ jobs:
         with:
           ref: \${{ github.event.pull_request.base.sha }}
           path: _base
-      - uses: delimit-ai/delimit@v1
+      - uses: delimit-ai/delimit-action@v1
         with:
           old_spec: _base/${specPath}
           new_spec: ${specPath}
