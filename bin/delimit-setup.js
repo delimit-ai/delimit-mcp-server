@@ -537,7 +537,12 @@ if [ "$DELIMIT_WRAPPED" = "true" ] || [ ! -t 1 ]; then
 fi
 DELIMIT_HOME="\${DELIMIT_HOME:-$HOME/.delimit}"
 TOOL_COUNT="0"
-[ -f "$DELIMIT_HOME/server/ai/server.py" ] && TOOL_COUNT=$(grep -c '@mcp.tool' "$DELIMIT_HOME/server/ai/server.py" 2>/dev/null || echo "0")
+if [ -f "$DELIMIT_HOME/server/ai/server.py" ]; then
+  TOTAL=$(grep -c '@mcp.tool' "$DELIMIT_HOME/server/ai/server.py" 2>/dev/null || echo "0")
+  OPS=$(grep -c '@_ops_pack_tool' "$DELIMIT_HOME/server/ai/server.py" 2>/dev/null || echo "0")
+  INTERNAL=$(grep -c '@_internal_tool' "$DELIMIT_HOME/server/ai/server.py" 2>/dev/null || echo "0")
+  TOOL_COUNT=$((TOTAL - OPS - INTERNAL))
+fi
 echo ""
 printf "  \${PURPLE}\${BOLD}    ____  ________    ______  _____________\${RESET}\\n"
 printf "  \${PURPLE}\${BOLD}   / __ \\\\/ ____/ /   /  _/  |/  /  _/_  __/\${RESET}\\n"

@@ -147,8 +147,17 @@ def add_item(
     source: str = "session",
     project_path: str = ".",
     tags: Optional[List[str]] = None,
+    acceptance_criteria: Optional[List[str]] = None,
+    context: str = "",
+    tools_needed: Optional[List[str]] = None,
+    estimated_complexity: str = "",
 ) -> Dict[str, Any]:
-    """Add a new item to the project's strategy or operational ledger."""
+    """Add a new item to the project's strategy or operational ledger.
+
+    LED-189: Items can have acceptance_criteria (testable "done when" conditions).
+    LED-190: Items can have context, tools_needed, and estimated_complexity
+    for agent-executable task format.
+    """
     _ensure(project_path)
     venture = _detect_venture(project_path)
     ledger_dir = _project_ledger_dir(project_path)
@@ -173,14 +182,43 @@ def add_item(
         "status": "open",
         "tags": tags or [],
     }
+    # LED-189: Optional acceptance criteria
+    if acceptance_criteria:
+        entry["acceptance_criteria"] = acceptance_criteria
+    # LED-190: Optional agent-executable fields
+    if context:
+        entry["context"] = context
+    if tools_needed:
+        entry["tools_needed"] = tools_needed
+    if estimated_complexity:
+        entry["estimated_complexity"] = estimated_complexity
 
     result = _append(path, entry)
+
+    # Sync to Supabase for dashboard visibility
+    try:
+        from ai.supabase_sync import sync_ledger_item
+        sync_ledger_item(result)
+    except Exception:
+        pass  # Never let cloud sync break ledger operations
+
     return {
         "added": result,
         "ledger": ledger,
         "venture": venture["name"],
         "total_items": len(_read_ledger(path)),
     }
+
+
+def _find_item_in_ledger_dir(item_id: str, ledger_dir: Path) -> Optional[Dict[str, Any]]:
+    """Search a ledger directory for an item by ID. Returns (ledger_name, path) or None."""
+    for ledger_name, filename in [("ops", "operations.jsonl"), ("strategy", "strategy.jsonl")]:
+        path = ledger_dir / filename
+        items = _read_ledger(path)
+        for item in items:
+            if item.get("id") == item_id and item.get("type") != "update":
+                return {"ledger_name": ledger_name, "path": path}
+    return None
 
 
 def update_item(
@@ -194,24 +232,55 @@ def update_item(
     _ensure(project_path)
     ledger_dir = _project_ledger_dir(project_path)
 
-    for ledger_name, filename in [("ops", "operations.jsonl"), ("strategy", "strategy.jsonl")]:
-        path = ledger_dir / filename
-        items = _read_ledger(path)
-        for item in items:
-            if item.get("id") == item_id and item.get("type") != "update":
-                update = {
-                    "id": item_id,
-                    "type": "update",
-                    "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                }
-                if status:
-                    update["status"] = status
-                if note:
-                    update["note"] = note
-                if priority:
-                    update["priority"] = priority
-                _append(path, update)
-                return {"updated": item_id, "changes": update, "ledger": ledger_name}
+    # First, search the specified project's ledger
+    found = _find_item_in_ledger_dir(item_id, ledger_dir)
+
+    # If not found, search all registered ventures as a fallback
+    if not found:
+        try:
+            ventures = {}
+            if VENTURES_FILE.exists():
+                ventures = json.loads(VENTURES_FILE.read_text())
+        except Exception:
+            ventures = {}
+
+        searched = {str(ledger_dir)}
+        for _name, info in ventures.items():
+            vpath = info.get("path", "")
+            if not vpath:
+                continue
+            candidate_dir = Path(vpath) / ".delimit" / "ledger"
+            if str(candidate_dir) in searched:
+                continue
+            searched.add(str(candidate_dir))
+            found = _find_item_in_ledger_dir(item_id, candidate_dir)
+            if found:
+                break
+
+    if found:
+        ledger_name = found["ledger_name"]
+        path = found["path"]
+        update = {
+            "id": item_id,
+            "type": "update",
+            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        if status:
+            update["status"] = status
+        if note:
+            update["note"] = note
+        if priority:
+            update["priority"] = priority
+        _append(path, update)
+
+        # Sync to Supabase for dashboard visibility
+        try:
+            from ai.supabase_sync import sync_ledger_update
+            sync_ledger_update(item_id, status=status or "", note=note or "")
+        except Exception:
+            pass  # Never let cloud sync break ledger operations
+
+        return {"updated": item_id, "changes": update, "ledger": ledger_name}
 
     return {"error": f"Item {item_id} not found in project ledger"}
 
