@@ -5,6 +5,7 @@ const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
 const { execSync, spawn } = require('child_process');
+const os = require('os');
 const chalk = require('chalk');
 const inquirer = require('inquirer');
 const DelimitAuthSetup = require('../lib/auth-setup');
@@ -1332,6 +1333,170 @@ jobs:
         console.log(`    ${chalk.bold('delimit doctor')}                         — verify setup`);
         console.log(`    ${chalk.bold('delimit explain')}                        — human-readable report`);
         console.log('');
+    });
+
+// Demo command — prove governance value in 5 minutes (LED-262)
+program
+    .command('demo')
+    .description('Run a self-contained governance demo — proves value in under 5 minutes')
+    .action(async () => {
+        const tmpDir = path.join(os.tmpdir(), `delimit-demo-${Date.now()}`);
+        fs.mkdirSync(tmpDir, { recursive: true });
+
+        console.log(chalk.bold('\n  Delimit Governance Demo\n'));
+        console.log(chalk.gray(`  Working in ${tmpDir}\n`));
+
+        // Step 1: Create a sample API spec
+        console.log(chalk.bold('  Step 1: Creating sample API spec...'));
+        const baseSpec = {
+            openapi: '3.0.3',
+            info: { title: 'Pet Store API', version: '1.0.0' },
+            paths: {
+                '/pets': {
+                    get: {
+                        summary: 'List all pets',
+                        operationId: 'listPets',
+                        parameters: [
+                            { name: 'limit', in: 'query', required: false, schema: { type: 'integer' } },
+                        ],
+                        responses: { '200': { description: 'A list of pets', content: { 'application/json': { schema: { type: 'array', items: { '$ref': '#/components/schemas/Pet' } } } } } },
+                    },
+                    post: {
+                        summary: 'Create a pet',
+                        operationId: 'createPet',
+                        requestBody: { content: { 'application/json': { schema: { '$ref': '#/components/schemas/Pet' } } } },
+                        responses: { '201': { description: 'Pet created' } },
+                    },
+                },
+                '/pets/{petId}': {
+                    get: {
+                        summary: 'Get a pet by ID',
+                        operationId: 'showPetById',
+                        parameters: [{ name: 'petId', in: 'path', required: true, schema: { type: 'string' } }],
+                        responses: { '200': { description: 'A pet', content: { 'application/json': { schema: { '$ref': '#/components/schemas/Pet' } } } } },
+                    },
+                },
+            },
+            components: {
+                schemas: {
+                    Pet: {
+                        type: 'object',
+                        required: ['id', 'name'],
+                        properties: {
+                            id: { type: 'integer', format: 'int64' },
+                            name: { type: 'string' },
+                            tag: { type: 'string' },
+                        },
+                    },
+                },
+            },
+        };
+
+        const baseSpecPath = path.join(tmpDir, 'openapi-v1.yaml');
+        fs.writeFileSync(baseSpecPath, yaml.dump(baseSpec));
+        console.log(chalk.green('  Created openapi-v1.yaml (3 endpoints, 1 schema)\n'));
+
+        // Step 2: Introduce breaking changes
+        console.log(chalk.bold('  Step 2: Introducing breaking changes...'));
+        const changedSpec = JSON.parse(JSON.stringify(baseSpec));
+        changedSpec.info.version = '2.0.0';
+
+        // Breaking: remove endpoint
+        delete changedSpec.paths['/pets/{petId}'];
+        // Breaking: add required parameter
+        changedSpec.paths['/pets'].get.parameters.push(
+            { name: 'owner_id', in: 'query', required: true, schema: { type: 'string' } }
+        );
+        // Breaking: remove response field
+        delete changedSpec.components.schemas.Pet.properties.tag;
+        // Non-breaking: add endpoint
+        changedSpec.paths['/pets/search'] = {
+            get: {
+                summary: 'Search pets',
+                operationId: 'searchPets',
+                parameters: [{ name: 'q', in: 'query', required: true, schema: { type: 'string' } }],
+                responses: { '200': { description: 'Search results' } },
+            },
+        };
+
+        const changedSpecPath = path.join(tmpDir, 'openapi-v2.yaml');
+        fs.writeFileSync(changedSpecPath, yaml.dump(changedSpec));
+        console.log(chalk.red('  Removed: GET /pets/{petId}'));
+        console.log(chalk.red('  Added required param: owner_id on GET /pets'));
+        console.log(chalk.red('  Removed field: Pet.tag'));
+        console.log(chalk.green('  Added: GET /pets/search'));
+        console.log('');
+
+        // Step 3: Run Delimit lint
+        console.log(chalk.bold('  Step 3: Running governance check...\n'));
+        try {
+            const result = apiEngine.lint(baseSpecPath, changedSpecPath, { policy: 'strict' });
+
+            if (result && result.summary) {
+                const s = result.summary;
+                const breaking = s.breaking || s.breaking_changes || 0;
+                const total = s.total || s.total_changes || 0;
+                const safe = total - breaking;
+
+                if (breaking > 0) {
+                    console.log(chalk.red.bold(`  BLOCKED — ${breaking} breaking change(s) detected\n`));
+                } else {
+                    console.log(chalk.green.bold(`  PASSED — No breaking changes\n`));
+                }
+
+                // Show violations
+                const violations = result.violations || [];
+                if (violations.length > 0) {
+                    console.log(chalk.bold('  Violations:'));
+                    violations.forEach((v, i) => {
+                        const icon = v.severity === 'error' ? chalk.red('  BLOCK') : chalk.yellow('  WARN ');
+                        console.log(`  ${icon} ${v.message}`);
+                        if (v.path) console.log(chalk.gray(`         ${v.path}`));
+                    });
+                    console.log('');
+                }
+
+                // Semver
+                if (result.semver) {
+                    console.log(`  Semver: ${chalk.bold(result.semver.bump?.toUpperCase() || 'MAJOR')}`);
+                    if (result.semver.next_version) {
+                        console.log(`  Next version: ${chalk.bold(result.semver.next_version)}`);
+                    }
+                }
+
+                // Show safe changes
+                if (safe > 0) {
+                    console.log(chalk.green(`\n  ${safe} additive change(s) also detected`));
+                }
+            }
+        } catch (err) {
+            console.log(chalk.yellow(`  Lint error: ${err.message}`));
+        }
+
+        // Step 4: Show governance gates
+        console.log(chalk.bold('\n  Governance Gates:'));
+        console.log(`    ${chalk.red('X')} API Lint          ${chalk.gray('→ semver → gov_evaluate')}`);
+        console.log(`    ${chalk.red('X')} Policy Compliance  ${chalk.gray('→ evidence_collect')}`);
+        console.log(`    ${chalk.green('+')} Security Audit     ${chalk.gray('→ evidence_collect → notify')}`);
+        console.log(`    ${chalk.red('X')} Deploy Readiness   ${chalk.gray('→ deploy_plan → security_audit')}`);
+        console.log(chalk.red.bold('\n  Deploy BLOCKED until all gates pass.\n'));
+
+        // Step 5: Show what would happen with the fix
+        console.log(chalk.bold('  What Delimit does:'));
+        console.log(chalk.gray('    1. Detects the 3 breaking changes automatically'));
+        console.log(chalk.gray('    2. Evaluates against your policy (strict/default/relaxed)'));
+        console.log(chalk.gray('    3. Blocks the deploy via governance gates'));
+        console.log(chalk.gray('    4. Records evidence for audit trail'));
+        console.log(chalk.gray('    5. Posts remediation guide on the PR'));
+        console.log(chalk.gray('    6. Tracks in the ledger for cross-model continuity'));
+
+        console.log(chalk.bold('\n  Try it on your project:'));
+        console.log(`    ${chalk.green('npx delimit-cli init')}     — set up governance`);
+        console.log(`    ${chalk.green('npx delimit-cli lint')}     — lint your API spec`);
+        console.log(`    ${chalk.green('npx delimit-cli setup')}    — configure AI assistants\n`);
+
+        // Cleanup
+        try { fs.rmSync(tmpDir, { recursive: true }); } catch {}
     });
 
 // Doctor command — verify setup is correct
