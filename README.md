@@ -24,6 +24,30 @@ npx delimit-cli setup    # Configure your AI assistants
 
 No API keys. No account. No config files.
 
+### Pick your first win
+
+**Protect my API** — catch breaking changes before merge:
+```bash
+npx delimit-cli try
+# Creates a sample API, introduces breaking changes, shows what gets blocked.
+# Saves a governance report to delimit-report.md
+```
+
+**Watch for drift** — detect spec changes without review:
+```bash
+npx delimit-cli init        # Sets up governance + drift baseline
+# Weekly drift checks run automatically via GitHub Action
+```
+
+**Run PR copilot** — governance gates on every pull request:
+```yaml
+# .github/workflows/api-governance.yml
+- uses: delimit-ai/delimit-action@v1
+  with:
+    spec: api/openapi.yaml
+# Posts gate status, violations, and remediation in PR comments
+```
+
 ---
 
 ## What's New in v3.14
