@@ -1332,7 +1332,29 @@ jobs:
         }
         console.log(`    ${chalk.bold('delimit doctor')}                         — verify setup`);
         console.log(`    ${chalk.bold('delimit explain')}                        — human-readable report`);
-        console.log('');
+
+        // Beta capture after init (LED-263)
+        if (!options.yes) {
+            try {
+                const betaAns = await inquirer.prompt([{
+                    type: 'input',
+                    name: 'email',
+                    message: chalk.blue('  Join the beta? Enter your email (or press Enter to skip):'),
+                }]);
+                if (betaAns.email && betaAns.email.includes('@')) {
+                    try {
+                        await axios.post('https://delimit.ai/api/subscribe', { email: betaAns.email, source: 'cli-init' });
+                        console.log(chalk.green('  Thanks! You\'re on the list.\n'));
+                    } catch {
+                        console.log(chalk.green('  Thanks! Visit https://delimit.ai to stay updated.\n'));
+                    }
+                } else {
+                    console.log('');
+                }
+            } catch {}
+        } else {
+            console.log('');
+        }
     });
 
 // Demo command — prove governance value in 5 minutes (LED-262)
@@ -1494,6 +1516,23 @@ program
         console.log(`    ${chalk.green('npx delimit-cli init')}     — set up governance`);
         console.log(`    ${chalk.green('npx delimit-cli lint')}     — lint your API spec`);
         console.log(`    ${chalk.green('npx delimit-cli setup')}    — configure AI assistants\n`);
+
+        // Beta capture (LED-263)
+        try {
+            const betaAns = await inquirer.prompt([{
+                type: 'input',
+                name: 'email',
+                message: chalk.blue('Join the beta? Enter your email (or press Enter to skip):'),
+            }]);
+            if (betaAns.email && betaAns.email.includes('@')) {
+                try {
+                    await axios.post('https://delimit.ai/api/subscribe', { email: betaAns.email, source: 'cli-demo' });
+                    console.log(chalk.green('\n  Thanks! You\'re on the list. We\'ll keep you in the loop.\n'));
+                } catch {
+                    console.log(chalk.green('\n  Thanks! Visit https://delimit.ai to stay updated.\n'));
+                }
+            }
+        } catch {}
 
         // Cleanup
         try { fs.rmSync(tmpDir, { recursive: true }); } catch {}
