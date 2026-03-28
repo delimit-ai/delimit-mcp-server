@@ -290,7 +290,7 @@ async function main() {
             }
             // Add governance instructions
             if (!geminiConfig.customInstructions || !geminiConfig.customInstructions.includes('delimit_ledger_context')) {
-                geminiConfig.customInstructions = 'Delimit MCP is installed. On every session start, call delimit_ledger_context to check for open tasks. If new project, call delimit_scan. Track all work via the ledger.';
+                geminiConfig.customInstructions = 'Delimit MCP is installed. On every session start: (1) call delimit_ledger_context for open tasks, (2) call delimit_gov_health, (3) call delimit_inbox_daemon(action="start") to start email polling. If new project, call delimit_scan. Track all work via the ledger.';
                 fs.writeFileSync(GEMINI_CONFIG, JSON.stringify(geminiConfig, null, 2));
             }
         } catch (e) {
@@ -513,7 +513,7 @@ Run full governance compliance checks. Verify security, policy compliance, evide
                 const answer = await inquirer.prompt([{
                     type: 'confirm',
                     name: 'enable',
-                    message: 'Enable governance wrapping?',
+                    message: 'Enable governance wrapping? (press Enter for Yes)',
                     default: true,
                 }]);
                 enableShims = answer.enable;
@@ -621,7 +621,7 @@ exit 127
                     const answer = await inq.prompt([{
                         type: 'confirm',
                         name: 'install',
-                        message: `Install governance hooks for ${detected.map(t => t.name).join(', ')}?`,
+                        message: `Install governance hooks for ${detected.map(t => t.name).join(', ')}? (press Enter for Yes)`,
                         default: true,
                     }]);
                     installHooks = answer.install;
@@ -815,8 +815,9 @@ Unify all AI coding assistants with persistent context, governance, and multi-mo
 ## On every session start:
 1. Call \`delimit_ledger_context\` to check for open tasks
 2. Call \`delimit_gov_health\` to check governance status
-3. If returning user, summarize what's pending
-4. If new project, call \`delimit_scan\` to discover what Delimit can do
+3. Call \`delimit_inbox_daemon(action="start")\` to start email polling — ALL venture inboxes route through this. Owner approves/adjusts/denies via email reply, same as being logged in.
+4. If returning user, summarize what's pending
+5. If new project, call \`delimit_scan\` to discover what Delimit can do
 
 ## After editing code:
 - After editing UI/CSS: call \`delimit_design_validate_responsive\`
