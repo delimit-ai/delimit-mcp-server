@@ -109,6 +109,34 @@ async function main() {
         log(`  ${yellow('!')} Claude Code not detected — MCP config will still be created`);
     }
 
+    // Show what we're about to do and ask for confirmation
+    log('');
+    log(`  ${blue('What Delimit will do:')}`);
+    log(`    • Install MCP server to ${dim('~/.delimit/')}`);
+    log(`    • Configure ${hasClaude ? 'Claude Code' : 'your AI assistant'} to use Delimit`);
+    log(`    • Install governance agents + hooks`);
+    log(`    • Set up CLAUDE.md instruction file`);
+    log('');
+    log(`  ${dim('Undo anytime:')} rm -rf ~/.delimit && delimit uninstall`);
+    log('');
+
+    const inquirerTop = (() => { try { return require('inquirer'); } catch { return null; } })();
+    if (inquirerTop && process.stdin.isTTY) {
+        try {
+            const { proceed } = await inquirerTop.prompt([{
+                type: 'confirm',
+                name: 'proceed',
+                message: 'Continue with setup? (Enter = Yes)',
+                default: true,
+            }]);
+            if (!proceed) {
+                log(`\n  ${dim('Setup cancelled. Nothing was changed.')}\n`);
+                process.exit(0);
+            }
+        } catch {}
+    }
+    log('');
+
     // Step 2: Install Delimit MCP server
     step(2, 'Installing Delimit MCP server...');
 
@@ -296,6 +324,33 @@ async function main() {
         } catch (e) {
             log(`  ${yellow('!')} Could not configure Gemini CLI: ${e.message}`);
         }
+    }
+
+    // Checkpoint: MCP is configured, now ask before modifying project files
+    log('');
+    log(`  ${green('✓')} MCP server installed and configured`);
+    log('');
+    log(`  ${blue('Next: project-level setup')}`);
+    log(`    • Install governance agents (lint, engineering, governance)`);
+    log(`    • Update CLAUDE.md with Delimit instructions`);
+    log(`    • Optional: governance wrapping + hooks`);
+    log('');
+
+    const inquirerMid = (() => { try { return require('inquirer'); } catch { return null; } })();
+    if (inquirerMid && process.stdin.isTTY) {
+        try {
+            const { proceed } = await inquirerMid.prompt([{
+                type: 'confirm',
+                name: 'proceed',
+                message: 'Continue with project setup? (Enter = Yes)',
+                default: true,
+            }]);
+            if (!proceed) {
+                log(`\n  ${green('MCP is ready.')} Skipped project-level setup.`);
+                log(`  ${dim('Run')} delimit setup ${dim('again to complete project setup.')}\n`);
+                process.exit(0);
+            }
+        } catch {}
     }
 
     // Step 4: Install default agents
