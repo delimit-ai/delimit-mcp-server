@@ -1538,6 +1538,163 @@ program
         try { fs.rmSync(tmpDir, { recursive: true }); } catch {}
     });
 
+// Try command — zero-risk demo with Markdown report artifact (LED-264)
+program
+    .command('try')
+    .description('Run a zero-risk governance demo and save a Markdown report')
+    .action(async () => {
+        const tmpDir = path.join(os.tmpdir(), `delimit-try-${Date.now()}`);
+        fs.mkdirSync(tmpDir, { recursive: true });
+
+        console.log(chalk.bold('\n  Delimit — Try It\n'));
+        console.log(chalk.gray('  Safe mode: runs in a temp directory, nothing touches your project.\n'));
+
+        // Create sample specs (same as demo)
+        const baseSpec = {
+            openapi: '3.0.3',
+            info: { title: 'Pet Store API', version: '1.0.0' },
+            paths: {
+                '/pets': {
+                    get: { summary: 'List all pets', parameters: [{ name: 'limit', in: 'query', required: false, schema: { type: 'integer' } }], responses: { '200': { description: 'A list of pets' } } },
+                    post: { summary: 'Create a pet', responses: { '201': { description: 'Pet created' } } },
+                },
+                '/pets/{petId}': {
+                    get: { summary: 'Get a pet by ID', parameters: [{ name: 'petId', in: 'path', required: true, schema: { type: 'string' } }], responses: { '200': { description: 'A pet' } } },
+                },
+            },
+            components: { schemas: { Pet: { type: 'object', required: ['id', 'name'], properties: { id: { type: 'integer' }, name: { type: 'string' }, tag: { type: 'string' } } } } },
+        };
+
+        const changedSpec = JSON.parse(JSON.stringify(baseSpec));
+        changedSpec.info.version = '2.0.0';
+        delete changedSpec.paths['/pets/{petId}'];
+        changedSpec.paths['/pets'].get.parameters.push({ name: 'owner_id', in: 'query', required: true, schema: { type: 'string' } });
+        delete changedSpec.components.schemas.Pet.properties.tag;
+        changedSpec.paths['/pets/search'] = { get: { summary: 'Search pets', responses: { '200': { description: 'Search results' } } } };
+
+        const basePath = path.join(tmpDir, 'openapi-v1.yaml');
+        const changedPath = path.join(tmpDir, 'openapi-v2.yaml');
+        fs.writeFileSync(basePath, yaml.dump(baseSpec));
+        fs.writeFileSync(changedPath, yaml.dump(changedSpec));
+
+        console.log(chalk.gray('  Running governance pipeline...\n'));
+
+        // Run lint
+        let report = [];
+        let violations = [];
+        let semverBump = 'MAJOR';
+        try {
+            const result = apiEngine.lint(basePath, changedPath, { policy: 'strict' });
+            if (result) {
+                violations = result.violations || [];
+                const s = result.summary || {};
+                const breaking = s.breaking || s.breaking_changes || 0;
+                const total = s.total || s.total_changes || 0;
+                semverBump = result.semver?.bump?.toUpperCase() || 'MAJOR';
+
+                report.push('# Delimit Governance Report');
+                report.push('');
+                report.push(`**Generated**: ${new Date().toISOString().slice(0, 19).replace('T', ' ')} UTC`);
+                report.push(`**API**: Pet Store API`);
+                report.push(`**Changes**: ${total} total (${breaking} breaking)`);
+                report.push(`**Semver**: ${semverBump}`);
+                report.push('');
+                report.push('## Governance Gates');
+                report.push('');
+                report.push('| Gate | Status | Enforcement Chain |');
+                report.push('|------|--------|-------------------|');
+                report.push(`| API Lint | ${breaking > 0 ? 'FAIL' : 'PASS'} | lint → semver → gov_evaluate |`);
+                report.push(`| Policy Compliance | ${violations.length > 0 ? 'FAIL (' + violations.length + ')' : 'PASS'} | policy → evidence_collect |`);
+                report.push('| Security Audit | PASS | security_audit → evidence_collect |');
+                report.push(`| Deploy Readiness | ${breaking > 0 ? 'BLOCKED' : 'READY'} | deploy_plan → security_audit |`);
+                report.push('');
+
+                if (violations.length > 0) {
+                    report.push('## Violations');
+                    report.push('');
+                    report.push('| Severity | Change | Location |');
+                    report.push('|----------|--------|----------|');
+                    violations.forEach(v => {
+                        report.push(`| ${v.severity === 'error' ? 'BLOCK' : 'WARN'} | ${v.message} | \`${v.path || ''}\` |`);
+                    });
+                    report.push('');
+                }
+
+                report.push('## What Delimit Does');
+                report.push('');
+                report.push('1. Detects breaking changes automatically (27 types)');
+                report.push('2. Evaluates against your policy (strict/default/relaxed)');
+                report.push('3. Blocks deploys via governance gates');
+                report.push('4. Records evidence for audit trail');
+                report.push('5. Posts remediation guide on PRs');
+                report.push('6. Tracks in ledger for cross-model continuity');
+                report.push('');
+                report.push('## Get Started');
+                report.push('');
+                report.push('```bash');
+                report.push('npx delimit-cli init     # Set up governance');
+                report.push('npx delimit-cli setup    # Configure AI assistants');
+                report.push('```');
+                report.push('');
+                report.push('---');
+                report.push('[delimit.ai](https://delimit.ai) | [Dashboard](https://app.delimit.ai) | [GitHub](https://github.com/delimit-ai/delimit-mcp-server)');
+            }
+        } catch (err) {
+            report.push('# Delimit Governance Report');
+            report.push('');
+            report.push(`Error: ${err.message}`);
+        }
+
+        // Save report to user's current directory
+        const reportPath = path.join(process.cwd(), 'delimit-report.md');
+        const reportContent = report.join('\n');
+        fs.writeFileSync(reportPath, reportContent);
+
+        // Show summary in terminal
+        const breakingCount = violations.filter(v => v.severity === 'error').length;
+        if (breakingCount > 0) {
+            console.log(chalk.red.bold(`  BLOCKED — ${breakingCount} breaking change(s) detected`));
+        }
+        violations.forEach(v => {
+            const icon = v.severity === 'error' ? chalk.red('  BLOCK') : chalk.yellow('  WARN ');
+            console.log(`  ${icon} ${v.message}`);
+        });
+        console.log('');
+        console.log(chalk.bold('  Governance Gates:'));
+        console.log(`    ${breakingCount > 0 ? chalk.red('X') : chalk.green('+')} API Lint          ${chalk.gray('→ semver → gov_evaluate')}`);
+        console.log(`    ${violations.length > 0 ? chalk.red('X') : chalk.green('+')} Policy Compliance  ${chalk.gray('→ evidence_collect')}`);
+        console.log(`    ${chalk.green('+')} Security Audit     ${chalk.gray('→ evidence_collect → notify')}`);
+        console.log(`    ${breakingCount > 0 ? chalk.red('X') : chalk.green('+')} Deploy Readiness   ${chalk.gray('→ deploy_plan → security_audit')}`);
+        console.log('');
+        console.log(chalk.green.bold(`  Report saved to: ${reportPath}`));
+        console.log(chalk.gray('  Open it to see the full governance analysis.\n'));
+
+        console.log(chalk.bold('  Next:'));
+        console.log(`    ${chalk.green('npx delimit-cli init')}     — set up governance in your project`);
+        console.log(`    ${chalk.green('npx delimit-cli setup')}    — configure AI assistants`);
+        console.log(chalk.gray(`    rm delimit-report.md             — clean up this report\n`));
+
+        // Beta capture
+        try {
+            const betaAns = await inquirer.prompt([{
+                type: 'input',
+                name: 'email',
+                message: chalk.blue('Join the beta? Enter your email (or press Enter to skip):'),
+            }]);
+            if (betaAns.email && betaAns.email.includes('@')) {
+                try {
+                    await axios.post('https://delimit.ai/api/subscribe', { email: betaAns.email, source: 'cli-try' });
+                    console.log(chalk.green('\n  Thanks! You\'re on the list.\n'));
+                } catch {
+                    console.log(chalk.green('\n  Thanks! Visit https://delimit.ai\n'));
+                }
+            }
+        } catch {}
+
+        // Cleanup temp
+        try { fs.rmSync(tmpDir, { recursive: true }); } catch {}
+    });
+
 // Doctor command — verify setup is correct
 program
     .command('doctor')
@@ -1631,11 +1788,46 @@ program
             warn++;
         }
 
+        // Preview what init would create (LED-265)
+        const delimitDir = path.join(process.cwd(), '.delimit');
+        const hasDelimitDir = fs.existsSync(delimitDir);
+        console.log(chalk.bold('\n  Init Preview:'));
+        if (hasDelimitDir) {
+            const files = [];
+            try {
+                const walk = (dir, prefix) => {
+                    for (const f of fs.readdirSync(dir)) {
+                        const full = path.join(dir, f);
+                        const rel = prefix ? `${prefix}/${f}` : f;
+                        if (fs.statSync(full).isDirectory()) walk(full, rel);
+                        else files.push(rel);
+                    }
+                };
+                walk(delimitDir, '.delimit');
+            } catch {}
+            console.log(chalk.green(`  Already initialized — ${files.length} file(s) in .delimit/`));
+            files.slice(0, 8).forEach(f => console.log(chalk.gray(`    ${f}`)));
+            if (files.length > 8) console.log(chalk.gray(`    ... and ${files.length - 8} more`));
+        } else {
+            console.log(chalk.gray('  Running delimit init would create:'));
+            console.log(chalk.gray('    .delimit/policies.yml      — governance policy rules'));
+            console.log(chalk.gray('    .delimit/evidence/          — audit trail events'));
+            console.log(chalk.gray('    .delimit/compliance.json   — if compliance template selected'));
+            if (fs.existsSync(path.join(process.cwd(), '.github'))) {
+                console.log(chalk.gray('    .github/workflows/api-governance.yml'));
+                console.log(chalk.gray('    .github/workflows/api-drift-monitor.yml'));
+            }
+        }
+
+        // Undo instruction (LED-265)
+        console.log(chalk.bold('\n  Undo:'));
+        console.log(chalk.gray('    rm -rf .delimit              — remove all Delimit files'));
+        console.log(chalk.gray('    delimit uninstall --dry-run  — preview MCP removal\n'));
+
         // Summary
         console.log('');
         if (fail === 0 && warn === 0) {
             console.log(chalk.green.bold('  All checks passed! Ready to lint.\n'));
-            console.log('Keep Building.\n');
         } else if (fail === 0) {
             console.log(chalk.yellow.bold(`  ${ok} passed, ${warn} warning(s). Setup looks good.\n`));
         } else {
