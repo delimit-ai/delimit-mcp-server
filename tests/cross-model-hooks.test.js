@@ -94,7 +94,7 @@ describe('installClaudeHooks', () => {
     beforeEach(() => { setupTmpHome(); });
     afterEach(() => { teardownTmpHome(); });
 
-    it('creates settings.json with SessionStart and PreToolUse hooks with conditional if fields', () => {
+    it('creates settings.json with SessionStart and PreToolUse hooks in nested format with conditional if fields', () => {
         const claudeDir = path.join(tmpDir, '.claude');
         fs.mkdirSync(claudeDir, { recursive: true });
 
@@ -103,39 +103,49 @@ describe('installClaudeHooks', () => {
             name: 'Claude Code',
             configPath: path.join(claudeDir, 'settings.json'),
         };
-        const hookConfig = { session_start: true, pre_tool: true, pre_commit: true };
+        const hookConfig = { session_start: true, pre_tool: true, pre_commit: true, conditional_hooks: true, deploy_audit: true };
 
         const changes = crossModelHooks.installClaudeHooks(tool, hookConfig);
 
         assert.ok(changes.includes('SessionStart'));
         assert.ok(changes.includes('PreToolUse'));
         assert.ok(changes.includes('PreCommit'));
+        // LED-234 conditional hooks
+        assert.ok(changes.includes('PostToolUse:spec-lint'), 'Should install PostToolUse spec-lint');
+        assert.ok(changes.includes('PreToolUse:doctor'), 'Should install PreToolUse doctor');
+        assert.ok(changes.includes('PreToolUse:deploy-audit'), 'Should install PreToolUse deploy-audit');
 
         const config = JSON.parse(fs.readFileSync(tool.configPath, 'utf-8'));
         assert.ok(config.hooks.SessionStart, 'SessionStart hooks should exist');
         assert.ok(config.hooks.PreToolUse, 'PreToolUse hooks should exist');
+        assert.ok(config.hooks.PostToolUse, 'PostToolUse hooks should exist');
 
-        const sessionHook = config.hooks.SessionStart[0];
-        assert.strictEqual(sessionHook.type, 'command');
-        assert.ok(sessionHook.command.includes('delimit-cli hook session-start'));
-        assert.strictEqual(sessionHook.if, undefined, 'SessionStart should have no if condition');
+        // SessionStart uses nested format
+        const sessionGroup = config.hooks.SessionStart[0];
+        assert.ok(sessionGroup.hooks, 'SessionStart should use nested format');
+        assert.ok(sessionGroup.hooks[0].command.includes('delimit-cli hook session-start'));
+        assert.strictEqual(sessionGroup.if, undefined, 'SessionStart should have no if condition');
 
-        // PreToolUse should have the spec-scoped hook
-        const preToolHook = config.hooks.PreToolUse.find(h => h.command.includes('hook pre-tool'));
-        assert.ok(preToolHook, 'PreToolUse pre-tool hook should exist');
-        assert.strictEqual(preToolHook.matcher, 'Edit|Write');
-        assert.ok(preToolHook.if, 'PreToolUse pre-tool hook should have an if condition');
-        assert.ok(preToolHook.if.includes('path_matches'), 'if condition should use path_matches');
-        assert.ok(preToolHook.if.includes('openapi'), 'if condition should mention openapi');
-        assert.ok(preToolHook.if.includes('swagger'), 'if condition should mention swagger');
+        // PreToolUse should have the spec-scoped hook in nested format
+        const preToolGroup = config.hooks.PreToolUse.find(
+            g => g.hooks && g.hooks.some(h => h.command.includes('hook pre-tool'))
+        );
+        assert.ok(preToolGroup, 'PreToolUse pre-tool hook group should exist');
+        assert.strictEqual(preToolGroup.matcher, 'Edit|Write');
+        assert.ok(preToolGroup.if, 'PreToolUse pre-tool hook should have an if condition');
+        assert.ok(preToolGroup.if.includes('path_matches'), 'if condition should use path_matches');
+        assert.ok(preToolGroup.if.includes('openapi'), 'if condition should mention openapi');
+        assert.ok(preToolGroup.if.includes('swagger'), 'if condition should mention swagger');
 
         // PreToolUse should also have the pre-commit hook scoped to Bash
-        const preCommitHook = config.hooks.PreToolUse.find(h => h.command.includes('hook pre-commit'));
-        assert.ok(preCommitHook, 'PreToolUse pre-commit hook should exist');
-        assert.strictEqual(preCommitHook.matcher, 'Bash');
-        assert.ok(preCommitHook.if, 'PreCommit hook should have an if condition');
-        assert.ok(preCommitHook.if.includes('git commit'), 'if condition should mention git commit');
-        assert.ok(preCommitHook.if.includes('git push'), 'if condition should mention git push');
+        const preCommitGroup = config.hooks.PreToolUse.find(
+            g => g.hooks && g.hooks.some(h => h.command.includes('hook pre-commit'))
+        );
+        assert.ok(preCommitGroup, 'PreToolUse pre-commit hook group should exist');
+        assert.strictEqual(preCommitGroup.matcher, 'Bash');
+        assert.ok(preCommitGroup.if, 'PreCommit hook should have an if condition');
+        assert.ok(preCommitGroup.if.includes('git commit'), 'if condition should mention git commit');
+        assert.ok(preCommitGroup.if.includes('git push'), 'if condition should mention git push');
     });
 
     it('does not duplicate hooks on repeated installation', () => {
@@ -147,7 +157,7 @@ describe('installClaudeHooks', () => {
             name: 'Claude Code',
             configPath: path.join(claudeDir, 'settings.json'),
         };
-        const hookConfig = { session_start: true, pre_tool: true, pre_commit: true };
+        const hookConfig = { session_start: true, pre_tool: true, pre_commit: true, conditional_hooks: true, deploy_audit: true };
 
         // Install twice
         crossModelHooks.installClaudeHooks(tool, hookConfig);
@@ -157,7 +167,10 @@ describe('installClaudeHooks', () => {
 
         const config = JSON.parse(fs.readFileSync(tool.configPath, 'utf-8'));
         assert.strictEqual(config.hooks.SessionStart.length, 1, 'Should have exactly one SessionStart hook');
-        assert.strictEqual(config.hooks.PreToolUse.length, 2, 'Should have exactly two PreToolUse hooks (pre-tool + pre-commit)');
+        // pre-tool + pre-commit + doctor + deploy-audit = 4
+        assert.strictEqual(config.hooks.PreToolUse.length, 4, 'Should have exactly four PreToolUse hooks');
+        // spec-lint = 1
+        assert.strictEqual(config.hooks.PostToolUse.length, 1, 'Should have exactly one PostToolUse hook');
     });
 
     it('preserves existing settings.json content', () => {
@@ -189,24 +202,25 @@ describe('installClaudeHooks', () => {
             name: 'Claude Code',
             configPath: path.join(claudeDir, 'settings.json'),
         };
-        const hookConfig = { session_start: false, pre_tool: true, pre_commit: false };
+        const hookConfig = { session_start: false, pre_tool: true, pre_commit: false, conditional_hooks: false };
 
         const changes = crossModelHooks.installClaudeHooks(tool, hookConfig);
 
         assert.ok(!changes.includes('SessionStart'), 'SessionStart should not be installed');
         assert.ok(changes.includes('PreToolUse'), 'PreToolUse should be installed');
         assert.ok(!changes.includes('PreCommit'), 'PreCommit should not be installed');
+        assert.ok(!changes.includes('PostToolUse:spec-lint'), 'Conditional hooks should not be installed');
 
         const config = JSON.parse(fs.readFileSync(tool.configPath, 'utf-8'));
         assert.ok(!config.hooks.SessionStart, 'No SessionStart entry should exist');
-        assert.strictEqual(config.hooks.PreToolUse.length, 1, 'Only pre-tool hook, no pre-commit');
+        assert.strictEqual(config.hooks.PreToolUse.length, 1, 'Only pre-tool hook, no pre-commit or conditional');
     });
 
-    it('upgrades existing pre-tool hook to include if condition', () => {
+    it('upgrades existing flat-format pre-tool hook to nested format with if condition', () => {
         const claudeDir = path.join(tmpDir, '.claude');
         fs.mkdirSync(claudeDir, { recursive: true });
 
-        // Simulate old-format hook already installed
+        // Simulate old flat-format hook already installed
         const oldConfig = {
             hooks: {
                 PreToolUse: [{
@@ -220,17 +234,20 @@ describe('installClaudeHooks', () => {
         fs.writeFileSync(configPath, JSON.stringify(oldConfig));
 
         const tool = { id: 'claude', name: 'Claude Code', configPath };
-        const hookConfig = { session_start: false, pre_tool: true, pre_commit: true };
+        const hookConfig = { session_start: false, pre_tool: true, pre_commit: true, conditional_hooks: false };
 
         const changes = crossModelHooks.installClaudeHooks(tool, hookConfig);
 
         assert.ok(changes.includes('PreToolUse (upgraded)'), 'Should report upgrade');
 
         const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-        const preToolHook = config.hooks.PreToolUse.find(h => h.command.includes('hook pre-tool'));
-        assert.ok(preToolHook.if, 'Upgraded hook should have if condition');
-        assert.strictEqual(preToolHook.matcher, 'Edit|Write', 'Matcher should be narrowed');
-        assert.ok(preToolHook.command.includes('$TOOL_NAME'), 'Command should include $TOOL_NAME');
+        const preToolGroup = config.hooks.PreToolUse.find(
+            g => g.hooks && g.hooks.some(h => h.command.includes('hook pre-tool'))
+        );
+        assert.ok(preToolGroup, 'Upgraded hook group should exist');
+        assert.ok(preToolGroup.if, 'Upgraded hook should have if condition');
+        assert.strictEqual(preToolGroup.matcher, 'Edit|Write', 'Matcher should be narrowed');
+        assert.ok(preToolGroup.hooks[0].command.includes('$TOOL_NAME'), 'Command should include $TOOL_NAME');
     });
 });
 
@@ -328,7 +345,39 @@ describe('removeClaudeHooks', () => {
     beforeEach(() => { setupTmpHome(); });
     afterEach(() => { teardownTmpHome(); });
 
-    it('removes Delimit hooks from settings.json', () => {
+    it('removes Delimit hooks from settings.json (nested format)', () => {
+        const claudeDir = path.join(tmpDir, '.claude');
+        fs.mkdirSync(claudeDir, { recursive: true });
+
+        const config = {
+            hooks: {
+                SessionStart: [
+                    { matcher: '', hooks: [{ type: 'command', command: 'npx delimit-cli hook session-start' }] },
+                    { matcher: '', hooks: [{ type: 'command', command: 'some-other-tool' }] },
+                ],
+                PreToolUse: [
+                    { matcher: 'Edit|Write', if: "Edit && path_matches('**/openapi*')", hooks: [{ type: 'command', command: 'npx delimit-cli hook pre-tool $TOOL_NAME' }] },
+                    { matcher: 'Bash', if: "Bash && input_contains('git commit')", hooks: [{ type: 'command', command: 'npx delimit-cli hook pre-commit' }] },
+                    { matcher: 'Bash', if: "command matches 'git commit'", hooks: [{ type: 'command', command: 'npx delimit-cli doctor' }] },
+                ],
+                PostToolUse: [
+                    { matcher: 'Edit|Write', hooks: [{ type: 'command', command: 'npx delimit-cli lint "$DELIMIT_FILE_PATH"' }] },
+                ],
+            }
+        };
+        fs.writeFileSync(path.join(claudeDir, 'settings.json'), JSON.stringify(config));
+
+        const removed = crossModelHooks.removeClaudeHooks();
+        assert.ok(removed, 'Should report changes');
+
+        const updated = JSON.parse(fs.readFileSync(path.join(claudeDir, 'settings.json'), 'utf-8'));
+        assert.strictEqual(updated.hooks.SessionStart.length, 1, 'Non-delimit hook preserved');
+        assert.strictEqual(updated.hooks.SessionStart[0].hooks[0].command, 'some-other-tool');
+        assert.ok(!updated.hooks.PreToolUse, 'Empty PreToolUse array should be removed');
+        assert.ok(!updated.hooks.PostToolUse, 'Empty PostToolUse array should be removed');
+    });
+
+    it('removes Delimit hooks in flat format (backward compat)', () => {
         const claudeDir = path.join(tmpDir, '.claude');
         fs.mkdirSync(claudeDir, { recursive: true });
 
@@ -337,10 +386,6 @@ describe('removeClaudeHooks', () => {
                 SessionStart: [
                     { type: 'command', command: 'npx delimit-cli hook session-start' },
                     { type: 'command', command: 'some-other-tool' },
-                ],
-                PreToolUse: [
-                    { type: 'command', command: 'npx delimit-cli hook pre-tool $TOOL_NAME', matcher: 'Edit|Write', if: "Edit && path_matches('**/openapi*')" },
-                    { type: 'command', command: 'npx delimit-cli hook pre-commit', matcher: 'Bash', if: "Bash && input_contains('git commit')" },
                 ],
             }
         };
@@ -352,7 +397,6 @@ describe('removeClaudeHooks', () => {
         const updated = JSON.parse(fs.readFileSync(path.join(claudeDir, 'settings.json'), 'utf-8'));
         assert.strictEqual(updated.hooks.SessionStart.length, 1, 'Non-delimit hook preserved');
         assert.strictEqual(updated.hooks.SessionStart[0].command, 'some-other-tool');
-        assert.ok(!updated.hooks.PreToolUse, 'Empty PreToolUse array should be removed');
     });
 });
 
@@ -688,6 +732,215 @@ describe('loadHookConfig with deliberation settings', () => {
     it('defaults include show_strategy_items as true', () => {
         const config = crossModelHooks.loadHookConfig();
         assert.strictEqual(config.show_strategy_items, true);
+    });
+
+    it('defaults include conditional_hooks as true', () => {
+        const config = crossModelHooks.loadHookConfig();
+        assert.strictEqual(config.conditional_hooks, true);
+    });
+
+    it('defaults include deploy_audit as true', () => {
+        const config = crossModelHooks.loadHookConfig();
+        assert.strictEqual(config.deploy_audit, true);
+    });
+});
+
+// -----------------------------------------------------------------------
+// LED-234: Conditional hooks tests
+// -----------------------------------------------------------------------
+
+describe('LED-234: Conditional Claude Code hooks', () => {
+    beforeEach(() => { setupTmpHome(); });
+    afterEach(() => { teardownTmpHome(); });
+
+    it('installs PostToolUse spec-lint hook with correct if condition', () => {
+        const claudeDir = path.join(tmpDir, '.claude');
+        fs.mkdirSync(claudeDir, { recursive: true });
+
+        const tool = { id: 'claude', name: 'Claude Code', configPath: path.join(claudeDir, 'settings.json') };
+        const hookConfig = { session_start: false, pre_tool: false, pre_commit: false, conditional_hooks: true };
+
+        crossModelHooks.installClaudeHooks(tool, hookConfig);
+
+        const config = JSON.parse(fs.readFileSync(tool.configPath, 'utf-8'));
+        assert.ok(config.hooks.PostToolUse, 'PostToolUse should exist');
+
+        const specLintGroup = config.hooks.PostToolUse.find(
+            g => g.hooks && g.hooks.some(h => h.command.includes('delimit-cli lint'))
+        );
+        assert.ok(specLintGroup, 'Spec-lint hook group should exist');
+        assert.strictEqual(specLintGroup.matcher, 'Edit|Write');
+        assert.ok(specLintGroup.if, 'Should have an if condition');
+        assert.ok(specLintGroup.if.includes('openapi'), 'if should match openapi');
+        assert.ok(specLintGroup.if.includes('swagger'), 'if should match swagger');
+        assert.ok(specLintGroup.if.includes('api/*.yaml'), 'if should match api directory');
+        assert.ok(specLintGroup.if.includes('specs/**'), 'if should match specs directory');
+        assert.ok(specLintGroup.hooks[0].command.includes('$DELIMIT_FILE_PATH'), 'Command should reference file path');
+        assert.strictEqual(specLintGroup.hooks[0].timeout, 30, 'Should have 30s timeout');
+    });
+
+    it('installs PreToolUse doctor hook with git commit condition', () => {
+        const claudeDir = path.join(tmpDir, '.claude');
+        fs.mkdirSync(claudeDir, { recursive: true });
+
+        const tool = { id: 'claude', name: 'Claude Code', configPath: path.join(claudeDir, 'settings.json') };
+        const hookConfig = { session_start: false, pre_tool: false, pre_commit: false, conditional_hooks: true };
+
+        crossModelHooks.installClaudeHooks(tool, hookConfig);
+
+        const config = JSON.parse(fs.readFileSync(tool.configPath, 'utf-8'));
+        const doctorGroup = config.hooks.PreToolUse.find(
+            g => g.hooks && g.hooks.some(h => h.command.includes('delimit-cli doctor'))
+        );
+        assert.ok(doctorGroup, 'Doctor hook group should exist');
+        assert.strictEqual(doctorGroup.matcher, 'Bash');
+        assert.ok(doctorGroup.if.includes('git commit'), 'if should match git commit');
+        assert.strictEqual(doctorGroup.hooks[0].timeout, 15, 'Should have 15s timeout');
+    });
+
+    it('installs PreToolUse deploy-audit hook with deploy/publish conditions', () => {
+        const claudeDir = path.join(tmpDir, '.claude');
+        fs.mkdirSync(claudeDir, { recursive: true });
+
+        const tool = { id: 'claude', name: 'Claude Code', configPath: path.join(claudeDir, 'settings.json') };
+        const hookConfig = { session_start: false, pre_tool: false, pre_commit: false, conditional_hooks: true, deploy_audit: true };
+
+        crossModelHooks.installClaudeHooks(tool, hookConfig);
+
+        const config = JSON.parse(fs.readFileSync(tool.configPath, 'utf-8'));
+        const deployGroup = config.hooks.PreToolUse.find(
+            g => g.hooks && g.hooks.some(h => h.command.includes('delimit-cli security-audit'))
+        );
+        assert.ok(deployGroup, 'Deploy-audit hook group should exist');
+        assert.strictEqual(deployGroup.matcher, 'Bash');
+        assert.ok(deployGroup.if.includes('npm publish'), 'if should match npm publish');
+        assert.ok(deployGroup.if.includes('deploy'), 'if should match deploy');
+        assert.ok(deployGroup.if.includes('release'), 'if should match release');
+        assert.strictEqual(deployGroup.hooks[0].timeout, 30, 'Should have 30s timeout');
+    });
+
+    it('skips deploy-audit when deploy_audit is false', () => {
+        const claudeDir = path.join(tmpDir, '.claude');
+        fs.mkdirSync(claudeDir, { recursive: true });
+
+        const tool = { id: 'claude', name: 'Claude Code', configPath: path.join(claudeDir, 'settings.json') };
+        const hookConfig = { session_start: false, pre_tool: false, pre_commit: false, conditional_hooks: true, deploy_audit: false };
+
+        const changes = crossModelHooks.installClaudeHooks(tool, hookConfig);
+
+        assert.ok(!changes.includes('PreToolUse:deploy-audit'), 'deploy-audit should not be installed');
+        assert.ok(changes.includes('PostToolUse:spec-lint'), 'spec-lint should still be installed');
+        assert.ok(changes.includes('PreToolUse:doctor'), 'doctor should still be installed');
+    });
+
+    it('skips all conditional hooks when conditional_hooks is false', () => {
+        const claudeDir = path.join(tmpDir, '.claude');
+        fs.mkdirSync(claudeDir, { recursive: true });
+
+        const tool = { id: 'claude', name: 'Claude Code', configPath: path.join(claudeDir, 'settings.json') };
+        const hookConfig = { session_start: false, pre_tool: false, pre_commit: false, conditional_hooks: false };
+
+        const changes = crossModelHooks.installClaudeHooks(tool, hookConfig);
+
+        assert.strictEqual(changes.length, 0, 'No hooks should be installed');
+        const config = JSON.parse(fs.readFileSync(tool.configPath, 'utf-8'));
+        assert.ok(!config.hooks.PostToolUse, 'No PostToolUse hooks');
+    });
+
+    it('preserves existing non-delimit hooks when installing conditional hooks', () => {
+        const claudeDir = path.join(tmpDir, '.claude');
+        fs.mkdirSync(claudeDir, { recursive: true });
+
+        const existingConfig = {
+            permissions: { allow: ['Read'] },
+            hooks: {
+                PostToolUse: [
+                    { matcher: '', hooks: [{ type: 'command', command: '/usr/local/bin/my-custom-hook' }] },
+                ],
+                PreToolUse: [
+                    { matcher: 'Bash', hooks: [{ type: 'command', command: '/usr/local/bin/pre-bash-hook' }] },
+                ],
+            },
+        };
+        fs.writeFileSync(path.join(claudeDir, 'settings.json'), JSON.stringify(existingConfig));
+
+        const tool = { id: 'claude', name: 'Claude Code', configPath: path.join(claudeDir, 'settings.json') };
+        const hookConfig = { session_start: false, pre_tool: false, pre_commit: false, conditional_hooks: true, deploy_audit: true };
+
+        crossModelHooks.installClaudeHooks(tool, hookConfig);
+
+        const config = JSON.parse(fs.readFileSync(tool.configPath, 'utf-8'));
+        assert.strictEqual(config.permissions.allow[0], 'Read', 'Existing config preserved');
+
+        // Existing hooks still present
+        const customPostHook = config.hooks.PostToolUse.find(
+            g => g.hooks && g.hooks.some(h => h.command === '/usr/local/bin/my-custom-hook')
+        );
+        assert.ok(customPostHook, 'Existing PostToolUse hook preserved');
+
+        const customPreHook = config.hooks.PreToolUse.find(
+            g => g.hooks && g.hooks.some(h => h.command === '/usr/local/bin/pre-bash-hook')
+        );
+        assert.ok(customPreHook, 'Existing PreToolUse hook preserved');
+
+        // Delimit hooks also present
+        assert.ok(config.hooks.PostToolUse.length >= 2, 'PostToolUse should have original + spec-lint');
+        assert.ok(config.hooks.PreToolUse.length >= 3, 'PreToolUse should have original + doctor + deploy-audit');
+    });
+});
+
+// -----------------------------------------------------------------------
+// LED-234: Helper function tests
+// -----------------------------------------------------------------------
+
+describe('findClaudeHookGroup', () => {
+    it('finds hook in nested format', () => {
+        const groups = [
+            { matcher: 'Bash', hooks: [{ type: 'command', command: 'npx delimit-cli doctor' }] },
+        ];
+        const result = crossModelHooks.findClaudeHookGroup(groups, 'delimit-cli doctor');
+        assert.ok(result, 'Should find the hook group');
+        assert.strictEqual(result.matcher, 'Bash');
+    });
+
+    it('finds hook in flat format', () => {
+        const groups = [
+            { type: 'command', command: 'npx delimit-cli hook pre-tool', matcher: 'Edit' },
+        ];
+        const result = crossModelHooks.findClaudeHookGroup(groups, 'delimit-cli hook pre-tool');
+        assert.ok(result, 'Should find flat-format hook');
+    });
+
+    it('returns null when not found', () => {
+        const groups = [
+            { matcher: 'Bash', hooks: [{ type: 'command', command: 'some-other-tool' }] },
+        ];
+        const result = crossModelHooks.findClaudeHookGroup(groups, 'delimit-cli');
+        assert.strictEqual(result, null);
+    });
+
+    it('returns null for non-array input', () => {
+        assert.strictEqual(crossModelHooks.findClaudeHookGroup(undefined, 'test'), null);
+        assert.strictEqual(crossModelHooks.findClaudeHookGroup(null, 'test'), null);
+    });
+});
+
+describe('migrateToNestedFormat', () => {
+    it('converts flat format to nested', () => {
+        const flat = { type: 'command', command: 'test-cmd', matcher: 'Edit', if: 'some condition' };
+        const nested = crossModelHooks.migrateToNestedFormat(flat);
+
+        assert.ok(nested.hooks, 'Should have hooks array');
+        assert.strictEqual(nested.hooks[0].type, 'command');
+        assert.strictEqual(nested.hooks[0].command, 'test-cmd');
+        assert.strictEqual(nested.matcher, 'Edit');
+        assert.strictEqual(nested.if, 'some condition');
+    });
+
+    it('returns already-nested format unchanged', () => {
+        const nested = { matcher: 'Bash', hooks: [{ type: 'command', command: 'test' }] };
+        const result = crossModelHooks.migrateToNestedFormat(nested);
+        assert.strictEqual(result, nested, 'Should return same object');
     });
 });
 
