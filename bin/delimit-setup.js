@@ -609,10 +609,9 @@ fi
 DELIMIT_HOME="\${DELIMIT_HOME:-$HOME/.delimit}"
 TOOL_COUNT="0"
 if [ -f "$DELIMIT_HOME/server/ai/server.py" ]; then
-  TOTAL=$(grep -c '@mcp.tool' "$DELIMIT_HOME/server/ai/server.py" 2>/dev/null || echo "0")
-  OPS=$(grep -c '@_ops_pack_tool' "$DELIMIT_HOME/server/ai/server.py" 2>/dev/null || echo "0")
-  INTERNAL=$(grep -c '@_internal_tool' "$DELIMIT_HOME/server/ai/server.py" 2>/dev/null || echo "0")
-  TOOL_COUNT=$((TOTAL - OPS - INTERNAL))
+  DECORATED=$(grep -c '@mcp.tool' "$DELIMIT_HOME/server/ai/server.py" 2>/dev/null || echo "0")
+  IMPL=$(grep -c 'mcp.tool()(' "$DELIMIT_HOME/server/ai/server.py" 2>/dev/null || echo "0")
+  TOOL_COUNT=$((DECORATED + IMPL))
 fi
 echo ""
 printf "  \${PURPLE}\${BOLD}    ____  ________    ______  _____________\${RESET}\\n"
