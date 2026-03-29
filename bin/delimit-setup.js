@@ -74,14 +74,31 @@ function findSpecFiles(dir, depth = 0) {
 }
 
 async function main() {
+    // Self-update check: ensure we're running the latest version
+    const _pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf-8'));
+    try {
+        const latest = execSync('npm view delimit-cli version 2>/dev/null', { encoding: 'utf-8', timeout: 5000 }).trim();
+        if (latest && latest !== _pkg.version && latest > _pkg.version) {
+            log(dim(`  Updating delimit-cli ${_pkg.version} -> ${latest}...`));
+            execSync('npm install -g delimit-cli@latest 2>/dev/null', { stdio: 'pipe', timeout: 30000 });
+            // Re-exec with the updated version
+            const setupPath = path.join(__dirname, 'delimit-setup.js');
+            if (fs.existsSync(setupPath)) {
+                execSync(`node "${setupPath}"`, { stdio: 'inherit' });
+                process.exit(0);
+            }
+        }
+    } catch { /* offline or timeout — continue with current version */ }
+
     log('');
     log(purple('    ____  ________    ______  _____________'));
     log(purple('   / __ \\/ ____/ /   /  _/  |/  /  _/_  __/'));
     log(magenta('  / / / / __/ / /    / // /|_/ // /  / /   '));
     log(magenta(' / /_/ / /___/ /____/ // /  / // /  / /    '));
     log(orange('/_____/_____/_____/___/_/  /_/___/ /_/     '));
-    const _pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf-8'));
-    log(dim(`  v${_pkg.version}`));
+    // Re-read in case we self-updated
+    const _pkgNow = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf-8'));
+    log(dim(`  v${_pkgNow.version}`));
     log('');
 
     // Step 1: Check prerequisites
