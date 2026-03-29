@@ -121,6 +121,7 @@ That's it. Delimit auto-fetches the base branch spec, diffs it, and posts a PR c
 ## CLI commands
 
 ```bash
+npx delimit-cli quickstart                       # Clone demo project + guided walkthrough
 npx delimit-cli try                              # Zero-risk demo — saves governance report
 npx delimit-cli demo                             # Self-contained governance demo
 npx delimit-cli init                             # Guided wizard with compliance templates

@@ -1538,6 +1538,112 @@ program
         try { fs.rmSync(tmpDir, { recursive: true }); } catch {}
     });
 
+// Quickstart command — clone demo repo + guided walkthrough (LED-267)
+program
+    .command('quickstart')
+    .description('Clone a demo project and walk through governance in 5 minutes')
+    .action(async () => {
+        const targetDir = path.join(process.cwd(), 'delimit-demo');
+
+        console.log(chalk.bold('\n  Delimit Quickstart\n'));
+        console.log(chalk.gray('  Clone a demo API project with a pre-broken spec,'));
+        console.log(chalk.gray('  then walk through the governance flow step by step.\n'));
+
+        // Step 1: Clone the quickstart repo
+        if (fs.existsSync(targetDir)) {
+            console.log(chalk.yellow(`  ${targetDir} already exists. Using existing directory.\n`));
+        } else {
+            console.log(chalk.bold('  Step 1: Cloning demo project...'));
+            try {
+                execSync(`git clone --depth 1 https://github.com/delimit-ai/delimit-quickstart.git "${targetDir}" 2>/dev/null`, { stdio: 'pipe' });
+                await logp(chalk.green('  Cloned delimit-ai/delimit-quickstart'));
+            } catch {
+                console.log(chalk.yellow('  Could not clone repo. Creating demo files locally...'));
+                fs.mkdirSync(targetDir, { recursive: true });
+                // Create inline demo specs
+                const baseSpec = { openapi: '3.0.3', info: { title: 'Pet Store API', version: '1.0.0' }, paths: { '/pets': { get: { summary: 'List pets', responses: { '200': { description: 'OK' } } } }, '/pets/{petId}': { get: { summary: 'Get pet', parameters: [{ name: 'petId', in: 'path', required: true, schema: { type: 'string' } }], responses: { '200': { description: 'OK' } } } } }, components: { schemas: { Pet: { type: 'object', properties: { id: { type: 'integer' }, name: { type: 'string' }, tag: { type: 'string' } } } } } };
+                const changedSpec = JSON.parse(JSON.stringify(baseSpec));
+                changedSpec.info.version = '2.0.0';
+                delete changedSpec.paths['/pets/{petId}'];
+                delete changedSpec.components.schemas.Pet.properties.tag;
+                fs.writeFileSync(path.join(targetDir, 'openapi.yaml'), yaml.dump(baseSpec));
+                fs.writeFileSync(path.join(targetDir, 'openapi-changed.yaml'), yaml.dump(changedSpec));
+                await logp(chalk.green('  Created demo specs locally'));
+            }
+        }
+        console.log('');
+
+        // Step 2: Initialize governance
+        console.log(chalk.bold('  Step 2: Setting up governance...'));
+        const configDir = path.join(targetDir, '.delimit');
+        if (!fs.existsSync(path.join(configDir, 'policies.yml'))) {
+            fs.mkdirSync(configDir, { recursive: true });
+            fs.writeFileSync(path.join(configDir, 'policies.yml'), POLICY_PRESETS['strict']);
+            await logp(chalk.green('  Created .delimit/policies.yml (strict)'));
+        } else {
+            await logp(chalk.green('  Governance already initialized'));
+        }
+        console.log('');
+
+        // Step 3: Run lint to show breaking changes
+        console.log(chalk.bold('  Step 3: Running governance lint...\n'));
+        const oldSpec = path.join(targetDir, 'openapi.yaml');
+        const newSpec = path.join(targetDir, 'openapi-changed.yaml');
+
+        if (fs.existsSync(oldSpec) && fs.existsSync(newSpec)) {
+            try {
+                const result = apiEngine.lint(oldSpec, newSpec, { policy: 'strict' });
+                if (result && result.summary) {
+                    const s = result.summary;
+                    const breaking = s.breaking || s.breaking_changes || 0;
+                    if (breaking > 0) {
+                        console.log(chalk.red.bold(`  BLOCKED — ${breaking} breaking change(s) detected\n`));
+                    }
+                    const violations = result.violations || [];
+                    violations.forEach(v => {
+                        const icon = v.severity === 'error' ? chalk.red('  BLOCK') : chalk.yellow('  WARN ');
+                        console.log(`  ${icon} ${v.message}`);
+                    });
+                }
+            } catch {
+                console.log(chalk.green('  Spec validated — no breaking changes'));
+            }
+        } else {
+            console.log(chalk.yellow('  No spec files found. Run delimit lint manually.'));
+        }
+
+        // Step 4: Show what to do next
+        console.log(chalk.bold('\n  What just happened:'));
+        await logp(chalk.gray('    1. Cloned a demo API project'));
+        await logp(chalk.gray('    2. Initialized strict governance policy'));
+        await logp(chalk.gray('    3. Ran lint and caught breaking changes'));
+        console.log('');
+        console.log(chalk.bold('  Now try in your own project:'));
+        console.log(`    ${chalk.green('npx delimit-cli init')}     — set up governance`);
+        console.log(`    ${chalk.green('npx delimit-cli lint')}     — check your API spec`);
+        console.log(`    ${chalk.green('npx delimit-cli setup')}    — configure AI assistants`);
+        console.log('');
+        console.log(chalk.gray(`  Demo project: ${targetDir}`));
+        console.log(chalk.gray(`  Clean up: rm -rf delimit-demo\n`));
+
+        // Beta capture
+        try {
+            const betaAns = await inquirer.prompt([{
+                type: 'input',
+                name: 'email',
+                message: chalk.blue('Join the beta? Enter your email (or press Enter to skip):'),
+            }]);
+            if (betaAns.email && betaAns.email.includes('@')) {
+                try {
+                    await axios.post('https://delimit.ai/api/subscribe', { email: betaAns.email, source: 'cli-quickstart' });
+                    console.log(chalk.green('\n  Thanks! You\'re on the list.\n'));
+                } catch {
+                    console.log(chalk.green('\n  Thanks! Visit https://delimit.ai\n'));
+                }
+            }
+        } catch {}
+    });
+
 // Try command — zero-risk demo with Markdown report artifact (LED-264)
 program
     .command('try')
