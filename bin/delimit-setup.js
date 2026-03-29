@@ -298,6 +298,18 @@ async function main() {
 
     // Step 3b: Configure Codex MCP (if installed)
     const CODEX_CONFIG = path.join(os.homedir(), '.codex', 'config.toml');
+    // Create config.toml if .codex dir exists or codex is in PATH
+    if (!fs.existsSync(CODEX_CONFIG)) {
+        const codexDir = path.join(os.homedir(), '.codex');
+        let hasCodex = fs.existsSync(codexDir);
+        if (!hasCodex) {
+            try { execSync('which codex 2>/dev/null', { stdio: 'pipe' }); hasCodex = true; } catch {}
+        }
+        if (hasCodex) {
+            fs.mkdirSync(codexDir, { recursive: true });
+            fs.writeFileSync(CODEX_CONFIG, '');
+        }
+    }
     if (fs.existsSync(CODEX_CONFIG)) {
         try {
             let toml = fs.readFileSync(CODEX_CONFIG, 'utf-8');
