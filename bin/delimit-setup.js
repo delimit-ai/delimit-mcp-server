@@ -322,19 +322,32 @@ async function main() {
             const serverDir = path.join(DELIMIT_HOME, 'server');
             const correctEntry = `\n[mcp_servers.delimit]\ncommand = "${python}"\nargs = ["${actualServer}"]\ncwd = "${serverDir}"\n\n[mcp_servers.delimit.env]\nPYTHONPATH = "${serverDir}:${path.join(serverDir, 'ai')}"\n`;
 
-            if (toml.includes('[mcp_servers.delimit]')) {
-                // Remove old entry and replace with correct paths for this machine
-                toml = toml.replace(/\[mcp_servers\.delimit\][\s\S]*?(?=\n\[|\n*$)/, '').trim();
-                toml += correctEntry;
-                fs.writeFileSync(CODEX_CONFIG, toml, { mode: 0o644 });
-                await logp(`  ${green('✓')} Updated Delimit paths in Codex config`);
-                configuredTools.push('Codex');
-            } else {
-                toml += correctEntry;
-                fs.writeFileSync(CODEX_CONFIG, toml, { mode: 0o644 });
-                await logp(`  ${green('✓')} Added delimit to Codex (${CODEX_CONFIG})`);
-                configuredTools.push('Codex');
+            // Remove ALL existing delimit MCP entries (prevents duplicates)
+            const existed = toml.includes('mcp_servers.delimit');
+            const lines = toml.split('\n');
+            const cleaned = [];
+            let skipBlock = false;
+            for (const line of lines) {
+                if (line.match(/^\[mcp_servers\.delimit/)) {
+                    skipBlock = true;
+                    continue;
+                }
+                if (skipBlock && (line.startsWith('[') || line.trim() === '')) {
+                    if (line.startsWith('[') && !line.match(/^\[mcp_servers\.delimit/)) {
+                        skipBlock = false;
+                        cleaned.push(line);
+                    }
+                    continue;
+                }
+                if (!skipBlock) {
+                    cleaned.push(line);
+                }
             }
+            toml = cleaned.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+            toml += correctEntry;
+            fs.writeFileSync(CODEX_CONFIG, toml, { mode: 0o644 });
+            await logp(`  ${green('✓')} ${existed ? 'Updated' : 'Added'} Delimit in Codex config`);
+            configuredTools.push('Codex');
         } catch (e) {
             log(`  ${yellow('!')} Could not configure Codex: ${e.message}`);
         }
