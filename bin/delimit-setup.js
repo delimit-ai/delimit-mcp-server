@@ -306,8 +306,8 @@ async function main() {
             try { execSync('which codex 2>/dev/null', { stdio: 'pipe' }); hasCodex = true; } catch {}
         }
         if (hasCodex) {
-            fs.mkdirSync(codexDir, { recursive: true });
-            fs.writeFileSync(CODEX_CONFIG, '');
+            fs.mkdirSync(codexDir, { recursive: true, mode: 0o755 });
+            fs.writeFileSync(CODEX_CONFIG, '', { mode: 0o644 });
         }
     }
     if (fs.existsSync(CODEX_CONFIG)) {
@@ -320,7 +320,7 @@ async function main() {
                 const serverDir = path.join(DELIMIT_HOME, 'server');
                 const codexEntry = `\n[mcp_servers.delimit]\ncommand = "${python}"\nargs = ["${actualServer}"]\ncwd = "${serverDir}"\n\n[mcp_servers.delimit.env]\nPYTHONPATH = "${serverDir}:${path.join(serverDir, 'ai')}"\n`;
                 toml += codexEntry;
-                fs.writeFileSync(CODEX_CONFIG, toml);
+                fs.writeFileSync(CODEX_CONFIG, toml, { mode: 0o644 });
                 await logp(`  ${green('✓')} Added delimit to Codex (${CODEX_CONFIG})`);
                 configuredTools.push('Codex');
             }
