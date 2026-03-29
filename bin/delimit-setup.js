@@ -81,12 +81,9 @@ async function main() {
         if (latest && latest !== _pkg.version && latest > _pkg.version) {
             log(dim(`  Updating delimit-cli ${_pkg.version} -> ${latest}...`));
             execSync('npm install -g delimit-cli@latest 2>/dev/null', { stdio: 'pipe', timeout: 30000 });
-            // Re-exec with the updated version
-            const setupPath = path.join(__dirname, 'delimit-setup.js');
-            if (fs.existsSync(setupPath)) {
-                execSync(`node "${setupPath}"`, { stdio: 'inherit' });
-                process.exit(0);
-            }
+            // Re-exec with the updated version from the NEW install location
+            execSync('delimit-cli setup', { stdio: 'inherit' });
+            process.exit(0);
         }
     } catch { /* offline or timeout — continue with current version */ }
 
