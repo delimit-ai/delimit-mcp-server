@@ -620,6 +620,11 @@ if [ "$DELIMIT_WRAPPED" = "true" ] || [ ! -t 1 ]; then
         [ -x "$c" ] && exec "$c" "$@"
     done
 fi
+# Auto-update in background (non-blocking)
+( CURR=\$(delimit-cli --version 2>/dev/null); LATE=\$(npm view delimit-cli version 2>/dev/null); \\
+  if [ -n "\$LATE" ] && [ "\$LATE" != "\$CURR" ]; then \\
+    npm install -g "delimit-cli@\$LATE" >/dev/null 2>&1 && delimit-cli setup >/dev/null 2>&1; \\
+  fi ) &
 DELIMIT_HOME="\${DELIMIT_HOME:-$HOME/.delimit}"
 TOOL_COUNT="0"
 if [ -f "$DELIMIT_HOME/server/ai/server.py" ]; then
