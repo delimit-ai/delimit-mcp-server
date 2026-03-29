@@ -214,6 +214,25 @@ async function main() {
         copyDir(gatewaySource, path.join(DELIMIT_HOME, 'server'));
     }
 
+    // Remove stale .so binaries that shadow updated .py source files
+    // Python loads .so before .py, so old compiled stubs block new source
+    const aiDir = path.join(DELIMIT_HOME, 'server', 'ai');
+    if (fs.existsSync(aiDir)) {
+        try {
+            const soFiles = fs.readdirSync(aiDir).filter(f => f.endsWith('.so'));
+            for (const so of soFiles) {
+                const pyName = so.replace(/\.cpython-\d+-.+\.so$/, '.py');
+                const pyPath = path.join(aiDir, pyName);
+                if (fs.existsSync(pyPath)) {
+                    fs.unlinkSync(path.join(aiDir, so));
+                }
+            }
+            if (soFiles.length > 0) {
+                await logp(`  ${green('✓')} Cleaned ${soFiles.length} stale compiled modules`);
+            }
+        } catch { /* ignore cleanup errors */ }
+    }
+
     // Install Python deps into isolated venv with pinned versions
     log(`  ${dim('  Installing Python dependencies...')}`);
     const venvDir = path.join(DELIMIT_HOME, 'venv');
