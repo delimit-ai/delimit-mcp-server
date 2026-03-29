@@ -641,7 +641,12 @@ done
 REAL=$(PATH=$(echo "$PATH" | tr ':' '\\n' | grep -v '.delimit/shims' | tr '\\n' ':') command -v ${toolName} 2>/dev/null)
 [ -x "$REAL" ] && exec "$REAL" "$@"
 echo "[Delimit] ${toolName} not found in PATH" >&2
-echo "  Install: npm install -g @anthropic-ai/claude-code" >&2
+case "${toolName}" in
+  claude) echo "  Install: npm install -g @anthropic-ai/claude-code" >&2 ;;
+  codex)  echo "  Install: npm install -g @openai/codex" >&2 ;;
+  gemini) echo "  Install: npm install -g @anthropic-ai/claude-code && pip install gemini-cli" >&2 ;;
+  *)      echo "  Install ${toolName} first" >&2 ;;
+esac
 exit 127
 `;
 
