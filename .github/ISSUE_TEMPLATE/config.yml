@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Documentation
+    url: https://delimit.ai/docs
+    about: Check the docs before opening an issue
+  - name: Try it first
+    url: https://delimit.ai/try
+    about: Run npx delimit-cli demo to see it in action
