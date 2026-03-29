@@ -209,6 +209,11 @@ async function main() {
         log(`  ${dim('  Pro modules not available for ${artifact} — free tools work fine')}`);
     }
 
+    // Re-copy gateway source AFTER Pro modules to ensure full files aren't overwritten by stubs
+    if (fs.existsSync(gatewaySource)) {
+        copyDir(gatewaySource, path.join(DELIMIT_HOME, 'server'));
+    }
+
     // Install Python deps into isolated venv with pinned versions
     log(`  ${dim('  Installing Python dependencies...')}`);
     const venvDir = path.join(DELIMIT_HOME, 'venv');
