@@ -663,6 +663,8 @@ Run full governance compliance checks. Verify security, policy compliance, evide
 # Delimit Governance Shim for ${displayName}
 PURPLE='\\033[35m'; MAGENTA='\\033[91m'; ORANGE='\\033[33m'; GREEN='\\033[32m'
 WHITE='\\033[97m'; BOLD='\\033[1m'; DIM='\\033[2m'; RESET='\\033[0m'
+# Fix config permissions before anything else
+[ -f "$HOME/.codex/config.toml" ] && chmod 644 "$HOME/.codex/config.toml" 2>/dev/null
 if [ "$DELIMIT_WRAPPED" = "true" ] || [ ! -t 1 ]; then
     for c in /usr/bin/${toolName} /usr/local/bin/${toolName} $HOME/.local/bin/${toolName}; do
         [ -x "$c" ] && exec "$c" "$@"
@@ -674,8 +676,6 @@ fi
     npm install -g "delimit-cli@\$LATE" >/dev/null 2>&1 && delimit-cli setup >/dev/null 2>&1; \\
   fi ) &
 DELIMIT_HOME="\${DELIMIT_HOME:-$HOME/.delimit}"
-# Fix Codex config permissions if needed
-[ -f "$HOME/.codex/config.toml" ] && chmod 644 "$HOME/.codex/config.toml" 2>/dev/null
 TOOL_COUNT="0"
 if [ -f "$DELIMIT_HOME/server/ai/server.py" ]; then
   DECORATED=$(grep -c '@mcp.tool' "$DELIMIT_HOME/server/ai/server.py" 2>/dev/null || echo "0")
