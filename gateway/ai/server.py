@@ -651,6 +651,23 @@ NEXT_STEPS_REGISTRY: Dict[str, List[Dict[str, Any]]] = {
     "agent_handoff": [
         {"tool": "delimit_agent_status", "reason": "Verify the handoff was recorded", "suggested_args": {}, "is_premium": True},
     ],
+    "agent_link": [
+        {"tool": "delimit_agent_dashboard", "reason": "View the updated agent dashboard", "suggested_args": {}, "is_premium": True},
+    ],
+    "agent_dashboard": [
+        {"tool": "delimit_agent_dispatch", "reason": "Dispatch a new task to an agent", "suggested_args": {}, "is_premium": True},
+    ],
+    "agent_policy": [
+        {"tool": "delimit_agent_check", "reason": "Verify a model's permission for an action", "suggested_args": {}, "is_premium": True},
+        {"tool": "delimit_agent_dashboard", "reason": "View agent orchestration status", "suggested_args": {}, "is_premium": True},
+    ],
+    "agent_check": [
+        {"tool": "delimit_agent_policy", "reason": "Update the model's policy if needed", "suggested_args": {}, "is_premium": True},
+    ],
+    "drift_check": [
+        {"tool": "delimit_lint", "reason": "Run lint to review detected drift", "suggested_args": {}, "is_premium": False},
+        {"tool": "delimit_notify", "reason": "Alert team about detected drift", "suggested_args": {}, "is_premium": True},
+    ],
     # --- Autonomous Build Loop (Pro) ---
     "next_task": [
         {"tool": "delimit_task_complete", "reason": "Mark the task done when finished", "suggested_args": {}, "is_premium": True},
@@ -833,6 +850,11 @@ NEXT_STEPS_REGISTRY: Dict[str, List[Dict[str, Any]]] = {
     ],
     "social_approve": [
         {"tool": "delimit_social_history", "reason": "Review post history after approval", "suggested_args": {"limit": 5}, "is_premium": True},
+    ],
+    "social_target": [
+        {"tool": "delimit_social_post", "reason": "Draft a reply for a discovered target", "suggested_args": {"draft": True}, "is_premium": True},
+        {"tool": "delimit_social_target", "reason": "Re-scan for new targets", "suggested_args": {"action": "scan"}, "is_premium": True},
+        {"tool": "delimit_social_target", "reason": "View target stats", "suggested_args": {"action": "stats"}, "is_premium": True},
     ],
     # --- Content Engine ---
     "content_schedule": [
@@ -1108,17 +1130,32 @@ def _detect_environment() -> Dict[str, Any]:
     }
 
 
+_inbox_daemon_autostarted = False
+
+
 def _with_next_steps(tool_name: str, result: Dict[str, Any]) -> Dict[str, Any]:
     """Route every tool result through governance. This IS the loop.
 
     The governance loop:
-    1. Emit event for dashboard tracking
-    2. STR-052: Policy kernel gate (blocks high-risk actions without approval)
-    3. Check Pro license gate (blocks if not authorized)
-    4. Check result against rules (thresholds, policies)
-    5. Auto-create ledger items for failures/warnings
-    6. Route back to delimit_ledger_context (the loop continues)
+    1. Auto-start inbox daemon on first tool call (model-agnostic)
+    2. Emit event for dashboard tracking
+    3. STR-052: Policy kernel gate (blocks high-risk actions without approval)
+    4. Check Pro license gate (blocks if not authorized)
+    5. Check result against rules (thresholds, policies)
+    6. Auto-create ledger items for failures/warnings
+    7. Route back to delimit_ledger_context (the loop continues)
     """
+    # Auto-start inbox daemon on first tool call — works for ALL models
+    global _inbox_daemon_autostarted
+    if not _inbox_daemon_autostarted:
+        _inbox_daemon_autostarted = True
+        try:
+            from ai.inbox_daemon import start_daemon
+            start_daemon()
+            logger.info("Inbox daemon auto-started on first tool call")
+        except Exception as e:
+            logger.warning("Inbox daemon auto-start failed: %s", e)
+
     # Emit event for real-time dashboard
     _emit_event(tool_name, result)
 
@@ -1190,6 +1227,18 @@ def delimit_lint(old_spec: str, new_spec: str, policy_file: Optional[str] = None
         return _with_next_steps("lint", lint_result)
 
     bump = str(semver_result.get("bump", "")).upper()
+
+    # Step 2b: Impact-based notification routing (LED-233, non-blocking)
+    try:
+        from ai.notify import route_by_impact
+        all_changes = lint_result.get("all_changes", lint_result.get("violations", []))
+        if all_changes:
+            routing_result = route_by_impact(all_changes, dry_run=False)
+            chain["steps"].append({"step": "impact_routing", "ok": True})
+            lint_result["impact_routing"] = routing_result
+    except Exception as e:
+        logger.debug("Impact routing non-fatal error: %s", e)
+        chain["steps"].append({"step": "impact_routing", "ok": False, "error": str(e)})
 
     if bump != "MAJOR":
         chain["status"] = f"complete_{bump.lower() or 'none'}"
@@ -1962,6 +2011,7 @@ def delimit_deploy_publish(app: str = "", git_ref: Optional[str] = None) -> Dict
 
 
 @_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
+@mcp.tool()
 def delimit_deploy_verify(app: str = "", env: str = "", git_ref: Optional[str] = None) -> Dict[str, Any]:
     """Verify deployment health (experimental) (Pro)."""
     return _delimit_deploy_impl(action="verify", app=app, env=env, git_ref=git_ref)
@@ -2064,6 +2114,7 @@ def delimit_intel_query(
 # ─── Generate ───────────────────────────────────────────────────────────
 
 @_internal_tool()
+@mcp.tool()
 def delimit_generate_template(
     template_type: str,
     name: str,
@@ -2090,6 +2141,7 @@ def delimit_generate_template(
 
 
 @_internal_tool()
+@mcp.tool()
 def delimit_generate_scaffold(
     project_type: str,
     name: str,
@@ -2113,6 +2165,7 @@ def delimit_generate_scaffold(
 # ─── Repo (RepoDoctor + ConfigSentry) ──────────────────────────────────
 
 @_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
+@mcp.tool()
 def delimit_repo_diagnose(target: str = ".") -> Dict[str, Any]:
     """Diagnose repository health issues (experimental) (Pro).
 
@@ -2128,6 +2181,7 @@ def delimit_repo_diagnose(target: str = ".") -> Dict[str, Any]:
 
 
 @_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
+@mcp.tool()
 def delimit_repo_analyze(target: str = ".") -> Dict[str, Any]:
     """Analyze repository structure and quality (experimental) (Pro).
 
@@ -2143,6 +2197,7 @@ def delimit_repo_analyze(target: str = ".") -> Dict[str, Any]:
 
 
 @_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
+@mcp.tool()
 def delimit_repo_config_validate(target: str = ".") -> Dict[str, Any]:
     """Validate configuration files (experimental) (Pro).
 
@@ -2158,6 +2213,7 @@ def delimit_repo_config_validate(target: str = ".") -> Dict[str, Any]:
 
 
 @_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
+@mcp.tool()
 def delimit_repo_config_audit(target: str = ".") -> Dict[str, Any]:
     """Audit configuration compliance (experimental) (Pro).
 
@@ -2803,12 +2859,14 @@ def delimit_release_status(environment: str = "production") -> Dict[str, Any]:
 
 
 @_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
+@mcp.tool()
 def delimit_release_rollback(environment: str, version: str, to_version: str) -> Dict[str, Any]:
     """Rollback deployment to previous version (experimental)."""
     return _delimit_release_impl(action="rollback", environment=environment, version=version, to_version=to_version)
 
 
 @_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
+@mcp.tool()
 def delimit_release_history(environment: str, limit: int = 10) -> Dict[str, Any]:
     """Show release history (experimental)."""
     return _delimit_release_impl(action="history", environment=environment, limit=limit)
@@ -2912,6 +2970,7 @@ def delimit_cost_controls(
 # ─── DataSteward (Governance Primitive) ────────────────────────────────
 
 @_internal_tool()
+@mcp.tool()
 def delimit_data_validate(target: str = ".") -> Dict[str, Any]:
     """Validate data files: JSON parse, CSV structure, SQLite integrity check.
 
@@ -2923,6 +2982,7 @@ def delimit_data_validate(target: str = ".") -> Dict[str, Any]:
 
 
 @_internal_tool()
+@mcp.tool()
 def delimit_data_migrate(target: str = ".") -> Dict[str, Any]:
     """Check for migration files (alembic, Django, Prisma, Knex) and report status.
 
@@ -2934,6 +2994,7 @@ def delimit_data_migrate(target: str = ".") -> Dict[str, Any]:
 
 
 @_internal_tool()
+@mcp.tool()
 def delimit_data_backup(target: str = ".") -> Dict[str, Any]:
     """Back up SQLite and JSON data files to ~/.delimit/backups/ with timestamp.
 
@@ -3024,6 +3085,7 @@ def delimit_obs_logs(query: str, time_range: str = "1h", source: Optional[str] =
 
 
 @_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
+@mcp.tool()
 def delimit_obs_alerts(action: str, alert_rule: Optional[Dict[str, Any]] = None, rule_id: Optional[str] = None) -> Dict[str, Any]:
     """Manage alerting rules (experimental)."""
     return _delimit_obs_impl(action="alerts", alert_action=action, alert_rule=alert_rule, rule_id=rule_id)
@@ -3038,6 +3100,7 @@ def delimit_obs_status() -> Dict[str, Any]:
 # ─── DesignSystem (UI Tooling) ──────────────────────────────────────────
 
 @_internal_tool()
+@mcp.tool()
 def delimit_design_extract_tokens(
     figma_file_key: Optional[str] = None,
     token_types: Optional[Union[str, List[str]]] = None,
@@ -3063,6 +3126,7 @@ def delimit_design_extract_tokens(
 
 
 @_internal_tool()
+@mcp.tool()
 def delimit_design_generate_component(component_name: str, figma_node_id: Optional[str] = None, output_path: Optional[str] = None, project_path: Optional[str] = None) -> Dict[str, Any]:
     """Generate a React/Next.js component skeleton with props interface and Tailwind support.
 
@@ -3077,6 +3141,7 @@ def delimit_design_generate_component(component_name: str, figma_node_id: Option
 
 
 @_internal_tool()
+@mcp.tool()
 def delimit_design_generate_tailwind(figma_file_key: Optional[str] = None, output_path: Optional[str] = None, project_path: Optional[str] = None) -> Dict[str, Any]:
     """Read existing tailwind.config or generate one from detected CSS tokens.
 
@@ -3090,6 +3155,7 @@ def delimit_design_generate_tailwind(figma_file_key: Optional[str] = None, outpu
 
 
 @_ops_pack_tool()
+@mcp.tool()
 def delimit_design_validate_responsive(
     project_path: str,
     check_types: Optional[Union[str, List[str]]] = None,
@@ -3111,6 +3177,7 @@ def delimit_design_validate_responsive(
 
 
 @_internal_tool()
+@mcp.tool()
 def delimit_design_component_library(project_path: str, output_format: str = "json") -> Dict[str, Any]:
     """Scan for React/Vue/Svelte components and generate a component catalog.
 
@@ -3125,6 +3192,7 @@ def delimit_design_component_library(project_path: str, output_format: str = "js
 # ─── Story (Component Stories + Visual/A11y Testing) ────────────────────
 
 @_internal_tool()
+@mcp.tool()
 def delimit_story_generate(
     component_path: str,
     story_name: Optional[str] = None,
@@ -3146,6 +3214,7 @@ def delimit_story_generate(
 
 
 @_internal_tool()
+@mcp.tool()
 def delimit_story_visual_test(url: str, project_path: Optional[str] = None, threshold: float = 0.05) -> Dict[str, Any]:
     """Run visual regression test -- screenshot and compare to baseline.
 
@@ -3163,6 +3232,7 @@ def delimit_story_visual_test(url: str, project_path: Optional[str] = None, thre
 
 
 @_internal_tool()  # Was experimental (LED-044), promoted to internal (Consensus 120)
+@mcp.tool()
 def delimit_story_build(project_path: str, output_dir: Optional[str] = None) -> Dict[str, Any]:
     """Build Storybook static site.
 
@@ -3178,6 +3248,7 @@ def delimit_story_build(project_path: str, output_dir: Optional[str] = None) -> 
 
 
 @_internal_tool()
+@mcp.tool()
 def delimit_story_accessibility(project_path: str, standards: str = "WCAG2AA") -> Dict[str, Any]:
     """Run WCAG accessibility checks by scanning HTML/JSX/TSX for common issues.
 
@@ -3210,6 +3281,7 @@ def delimit_test_generate(project_path: str, source_files: Optional[List[str]] =
 
 
 @_experimental_tool()  # HIDDEN: stub/pass-through (LED-044)
+@mcp.tool()
 def delimit_test_coverage(project_path: str, threshold: int = 80) -> Dict[str, Any]:
     """Analyze test coverage (experimental) (Pro).
 
@@ -3243,6 +3315,7 @@ def delimit_test_smoke(project_path: str, test_suite: Optional[str] = None) -> D
 # ─── Docs (Real implementations) ─────────────────────────────────────
 
 @_ops_pack_tool()
+@mcp.tool()
 def delimit_docs_generate(target: str = ".") -> Dict[str, Any]:
     """Generate API reference documentation for a project.
 
@@ -3769,6 +3842,56 @@ def delimit_ledger_add(
 
 
 @mcp.tool()
+def delimit_ledger_update(
+    item_id: str,
+    venture: str = "",
+    status: str = "",
+    priority: str = "",
+    title: str = "",
+    description: str = "",
+    note: str = "",
+    assignee: str = "",
+    due_date: str = "",
+    labels: Optional[Union[str, List[str]]] = None,
+    blocked_by: str = "",
+    blocks: str = "",
+) -> Dict[str, Any]:
+    """Update any field on a ledger item.
+
+    Supports: status, priority, title, description, assignee, due date, labels,
+    and dependency links (blocked_by, blocks). Pass only the fields you want to change.
+
+    Args:
+        item_id: The item ID (e.g. LED-001 or STR-001).
+        venture: Project name or path. Auto-detects if empty.
+        status: New status — "open", "in_progress", "blocked", "done".
+        priority: New priority — "P0", "P1", "P2".
+        title: New title.
+        description: New description.
+        note: Add a note/comment to the item.
+        assignee: Assign to a person or agent (e.g. "founder", "claude", "codex").
+        due_date: Due date in ISO format (e.g. "2026-04-01").
+        labels: Labels/tags (e.g. ["dashboard", "ux"] or "dashboard,ux").
+        blocked_by: Item ID that blocks this item (e.g. "LED-025").
+        blocks: Item ID that this item blocks (e.g. "STR-005").
+    """
+    try:
+        labels = _coerce_list_arg(labels, "labels") if labels else None
+    except ValueError:
+        labels = None
+    from ai.ledger_manager import update_item
+    project = _resolve_venture(venture)
+    result = update_item(
+        item_id=item_id, status=status or None, priority=priority or None,
+        title=title or None, description=description or None, note=note or None,
+        assignee=assignee or None, due_date=due_date or None, labels=labels,
+        blocked_by=blocked_by or None, blocks=blocks or None,
+        project_path=project,
+    )
+    return _with_next_steps("ledger_update", result)
+
+
+@mcp.tool()
 def delimit_ledger_done(item_id: str, note: str = "", venture: str = "") -> Dict[str, Any]:
     """Mark a ledger item as done.
 
@@ -3820,6 +3943,140 @@ def delimit_ledger_context(venture: str = "") -> Dict[str, Any]:
     project = _resolve_venture(venture) if venture else "."
     result = get_context(project_path=project)
     return _with_next_steps("ledger_context", result)
+
+
+@mcp.tool()
+def delimit_ledger_query(
+    query: str,
+    venture: str = "",
+) -> Dict[str, Any]:
+    """Ask natural language questions about the ledger (ChatOps 2.0).
+
+    Examples:
+      "what shipped this week?"
+      "what's blocked?"
+      "show me all P0s"
+      "how many items total?"
+      "what should I work on next?"
+      "search for dashboard"
+
+    Args:
+        query: Natural language question about the ledger.
+        venture: Project name or path. Auto-detects if empty.
+    """
+    from ai.ledger_manager import query_ledger
+    project = _resolve_venture(venture)
+    return query_ledger(query=query, project_path=project)
+
+
+@mcp.tool()
+def delimit_ledger_link(
+    from_id: str,
+    to_id: str,
+    link_type: str = "blocks",
+    note: str = "",
+    venture: str = "",
+) -> Dict[str, Any]:
+    """Create a relationship between two ledger items.
+
+    Supports: blocks/blocked_by (auto-creates reverse), parent/child,
+    relates_to, duplicates. Use to track dependencies and sub-tasks.
+
+    Args:
+        from_id: Source item ID (e.g. "LED-025").
+        to_id: Target item ID (e.g. "STR-005").
+        link_type: Relationship type — "blocks", "blocked_by", "parent", "child", "relates_to", "duplicates".
+        note: Optional note explaining the relationship.
+        venture: Project name or path. Auto-detects if empty.
+    """
+    from ai.ledger_manager import link_items
+    project = _resolve_venture(venture)
+    return link_items(from_id=from_id, to_id=to_id, link_type=link_type, note=note, project_path=project)
+
+
+@mcp.tool()
+def delimit_ledger_links(
+    item_id: str,
+    venture: str = "",
+) -> Dict[str, Any]:
+    """Get all relationships/dependencies for a ledger item.
+
+    Returns all links where this item is either the source or target.
+    Shows: blocks, blocked_by, parent, child, relates_to, duplicates.
+
+    Args:
+        item_id: The item ID to look up links for.
+        venture: Project name or path. Auto-detects if empty.
+    """
+    from ai.ledger_manager import get_links
+    project = _resolve_venture(venture)
+    return get_links(item_id=item_id, project_path=project)
+
+
+@mcp.tool()
+def delimit_session_handoff(
+    summary: str,
+    items_completed: Optional[Union[str, List[str]]] = None,
+    items_added: Optional[Union[str, List[str]]] = None,
+    key_decisions: Optional[Union[str, List[str]]] = None,
+    blockers: Optional[Union[str, List[str]]] = None,
+    files_changed: Optional[Union[str, List[str]]] = None,
+    venture: str = "",
+) -> Dict[str, Any]:
+    """Save a session summary for cross-session continuity.
+
+    Call at the end of a productive session so the next session can recover context.
+    Stores: what was completed, what was added, key decisions, blockers, and files changed.
+
+    Args:
+        summary: 2-3 sentence summary of what happened this session.
+        items_completed: List of completed ledger item IDs (e.g. ["LED-164", "LED-165"]).
+        items_added: List of newly added item IDs.
+        key_decisions: Key decisions or consensus results.
+        blockers: What's blocked and why.
+        files_changed: Key files that were modified.
+        venture: Venture context. Auto-detects if empty.
+    """
+    try:
+        items_completed = _coerce_list_arg(items_completed, "items_completed") if items_completed else None
+    except ValueError:
+        items_completed = None
+    try:
+        items_added = _coerce_list_arg(items_added, "items_added") if items_added else None
+    except ValueError:
+        items_added = None
+    try:
+        key_decisions = _coerce_list_arg(key_decisions, "key_decisions") if key_decisions else None
+    except ValueError:
+        key_decisions = None
+    try:
+        blockers = _coerce_list_arg(blockers, "blockers") if blockers else None
+    except ValueError:
+        blockers = None
+    try:
+        files_changed = _coerce_list_arg(files_changed, "files_changed") if files_changed else None
+    except ValueError:
+        files_changed = None
+    from ai.ledger_manager import session_handoff
+    return session_handoff(
+        summary=summary, items_completed=items_completed, items_added=items_added,
+        key_decisions=key_decisions, blockers=blockers, files_changed=files_changed,
+        venture=venture,
+    )
+
+
+@mcp.tool()
+def delimit_session_history(limit: int = 5) -> Dict[str, Any]:
+    """Load recent session handoffs for context recovery.
+
+    Call at the start of a new session to see what happened previously.
+    Returns the last N session summaries with items completed, decisions, and blockers.
+
+    Args:
+        limit: Number of recent sessions to return (default 5).
+    """
+    from ai.ledger_manager import session_history
+    return session_history(limit=limit)
 
 
 @mcp.tool()
@@ -3950,6 +4207,18 @@ def delimit_models(
 
 
 @mcp.tool()
+def delimit_deliberation_status() -> Dict[str, Any]:
+    """Check your deliberation usage and mode (hosted free tier vs BYOK).
+
+    Returns how many free deliberations you have used and remaining,
+    whether you are in hosted (free) or BYOK (bring your own keys) mode,
+    and your total deliberation count.
+    """
+    from ai.deliberation import get_deliberation_status
+    return get_deliberation_status()
+
+
+@mcp.tool()
 def delimit_deliberate(
     question: str,
     context: str = "",
@@ -3960,6 +4229,8 @@ def delimit_deliberate(
     """Run multi-model consensus via real AI-to-AI deliberation (Pro).
 
     Models (Grok 4, Gemini, Codex) debate each other directly until unanimous agreement.
+    Free tier: 3 deliberations using hosted keys, no setup required.
+    BYOK: configure your own API keys in ~/.delimit/models.json for unlimited use.
 
     Args:
         question: The question to reach consensus on.
@@ -4085,6 +4356,36 @@ def _extract_deliberation_actions(result: Dict, question: str) -> List[Dict[str,
 def delimit_release_sync(action: str = "audit") -> Dict[str, Any]:
     """Audit or sync all public surfaces for consistency (Pro)."""
     return _delimit_release_impl(action="sync", sync_action=action)
+
+
+@mcp.tool()
+def delimit_drift_check(spec_path: str = "", project_path: str = ".",
+                         staleness_days: int = 7) -> Dict[str, Any]:
+    """Check for API spec drift since last governance review.
+
+    Detects: spec changed without lint, stale baseline, missing policy.
+    Run on a schedule (cron) for continuous compliance monitoring.
+
+    Args:
+        spec_path: Path to OpenAPI spec. Auto-detects if empty.
+        project_path: Project root. Defaults to current directory.
+        staleness_days: Alert if baseline older than this (default 7).
+    """
+    from ai.drift_monitor import check_drift
+    result = _safe_call(check_drift, spec_path=spec_path, project_path=project_path,
+                        staleness_days=staleness_days)
+    return _with_next_steps("drift_check", result)
+
+
+@mcp.tool()
+def delimit_drift_history(limit: int = 20) -> Dict[str, Any]:
+    """View recent drift check history.
+
+    Args:
+        limit: Max entries to return.
+    """
+    from ai.drift_monitor import get_drift_history
+    return _safe_call(get_drift_history, limit=limit)
 
 
 @mcp.tool()
@@ -4808,15 +5109,32 @@ def delimit_webhook_manage(
 
 
 @_ops_pack_tool()
+@mcp.tool()
 def delimit_social_post(text: str = "", category: str = "", platform: str = "twitter",
                         account: str = "", quote_tweet_id: str = "",
-                        reply_to_id: str = "", draft: bool = False) -> Dict[str, Any]:
+                        reply_to_id: str = "", draft: bool = False,
+                        context: str = "") -> Dict[str, Any]:
     """Post to social media (Pro).
+
+    IMPORTANT — AUTO-TRIGGER RULE:
+    When the AI drafts a social post, it MUST call this tool immediately.
+    Never ask "want me to send this?" — just call the tool. The email-based
+    approval flow handles human review. The AI's job is to draft and send,
+    the founder's job is to approve/reject via email reply.
 
     Categories: tip, changelog, insight, engagement.
     Leave text empty to auto-generate from templates.
     Every post provides value — tips, insights, governance wisdom.
     Max 2 posts per day to stay authentic.
+
+    IMPORTANT — Platform tone rules (these are DIFFERENT per platform):
+    - Twitter: confident technical brand. Direct, professional, ALWAYS POSITIVE.
+      Celebrate wins and progress. Never complain or air gaps publicly.
+      No em dashes or en dashes. Include install commands when relevant.
+    - Reddit: proud builder posting as u/delimitdev. Casual, typed-on-phone energy.
+      ALWAYS POSITIVE. Mention Delimit ONLY when genuinely helpful.
+      NO bullet points/lists/bold/em dashes. 2-3 sentences max.
+    - LinkedIn: professional hook + insight + CTA
 
     Args:
         text: Tweet text. Leave empty to auto-generate.
@@ -4826,6 +5144,7 @@ def delimit_social_post(text: str = "", category: str = "", platform: str = "twi
         quote_tweet_id: Tweet ID to quote (creates a quote tweet).
         reply_to_id: Tweet ID to reply to (creates a reply).
         draft: If True, save as draft for approval instead of posting immediately.
+        context: WHY this post should be made. Strategic reasoning shown in the approval email.
     """
     from ai.social import generate_post, post_tweet, should_post_today, save_draft
 
@@ -4834,35 +5153,150 @@ def delimit_social_post(text: str = "", category: str = "", platform: str = "twi
 
     post = generate_post(category, text)
 
-    if platform == "twitter":
-        if draft:
-            entry = save_draft(
-                post["text"], platform=platform, account=account,
-                quote_tweet_id=quote_tweet_id, reply_to_id=reply_to_id,
-            )
-            # Send draft notification via email
-            try:
-                from ai.notify import send_email
-                send_email(
-                    message=f"Social draft pending approval:\n\n{post['text']}\n\nDraft ID: {entry['draft_id']}\nPlatform: {platform}\nAccount: {account or 'default'}",
-                    subject=f"Social Draft: {entry['draft_id']}",
+    # ALL platforms go through email approval — no direct posting.
+    # Founder reviews and posts manually from their device.
+    if platform not in ("twitter", "reddit"):
+        return {"error": f"Platform '{platform}' not supported yet", "supported": ["twitter", "reddit"]}
+
+    draft = True  # Always draft, never auto-post
+    entry = save_draft(
+        post["text"], platform=platform, account=account,
+        quote_tweet_id=quote_tweet_id, reply_to_id=reply_to_id,
+        context=context,
+    )
+    # Send draft notification via email and store Message-ID for
+    # In-Reply-To matching in the inbox daemon (Consensus 116)
+    try:
+        from ai.notify import send_email
+        from ai.social import store_draft_message_id
+
+        # Build contextual email body so the founder knows exactly what to do
+        _acct = account or ("delimitdev" if platform == "reddit" else "delimit_ai")
+        _lines = []
+
+        if platform == "reddit":
+            _lines.append(f"POST FROM: u/{_acct} on REDDIT")
+        else:
+            _lines.append(f"POST FROM: @{_acct} on TWITTER")
+        _lines.append("")
+
+        # WHY should this be posted?
+        _context = entry.get("context", "")
+        if _context:
+            _lines.append(f"WHY: {_context}")
+            _lines.append("")
+
+        # What type of post is this?
+        if platform == "reddit":
+            _thread_url = entry.get("thread_url", "")
+            # Fallback: extract reddit URL from context field
+            if not _thread_url and not reply_to_id:
+                import re as _re
+                _ctx = entry.get("context", "")
+                _url_match = _re.search(r'https?://(?:www\.)?reddit\.com/r/\S+', _ctx)
+                if _url_match:
+                    _thread_url = _url_match.group(0)
+            if reply_to_id or _thread_url:
+                _url = _thread_url or reply_to_id
+                _lines.append(f"ACTION: Reply in thread {_url}")
+                _lines.append("Open the thread, find the comment to reply to, paste the text below.")
+            else:
+                # New Reddit post — extract title from first line of text
+                _post_text = post["text"]
+                _first_newline = _post_text.find("\n")
+                if _first_newline > 0 and _first_newline < 200:
+                    _reddit_title = _post_text[:_first_newline].strip()
+                    _reddit_body = _post_text[_first_newline:].strip()
+                else:
+                    _reddit_title = _post_text[:100].strip()
+                    _reddit_body = _post_text
+                _lines.append("ACTION: New Reddit post")
+                _lines.append("Navigate to the subreddit, create a new post.")
+                _lines.append("")
+                _lines.append("--- TITLE (paste in title field) ---")
+                _lines.append("")
+                _lines.append(_reddit_title)
+                _lines.append("")
+                _lines.append("--- BODY (paste in body field) ---")
+                _lines.append("")
+                _lines.append(_reddit_body)
+                _lines.append("")
+                _lines.append("--- END ---")
+                _lines.append("")
+                _lines.append(f"Draft ID: {entry['draft_id']}")
+                if entry.get("tone_warnings"):
+                    _lines.append("")
+                    _lines.append("WARNINGS:")
+                    for w in entry["tone_warnings"]:
+                        _lines.append(f"  - {w}")
+                _lines.append("")
+                _lines.append("Reply APPROVED to approve, CANCEL to reject.")
+
+                _handle = f"u/{_acct}"
+                email_result = send_email(
+                    message="\n".join(_lines),
+                    subject=f"[Reddit Post] {_handle}: {_reddit_title[:60]}...",
                     event_type="social_draft",
                 )
-            except Exception as e:
-                logger.warning("Failed to send draft notification email: %s", e)
-            entry["category"] = post["category"]
-            entry["mode"] = "draft"
-            return _with_next_steps("social_post", entry)
+                if email_result.get("delivered") and email_result.get("message_id"):
+                    store_draft_message_id(entry["draft_id"], email_result["message_id"])
+                entry["category"] = post["category"]
+                entry["mode"] = "draft"
+                return _with_next_steps("social_post", entry)
+        elif reply_to_id:
+            _lines.append(f"ACTION: Reply to https://x.com/i/status/{reply_to_id}")
+            _lines.append("Open the link above, click Reply, paste the text below.")
+        elif quote_tweet_id:
+            _lines.append(f"ACTION: Quote tweet https://x.com/i/status/{quote_tweet_id}")
+            _lines.append("Open the link above, click Repost > Quote, paste the text below.")
+        else:
+            _lines.append("ACTION: New standalone tweet")
+            _lines.append("Open X, compose a new tweet, paste the text below.")
 
-        result = post_tweet(post["text"], account=account,
-                            quote_tweet_id=quote_tweet_id, reply_to_id=reply_to_id)
-        result["category"] = post["category"]
-        return _with_next_steps("social_post", result)
+        _lines.append("")
+        _lines.append("--- COPY BELOW THIS LINE ---")
+        _lines.append("")
+        _lines.append(post["text"])
+        _lines.append("")
+        _lines.append("--- END ---")
+        _lines.append("")
+        _lines.append(f"Draft ID: {entry['draft_id']}")
+        if entry.get("tone_warnings"):
+            _lines.append("")
+            _lines.append("WARNINGS:")
+            for w in entry["tone_warnings"]:
+                _lines.append(f"  - {w}")
+        _lines.append("")
+        _lines.append("Reply APPROVED to approve, CANCEL to reject.")
 
-    return {"error": f"Platform '{platform}' not supported yet", "supported": ["twitter"]}
+        if platform == "reddit":
+            _subject_type = "Reddit"
+        elif reply_to_id:
+            _subject_type = "Reply"
+        elif quote_tweet_id:
+            _subject_type = "Quote"
+        else:
+            _subject_type = "Tweet"
+
+        _handle = f"u/{_acct}" if platform == "reddit" else f"@{_acct}"
+        email_result = send_email(
+            message="\n".join(_lines),
+            subject=f"[{_subject_type}] {_handle}: {post['text'][:60]}...",
+            event_type="social_draft",
+        )
+        # Store the outbound Message-ID on the draft record so the
+        # inbox daemon can match approval replies via In-Reply-To header
+        if email_result.get("delivered") and email_result.get("message_id"):
+            store_draft_message_id(entry["draft_id"], email_result["message_id"])
+    except Exception as e:
+        logger.warning("Failed to send draft notification email: %s", e)
+    entry["category"] = post["category"]
+    entry["mode"] = "draft"
+    return _with_next_steps("social_post", entry)
 
 
 @_ops_pack_tool()
+@mcp.tool()
 def delimit_social_generate(category: str = "tip") -> Dict[str, Any]:
     """Generate a social media post without posting (Pro).
 
@@ -4876,6 +5310,7 @@ def delimit_social_generate(category: str = "tip") -> Dict[str, Any]:
 
 
 @_internal_tool()
+@mcp.tool()
 def delimit_social_accounts() -> Dict[str, Any]:
     """List configured social media accounts (Pro).
 
@@ -4889,14 +5324,29 @@ def delimit_social_accounts() -> Dict[str, Any]:
 
 
 @_internal_tool()
-def delimit_social_history(limit: int = 20) -> Dict[str, Any]:
-    """View recent social media post history (Pro)."""
+@mcp.tool()
+def delimit_social_history(limit: int = 20, platform: str = "",
+                           user: str = "", subreddit: str = "") -> Dict[str, Any]:
+    """View recent social media post history (Pro).
+
+    Filter by platform, Reddit user, or subreddit to recall prior conversations.
+    Reddit comments include thread context (subreddit, thread_url, replying_to_user)
+    so you can reference what was said when drafting follow-ups or DM replies.
+
+    Args:
+        limit: Max entries to return.
+        platform: Filter by platform — "twitter" or "reddit".
+        user: Filter by Reddit user we interacted with (e.g. "coolinjapan001").
+        subreddit: Filter by subreddit (e.g. "r/vibecoding").
+    """
     from ai.social import get_post_history
 
-    return _with_next_steps("social_history", {"posts": get_post_history(limit)})
+    posts = get_post_history(limit, platform=platform, user=user, subreddit=subreddit)
+    return _with_next_steps("social_history", {"posts": posts})
 
 
 @_ops_pack_tool()
+@mcp.tool()
 def delimit_social_approve(action: str = "list", draft_id: str = "") -> Dict[str, Any]:
     """Manage social media drafts: list, approve, or reject (Pro).
 
@@ -4929,12 +5379,111 @@ def delimit_social_approve(action: str = "list", draft_id: str = "") -> Dict[str
         return {"error": f"Unknown action: {action}. Supported: list, approve, reject"}
 
 
+@mcp.tool()
+def delimit_social_target(
+    action: str = "scan",
+    platforms: str = "x,hn,devto,reddit,github",
+    ventures: str = "",
+    keywords: str = "",
+    limit: int = 10,
+    draft_replies: bool = False,
+    create_ledger: bool = False,
+) -> Dict[str, Any]:
+    """Discover engagement opportunities across platforms (Pro).
+
+    IMPORTANT — TOOL CHAINING RULE:
+    After scanning, the AI MUST immediately process results:
+    1. For "reply" targets: draft a reply via delimit_social_post or delimit_notify
+    2. For "strategic" targets: create a ledger item via delimit_ledger_add
+    3. For "both": do both
+    Never just return targets and stop. Always chain to the next action.
+
+    Scans X, Reddit (RapidAPI), HN, Dev.to, GitHub for posts where ventures can engage.
+    NamePros flagged as manual_check_needed (no API).
+
+    Run in a /loop for continuous discovery. Deduplicates across runs.
+    Targets are classified as: reply (social engagement), strategic (ledger item), or both.
+
+    Args:
+        action: "scan" to discover targets, "list" to show recent, "stats" to show counts.
+        platforms: Comma-separated platforms to scan (x, hn, devto, reddit, github, namepros).
+        ventures: Comma-separated ventures to scan for. Empty = all.
+        keywords: Extra keywords to search for beyond venture topics.
+        limit: Max targets per platform.
+        draft_replies: If True, auto-draft social posts for "reply" targets.
+        create_ledger: If True, create ledger items for "strategic" targets.
+    """
+    from ai.social_target import scan_targets, process_targets, list_targets, get_stats
+
+    if action == "scan":
+        platform_list = [p.strip() for p in platforms.split(",")]
+        venture_list = [v.strip() for v in ventures.split(",") if v.strip()] or None
+        keyword_list = [k.strip() for k in keywords.split(",") if k.strip()] or None
+        targets = scan_targets(platform_list, venture_list, keyword_list, limit)
+        result = {"action": "scan", "targets_found": len(targets), "targets": targets}
+        if draft_replies or create_ledger:
+            processed = process_targets(targets, draft_replies, create_ledger)
+            result["processed"] = processed
+        return _with_next_steps("social_target", result)
+    elif action == "list":
+        return _with_next_steps("social_target", list_targets(limit))
+    elif action == "stats":
+        return _with_next_steps("social_target", get_stats())
+    return {"error": f"Unknown action: {action}. Supported: scan, list, stats"}
+
+
+@mcp.tool()
+def delimit_social_target_config(
+    action: str = "status",
+    platform: str = "",
+    enabled: bool = True,
+    provider: str = "",
+    subreddits: str = "",
+) -> Dict[str, Any]:
+    """Configure social target scanning platforms (Pro).
+
+    Actions:
+        status: Show current config and which platforms are available
+        detect: Auto-detect available platforms from configured API keys
+        update: Update a platform's config (enable/disable, change provider)
+        add_subreddits: Add subreddits to scan for a venture
+
+    Args:
+        action: status, detect, update, add_subreddits
+        platform: Platform to configure (x, reddit, github, hn, devto, namepros)
+        enabled: Enable/disable the platform (used with update action)
+        provider: Provider to use, e.g. twttr241, xai, proxy, gh_cli (used with update action)
+        subreddits: Comma-separated subreddits to add (with add_subreddits action)
+    """
+    from ai.social_target import (
+        get_config_status, _detect_available_platforms,
+        update_platform_config, add_subreddits as add_subs,
+    )
+
+    if action == "status":
+        return get_config_status()
+    elif action == "detect":
+        detection = _detect_available_platforms()
+        return {"platforms": detection}
+    elif action == "update":
+        if not platform:
+            return {"error": "Platform name is required for update action"}
+        return update_platform_config(platform, enabled=enabled, provider=provider or None)
+    elif action == "add_subreddits":
+        if not platform or not subreddits:
+            return {"error": "Platform (as venture name) and subreddits are required"}
+        sub_list = [s.strip() for s in subreddits.split(",") if s.strip()]
+        return add_subs(platform, sub_list)
+    return {"error": f"Unknown action: {action}. Supported: status, detect, update, add_subreddits"}
+
+
 # ═══════════════════════════════════════════════════════════════════════
 #  CONTENT ENGINE — Autonomous video + tweet pipeline (Pro)
 # ═══════════════════════════════════════════════════════════════════════
 
 
 @_internal_tool()
+@mcp.tool()
 def delimit_content_schedule() -> Dict[str, Any]:
     """View the upcoming content schedule: queued tweets, pending videos, recent activity (Pro)."""
     from ai.content_engine import get_content_schedule
@@ -4943,6 +5492,7 @@ def delimit_content_schedule() -> Dict[str, Any]:
 
 
 @_internal_tool()
+@mcp.tool()
 def delimit_content_publish(content_type: str = "tweet") -> Dict[str, Any]:
     """Manually trigger a content publish: tweet or youtube video (Pro).
 
@@ -4961,6 +5511,7 @@ def delimit_content_publish(content_type: str = "tweet") -> Dict[str, Any]:
 
 
 @_internal_tool()
+@mcp.tool()
 def delimit_content_queue(action: str = "status", items: str = "") -> Dict[str, Any]:
     """Manage the tweet and video content queues (Pro).
 
@@ -5055,12 +5606,13 @@ def delimit_daemon_classify(item_id: str = "") -> Dict[str, Any]:
 
 
 @_internal_tool()
+@mcp.tool()
 def delimit_inbox_daemon(action: str = "status") -> Dict[str, Any]:
     """Control the inbox polling daemon for email governance (Pro).
 
     Polls pro@delimit.ai every 5 minutes, classifies emails, forwards
-    owner-action items, and handles draft approval via email replies
-    with a 10-minute cancel window.
+    owner-action items, and handles draft approval via email replies.
+    Auto-posting is disabled - approved drafts are emailed for manual posting.
 
     Args:
         action: 'start' (begin polling), 'stop' (halt polling),
@@ -5205,6 +5757,7 @@ def delimit_config_import(
 
 
 @_ops_pack_tool()
+@mcp.tool()
 def delimit_screen_record(mode: str = "browser", url: str = "", name: str = "recording",
                           duration: int = 30, script: str = "") -> Dict[str, Any]:
     """Record a screen capture (Pro).
@@ -5249,6 +5802,7 @@ def delimit_screen_record(mode: str = "browser", url: str = "", name: str = "rec
 
 
 @_ops_pack_tool()
+@mcp.tool()
 def delimit_screenshot(url: str, name: str = "screenshot") -> Dict[str, Any]:
     """Take a screenshot of a URL using headless Chromium (Pro).
 
@@ -5302,20 +5856,34 @@ def delimit_changelog(old_spec: str = "", new_spec: str = "", format: str = "mar
 
 
 @_ops_pack_tool()
+@mcp.tool()
 def delimit_notify(channel: str = "webhook", message: str = "",
                    webhook_url: str = "", subject: str = "",
                    event_type: str = "", to: str = "",
                    from_account: str = "") -> Dict[str, Any]:
     """Send a notification (Pro).
 
+    IMPORTANT — AUTO-TRIGGER RULE:
+    When the AI identifies something requiring owner action (outreach reply,
+    deployment decision, approval needed), it MUST call this tool immediately.
+    Never ask "want me to notify you?" — just send the notification.
+    The founder reviews and acts via email. All tools must chain automatically.
+
     Channels: webhook (JSON POST), slack (webhook URL), email (SMTP).
     Use for: governance alerts, deployment notifications, breaking change warnings.
 
+    IMPORTANT — Email context rules:
+    Every email must be self-contained and actionable. The recipient reads on mobile
+    and needs to know exactly what to do without opening another app.
+    - Subject: lead with [ACTION TYPE] bracket, include enough context to triage from inbox
+    - Body: include WHAT happened, WHY it matters, WHAT to do next, and relevant links
+    - Never send bare IDs or technical state without human-readable context
+
     Args:
         channel: webhook, slack, or email.
-        message: Notification body.
+        message: Notification body. Must include full context (see rules above).
         webhook_url: URL for webhook/slack channels.
-        subject: Subject line (email only).
+        subject: Subject line (email only). Use [ACTION], [INFO], [ALERT] prefix.
         event_type: Event category for filtering.
         to: Recipient email address (email only). Overrides default DELIMIT_SMTP_TO.
             Send to any address — leave empty for default (configured-email@example.com).
@@ -5335,9 +5903,94 @@ def delimit_notify(channel: str = "webhook", message: str = "",
     ))
 
 
+@mcp.tool()
+def delimit_notify_routing(
+    action: str = "status",
+    config: str = "",
+    webhook_url: str = "",
+    email_to: str = "",
+    from_account: str = "",
+) -> Dict[str, Any]:
+    """Manage impact-based notification routing (LED-233).
+
+    Routes change alerts by severity: breaking changes send urgent notifications,
+    non-breaking goes to standard channels, cosmetic changes are suppressed.
+
+    Args:
+        action: 'status' (show current config), 'configure' (update routing rules),
+                'test' (send test notifications at each severity level).
+        config: JSON string with routing config for action='configure'.
+            Example: {"routing": {"critical": {"channels": ["email","webhook"],
+            "email_subject_prefix": "[URGENT]", "webhook_priority": "high"},
+            "warning": {"channels": ["webhook"], "webhook_priority": "normal"},
+            "info": {"channels": [], "digest": true}}}
+        webhook_url: Webhook URL for test notifications.
+        email_to: Email recipient for test notifications.
+        from_account: Sender account key for test email delivery.
+    """
+    from ai.notify import (
+        load_routing_config,
+        save_routing_config,
+        route_by_impact,
+        DEFAULT_ROUTING_CONFIG,
+    )
+
+    if action == "status":
+        current = load_routing_config()
+        return _with_next_steps("notify_routing", {
+            "action": "status",
+            "config": current,
+            "config_file": str(Path.home() / ".delimit" / "notify_routing.yaml"),
+            "using_defaults": current == DEFAULT_ROUTING_CONFIG,
+        })
+
+    elif action == "configure":
+        if not config:
+            return _with_next_steps("notify_routing", {
+                "error": "config parameter required for action='configure'.",
+                "usage": 'Pass a JSON string with routing rules, e.g. {"routing": {"critical": {"channels": ["email"]}}}',
+            })
+        try:
+            parsed = json.loads(config) if isinstance(config, str) else config
+        except json.JSONDecodeError as e:
+            return _with_next_steps("notify_routing", {
+                "error": f"Invalid JSON in config: {e}",
+            })
+        result = save_routing_config(parsed)
+        return _with_next_steps("notify_routing", {
+            "action": "configure",
+            **result,
+        })
+
+    elif action == "test":
+        # Generate synthetic changes at each severity level
+        test_changes = [
+            {"type": "endpoint_removed", "path": "/test/critical", "message": "Test critical: endpoint removed", "is_breaking": True},
+            {"type": "parameter_added", "path": "/test/warning", "message": "Test warning: optional parameter added", "is_breaking": False},
+            {"type": "description_changed", "path": "/test/info", "message": "Test info: description updated", "severity": "info"},
+        ]
+        result = route_by_impact(
+            test_changes,
+            webhook_url=webhook_url,
+            email_to=email_to,
+            from_account=from_account,
+            dry_run=not (webhook_url or email_to),
+        )
+        return _with_next_steps("notify_routing", {
+            "action": "test",
+            **result,
+        })
+
+    else:
+        return _with_next_steps("notify_routing", {
+            "error": f"Unknown action: {action}. Supported: status, configure, test.",
+        })
+
+
 @_internal_tool()
+@mcp.tool()
 def delimit_notify_inbox(action: str = "status", limit: int = 10,
-                         process: bool = False) -> Dict[str, Any]:
+                         process: bool = True) -> Dict[str, Any]:
     """Check inbound email inbox, classify, and route (Pro).
 
     Polls pro@delimit.ai via IMAP. Classifies emails as owner-action
@@ -5500,6 +6153,106 @@ def delimit_agent_handoff(task_id: str, to_model: str,
                           context: str = "") -> Dict[str, Any]:
     """Hand off an agent task to a different AI model (Pro)."""
     return _delimit_agent_impl(action="handoff", task_id=task_id, to_model=to_model, context=context)
+
+
+@mcp.tool()
+def delimit_agent_link(task_id: str, ledger_item_id: str) -> Dict[str, Any]:
+    """Link an agent task to a ledger item (LED-xxx or STR-xxx).
+
+    Creates a relationship so the dashboard shows which agent is working on which ledger item.
+
+    Args:
+        task_id: Agent task ID (AGT-xxx).
+        ledger_item_id: Ledger item ID (LED-xxx or STR-xxx).
+    """
+    from ai.agent_dispatch import link_ledger_item
+    return _with_next_steps("agent_link", _safe_call(
+        link_ledger_item, task_id=task_id, ledger_item_id=ledger_item_id,
+    ))
+
+
+@mcp.tool()
+def delimit_agent_dashboard() -> Dict[str, Any]:
+    """View the multi-agent orchestration dashboard (Pro).
+
+    Shows all agent tasks grouped by assignee and status, handoff history,
+    linked ledger items, and recent audit trail.
+    """
+    from ai.agent_dispatch import get_agent_dashboard
+    return _with_next_steps("agent_dashboard", _safe_call(get_agent_dashboard))
+
+
+@mcp.tool()
+def delimit_agent_policy(model: str = "", ledger: str = "", memory: str = "",
+                          deploy: str = "", evidence: str = "",
+                          secrets: str = "", custom_constraints: str = "") -> Dict[str, Any]:
+    """Set or view per-model governance permissions (Pro).
+
+    Controls what each AI model can do. Without arguments, shows all policies.
+    With a model name, shows or updates that model's policy.
+
+    Examples:
+      - delimit_agent_policy() -> show all model permissions
+      - delimit_agent_policy(model="codex", ledger="read-only", deploy="false")
+      - delimit_agent_policy(model="gemini", memory="none", secrets="false")
+
+    Access levels for ledger/memory/evidence: "read-only", "read-write", "none"
+    Boolean flags for deploy/secrets: "true" or "false"
+
+    Args:
+        model: AI model name (claude, codex, gemini, cursor). Empty = show all.
+        ledger: Ledger access level (read-only, read-write, none).
+        memory: Memory access level (read-only, read-write, none).
+        deploy: Allow deploys (true/false).
+        evidence: Evidence access level (read-only, read-write, none).
+        secrets: Allow secret access (true/false).
+        custom_constraints: Comma-separated constraints (e.g. "no-deploy,no-publish").
+    """
+    from ai.agent_policy import set_agent_policy, get_agent_policy
+
+    if not model or not model.strip():
+        return _with_next_steps("agent_policy", _safe_call(get_agent_policy, model=""))
+
+    # If only model provided with no changes, just show the policy
+    has_changes = any([ledger, memory, deploy, evidence, secrets, custom_constraints])
+    if not has_changes:
+        return _with_next_steps("agent_policy", _safe_call(get_agent_policy, model=model))
+
+    # Parse boolean strings
+    deploy_bool = None
+    if deploy:
+        deploy_bool = deploy.lower().strip() in ("true", "1", "yes")
+    secrets_bool = None
+    if secrets:
+        secrets_bool = secrets.lower().strip() in ("true", "1", "yes")
+    constraints_list = None
+    if custom_constraints:
+        constraints_list = [c.strip() for c in custom_constraints.split(",") if c.strip()]
+
+    return _with_next_steps("agent_policy", _safe_call(
+        set_agent_policy, model=model, ledger=ledger, memory=memory,
+        deploy=deploy_bool, evidence=evidence, secrets=secrets_bool,
+        custom_constraints=constraints_list,
+    ))
+
+
+@mcp.tool()
+def delimit_agent_check(model: str, action: str) -> Dict[str, Any]:
+    """Check if a model is allowed to perform an action (Pro).
+
+    Use before executing sensitive operations to verify the agent has permission.
+
+    Actions: ledger_write, ledger_read, memory_write, memory_read,
+             deploy, lint, deliberate, security_audit, evidence_write, secrets_read.
+
+    Args:
+        model: AI model name (claude, codex, gemini, cursor).
+        action: Action to check (e.g. "ledger_write", "deploy").
+    """
+    from ai.agent_policy import check_agent_permission
+    return _with_next_steps("agent_check", _safe_call(
+        check_agent_permission, model=model, action=action,
+    ))
 
 
 # ═══════════════════════════════════════════════════════════════════════
