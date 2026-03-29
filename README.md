@@ -1,6 +1,6 @@
 # `</>` Delimit
 
-API governance that enforces itself. One workspace for Claude Code, Codex, Cursor, and Gemini CLI.
+Stop re-explaining your codebase every session. Memory, tasks, and governance that persist across Claude Code, Codex, Cursor, and Gemini CLI.
 
 [![npm](https://img.shields.io/npm/v/delimit-cli)](https://www.npmjs.com/package/delimit-cli)
 [![GitHub Action](https://img.shields.io/badge/GitHub%20Action-v1.8.0-blue)](https://github.com/marketplace/actions/delimit-api-governance)
