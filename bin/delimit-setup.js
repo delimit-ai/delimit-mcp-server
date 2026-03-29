@@ -277,21 +277,24 @@ async function main() {
     const serverPathAlt = path.join(DELIMIT_HOME, 'server', 'mcp-server.py');
     const actualServer = fs.existsSync(serverPath) ? serverPath : serverPathAlt;
 
-    if (mcpConfig.mcpServers.delimit) {
-        await logp(`  ${green('✓')} Delimit MCP already configured`);
+    // Always update paths to match this machine's directory structure
+    const delimitMcp = {
+        type: 'stdio',
+        command: python,
+        args: [actualServer],
+        cwd: path.join(DELIMIT_HOME, 'server'),
+        env: {
+            PYTHONPATH: path.join(DELIMIT_HOME, 'server')
+        },
+        description: 'Delimit — AI agent guardrails'
+    };
+    const existed = !!mcpConfig.mcpServers.delimit;
+    mcpConfig.mcpServers.delimit = delimitMcp;
+    fs.writeFileSync(MCP_CONFIG, JSON.stringify(mcpConfig, null, 2));
+    if (existed) {
+        await logp(`  ${green('✓')} Delimit MCP paths updated`);
         configuredTools.push('Claude Code');
     } else {
-        mcpConfig.mcpServers.delimit = {
-            type: 'stdio',
-            command: python,
-            args: [actualServer],
-            cwd: path.join(DELIMIT_HOME, 'server'),
-            env: {
-                PYTHONPATH: path.join(DELIMIT_HOME, 'server')
-            },
-            description: 'Delimit — AI agent guardrails'
-        };
-        fs.writeFileSync(MCP_CONFIG, JSON.stringify(mcpConfig, null, 2));
         await logp(`  ${green('✓')} Added delimit to ${MCP_CONFIG}`);
         configuredTools.push('Claude Code');
     }
@@ -315,13 +318,18 @@ async function main() {
             // Fix permissions on existing config
             fs.chmodSync(CODEX_CONFIG, 0o644);
             let toml = fs.readFileSync(CODEX_CONFIG, 'utf-8');
+            const serverDir = path.join(DELIMIT_HOME, 'server');
+            const correctEntry = `\n[mcp_servers.delimit]\ncommand = "${python}"\nargs = ["${actualServer}"]\ncwd = "${serverDir}"\n\n[mcp_servers.delimit.env]\nPYTHONPATH = "${serverDir}:${path.join(serverDir, 'ai')}"\n`;
+
             if (toml.includes('[mcp_servers.delimit]')) {
-                await logp(`  ${green('✓')} Delimit already in Codex config`);
+                // Remove old entry and replace with correct paths for this machine
+                toml = toml.replace(/\[mcp_servers\.delimit\][\s\S]*?(?=\n\[|\n*$)/, '').trim();
+                toml += correctEntry;
+                fs.writeFileSync(CODEX_CONFIG, toml, { mode: 0o644 });
+                await logp(`  ${green('✓')} Updated Delimit paths in Codex config`);
                 configuredTools.push('Codex');
             } else {
-                const serverDir = path.join(DELIMIT_HOME, 'server');
-                const codexEntry = `\n[mcp_servers.delimit]\ncommand = "${python}"\nargs = ["${actualServer}"]\ncwd = "${serverDir}"\n\n[mcp_servers.delimit.env]\nPYTHONPATH = "${serverDir}:${path.join(serverDir, 'ai')}"\n`;
-                toml += codexEntry;
+                toml += correctEntry;
                 fs.writeFileSync(CODEX_CONFIG, toml, { mode: 0o644 });
                 await logp(`  ${green('✓')} Added delimit to Codex (${CODEX_CONFIG})`);
                 configuredTools.push('Codex');
@@ -340,17 +348,18 @@ async function main() {
                 cursorConfig = JSON.parse(fs.readFileSync(CURSOR_CONFIG, 'utf-8'));
             }
             if (!cursorConfig.mcpServers) cursorConfig.mcpServers = {};
-            if (cursorConfig.mcpServers.delimit) {
-                await logp(`  ${green('✓')} Delimit already in Cursor config`);
+            const cursorExisted = !!cursorConfig.mcpServers.delimit;
+            cursorConfig.mcpServers.delimit = {
+                command: python,
+                args: [actualServer],
+                cwd: path.join(DELIMIT_HOME, 'server'),
+                env: { PYTHONPATH: path.join(DELIMIT_HOME, 'server') }
+            };
+            fs.writeFileSync(CURSOR_CONFIG, JSON.stringify(cursorConfig, null, 2));
+            if (cursorExisted) {
+                await logp(`  ${green('✓')} Updated Delimit paths in Cursor config`);
                 configuredTools.push('Cursor');
             } else {
-                cursorConfig.mcpServers.delimit = {
-                    command: python,
-                    args: [actualServer],
-                    cwd: path.join(DELIMIT_HOME, 'server'),
-                    env: { PYTHONPATH: path.join(DELIMIT_HOME, 'server') }
-                };
-                fs.writeFileSync(CURSOR_CONFIG, JSON.stringify(cursorConfig, null, 2));
                 await logp(`  ${green('✓')} Added delimit to Cursor (${CURSOR_CONFIG})`);
                 configuredTools.push('Cursor');
             }
@@ -369,17 +378,18 @@ async function main() {
                 geminiConfig = JSON.parse(fs.readFileSync(GEMINI_CONFIG, 'utf-8'));
             }
             if (!geminiConfig.mcpServers) geminiConfig.mcpServers = {};
-            if (geminiConfig.mcpServers.delimit) {
-                await logp(`  ${green('✓')} Delimit already in Gemini CLI config`);
+            const geminiExisted = !!geminiConfig.mcpServers.delimit;
+            geminiConfig.mcpServers.delimit = {
+                command: python,
+                args: [actualServer],
+                cwd: path.join(DELIMIT_HOME, 'server'),
+                env: { PYTHONPATH: path.join(DELIMIT_HOME, 'server') }
+            };
+            fs.writeFileSync(GEMINI_CONFIG, JSON.stringify(geminiConfig, null, 2));
+            if (geminiExisted) {
+                await logp(`  ${green('✓')} Updated Delimit paths in Gemini CLI config`);
                 configuredTools.push('Gemini CLI');
             } else {
-                geminiConfig.mcpServers.delimit = {
-                    command: python,
-                    args: [actualServer],
-                    cwd: path.join(DELIMIT_HOME, 'server'),
-                    env: { PYTHONPATH: path.join(DELIMIT_HOME, 'server') }
-                };
-                fs.writeFileSync(GEMINI_CONFIG, JSON.stringify(geminiConfig, null, 2));
                 await logp(`  ${green('✓')} Added delimit to Gemini CLI (${GEMINI_CONFIG})`);
                 configuredTools.push('Gemini CLI');
             }
