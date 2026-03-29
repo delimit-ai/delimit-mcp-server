@@ -619,7 +619,8 @@ printf "  \${PURPLE}\${BOLD}   / __ \\\\/ ____/ /   /  _/  |/  /  _/_  __/\${RES
 printf "  \${MAGENTA}\${BOLD}  / / / / __/ / /    / // /|_/ // /  / /   \${RESET}\\n"
 printf "  \${MAGENTA}\${BOLD} / /_/ / /___/ /____/ // /  / // /  / /    \${RESET}\\n"
 printf "  \${ORANGE}\${BOLD}/_____/_____/_____/___/_/  /_/___/ /_/     \${RESET}\\n"
-printf "  \${DIM}v${pkg.version}\${RESET}\\n"
+VERSION=\$(delimit-cli --version 2>/dev/null || echo "unknown")
+printf "  \${DIM}v\${VERSION}\${RESET}\\n"
 echo ""
 printf "  \${PURPLE}\${BOLD}[Delimit]\${RESET} \${DIM}Executing governance check...\${RESET}\\n"
 sleep 0.1
