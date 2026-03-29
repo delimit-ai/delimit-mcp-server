@@ -571,12 +571,12 @@ Run full governance compliance checks. Verify security, policy compliance, evide
     const shimsDir = path.join(DELIMIT_HOME, 'shims');
     const shimsInstalled = fs.existsSync(shimsDir) && fs.readdirSync(shimsDir).length > 0;
 
-    if (shimsInstalled) {
-        log(`  ${green('✓')} Governance wrapping already enabled`);
-    } else {
-        // Default YES prompt — non-interactive mode auto-accepts
+    let enableShims = shimsInstalled; // Auto-yes if already installed (just update)
+
+    if (!shimsInstalled) {
+        // First install — prompt
         const inquirer = (() => { try { return require('inquirer'); } catch { return null; } })();
-        let enableShims = true;
+        enableShims = true;
 
         if (inquirer && process.stdin.isTTY) {
             try {
@@ -588,12 +588,13 @@ Run full governance compliance checks. Verify security, policy compliance, evide
                 }]);
                 enableShims = answer.enable;
             } catch {
-                enableShims = true; // Default yes if prompt fails
+                enableShims = true;
             }
         }
+    }
 
         if (enableShims) {
-            // Create shims
+            // Create/update shims with latest template
             fs.mkdirSync(shimsDir, { recursive: true });
 
             const shimTemplate = (toolName, displayName) => `#!/bin/sh
@@ -663,12 +664,15 @@ exit 127
                 }
             }
 
-            log(`  ${green('✓')} Governance wrapping enabled`);
-            log(`  ${dim('  Restart your terminal or run: source ~/.bashrc')}`);
+            if (shimsInstalled) {
+                await logp(`  ${green('✓')} Governance shims updated`);
+            } else {
+                log(`  ${green('✓')} Governance wrapping enabled`);
+                log(`  ${dim('  Restart your terminal or run: source ~/.bashrc')}`);
+            }
         } else {
             log(`  ${dim('  Skipped. Enable later: delimit shims enable')}`);
         }
-    }
     log('');
 
     // Step 7: Install cross-model governance hooks (LED-202)
