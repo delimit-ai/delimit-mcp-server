@@ -664,6 +664,8 @@ fi
     npm install -g "delimit-cli@\$LATE" >/dev/null 2>&1 && delimit-cli setup >/dev/null 2>&1; \\
   fi ) &
 DELIMIT_HOME="\${DELIMIT_HOME:-$HOME/.delimit}"
+# Fix Codex config permissions if needed
+[ -f "$HOME/.codex/config.toml" ] && chmod 644 "$HOME/.codex/config.toml" 2>/dev/null
 TOOL_COUNT="0"
 if [ -f "$DELIMIT_HOME/server/ai/server.py" ]; then
   DECORATED=$(grep -c '@mcp.tool' "$DELIMIT_HOME/server/ai/server.py" 2>/dev/null || echo "0")
