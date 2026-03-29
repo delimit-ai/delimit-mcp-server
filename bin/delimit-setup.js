@@ -644,7 +644,7 @@ echo "[Delimit] ${toolName} not found in PATH" >&2
 case "${toolName}" in
   claude) echo "  Install: npm install -g @anthropic-ai/claude-code" >&2 ;;
   codex)  echo "  Install: npm install -g @openai/codex" >&2 ;;
-  gemini) echo "  Install: pip install gemini-cli" >&2 ;;
+  gemini) echo "  Install: npm install -g @google/gemini-cli" >&2 ;;
   *)      echo "  Install ${toolName} first" >&2 ;;
 esac
 exit 127
