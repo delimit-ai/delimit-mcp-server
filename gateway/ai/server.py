@@ -3684,6 +3684,14 @@ def delimit_swarm(action: str = "status", venture: str = "",
         return _with_next_steps("swarm", _safe_call(
             check_namespace_access, agent_id=agent_id, target_path=target_path, action=access_action,
         ))
+    if action == "metric":
+        from ai.swarm import record_metric
+        return _with_next_steps("swarm", _safe_call(
+            record_metric, venture=venture, metric_type=access_action, note=target_path,
+        ))
+    if action == "metrics":
+        from ai.swarm import get_metrics
+        return _with_next_steps("swarm", _safe_call(get_metrics, venture=venture))
     return _with_next_steps("swarm", _safe_call(get_swarm_status))
 
 

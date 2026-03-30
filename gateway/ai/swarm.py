@@ -395,3 +395,101 @@ Medium alerts: prompt drift, model errors, credit exhaustion.
 def get_usage_guide() -> Dict[str, Any]:
     """Get the swarm usage guide."""
     return {"guide": USAGE_GUIDE, "version": "1.2"}
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  LED-278: GTM Tracking — speed, revenue, venture launches
+# ═══════════════════════════════════════════════════════════════════════
+
+METRICS_FILE = SWARM_DIR / "metrics.json"
+
+
+def _load_metrics() -> Dict[str, Any]:
+    if not METRICS_FILE.exists():
+        return {"daily": {}, "ventures": {}}
+    try:
+        return json.loads(METRICS_FILE.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {"daily": {}, "ventures": {}}
+
+
+def _save_metrics(metrics: Dict[str, Any]):
+    _ensure_dir()
+    METRICS_FILE.write_text(json.dumps(metrics, indent=2))
+
+
+def record_metric(
+    venture: str,
+    metric_type: str,
+    value: float = 1.0,
+    note: str = "",
+) -> Dict[str, Any]:
+    """Record a GTM metric for tracking swarm performance.
+
+    Metric types: tasks_completed, deploy_count, revenue, launch_event,
+                  outreach_sent, user_signup, feature_shipped.
+    """
+    if not venture or not metric_type:
+        return {"error": "venture and metric_type required"}
+
+    metrics = _load_metrics()
+    today = time.strftime("%Y-%m-%d")
+
+    # Daily tracking
+    if today not in metrics["daily"]:
+        metrics["daily"][today] = {}
+    day = metrics["daily"][today]
+    key = f"{venture}:{metric_type}"
+    day[key] = day.get(key, 0) + value
+
+    # Venture totals
+    if venture not in metrics["ventures"]:
+        metrics["ventures"][venture] = {}
+    vtotals = metrics["ventures"][venture]
+    vtotals[metric_type] = vtotals.get(metric_type, 0) + value
+
+    _save_metrics(metrics)
+    _log({"action": "metric", "venture": venture, "type": metric_type, "value": value, "note": note})
+
+    return {
+        "status": "recorded",
+        "venture": venture,
+        "metric": metric_type,
+        "value": value,
+        "today_total": day[key],
+        "all_time": vtotals[metric_type],
+    }
+
+
+def get_metrics(venture: str = "", days: int = 7) -> Dict[str, Any]:
+    """Get GTM metrics — speed, revenue, launches across ventures.
+
+    Shows daily breakdown and venture totals. Used for dogfood tracking
+    and build-in-public content.
+    """
+    metrics = _load_metrics()
+
+    # Filter by date range
+    today = time.strftime("%Y-%m-%d")
+    recent_days = {}
+    for date_str, day_data in sorted(metrics["daily"].items(), reverse=True)[:days]:
+        if venture:
+            filtered = {k: v for k, v in day_data.items() if k.startswith(f"{venture}:")}
+            if filtered:
+                recent_days[date_str] = filtered
+        else:
+            recent_days[date_str] = day_data
+
+    # Venture totals
+    if venture:
+        vtotals = metrics["ventures"].get(venture, {})
+    else:
+        vtotals = metrics["ventures"]
+
+    return {
+        "status": "ok",
+        "daily": recent_days,
+        "totals": vtotals,
+        "venture_filter": venture or "all",
+        "days": days,
+    }
