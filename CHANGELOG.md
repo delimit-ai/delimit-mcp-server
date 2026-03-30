@@ -1,5 +1,46 @@
 # Changelog
 
+## [3.15.9] - 2026-03-30
+
+### Added
+- **Agent Swarm**: 20 agents across 4 ventures with namespace isolation, tiered approvals, and central governor
+- **Prompt Playbook**: versioned, reusable prompt templates with {{variable}} syntax
+- **Multi-model code review**: consolidated feedback from Claude, Grok, Gemini, Codex
+- **PII/secret redaction**: scan and redact API keys, emails, SSNs before sending to LLMs
+- **Collision detection**: prevent two AI models from editing the same file
+- **Prompt drift detection**: track when same task behaves differently across models
+- **Cost vs Efficacy dashboard**: which model is best for your codebase
+- **Project config**: committable `delimit.yml` with per-repo AI governance
+- **`delimit resume`**: show what you were working on last session
+- **`delimit quickstart`**: clone demo project and guided walkthrough
+- **`delimit try`**: zero-risk demo that saves a Markdown report
+- **Change management policy**: docs freshness check before deploy
+- **GTM metrics tracking**: tasks, deploys, revenue per venture
+
+### Changed
+- Hero messaging: "Stop Re-Explaining Your Codebase" (pain-first)
+- Progressive disclosure: 5 workflows instead of 162 tools
+- Deliberation engine now uses official SDKs (anthropic, openai, google-genai)
+- 4-model deliberation: Claude (CLI) + Grok + Gemini + Codex
+- Setup auto-updates, regenerates shims, fixes config permissions
+- Boot screen shows dynamic version and tool count with gradient colors
+- All confirmation prompts show "Enter = Yes" hint
+- Pricing page updated: Free/Pro/Enterprise tiers
+
+### Fixed
+- 37 missing @mcp.tool() decorators restored (125 to 171 tools)
+- Stale .so binaries shadowing updated .py source files
+- Codex config.toml duplicate TOML entries
+- CI green across Python 3.10/3.11/3.12 (7 test files fixed)
+- Setup self-update infinite loop guard
+- Pro module stubs overwriting full source files
+
+### Security
+- 7 proprietary modules stubbed in npm bundle
+- Deliberation engine kept private (stub in npm, full on server)
+- PII scrubbed from all public packages
+- Security check runs before every npm publish
+
 ## [3.13.3] - 2026-03-27
 
 ### Changed

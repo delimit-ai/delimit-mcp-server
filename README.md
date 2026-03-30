@@ -50,15 +50,16 @@ npx delimit-cli init        # Sets up governance + drift baseline
 
 ---
 
-## What's New in v3.14
+## What's New in v3.15
 
-- **Evidence timeline + gate status dashboard** -- see every governance decision and when it happened
-- **Multi-agent orchestration** -- track which AI assistant works on what, across models
-- **Continuous drift monitoring** -- detect spec drift between deployments automatically
-- **PR governance copilot** -- gate status posted directly in PR comments
-- **Compliance templates** -- SOC2, PCI-DSS, and HIPAA presets out of the box
-- **Beta capture in CLI** -- opt into early features from the command line
-- **112+ MCP tools** -- governance, context, shipping, observability, and orchestration
+- **Agent Swarm** -- 20 AI agents across 4 ventures with namespace isolation and tiered approvals
+- **Prompt Playbook** -- versioned, reusable prompts with {{variable}} syntax
+- **Multi-model code review** -- consolidated feedback from 3+ AI models
+- **PII/secret redaction** -- auto-scan and redact before sending to external LLMs
+- **Collision detection** -- prevent two AI models from editing the same file
+- **4-model deliberation** -- Claude + Grok + Gemini + Codex debate until consensus
+- **Change management** -- docs freshness check enforced before deploy
+- **171 MCP tools** -- governance, context, shipping, observability, orchestration, and swarm
 
 ---
 
