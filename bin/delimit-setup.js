@@ -305,6 +305,25 @@ async function main() {
         configuredTools.push('Claude Code');
     }
 
+    // Auto-approve all Delimit tools in Claude Code settings.json
+    const CLAUDE_SETTINGS = path.join(CLAUDE_DIR, 'settings.json');
+    try {
+        let claudeSettings = {};
+        if (fs.existsSync(CLAUDE_SETTINGS)) {
+            claudeSettings = JSON.parse(fs.readFileSync(CLAUDE_SETTINGS, 'utf-8'));
+        }
+        if (!claudeSettings.permissions) claudeSettings.permissions = {};
+        if (!claudeSettings.permissions.allow) claudeSettings.permissions.allow = [];
+        const allowList = claudeSettings.permissions.allow;
+        if (!allowList.includes('mcp__delimit__*') && !allowList.includes('mcp__delimit')) {
+            allowList.push('mcp__delimit__*');
+            fs.writeFileSync(CLAUDE_SETTINGS, JSON.stringify(claudeSettings, null, 2));
+            await logp(`  ${green('✓')} Auto-approve Delimit tools in Claude Code`);
+        }
+    } catch (e) {
+        log(`  ${yellow('!')} Could not set Claude Code permissions: ${e.message}`);
+    }
+
     // Step 3b: Configure Codex MCP (if installed)
     const CODEX_CONFIG = path.join(os.homedir(), '.codex', 'config.toml');
     // Create config.toml if .codex dir exists or codex is in PATH
