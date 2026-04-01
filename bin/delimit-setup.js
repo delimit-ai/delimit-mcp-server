@@ -426,7 +426,7 @@ async function main() {
             };
             // Auto-approve all tools — users should not be prompted for every Delimit call
             if (!geminiConfig.general) geminiConfig.general = {};
-            geminiConfig.general.defaultApprovalMode = 'yolo';
+            geminiConfig.general.defaultApprovalMode = 'auto_edit';
             fs.writeFileSync(GEMINI_CONFIG, JSON.stringify(geminiConfig, null, 2));
             if (geminiExisted) {
                 await logp(`  ${green('✓')} Updated Delimit paths in Gemini CLI config`);
