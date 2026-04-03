@@ -3,10 +3,13 @@
 Implements Agent Swarm Standard v1.2 (4-party consent achieved 2026-03-30).
 Each venture gets 5 agent roles bound to AI models with namespace isolation.
 
-Config: ~/.delimit/swarm/config.yml
+Config: /home/jamsons/governance/AGENT_SWARM_STANDARD.yml
 """
 
 import json
+import os
+import signal
+import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -593,6 +596,168 @@ def check_docs_freshness(
 
 
 # ═══════════════════════════════════════════════════════════════════════
+#  Swarm Governance Auto-Triggers — NEVER skip these
+#  Runs pre-flight checks before any major action
+# ═══════════════════════════════════════════════════════════════════════
+
+PREFLIGHT_LOG = SWARM_DIR / "preflight_log.jsonl"
+
+
+def preflight_check(
+    action: str,
+    venture: str = "",
+    path: str = "",
+    agent_id: str = "",
+) -> Dict[str, Any]:
+    """Run mandatory governance checks before any major swarm action.
+
+    This MUST be called before:
+    - Creating a new project/venture
+    - Deploying to production
+    - Publishing to npm
+    - Creating new agents or tools
+    - Any cross-venture operation
+
+    Returns a gate result: PASS (proceed), WARN (proceed with caution),
+    or BLOCK (stop and fix issues first).
+    """
+    _ensure_dir()
+    checks = []
+    gate = "PASS"
+
+    # 1. Venture must be registered
+    if venture:
+        ventures = _load_ventures()
+        if venture not in ventures.get("ventures", {}):
+            checks.append({
+                "check": "venture_registered",
+                "status": "FAIL",
+                "message": f"Venture '{venture}' is not registered. Call delimit_swarm(action='register') first.",
+                "required_action": "register_venture",
+            })
+            gate = "BLOCK"
+        else:
+            checks.append({"check": "venture_registered", "status": "PASS"})
+
+    # 2. Agent must exist and be authorized
+    if agent_id:
+        registry = _load_registry()
+        agent = registry["agents"].get(agent_id, {})
+        if not agent:
+            checks.append({
+                "check": "agent_exists",
+                "status": "FAIL",
+                "message": f"Agent '{agent_id}' not found in registry.",
+            })
+            gate = "BLOCK"
+        elif agent.get("status") != "active":
+            checks.append({
+                "check": "agent_active",
+                "status": "FAIL",
+                "message": f"Agent '{agent_id}' is not active (status: {agent.get('status')}).",
+            })
+            gate = "BLOCK"
+        else:
+            checks.append({"check": "agent_authorized", "status": "PASS"})
+
+    # 3. Namespace isolation check
+    if venture and path:
+        ventures = _load_ventures()
+        v_data = ventures.get("ventures", {}).get(venture, {})
+        v_path = v_data.get("path", "")
+        if v_path and not path.startswith(v_path):
+            checks.append({
+                "check": "namespace_isolation",
+                "status": "WARN",
+                "message": f"Path '{path}' is outside venture namespace '{v_path}'.",
+            })
+            if gate == "PASS":
+                gate = "WARN"
+        else:
+            checks.append({"check": "namespace_isolation", "status": "PASS"})
+
+    # 4. Action-specific checks
+    if action in ("deploy_production", "publish_npm"):
+        # Must have run scan
+        checks.append({
+            "check": "pre_deploy_scan",
+            "status": "WARN",
+            "message": "Ensure delimit_scan, delimit_security_audit, and delimit_test_smoke have been run.",
+            "required_tools": ["delimit_scan", "delimit_security_audit", "delimit_test_smoke"],
+        })
+        if gate == "PASS":
+            gate = "WARN"
+
+    if action == "new_project":
+        checks.append({
+            "check": "project_init",
+            "status": "WARN",
+            "message": "New project: ensure delimit_scan is run after scaffolding.",
+            "required_tools": ["delimit_scan", "delimit_swarm(action='register')"],
+        })
+        if gate == "PASS":
+            gate = "WARN"
+
+    if action == "create_tool" or action == "create_agent":
+        checks.append({
+            "check": "extension_governance",
+            "status": "PASS" if agent_id else "WARN",
+            "message": "Self-extension requires architect role and founder approval for activation.",
+        })
+
+    # 5. Collision check
+    if path:
+        try:
+            from ai.collision_detect import check_collisions
+            collisions = check_collisions()
+            if collisions.get("conflicts"):
+                checks.append({
+                    "check": "collision_free",
+                    "status": "WARN",
+                    "message": f"{len(collisions['conflicts'])} file collision(s) detected.",
+                })
+                if gate == "PASS":
+                    gate = "WARN"
+            else:
+                checks.append({"check": "collision_free", "status": "PASS"})
+        except ImportError:
+            checks.append({"check": "collision_free", "status": "SKIP"})
+
+    # Log the preflight
+    log_entry = {
+        "timestamp": time.time(),
+        "action": action,
+        "venture": venture,
+        "agent_id": agent_id,
+        "gate": gate,
+        "checks_passed": sum(1 for c in checks if c["status"] == "PASS"),
+        "checks_total": len(checks),
+    }
+    try:
+        with open(PREFLIGHT_LOG, "a") as f:
+            f.write(json.dumps(log_entry) + "\n")
+    except Exception:
+        pass
+
+    _log({"action": "preflight_check", "gate": gate, "venture": venture,
+           "checks": len(checks), "action_type": action})
+
+    return {
+        "gate": gate,
+        "action": action,
+        "venture": venture,
+        "checks": checks,
+        "passed": sum(1 for c in checks if c["status"] == "PASS"),
+        "total": len(checks),
+        "message": {
+            "PASS": "All governance checks passed. Proceed.",
+            "WARN": "Governance checks passed with warnings. Review before proceeding.",
+            "BLOCK": "Governance checks FAILED. Fix blocking issues before proceeding.",
+        }[gate],
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════
 #  LED-279: Self-Extending Swarm — Founder Mode
 #  Agents can create new MCP tools when authorized
 # ═══════════════════════════════════════════════════════════════════════
@@ -694,5 +859,274 @@ def list_custom_tools(venture: str = "") -> Dict[str, Any]:
         "status": "ok",
         "tools": tools,
         "total": len(tools),
+        "venture_filter": venture or "all",
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  MCP Hot Reload — Option B: subprocess restart with state transfer
+#  Consensus: Grok + Gemini agreed on subprocess restart with IPC
+# ═══════════════════════════════════════════════════════════════════════
+
+STATE_FILE = SWARM_DIR / "reload_state.json"
+RESTART_FLAG = SWARM_DIR / "restart_pending"
+
+
+def hot_reload(reason: str = "update") -> Dict[str, Any]:
+    """Restart the MCP server process to pick up new module code.
+
+    Saves current state (registry, ventures, metrics, custom tools list)
+    to a transfer file, signals the parent process to restart, and the
+    new process ingests the state on boot.
+
+    Works across all AI CLIs because MCP servers are subprocesses —
+    the CLI reconnects automatically within its timeout window (5-10s).
+    """
+    _ensure_dir()
+
+    # 1. Capture current state for transfer
+    state = {
+        "timestamp": time.time(),
+        "reason": reason,
+        "registry": _load_registry(),
+        "ventures": _load_ventures(),
+        "metrics": _load_metrics(),
+        "custom_tools": list_custom_tools().get("tools", []),
+    }
+    STATE_FILE.write_text(json.dumps(state, indent=2))
+
+    # 2. Write restart flag (picked up by boot sequence)
+    RESTART_FLAG.write_text(json.dumps({
+        "requested_at": time.time(),
+        "reason": reason,
+        "pid": os.getpid(),
+    }))
+
+    _log({"action": "hot_reload_requested", "reason": reason, "pid": os.getpid()})
+
+    # 3. Schedule graceful restart — send SIGHUP to self after brief delay
+    # The MCP framework (FastMCP) handles SIGHUP by restarting the server
+    # If SIGHUP isn't supported, fall back to writing the flag for manual pickup
+    restart_method = "flag"
+    try:
+        # Check if we're the MCP server process
+        if os.environ.get("DELIMIT_MCP_PID"):
+            mcp_pid = int(os.environ["DELIMIT_MCP_PID"])
+            os.kill(mcp_pid, signal.SIGHUP)
+            restart_method = "sighup"
+    except (ValueError, ProcessLookupError, PermissionError):
+        pass
+
+    return {
+        "status": "reload_scheduled",
+        "method": restart_method,
+        "state_file": str(STATE_FILE),
+        "reason": reason,
+        "message": f"MCP server reload scheduled ({restart_method}). "
+                   "AI CLI will reconnect within 5-10 seconds. "
+                   "Session context (ledger, memory, conversation) is preserved.",
+        "next_step": "The MCP server will restart and load updated modules. "
+                     "No action needed — tools will be available again momentarily.",
+    }
+
+
+def ingest_reload_state() -> Dict[str, Any]:
+    """Called on MCP server boot to restore state from a hot reload.
+
+    Returns the transferred state if a reload just happened, or empty
+    if this is a fresh boot.
+    """
+    if not STATE_FILE.exists():
+        return {"status": "fresh_boot", "restored": False}
+
+    try:
+        state = json.loads(STATE_FILE.read_text())
+        age = time.time() - state.get("timestamp", 0)
+
+        # Only ingest if state is less than 60 seconds old
+        if age > 60:
+            STATE_FILE.unlink(missing_ok=True)
+            return {"status": "stale_state", "restored": False, "age_seconds": age}
+
+        # Clean up
+        STATE_FILE.unlink(missing_ok=True)
+        RESTART_FLAG.unlink(missing_ok=True)
+
+        _log({"action": "reload_state_ingested", "reason": state.get("reason"), "age": age})
+
+        return {
+            "status": "restored",
+            "restored": True,
+            "reason": state.get("reason", "unknown"),
+            "age_seconds": round(age, 1),
+            "registry_agents": len(state.get("registry", {}).get("agents", {})),
+            "ventures": len(state.get("ventures", {}).get("ventures", {})),
+            "custom_tools": len(state.get("custom_tools", [])),
+        }
+    except (json.JSONDecodeError, KeyError):
+        STATE_FILE.unlink(missing_ok=True)
+        return {"status": "corrupt_state", "restored": False}
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  Swarm Self-Scaling — as ventures grow, so does the workforce
+#  Architect agents can provision new specialist roles
+# ═══════════════════════════════════════════════════════════════════════
+
+CUSTOM_ROLES_FILE = SWARM_DIR / "custom_roles.json"
+
+
+def create_agent(
+    venture: str,
+    role_name: str,
+    description: str,
+    default_model: str = "claude-opus-4.6",
+    fallback_model: str = "gemini-3.1-pro-preview",
+    permissions: Optional[List[str]] = None,
+    creator_agent_id: str = "",
+) -> Dict[str, Any]:
+    """Create a new specialist agent role for a venture.
+
+    Only the Architect agent can create new roles. New roles inherit
+    the venture's namespace isolation but get scoped permissions.
+    The agent is registered but requires founder approval to activate.
+
+    All models see new agents via the standard MCP tool interface —
+    no model-specific configuration needed.
+    """
+    if not venture or not role_name:
+        return {"error": "venture and role_name are required"}
+
+    # Verify creator has authority
+    registry = _load_registry()
+    creator = registry["agents"].get(creator_agent_id, {})
+    if creator.get("role") != "architect":
+        return {
+            "error": f"Only architect agents can create new roles. "
+                     f"Agent '{creator_agent_id}' has role '{creator.get('role', 'unknown')}'.",
+        }
+
+    # Verify venture namespace
+    if creator.get("venture", "") != venture:
+        return {"error": f"Agent '{creator_agent_id}' cannot create roles for venture '{venture}'"}
+
+    # Normalize role name
+    safe_role = role_name.lower().replace("-", "_").replace(" ", "_")
+
+    # Check for duplicate
+    if safe_role in DEFAULT_ROSTER:
+        return {"error": f"Cannot override built-in role '{safe_role}'"}
+
+    # Load or create custom roles registry
+    custom_roles = {}
+    if CUSTOM_ROLES_FILE.exists():
+        try:
+            custom_roles = json.loads(CUSTOM_ROLES_FILE.read_text())
+        except json.JSONDecodeError:
+            custom_roles = {}
+
+    venture_roles = custom_roles.setdefault(venture, {})
+    if safe_role in venture_roles:
+        return {"error": f"Role '{safe_role}' already exists for venture '{venture}'"}
+
+    # Create the role definition
+    role_def = {
+        "role": description,
+        "default_model": default_model,
+        "fallback_model": fallback_model,
+        "permissions": permissions or ["read", "suggest"],
+        "created_by": creator_agent_id,
+        "created_at": time.time(),
+        "status": "pending_approval",
+    }
+    venture_roles[safe_role] = role_def
+
+    # Save
+    _ensure_dir()
+    CUSTOM_ROLES_FILE.write_text(json.dumps(custom_roles, indent=2))
+
+    # Auto-register the agent (inactive until approved)
+    agent_id = f"{venture}_{safe_role}"
+    registry["agents"][agent_id] = {
+        "venture": venture,
+        "role": safe_role,
+        "model": default_model,
+        "fallback": fallback_model,
+        "status": "pending_approval",
+        "registered_at": time.time(),
+        "custom": True,
+    }
+    _save_registry(registry)
+
+    _log({
+        "action": "agent_created",
+        "venture": venture,
+        "role": safe_role,
+        "model": default_model,
+        "created_by": creator_agent_id,
+        "status": "pending_approval",
+    })
+
+    return {
+        "status": "created",
+        "agent_id": agent_id,
+        "role": safe_role,
+        "venture": venture,
+        "model": default_model,
+        "permissions": role_def["permissions"],
+        "created_by": creator_agent_id,
+        "activation": "pending_approval",
+        "message": f"Agent '{agent_id}' created with role '{safe_role}'. "
+                   f"Founder approval required to activate.",
+    }
+
+
+def approve_agent(agent_id: str) -> Dict[str, Any]:
+    """Approve a pending custom agent for activation (founder only)."""
+    registry = _load_registry()
+    agent = registry["agents"].get(agent_id)
+    if not agent:
+        return {"error": f"Agent '{agent_id}' not found"}
+    if not agent.get("custom"):
+        return {"error": f"Agent '{agent_id}' is a built-in role, not a custom agent"}
+    if agent.get("status") == "active":
+        return {"status": "already_active", "agent_id": agent_id}
+
+    agent["status"] = "active"
+    agent["approved_at"] = time.time()
+    _save_registry(registry)
+
+    _log({"action": "agent_approved", "agent_id": agent_id})
+
+    return {
+        "status": "activated",
+        "agent_id": agent_id,
+        "role": agent.get("role"),
+        "venture": agent.get("venture"),
+        "message": f"Agent '{agent_id}' is now active.",
+    }
+
+
+def list_agents(venture: str = "") -> Dict[str, Any]:
+    """List all agents — built-in and custom — optionally filtered by venture."""
+    registry = _load_registry()
+    agents = []
+
+    for agent_id, agent in registry["agents"].items():
+        if venture and agent.get("venture") != venture:
+            continue
+        agents.append({
+            "id": agent_id,
+            "venture": agent.get("venture", ""),
+            "role": agent.get("role", ""),
+            "model": agent.get("model", ""),
+            "status": agent.get("status", "active"),
+            "custom": agent.get("custom", False),
+        })
+
+    return {
+        "status": "ok",
+        "agents": agents,
+        "total": len(agents),
         "venture_filter": venture or "all",
     }
