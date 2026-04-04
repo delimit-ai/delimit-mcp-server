@@ -57,6 +57,11 @@ function getDynamicContinuityContext(options = {}) {
 function normalizeNaturalLanguageArgs(argv) {
     const raw = argv.slice(2);
     if (raw.length === 0) {
+        // First-run detection: if no ~/.delimit exists, show welcome flow
+        const delimitHome = path.join(os.homedir(), '.delimit');
+        if (!fs.existsSync(delimitHome) || !fs.existsSync(path.join(delimitHome, 'server'))) {
+            return ['scan'];  // lowest friction entry point for new users
+        }
         return resolveRepoRoot(process.cwd()) ? ['session', '--inspect'] : ['session', '--all'];
     }
 
