@@ -605,6 +605,14 @@ def data_migrate(target: str = ".") -> Dict[str, Any]:
     }
 
 
+def _human_size(size_bytes: int) -> str:
+    for unit in ["B", "KB", "MB", "GB"]:
+        if size_bytes < 1024:
+            return f"{size_bytes:.1f} {unit}"
+        size_bytes /= 1024
+    return f"{size_bytes:.1f} TB"
+
+
 def data_backup(target: str = ".") -> Dict[str, Any]:
     """Back up SQLite and JSON data files to ~/.delimit/backups/."""
     target_path = Path(target).resolve()
@@ -658,14 +666,6 @@ def data_backup(target: str = ".") -> Dict[str, Any]:
     }
 
 
-def _human_size(size_bytes: int) -> str:
-    for unit in ["B", "KB", "MB", "GB"]:
-        if size_bytes < 1024:
-            return f"{size_bytes:.1f} {unit}"
-        size_bytes /= 1024
-    return f"{size_bytes:.1f} TB"
-
-
 # ═══════════════════════════════════════════════════════════════════════
 #  INTEL TOOLS
 # ═══════════════════════════════════════════════════════════════════════
@@ -711,6 +711,14 @@ def intel_snapshot_ingest(data: Dict[str, Any], provenance: Optional[Dict[str, A
         "checksum": snapshot["checksum"],
         "storage_path": str(snapshot_file),
     }
+
+
+def _truncate_data(data: Any, max_len: int = 200) -> Any:
+    """Truncate data for preview."""
+    s = json.dumps(data)
+    if len(s) <= max_len:
+        return data
+    return {"_preview": s[:max_len] + "...", "_truncated": True}
 
 
 def intel_query(dataset_id: Optional[str] = None, query: str = "", parameters: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -764,14 +772,6 @@ def intel_query(dataset_id: Optional[str] = None, query: str = "", parameters: O
         "results": results,
         "total_results": len(results),
     }
-
-
-def _truncate_data(data: Any, max_len: int = 200) -> Any:
-    """Truncate data for preview."""
-    s = json.dumps(data)
-    if len(s) <= max_len:
-        return data
-    return {"_preview": s[:max_len] + "...", "_truncated": True}
 
 
 def intel_dataset_register(name: str, schema: Optional[Dict[str, Any]] = None,
