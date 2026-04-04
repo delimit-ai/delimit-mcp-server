@@ -3494,5 +3494,40 @@ program
         console.log("");
     });
 
+// Badge command — generate governance badge for README
+program
+    .command('badge')
+    .description('Generate a governance badge for your README')
+    .action(() => {
+        const policyFile = path.join(process.cwd(), '.delimit', 'policies.yml');
+        const hasPolicy = fs.existsSync(policyFile);
+        const workflowDir = path.join(process.cwd(), '.github', 'workflows');
+        const hasAction = fs.existsSync(workflowDir) && fs.readdirSync(workflowDir).some(f => {
+            try { return fs.readFileSync(path.join(workflowDir, f), 'utf-8').includes('delimit'); } catch { return false; }
+        });
+
+        console.log(chalk.bold('\n  Delimit Badge\n'));
+
+        if (hasPolicy && hasAction) {
+            console.log(chalk.green('  Governance: active (policy + CI)\n'));
+            console.log('  Add this to your README.md:\n');
+            console.log(chalk.cyan('  [![API Governance](https://img.shields.io/badge/API%20Governance-Delimit-7c3aed)](https://github.com/delimit-ai/delimit-mcp-server)'));
+        } else if (hasPolicy) {
+            console.log(chalk.yellow('  Governance: policy only (no CI action)\n'));
+            console.log('  Add this to your README.md:\n');
+            console.log(chalk.cyan('  [![API Policy](https://img.shields.io/badge/API%20Policy-Delimit-7c3aed)](https://github.com/delimit-ai/delimit-mcp-server)'));
+            console.log(chalk.gray('\n  Add CI: npx delimit-cli init (creates GitHub Action workflow)'));
+        } else {
+            console.log(chalk.gray('  No governance found. Run:\n'));
+            console.log(`  ${chalk.green('npx delimit-cli init')}   — set up policy + GitHub Action`);
+            console.log(`  ${chalk.green('npx delimit-cli badge')}  — then generate your badge\n`);
+            return;
+        }
+
+        console.log('');
+        console.log(chalk.gray('  Copy the line above and paste it in your README.md'));
+        console.log(chalk.gray('  The badge links to Delimit so visitors can learn more.\n'));
+    });
+
 const normalizedArgs = normalizeNaturalLanguageArgs(process.argv);
 program.parse([process.argv[0], process.argv[1], ...normalizedArgs]);
