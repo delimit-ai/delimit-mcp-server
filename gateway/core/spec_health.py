@@ -239,6 +239,25 @@ def score_completeness(spec: Dict[str, Any]) -> Tuple[int, List[str]]:
     return score, recommendations
 
 
+def _spec_to_text(spec: Dict[str, Any], depth: int = 0) -> str:
+    """Convert a spec to flat text for pattern scanning. Limits recursion depth."""
+    if depth > 15:
+        return ""
+    parts = []
+    if isinstance(spec, dict):
+        for k, v in spec.items():
+            if k == "$ref":
+                continue
+            parts.append(str(k))
+            parts.append(_spec_to_text(v, depth + 1))
+    elif isinstance(spec, list):
+        for item in spec:
+            parts.append(_spec_to_text(item, depth + 1))
+    elif isinstance(spec, str):
+        parts.append(spec)
+    return " ".join(parts)
+
+
 def score_security(spec: Dict[str, Any]) -> Tuple[int, List[str]]:
     """Score security: auth schemes, HTTPS, PII patterns."""
     recommendations = []
@@ -295,25 +314,6 @@ def score_security(spec: Dict[str, Any]) -> Tuple[int, List[str]]:
 
     score = round((points / max_points) * 100) if max_points > 0 else 0
     return score, recommendations
-
-
-def _spec_to_text(spec: Dict[str, Any], depth: int = 0) -> str:
-    """Convert a spec to flat text for pattern scanning. Limits recursion depth."""
-    if depth > 15:
-        return ""
-    parts = []
-    if isinstance(spec, dict):
-        for k, v in spec.items():
-            if k == "$ref":
-                continue
-            parts.append(str(k))
-            parts.append(_spec_to_text(v, depth + 1))
-    elif isinstance(spec, list):
-        for item in spec:
-            parts.append(_spec_to_text(item, depth + 1))
-    elif isinstance(spec, str):
-        parts.append(spec)
-    return " ".join(parts)
 
 
 def score_consistency(spec: Dict[str, Any]) -> Tuple[int, List[str]]:
