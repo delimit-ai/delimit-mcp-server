@@ -6,29 +6,6 @@ from schemas.base import TaskRequest
 
 register_task = task_registry.register
 
-@register_task("explain-diff", version="v1", description="Explain differences between API versions")
-def explain_diff_handler(request: TaskRequest) -> Dict[str, Any]:
-    """Generate human-readable explanation of API changes"""
-    
-    files = request.files
-    if len(files) != 2:
-        raise ValueError("explain-diff requires exactly 2 files: old and new API spec")
-    
-    old_spec = load_spec(files[0])
-    new_spec = load_spec(files[1])
-    
-    changes = analyze_changes(old_spec, new_spec)
-    explanation = generate_explanation(changes)
-    migration_guide = generate_migration_guide(changes)
-    
-    return {
-        "summary": explanation["summary"],
-        "changes": changes,
-        "explanation": explanation["details"],
-        "migration_guide": migration_guide,
-        "impact_assessment": assess_impact(changes)
-    }
-
 def load_spec(file_path: str) -> Dict:
     """Load API specification"""
     with open(file_path, 'r') as f:
@@ -36,75 +13,6 @@ def load_spec(file_path: str) -> Dict:
             return yaml.safe_load(f)
         else:
             return json.load(f)
-
-def analyze_changes(old_spec: Dict, new_spec: Dict) -> Dict[str, Any]:
-    """Analyze all changes between specs"""
-    changes = {
-        "endpoints": {
-            "added": [],
-            "removed": [],
-            "modified": []
-        },
-        "models": {
-            "added": [],
-            "removed": [],
-            "modified": []
-        },
-        "security": {
-            "added": [],
-            "removed": [],
-            "modified": []
-        },
-        "metadata": {}
-    }
-    
-    # Analyze endpoint changes
-    old_paths = set(old_spec.get("paths", {}).keys())
-    new_paths = set(new_spec.get("paths", {}).keys())
-    
-    changes["endpoints"]["added"] = list(new_paths - old_paths)
-    changes["endpoints"]["removed"] = list(old_paths - new_paths)
-    
-    # Check for modified endpoints
-    for path in old_paths & new_paths:
-        old_methods = set(old_spec["paths"][path].keys())
-        new_methods = set(new_spec["paths"][path].keys())
-        
-        if old_methods != new_methods or has_parameter_changes(
-            old_spec["paths"][path], new_spec["paths"][path]
-        ):
-            changes["endpoints"]["modified"].append({
-                "path": path,
-                "methods_added": list(new_methods - old_methods),
-                "methods_removed": list(old_methods - new_methods),
-                "parameter_changes": get_parameter_changes(
-                    old_spec["paths"][path], new_spec["paths"][path]
-                )
-            })
-    
-    # Analyze model/schema changes
-    old_schemas = get_schemas(old_spec)
-    new_schemas = get_schemas(new_spec)
-    
-    changes["models"]["added"] = list(set(new_schemas.keys()) - set(old_schemas.keys()))
-    changes["models"]["removed"] = list(set(old_schemas.keys()) - set(new_schemas.keys()))
-    
-    # Check for modified models
-    for model_name in set(old_schemas.keys()) & set(new_schemas.keys()):
-        if old_schemas[model_name] != new_schemas[model_name]:
-            changes["models"]["modified"].append({
-                "name": model_name,
-                "changes": compare_schemas(old_schemas[model_name], new_schemas[model_name])
-            })
-    
-    # Analyze metadata changes
-    if old_spec.get("info") != new_spec.get("info"):
-        changes["metadata"]["version_change"] = {
-            "old": old_spec.get("info", {}).get("version"),
-            "new": new_spec.get("info", {}).get("version")
-        }
-    
-    return changes
 
 def has_parameter_changes(old_endpoint: Dict, new_endpoint: Dict) -> bool:
     """Check if endpoint has parameter changes"""
@@ -172,6 +80,75 @@ def compare_schemas(old_schema: Dict, new_schema: Dict) -> List[str]:
         new_type = new_schema["properties"][prop].get("type")
         if old_type != new_type:
             changes.append(f"Field '{prop}' type changed from {old_type} to {new_type}")
+    
+    return changes
+
+def analyze_changes(old_spec: Dict, new_spec: Dict) -> Dict[str, Any]:
+    """Analyze all changes between specs"""
+    changes = {
+        "endpoints": {
+            "added": [],
+            "removed": [],
+            "modified": []
+        },
+        "models": {
+            "added": [],
+            "removed": [],
+            "modified": []
+        },
+        "security": {
+            "added": [],
+            "removed": [],
+            "modified": []
+        },
+        "metadata": {}
+    }
+    
+    # Analyze endpoint changes
+    old_paths = set(old_spec.get("paths", {}).keys())
+    new_paths = set(new_spec.get("paths", {}).keys())
+    
+    changes["endpoints"]["added"] = list(new_paths - old_paths)
+    changes["endpoints"]["removed"] = list(old_paths - new_paths)
+    
+    # Check for modified endpoints
+    for path in old_paths & new_paths:
+        old_methods = set(old_spec["paths"][path].keys())
+        new_methods = set(new_spec["paths"][path].keys())
+        
+        if old_methods != new_methods or has_parameter_changes(
+            old_spec["paths"][path], new_spec["paths"][path]
+        ):
+            changes["endpoints"]["modified"].append({
+                "path": path,
+                "methods_added": list(new_methods - old_methods),
+                "methods_removed": list(old_methods - new_methods),
+                "parameter_changes": get_parameter_changes(
+                    old_spec["paths"][path], new_spec["paths"][path]
+                )
+            })
+    
+    # Analyze model/schema changes
+    old_schemas = get_schemas(old_spec)
+    new_schemas = get_schemas(new_spec)
+    
+    changes["models"]["added"] = list(set(new_schemas.keys()) - set(old_schemas.keys()))
+    changes["models"]["removed"] = list(set(old_schemas.keys()) - set(new_schemas.keys()))
+    
+    # Check for modified models
+    for model_name in set(old_schemas.keys()) & set(new_schemas.keys()):
+        if old_schemas[model_name] != new_schemas[model_name]:
+            changes["models"]["modified"].append({
+                "name": model_name,
+                "changes": compare_schemas(old_schemas[model_name], new_schemas[model_name])
+            })
+    
+    # Analyze metadata changes
+    if old_spec.get("info") != new_spec.get("info"):
+        changes["metadata"]["version_change"] = {
+            "old": old_spec.get("info", {}).get("version"),
+            "new": new_spec.get("info", {}).get("version")
+        }
     
     return changes
 
@@ -303,3 +280,26 @@ def assess_impact(changes: Dict) -> Dict[str, Any]:
         impact["recommendation"] = "No action required."
     
     return impact
+
+@register_task("explain-diff", version="v1", description="Explain differences between API versions")
+def explain_diff_handler(request: TaskRequest) -> Dict[str, Any]:
+    """Generate human-readable explanation of API changes"""
+    
+    files = request.files
+    if len(files) != 2:
+        raise ValueError("explain-diff requires exactly 2 files: old and new API spec")
+    
+    old_spec = load_spec(files[0])
+    new_spec = load_spec(files[1])
+    
+    changes = analyze_changes(old_spec, new_spec)
+    explanation = generate_explanation(changes)
+    migration_guide = generate_migration_guide(changes)
+    
+    return {
+        "summary": explanation["summary"],
+        "changes": changes,
+        "explanation": explanation["details"],
+        "migration_guide": migration_guide,
+        "impact_assessment": assess_impact(changes)
+    }
