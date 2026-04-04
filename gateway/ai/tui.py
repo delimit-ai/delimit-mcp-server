@@ -90,12 +90,6 @@ class LedgerPanel(Static):
     def compose(self) -> ComposeResult:
         yield DataTable(id="ledger-table")
 
-    def on_mount(self) -> None:
-        table = self.query_one("#ledger-table", DataTable)
-        table.add_columns("ID", "P", "Title", "Venture", "Type")
-        self._refresh_data()
-        self.set_interval(30, self._refresh_data)
-
     def _refresh_data(self) -> None:
         table = self.query_one("#ledger-table", DataTable)
         table.clear()
@@ -108,16 +102,18 @@ class LedgerPanel(Static):
                 item.get("type", ""),
             )
 
+    def on_mount(self) -> None:
+        table = self.query_one("#ledger-table", DataTable)
+        table.add_columns("ID", "P", "Title", "Venture", "Type")
+        self._refresh_data()
+        self.set_interval(30, self._refresh_data)
+
 
 class SwarmPanel(Static):
     """Swarm status — agents, ventures, health."""
 
     def compose(self) -> ComposeResult:
         yield Static(id="swarm-content")
-
-    def on_mount(self) -> None:
-        self._refresh_data()
-        self.set_interval(15, self._refresh_data)
 
     def _refresh_data(self) -> None:
         content = self.query_one("#swarm-content", Static)
@@ -130,15 +126,16 @@ class SwarmPanel(Static):
             lines.append(f"  [green]{venture}[/]: {count} agents")
         content.update("\n".join(lines))
 
+    def on_mount(self) -> None:
+        self._refresh_data()
+        self.set_interval(15, self._refresh_data)
+
 
 class SessionPanel(Static):
     """Recent sessions — handoff history."""
 
     def compose(self) -> ComposeResult:
         yield Static(id="session-content")
-
-    def on_mount(self) -> None:
-        self._refresh_data()
 
     def _refresh_data(self) -> None:
         content = self.query_one("#session-content", Static)
@@ -156,16 +153,15 @@ class SessionPanel(Static):
                 lines.append(f"  [green]✓ {completed} items completed[/]")
         content.update("\n".join(lines))
 
+    def on_mount(self) -> None:
+        self._refresh_data()
+
 
 class VenturesPanel(Static):
     """Ventures as app tiles — each venture is an 'app' in the OS."""
 
     def compose(self) -> ComposeResult:
         yield Static(id="ventures-content")
-
-    def on_mount(self) -> None:
-        self._refresh_data()
-        self.set_interval(30, self._refresh_data)
 
     def _refresh_data(self) -> None:
         content = self.query_one("#ventures-content", Static)
@@ -198,16 +194,16 @@ class VenturesPanel(Static):
         lines.append(f"\n[dim]Total: {len(by_venture)} ventures, {swarm['agents']} agents[/]")
         content.update("\n".join(lines))
 
+    def on_mount(self) -> None:
+        self._refresh_data()
+        self.set_interval(30, self._refresh_data)
+
 
 class GovernanceBar(Static):
     """Top status bar — governance health at a glance."""
 
     def compose(self) -> ComposeResult:
         yield Static(id="gov-bar")
-
-    def on_mount(self) -> None:
-        self._refresh()
-        self.set_interval(60, self._refresh)
 
     def _refresh(self) -> None:
         bar = self.query_one("#gov-bar", Static)
@@ -223,6 +219,10 @@ class GovernanceBar(Static):
             f"[cyan]Mode:[/] {mode}  |  "
             f"[dim]{time.strftime('%H:%M')}[/]"
         )
+
+    def on_mount(self) -> None:
+        self._refresh()
+        self.set_interval(60, self._refresh)
 
 
 # ── Main App ─────────────────────────────────────────────────────────
