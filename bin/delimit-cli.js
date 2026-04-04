@@ -2787,15 +2787,52 @@ print(json.dumps({'changes':[{'type':c.type.value if hasattr(c.type,'value') els
         }
     });
 
-// Try command — zero-risk demo with Markdown report artifact (LED-264)
+// Try command — zero-risk demo with Markdown report artifact (LED-264 + LED-424)
 program
-    .command('try')
-    .description('Run a zero-risk governance demo and save a Markdown report')
-    .action(async () => {
+    .command('try [repo]')
+    .description('Run governance on your project, a GitHub repo, or a built-in demo')
+    .action(async (repo) => {
         const tmpDir = path.join(os.tmpdir(), `delimit-try-${Date.now()}`);
         fs.mkdirSync(tmpDir, { recursive: true });
 
         console.log(chalk.bold('\n  Delimit — Try It\n'));
+
+        // Mode 1: Clone a GitHub repo and scan it
+        if (repo && (repo.includes('/') || repo.startsWith('http'))) {
+            const repoUrl = repo.startsWith('http') ? repo : `https://github.com/${repo}`;
+            console.log(chalk.gray(`  Cloning ${repoUrl}...\n`));
+            try {
+                execSync(`git clone --depth 1 ${repoUrl} ${tmpDir}/repo 2>&1`, { timeout: 30000 });
+                console.log(chalk.green('  Cloned. Scanning for OpenAPI specs...\n'));
+                execSync(`node "${path.join(__dirname, 'delimit-cli.js')}" scan ${tmpDir}/repo`, { stdio: 'inherit', timeout: 30000 });
+                // Show governance readiness for their repo
+                console.log(chalk.bold('\n  Want to add governance to this repo?\n'));
+                console.log(`    ${chalk.green('1.')} Fork it and run ${chalk.bold('npx delimit-cli init')}`);
+                console.log(`    ${chalk.green('2.')} Add CI: ${chalk.bold('npx delimit-cli ci')}`);
+                console.log(`    ${chalk.green('3.')} Open a PR — Delimit comments with breaking changes automatically\n`);
+                try { fs.rmSync(tmpDir, { recursive: true }); } catch {}
+                return;
+            } catch (err) {
+                console.log(chalk.red(`  Could not clone: ${err.message}\n`));
+                console.log(chalk.gray('  Falling back to built-in demo...\n'));
+            }
+        }
+
+        // Mode 2: Use current directory if it has specs
+        if (!repo) {
+            const cwd = process.cwd();
+            const localSpecs = ['openapi.yaml', 'openapi.yml', 'openapi.json', 'swagger.yaml', 'swagger.json',
+                'api/openapi.yaml', 'api/openapi.yml', 'api/openapi.json', 'spec/api.json', 'docs/openapi.yaml'];
+            const foundLocal = localSpecs.find(s => fs.existsSync(path.join(cwd, s)));
+            if (foundLocal) {
+                console.log(chalk.green(`  Found ${foundLocal} in current directory. Running governance scan...\n`));
+                execSync(`node "${path.join(__dirname, 'delimit-cli.js')}" scan ${path.join(cwd, foundLocal)}`, { stdio: 'inherit', timeout: 30000 });
+                try { fs.rmSync(tmpDir, { recursive: true }); } catch {}
+                return;
+            }
+        }
+
+        // Mode 3: Built-in demo (original behavior)
         console.log(chalk.gray('  Safe mode: runs in a temp directory, nothing touches your project.\n'));
 
         // Create sample specs (same as demo)

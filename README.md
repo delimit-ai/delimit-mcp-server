@@ -31,6 +31,7 @@ Works across any configuration — from a single model on a budget to an enterpr
 
 ```bash
 npx delimit-cli scan              # Instant health grade for your API spec
+npx delimit-cli try owner/repo    # Try governance on any GitHub repo
 npx delimit-cli pr owner/repo#123 # Review any GitHub PR for breaking changes
 npx delimit-cli setup && source ~/.bashrc  # Configure AI assistants + activate
 ```
