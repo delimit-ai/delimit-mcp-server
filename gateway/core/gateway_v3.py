@@ -21,10 +21,6 @@ class HardenedGateway:
     All paths return TaskEvidence
     """
     
-    def __init__(self):
-        self.registry = task_registry
-        self._load_tasks()
-    
     def _load_tasks(self):
         """Load all task modules to register handlers"""
         try:
@@ -34,6 +30,36 @@ class HardenedGateway:
             import tasks.explain_diff_v2
         except ImportError as e:
             logger.warning(f"Could not load all tasks: {e}")
+    
+    def __init__(self):
+        self.registry = task_registry
+        self._load_tasks()
+    
+    def _create_error_evidence(self, task: str, error_message: str, correlation_id: Optional[str] = None) -> TaskEvidence:
+        """Create proper TaskEvidence for errors - never return raw dicts"""
+        return TaskEvidence(
+            task=task,
+            task_version="error",
+            decision=Decision.FAIL,
+            exit_code=1,
+            violations=[
+                Violation(
+                    rule="execution_error",
+                    severity=ViolationSeverity.HIGH,
+                    message=error_message,
+                    details={"error_type": "execution_failure"}
+                )
+            ],
+            evidence=[],
+            remediation=Remediation(
+                summary="Task execution failed",
+                steps=["Check input parameters", "Verify file paths exist", "Review error message"],
+                documentation="https://docs.delimit.ai/troubleshooting"
+            ),
+            summary=f"Task execution failed: {error_message}",
+            correlation_id=correlation_id,
+            metrics={}
+        )
     
     def run_validate_api(self, request: ValidateAPIRequest) -> TaskEvidence:
         """Execute validate-api task with typed request/response"""
@@ -80,32 +106,6 @@ class HardenedGateway:
             return handler(request)
         except Exception as e:
             return self._create_error_evidence("explain-diff", str(e), request.correlation_id)
-    
-    def _create_error_evidence(self, task: str, error_message: str, correlation_id: Optional[str] = None) -> TaskEvidence:
-        """Create proper TaskEvidence for errors - never return raw dicts"""
-        return TaskEvidence(
-            task=task,
-            task_version="error",
-            decision=Decision.FAIL,
-            exit_code=1,
-            violations=[
-                Violation(
-                    rule="execution_error",
-                    severity=ViolationSeverity.HIGH,
-                    message=error_message,
-                    details={"error_type": "execution_failure"}
-                )
-            ],
-            evidence=[],
-            remediation=Remediation(
-                summary="Task execution failed",
-                steps=["Check input parameters", "Verify file paths exist", "Review error message"],
-                documentation="https://docs.delimit.ai/troubleshooting"
-            ),
-            summary=f"Task execution failed: {error_message}",
-            correlation_id=correlation_id,
-            metrics={}
-        )
     
     def run(self, task: str, **kwargs) -> Dict[str, str]:
         """
