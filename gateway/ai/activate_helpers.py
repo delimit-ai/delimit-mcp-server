@@ -10,49 +10,6 @@ from pathlib import Path
 from typing import Dict, Any
 
 
-def activate_auto_permissions(auto_permissions: bool) -> dict:
-    """LED-269: Detect AI assistant and auto-configure Delimit tool permissions.
-
-    Returns a checklist entry dict with item/status/detail.
-    """
-    home = Path.home()
-    assistant = None
-    config_path = None
-
-    # Detect which assistant is running
-    if os.environ.get("CLAUDE_CODE") or (home / ".claude").is_dir():
-        assistant = "claude_code"
-        config_path = home / ".claude" / "settings.json"
-    elif (home / ".codex" / "config.toml").exists():
-        assistant = "codex"
-        config_path = home / ".codex" / "config.toml"
-    elif (home / ".gemini" / "settings.json").exists():
-        assistant = "gemini"
-        config_path = home / ".gemini" / "settings.json"
-    else:
-        if os.environ.get("CODEX_CLI"):
-            assistant = "codex"
-            config_path = home / ".codex" / "config.toml"
-
-    if not assistant:
-        return {"item": "Permissions", "status": "Skip (no assistant)", "detail": "No AI assistant detected"}
-
-    if not auto_permissions:
-        return {"item": "Permissions", "status": "Skip (manual)", "detail": f"Detected {assistant} — auto-config disabled"}
-
-    try:
-        if assistant == "claude_code":
-            return configure_claude_code_permissions(config_path)
-        elif assistant == "codex":
-            return configure_codex_permissions(config_path)
-        elif assistant == "gemini":
-            return {"item": "Permissions", "status": "Skip (manual)", "detail": "Gemini CLI — configure permissions manually"}
-    except Exception as e:
-        return {"item": "Permissions", "status": "Fail", "detail": f"Auto-config failed: {e}"}
-
-    return {"item": "Permissions", "status": "Skip (manual)", "detail": f"Detected {assistant}"}
-
-
 def configure_claude_code_permissions(config_path: Path) -> dict:
     """Add mcp__delimit__* to Claude Code permissions.allow if not present."""
     permission_pattern = "mcp__delimit__*"
@@ -94,6 +51,49 @@ def configure_codex_permissions(config_path: Path) -> dict:
         return {"item": "Permissions", "status": "Pass", "detail": f"Codex: added trust_level=trusted to {config_path}"}
     else:
         return {"item": "Permissions", "status": "Pass", "detail": "Codex: delimit section exists"}
+
+
+def activate_auto_permissions(auto_permissions: bool) -> dict:
+    """LED-269: Detect AI assistant and auto-configure Delimit tool permissions.
+
+    Returns a checklist entry dict with item/status/detail.
+    """
+    home = Path.home()
+    assistant = None
+    config_path = None
+
+    # Detect which assistant is running
+    if os.environ.get("CLAUDE_CODE") or (home / ".claude").is_dir():
+        assistant = "claude_code"
+        config_path = home / ".claude" / "settings.json"
+    elif (home / ".codex" / "config.toml").exists():
+        assistant = "codex"
+        config_path = home / ".codex" / "config.toml"
+    elif (home / ".gemini" / "settings.json").exists():
+        assistant = "gemini"
+        config_path = home / ".gemini" / "settings.json"
+    else:
+        if os.environ.get("CODEX_CLI"):
+            assistant = "codex"
+            config_path = home / ".codex" / "config.toml"
+
+    if not assistant:
+        return {"item": "Permissions", "status": "Skip (no assistant)", "detail": "No AI assistant detected"}
+
+    if not auto_permissions:
+        return {"item": "Permissions", "status": "Skip (manual)", "detail": f"Detected {assistant} — auto-config disabled"}
+
+    try:
+        if assistant == "claude_code":
+            return configure_claude_code_permissions(config_path)
+        elif assistant == "codex":
+            return configure_codex_permissions(config_path)
+        elif assistant == "gemini":
+            return {"item": "Permissions", "status": "Skip (manual)", "detail": "Gemini CLI — configure permissions manually"}
+    except Exception as e:
+        return {"item": "Permissions", "status": "Fail", "detail": f"Auto-config failed: {e}"}
+
+    return {"item": "Permissions", "status": "Skip (manual)", "detail": f"Detected {assistant}"}
 
 
 def build_checklist(
