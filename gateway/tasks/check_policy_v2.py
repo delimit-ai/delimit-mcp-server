@@ -26,119 +26,6 @@ IMPLEMENTED_RULES = {
 }
 
 
-@task_registry.register("check-policy", version="1.0", description="Check API against implemented policy rules")
-def check_policy_handler(request: CheckPolicyRequest) -> PolicyComplianceEvidence:
-    """Validate API spec against ACTUALLY IMPLEMENTED policy rules"""
-    
-    # Get policy - either from file, inline, or defaults
-    if request.policy_file:
-        policy = load_policy(request.policy_file)
-    elif request.policy_inline:
-        policy = request.policy_inline
-    else:
-        policy = get_default_policy()
-    
-    violations = []
-    evidence_list = []
-    checks_performed = 0
-    checks_passed = 0
-    
-    # Process each spec file
-    for spec_file in request.spec_files:
-        spec = load_spec(spec_file)
-        
-        # ONLY check rules we actually implement
-        for rule_name in IMPLEMENTED_RULES:
-            if not policy.get("rules", {}).get(rule_name, False):
-                continue  # Rule not enabled in policy
-            
-            checks_performed += 1
-            rule_passed, violation = check_rule(rule_name, spec, policy)
-            
-            if rule_passed:
-                checks_passed += 1
-                evidence_list.append(Evidence(
-                    rule=rule_name,
-                    passed=True,
-                    details={"file": spec_file, "status": "passed"}
-                ))
-            else:
-                violations.append(violation)
-                evidence_list.append(Evidence(
-                    rule=rule_name,
-                    passed=False,
-                    details={"file": spec_file, "reason": violation.message}
-                ))
-    
-    # Calculate compliance score
-    compliance_score = int((checks_passed / checks_performed * 100)) if checks_performed > 0 else 100
-    
-    # Determine decision
-    if violations:
-        high_severity = any(v.severity == ViolationSeverity.HIGH for v in violations)
-        if high_severity:
-            decision = Decision.FAIL
-            exit_code = 1
-        else:
-            decision = Decision.WARN
-            exit_code = 0
-    else:
-        decision = Decision.PASS
-        exit_code = 0
-    
-    # Build summary
-    if decision == Decision.PASS:
-        summary = f"Policy check passed: All {checks_performed} checks passed"
-    elif decision == Decision.WARN:
-        summary = f"Policy check passed with warnings: {len(violations)} low-severity issues"
-    else:
-        summary = f"Policy check failed: {len(violations)} violations found"
-    
-    # Build remediation
-    remediation = None
-    if violations:
-        steps = []
-        for v in violations[:3]:  # Show top 3 violations
-            if v.rule == "require_openapi_version":
-                steps.append("Add 'openapi' field with version (e.g., openapi: 3.0.0)")
-            elif v.rule == "require_info_description":
-                steps.append("Add description field under info section")
-            elif v.rule == "require_security_definition":
-                steps.append("Define security schemes in components.securitySchemes")
-            elif v.rule == "require_https_only":
-                steps.append("Update all server URLs to use HTTPS")
-            elif v.rule == "max_path_depth":
-                steps.append("Simplify API paths to reduce nesting depth")
-        
-        remediation = Remediation(
-            summary="Fix policy violations to ensure API compliance",
-            steps=steps,
-            documentation="https://docs.delimit.ai/policy-rules"
-        )
-    
-    return PolicyComplianceEvidence(
-        task="check-policy",
-        task_version="1.0",
-        decision=decision,
-        exit_code=exit_code,
-        violations=violations,
-        evidence=evidence_list,
-        remediation=remediation,
-        summary=summary,
-        correlation_id=request.correlation_id,
-        metrics={
-            "files_checked": len(request.spec_files),
-            "rules_checked": checks_performed,
-            "rules_passed": checks_passed,
-            "violations": len(violations)
-        },
-        compliance_score=compliance_score,
-        policy_version="1.0",
-        checks_performed=checks_performed,
-        checks_passed=checks_passed
-    )
-
-
 def check_rule(rule_name: str, spec: Dict, policy: Dict) -> tuple[bool, Violation]:
     """Check a specific rule - ONLY for implemented rules"""
     
@@ -253,3 +140,116 @@ def load_policy(policy_path: str) -> Dict:
     path = Path(policy_path)
     with path.open('r') as f:
         return yaml.safe_load(f)
+
+
+@task_registry.register("check-policy", version="1.0", description="Check API against implemented policy rules")
+def check_policy_handler(request: CheckPolicyRequest) -> PolicyComplianceEvidence:
+    """Validate API spec against ACTUALLY IMPLEMENTED policy rules"""
+    
+    # Get policy - either from file, inline, or defaults
+    if request.policy_file:
+        policy = load_policy(request.policy_file)
+    elif request.policy_inline:
+        policy = request.policy_inline
+    else:
+        policy = get_default_policy()
+    
+    violations = []
+    evidence_list = []
+    checks_performed = 0
+    checks_passed = 0
+    
+    # Process each spec file
+    for spec_file in request.spec_files:
+        spec = load_spec(spec_file)
+        
+        # ONLY check rules we actually implement
+        for rule_name in IMPLEMENTED_RULES:
+            if not policy.get("rules", {}).get(rule_name, False):
+                continue  # Rule not enabled in policy
+            
+            checks_performed += 1
+            rule_passed, violation = check_rule(rule_name, spec, policy)
+            
+            if rule_passed:
+                checks_passed += 1
+                evidence_list.append(Evidence(
+                    rule=rule_name,
+                    passed=True,
+                    details={"file": spec_file, "status": "passed"}
+                ))
+            else:
+                violations.append(violation)
+                evidence_list.append(Evidence(
+                    rule=rule_name,
+                    passed=False,
+                    details={"file": spec_file, "reason": violation.message}
+                ))
+    
+    # Calculate compliance score
+    compliance_score = int((checks_passed / checks_performed * 100)) if checks_performed > 0 else 100
+    
+    # Determine decision
+    if violations:
+        high_severity = any(v.severity == ViolationSeverity.HIGH for v in violations)
+        if high_severity:
+            decision = Decision.FAIL
+            exit_code = 1
+        else:
+            decision = Decision.WARN
+            exit_code = 0
+    else:
+        decision = Decision.PASS
+        exit_code = 0
+    
+    # Build summary
+    if decision == Decision.PASS:
+        summary = f"Policy check passed: All {checks_performed} checks passed"
+    elif decision == Decision.WARN:
+        summary = f"Policy check passed with warnings: {len(violations)} low-severity issues"
+    else:
+        summary = f"Policy check failed: {len(violations)} violations found"
+    
+    # Build remediation
+    remediation = None
+    if violations:
+        steps = []
+        for v in violations[:3]:  # Show top 3 violations
+            if v.rule == "require_openapi_version":
+                steps.append("Add 'openapi' field with version (e.g., openapi: 3.0.0)")
+            elif v.rule == "require_info_description":
+                steps.append("Add description field under info section")
+            elif v.rule == "require_security_definition":
+                steps.append("Define security schemes in components.securitySchemes")
+            elif v.rule == "require_https_only":
+                steps.append("Update all server URLs to use HTTPS")
+            elif v.rule == "max_path_depth":
+                steps.append("Simplify API paths to reduce nesting depth")
+        
+        remediation = Remediation(
+            summary="Fix policy violations to ensure API compliance",
+            steps=steps,
+            documentation="https://docs.delimit.ai/policy-rules"
+        )
+    
+    return PolicyComplianceEvidence(
+        task="check-policy",
+        task_version="1.0",
+        decision=decision,
+        exit_code=exit_code,
+        violations=violations,
+        evidence=evidence_list,
+        remediation=remediation,
+        summary=summary,
+        correlation_id=request.correlation_id,
+        metrics={
+            "files_checked": len(request.spec_files),
+            "rules_checked": checks_performed,
+            "rules_passed": checks_passed,
+            "violations": len(violations)
+        },
+        compliance_score=compliance_score,
+        policy_version="1.0",
+        checks_performed=checks_performed,
+        checks_passed=checks_passed
+    )
