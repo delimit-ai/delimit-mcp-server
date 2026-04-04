@@ -2437,6 +2437,7 @@ program
                         choices: [
                             { name: `Lint this spec for breaking changes`, value: 'lint' },
                             { name: 'Set up governance for this project', value: 'init' },
+                            { name: 'Add CI gate (GitHub Action)', value: 'ci' },
                             { name: 'Configure AI assistants (Claude, Codex, Gemini)', value: 'setup' },
                             { name: 'Exit', value: 'exit' },
                         ],
@@ -2445,6 +2446,8 @@ program
                         execSync(`npx delimit-cli lint ${target}`, { stdio: 'inherit' });
                     } else if (next === 'init') {
                         execSync('npx delimit-cli init', { stdio: 'inherit' });
+                    } else if (next === 'ci') {
+                        execSync('npx delimit-cli ci', { stdio: 'inherit' });
                     } else if (next === 'setup') {
                         execSync('npx delimit-cli setup', { stdio: 'inherit' });
                     }
@@ -2541,6 +2544,7 @@ program
                         message: '\n  What next?\n',
                         choices: [
                             { name: 'Set up governance for this project', value: 'init' },
+                            { name: 'Add CI gate (GitHub Action)', value: 'ci' },
                             { name: 'Configure AI assistants (Claude, Codex, Gemini)', value: 'setup' },
                             { name: 'Run a breaking change demo', value: 'try' },
                             { name: 'Exit', value: 'exit' },
@@ -2548,6 +2552,8 @@ program
                     }]);
                     if (next === 'init') {
                         execSync('npx delimit-cli init', { stdio: 'inherit' });
+                    } else if (next === 'ci') {
+                        execSync('npx delimit-cli ci', { stdio: 'inherit' });
                     } else if (next === 'setup') {
                         execSync('npx delimit-cli setup', { stdio: 'inherit' });
                     } else if (next === 'try') {
@@ -3032,6 +3038,110 @@ program
         } else {
             console.log(chalk.red.bold(`  ${ok} passed, ${warn} warning(s), ${fail} error(s). Fix errors above.\n`));
         }
+    });
+
+// CI command — generate GitHub Action workflow
+program
+    .command('ci')
+    .description('Generate a GitHub Action workflow for API governance on every PR')
+    .option('--spec <path>', 'Path to OpenAPI spec (auto-detected if omitted)')
+    .option('--strict', 'Use strict policy preset')
+    .option('--dry-run', 'Print workflow to stdout instead of writing file')
+    .action(async (opts) => {
+        console.log(chalk.bold('\n  Delimit CI Setup\n'));
+
+        // Auto-detect spec
+        let specPath = opts.spec;
+        if (!specPath) {
+            const candidates = [
+                'api/openapi.yaml', 'api/openapi.yml', 'api/openapi.json',
+                'openapi.yaml', 'openapi.yml', 'openapi.json',
+                'api/swagger.yaml', 'api/swagger.yml', 'api/swagger.json',
+                'swagger.yaml', 'swagger.yml', 'swagger.json',
+                'docs/openapi.yaml', 'docs/openapi.yml',
+                'specs/openapi.yaml', 'specs/openapi.yml',
+            ];
+            for (const c of candidates) {
+                if (fs.existsSync(path.join(process.cwd(), c))) {
+                    specPath = c;
+                    break;
+                }
+            }
+        }
+
+        if (specPath) {
+            console.log(chalk.green(`  Found spec: ${specPath}`));
+        } else {
+            console.log(chalk.yellow('  No OpenAPI spec found — using auto-detect in workflow'));
+        }
+
+        const policy = opts.strict ? 'strict' : 'default';
+        const specLine = specPath ? `\n          spec: ${specPath}` : '';
+        const policyLine = opts.strict ? `\n          policy: strict` : '';
+
+        const workflow = `name: API Governance
+on:
+  pull_request:
+    paths:
+      - '**/*.yaml'
+      - '**/*.yml'
+      - '**/*.json'
+
+jobs:
+  delimit:
+    name: Breaking Change Check
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: delimit-ai/delimit-action@v1
+        with:${specLine}${policyLine}
+          comment: true
+`;
+
+        if (opts.dryRun) {
+            console.log('');
+            console.log(workflow);
+            return;
+        }
+
+        // Write workflow file
+        const workflowDir = path.join(process.cwd(), '.github', 'workflows');
+        const workflowPath = path.join(workflowDir, 'api-governance.yml');
+
+        if (fs.existsSync(workflowPath)) {
+            const ans = await inquirer.prompt([{
+                type: 'confirm',
+                name: 'overwrite',
+                message: chalk.yellow('  .github/workflows/api-governance.yml already exists. Overwrite?'),
+                default: false,
+            }]);
+            if (!ans.overwrite) {
+                console.log(chalk.gray('\n  Skipped. Use --dry-run to preview the workflow.\n'));
+                return;
+            }
+        }
+
+        fs.mkdirSync(workflowDir, { recursive: true });
+        fs.writeFileSync(workflowPath, workflow);
+
+        console.log(chalk.green.bold(`\n  Created: .github/workflows/api-governance.yml`));
+        console.log(chalk.gray(`  Policy: ${policy}`));
+        console.log('');
+        console.log(chalk.bold('  What happens next:'));
+        console.log(`    ${chalk.green('1.')} Open a PR that changes an API spec`);
+        console.log(`    ${chalk.green('2.')} Delimit detects breaking changes automatically`);
+        console.log(`    ${chalk.green('3.')} PR gets a comment with violations + migration guide`);
+        console.log('');
+        console.log(chalk.bold('  Commit it:'));
+        console.log(chalk.gray(`    git add .github/workflows/api-governance.yml`));
+        console.log(chalk.gray(`    git commit -m "ci: add API governance gate"`));
+        console.log(chalk.gray(`    git push\n`));
     });
 
 // Lint command — diff + policy (primary command)

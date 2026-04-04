@@ -154,6 +154,8 @@ npx delimit-cli setup --dry-run                  # Preview changes first
 npx delimit-cli lint api/openapi.yaml            # Check for breaking changes
 npx delimit-cli diff old.yaml new.yaml           # Compare two specs
 npx delimit-cli explain old.yaml new.yaml        # Generate migration guide
+npx delimit-cli ci                               # Generate GitHub Action workflow
+npx delimit-cli ci --strict --dry-run            # Preview strict workflow
 npx delimit-cli doctor                           # Check setup health
 npx delimit-cli uninstall --dry-run              # Preview removal
 ```
