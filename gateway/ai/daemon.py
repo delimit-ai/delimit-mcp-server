@@ -81,11 +81,6 @@ AUTO_PATTERNS = {
 class DaemonState:
     """Tracks daemon execution state across runs."""
 
-    def __init__(self, state_path: Optional[Path] = None):
-        self.state_path = state_path or DAEMON_STATE
-        self.state_path.parent.mkdir(parents=True, exist_ok=True)
-        self.state = self._load()
-
     def _load(self) -> dict:
         if self.state_path.exists():
             try:
@@ -103,6 +98,11 @@ class DaemonState:
             "errors": 0,
             "processed_ids": [],
         }
+
+    def __init__(self, state_path: Optional[Path] = None):
+        self.state_path = state_path or DAEMON_STATE
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        self.state = self._load()
 
     def save(self):
         self.state_path.write_text(json.dumps(self.state, indent=2))
@@ -263,63 +263,6 @@ def get_next_automatable_item(
     return None
 
 
-def process_item(item: dict, log_path: Optional[Path] = None) -> dict:
-    """Process a single ledger item by running the suggested tool.
-
-    For high/critical risk items, creates an escalation instead of executing.
-    For low risk items, actually runs the tool. Medium risk items run then notify.
-    """
-    item_id = item.get("id", "unknown")
-    risk = item.get("_risk", "medium")
-    tool = item.get("_suggested_tool", "unknown")
-
-    log_action("processing", item_id, f"risk={risk}, tool={tool}", risk,
-               log_path=log_path)
-
-    if risk in ("high", "critical"):
-        # Create approval request instead of executing
-        log_action("escalated", item_id, "Requires human approval", risk,
-                   log_path=log_path)
-        return {
-            "status": "escalated",
-            "item_id": item_id,
-            "reason": "high-risk action requires human approval",
-        }
-
-    # ACTUALLY RUN THE TOOL
-    tool_map = {
-        "lint": _run_lint,
-        "scan": _run_scan,
-        "test": _run_test,
-        "governance": _run_governance,
-        "docs": _run_docs,
-    }
-
-    runner = tool_map.get(tool)
-    if runner:
-        try:
-            result = runner(item)
-            log_action("completed", item_id, json.dumps(result)[:200], risk,
-                       log_path=log_path)
-            return {"status": "executed", "item_id": item_id, "result": result}
-        except Exception as e:
-            log_action("error", item_id, str(e)[:200], risk,
-                       log_path=log_path)
-            return {"status": "error", "item_id": item_id, "error": str(e)}
-
-    # Fallback for tools without a runner
-    result = {
-        "status": "processed",
-        "item_id": item_id,
-        "tool": tool,
-        "risk": risk,
-        "action": f"No runner for {tool}: {item.get('title', '')[:100]}",
-    }
-    log_action("completed", item_id, json.dumps(result)[:200], risk,
-               log_path=log_path)
-    return result
-
-
 def _run_lint(item: dict) -> dict:
     """Run lint on any spec files mentioned in the item."""
     import glob as globmod
@@ -398,6 +341,63 @@ def _run_docs(item: dict) -> dict:
             result["files_found"].append(doc_file)
         else:
             result["missing"].append(doc_file)
+    return result
+
+
+def process_item(item: dict, log_path: Optional[Path] = None) -> dict:
+    """Process a single ledger item by running the suggested tool.
+
+    For high/critical risk items, creates an escalation instead of executing.
+    For low risk items, actually runs the tool. Medium risk items run then notify.
+    """
+    item_id = item.get("id", "unknown")
+    risk = item.get("_risk", "medium")
+    tool = item.get("_suggested_tool", "unknown")
+
+    log_action("processing", item_id, f"risk={risk}, tool={tool}", risk,
+               log_path=log_path)
+
+    if risk in ("high", "critical"):
+        # Create approval request instead of executing
+        log_action("escalated", item_id, "Requires human approval", risk,
+                   log_path=log_path)
+        return {
+            "status": "escalated",
+            "item_id": item_id,
+            "reason": "high-risk action requires human approval",
+        }
+
+    # ACTUALLY RUN THE TOOL
+    tool_map = {
+        "lint": _run_lint,
+        "scan": _run_scan,
+        "test": _run_test,
+        "governance": _run_governance,
+        "docs": _run_docs,
+    }
+
+    runner = tool_map.get(tool)
+    if runner:
+        try:
+            result = runner(item)
+            log_action("completed", item_id, json.dumps(result)[:200], risk,
+                       log_path=log_path)
+            return {"status": "executed", "item_id": item_id, "result": result}
+        except Exception as e:
+            log_action("error", item_id, str(e)[:200], risk,
+                       log_path=log_path)
+            return {"status": "error", "item_id": item_id, "error": str(e)}
+
+    # Fallback for tools without a runner
+    result = {
+        "status": "processed",
+        "item_id": item_id,
+        "tool": tool,
+        "risk": risk,
+        "action": f"No runner for {tool}: {item.get('title', '')[:100]}",
+    }
+    log_action("completed", item_id, json.dumps(result)[:200], risk,
+               log_path=log_path)
     return result
 
 
