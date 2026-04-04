@@ -63,6 +63,14 @@ class AutoBaseline:
         
         return None
     
+    def _calculate_file_checksum(self, file_path: str) -> str:
+        """Calculate checksum of file for change detection."""
+        try:
+            with open(file_path, 'rb') as f:
+                return hashlib.sha256(f.read()).hexdigest()
+        except:
+            return ""
+    
     def save_baseline(self, file_path: str, task: str, evidence: TaskEvidence) -> Path:
         """
         Save current results as baseline.
@@ -180,14 +188,6 @@ class AutoBaseline:
             evidence = self.filter_new_violations(evidence, baseline)
         
         return evidence
-    
-    def _calculate_file_checksum(self, file_path: str) -> str:
-        """Calculate checksum of file for change detection."""
-        try:
-            with open(file_path, 'rb') as f:
-                return hashlib.sha256(f.read()).hexdigest()
-        except:
-            return ""
     
     def update_baseline(self,
                        file_path: str,
