@@ -57,6 +57,68 @@ except Exception as e:
 '''
 
 
+def _find_python(root: Path) -> Optional[str]:
+    """Find the best Python binary for the project."""
+    # Check for project venv
+    for venv_dir in [root / "venv", root / ".venv", root / "env"]:
+        venv_python = venv_dir / "bin" / "python"
+        if venv_python.exists():
+            return str(venv_python)
+
+    # Fall back to system python
+    for name in ["python3", "python"]:
+        try:
+            result = subprocess.run(
+                [name, "--version"], capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0:
+                return name
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+
+    return None
+
+
+def _check_fastapi_installed(python: str, root: Path) -> Dict[str, Any]:
+    """Check if FastAPI is importable with the given Python."""
+    try:
+        result = subprocess.run(
+            [python, "-c", "import fastapi; print(fastapi.__version__)"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            cwd=str(root),
+        )
+        if result.returncode == 0:
+            return {"installed": True, "version": result.stdout.strip()}
+        return {"installed": False}
+    except Exception:
+        return {"installed": False}
+
+
+def _write_temp_spec(spec: Dict[str, Any], root: Path) -> str:
+    """Write extracted spec to a temp YAML file."""
+    import hashlib
+
+    try:
+        import yaml
+        formatter = yaml.dump
+        ext = ".yaml"
+    except ImportError:
+        formatter = lambda d: json.dumps(d, indent=2)
+        ext = ".json"
+
+    # Deterministic filename based on project path
+    hash_input = str(root).encode()
+    short_hash = hashlib.sha256(hash_input).hexdigest()[:8]
+    spec_path = os.path.join(tempfile.gettempdir(), f"delimit-inferred-{short_hash}{ext}")
+
+    with open(spec_path, "w") as f:
+        f.write(formatter(spec))
+
+    return spec_path
+
+
 def extract_fastapi_spec(
     info: FrameworkInfo,
     project_dir: str = ".",
@@ -190,65 +252,3 @@ def extract_fastapi_spec(
             os.unlink(script_path)
         except OSError:
             pass
-
-
-def _find_python(root: Path) -> Optional[str]:
-    """Find the best Python binary for the project."""
-    # Check for project venv
-    for venv_dir in [root / "venv", root / ".venv", root / "env"]:
-        venv_python = venv_dir / "bin" / "python"
-        if venv_python.exists():
-            return str(venv_python)
-
-    # Fall back to system python
-    for name in ["python3", "python"]:
-        try:
-            result = subprocess.run(
-                [name, "--version"], capture_output=True, text=True, timeout=5
-            )
-            if result.returncode == 0:
-                return name
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            continue
-
-    return None
-
-
-def _check_fastapi_installed(python: str, root: Path) -> Dict[str, Any]:
-    """Check if FastAPI is importable with the given Python."""
-    try:
-        result = subprocess.run(
-            [python, "-c", "import fastapi; print(fastapi.__version__)"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            cwd=str(root),
-        )
-        if result.returncode == 0:
-            return {"installed": True, "version": result.stdout.strip()}
-        return {"installed": False}
-    except Exception:
-        return {"installed": False}
-
-
-def _write_temp_spec(spec: Dict[str, Any], root: Path) -> str:
-    """Write extracted spec to a temp YAML file."""
-    import hashlib
-
-    try:
-        import yaml
-        formatter = yaml.dump
-        ext = ".yaml"
-    except ImportError:
-        formatter = lambda d: json.dumps(d, indent=2)
-        ext = ".json"
-
-    # Deterministic filename based on project path
-    hash_input = str(root).encode()
-    short_hash = hashlib.sha256(hash_input).hexdigest()[:8]
-    spec_path = os.path.join(tempfile.gettempdir(), f"delimit-inferred-{short_hash}{ext}")
-
-    with open(spec_path, "w") as f:
-        f.write(formatter(spec))
-
-    return spec_path
