@@ -120,6 +120,42 @@ def _detect_git_state(project_path: str) -> Dict[str, Any]:
     }
 
 
+def _prune_souls(proj_dir: Path) -> None:
+    """Keep only the latest MAX_SOULS_PER_PROJECT souls per project."""
+    soul_files = sorted(
+        [f for f in proj_dir.iterdir() if f.name != "latest.json" and f.suffix == ".json"],
+        key=lambda f: f.name,
+    )
+    while len(soul_files) > MAX_SOULS_PER_PROJECT:
+        oldest = soul_files.pop(0)
+        oldest.unlink(missing_ok=True)
+
+
+def _store_soul(soul: SessionSoul) -> Path:
+    """Persist a soul to disk and maintain the latest pointer."""
+    global _capture_counter
+    proj_dir = _project_dir(soul.project_path)
+    proj_dir.mkdir(parents=True, exist_ok=True)
+
+    # Timestamp + monotonic counter for correct ordering within same second
+    _capture_counter += 1
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    filename = f"{ts}_{_capture_counter:06d}_{soul.soul_id}.json"
+    filepath = proj_dir / filename
+
+    data = asdict(soul)
+    filepath.write_text(json.dumps(data, indent=2))
+
+    # Update latest.json as a copy (symlinks can be fragile across systems)
+    latest = proj_dir / "latest.json"
+    latest.write_text(json.dumps(data, indent=2))
+
+    # Auto-prune to MAX_SOULS_PER_PROJECT (keep latest N by name sort)
+    _prune_souls(proj_dir)
+
+    return filepath
+
+
 def capture_soul(
     active_task: str = "",
     decisions: Optional[List[str]] = None,
@@ -158,42 +194,6 @@ def capture_soul(
 
     _store_soul(soul)
     return soul
-
-
-def _store_soul(soul: SessionSoul) -> Path:
-    """Persist a soul to disk and maintain the latest pointer."""
-    global _capture_counter
-    proj_dir = _project_dir(soul.project_path)
-    proj_dir.mkdir(parents=True, exist_ok=True)
-
-    # Timestamp + monotonic counter for correct ordering within same second
-    _capture_counter += 1
-    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    filename = f"{ts}_{_capture_counter:06d}_{soul.soul_id}.json"
-    filepath = proj_dir / filename
-
-    data = asdict(soul)
-    filepath.write_text(json.dumps(data, indent=2))
-
-    # Update latest.json as a copy (symlinks can be fragile across systems)
-    latest = proj_dir / "latest.json"
-    latest.write_text(json.dumps(data, indent=2))
-
-    # Auto-prune to MAX_SOULS_PER_PROJECT (keep latest N by name sort)
-    _prune_souls(proj_dir)
-
-    return filepath
-
-
-def _prune_souls(proj_dir: Path) -> None:
-    """Keep only the latest MAX_SOULS_PER_PROJECT souls per project."""
-    soul_files = sorted(
-        [f for f in proj_dir.iterdir() if f.name != "latest.json" and f.suffix == ".json"],
-        key=lambda f: f.name,
-    )
-    while len(soul_files) > MAX_SOULS_PER_PROJECT:
-        oldest = soul_files.pop(0)
-        oldest.unlink(missing_ok=True)
 
 
 def _load_soul(path: Path) -> Optional[SessionSoul]:
