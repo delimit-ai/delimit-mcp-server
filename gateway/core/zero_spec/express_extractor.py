@@ -200,6 +200,120 @@ console.log(JSON.stringify(spec));
 '''
 
 
+def _find_node(root: Path) -> Optional[str]:
+    """Find the best Node.js binary."""
+    # Check for nvm/local node
+    for name in ["node", "nodejs"]:
+        try:
+            result = subprocess.run(
+                [name, "--version"], capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0:
+                return name
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+    return None
+
+
+def _check_express_installed(node: str, root: Path) -> bool:
+    """Check if express is importable with the given Node."""
+    try:
+        result = subprocess.run(
+            [node, "-e", "require('express'); console.log('ok')"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            cwd=str(root),
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def _detect_app_variable(content: str) -> Optional[str]:
+    """Detect the variable name of an Express app instance in source code."""
+    # Pattern: const app = express()
+    m = re.search(r"(?:const|let|var)\s+(\w+)\s*=\s*(?:express\s*\(\s*\)|require\s*\(\s*['\"]express['\"]\s*\)\s*\(\s*\))", content)
+    if m:
+        return m.group(1)
+
+    # Pattern: const express = require('express'); ... const app = express();
+    # First find what express is called
+    express_var = None
+    m_req = re.search(r"(?:const|let|var)\s+(\w+)\s*=\s*require\s*\(\s*['\"]express['\"]\s*\)", content)
+    if m_req:
+        express_var = m_req.group(1)
+
+    if express_var:
+        m_app = re.search(rf"(?:const|let|var)\s+(\w+)\s*=\s*{re.escape(express_var)}\s*\(\s*\)", content)
+        if m_app:
+            return m_app.group(1)
+
+    # Fallback: look for module.exports = <varname> where varname is likely the app
+    m_exp = re.search(r"module\.exports\s*=\s*(\w+)", content)
+    if m_exp:
+        return m_exp.group(1)
+
+    # Fallback: exports.app = ...
+    m_exp2 = re.search(r"exports\.(\w+)\s*=", content)
+    if m_exp2:
+        return m_exp2.group(1)
+
+    return None
+
+
+def _find_express_app_fallback(root: Path) -> Optional[AppLocation]:
+    """Try to find an Express app export in common entry point files."""
+    candidates = [
+        "app.js", "src/app.js", "server.js", "src/server.js",
+        "index.js", "src/index.js", "app.ts", "src/app.ts",
+    ]
+
+    for rel_path in candidates:
+        full_path = root / rel_path
+        if not full_path.exists():
+            continue
+
+        try:
+            content = full_path.read_text()
+        except Exception:
+            continue
+
+        # Check for Express app creation patterns
+        if not re.search(r"require\s*\(\s*['\"]express['\"]\s*\)", content) and \
+           not re.search(r"from\s+['\"]express['\"]", content):
+            continue
+
+        # Find the variable name of the Express app
+        var_name = _detect_app_variable(content)
+        if var_name:
+            return AppLocation(file=rel_path, variable=var_name, line=1)
+
+    return None
+
+
+def _write_temp_spec(spec: Dict[str, Any], root: Path) -> str:
+    """Write extracted spec to a temp YAML file."""
+    import hashlib
+
+    try:
+        import yaml
+        formatter = yaml.dump
+        ext = ".yaml"
+    except ImportError:
+        formatter = lambda d: json.dumps(d, indent=2)
+        ext = ".json"
+
+    hash_input = str(root).encode()
+    short_hash = hashlib.sha256(hash_input).hexdigest()[:8]
+    spec_path = os.path.join(tempfile.gettempdir(), f"delimit-inferred-express-{short_hash}{ext}")
+
+    with open(spec_path, "w") as f:
+        f.write(formatter(spec))
+
+    return spec_path
+
+
 def extract_express_spec(
     info: FrameworkInfo,
     project_dir: str = ".",
@@ -351,98 +465,6 @@ def extract_express_spec(
             pass
 
 
-def _find_node(root: Path) -> Optional[str]:
-    """Find the best Node.js binary."""
-    # Check for nvm/local node
-    for name in ["node", "nodejs"]:
-        try:
-            result = subprocess.run(
-                [name, "--version"], capture_output=True, text=True, timeout=5,
-            )
-            if result.returncode == 0:
-                return name
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            continue
-    return None
-
-
-def _check_express_installed(node: str, root: Path) -> bool:
-    """Check if express is importable with the given Node."""
-    try:
-        result = subprocess.run(
-            [node, "-e", "require('express'); console.log('ok')"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            cwd=str(root),
-        )
-        return result.returncode == 0
-    except Exception:
-        return False
-
-
-def _find_express_app_fallback(root: Path) -> Optional[AppLocation]:
-    """Try to find an Express app export in common entry point files."""
-    candidates = [
-        "app.js", "src/app.js", "server.js", "src/server.js",
-        "index.js", "src/index.js", "app.ts", "src/app.ts",
-    ]
-
-    for rel_path in candidates:
-        full_path = root / rel_path
-        if not full_path.exists():
-            continue
-
-        try:
-            content = full_path.read_text()
-        except Exception:
-            continue
-
-        # Check for Express app creation patterns
-        if not re.search(r"require\s*\(\s*['\"]express['\"]\s*\)", content) and \
-           not re.search(r"from\s+['\"]express['\"]", content):
-            continue
-
-        # Find the variable name of the Express app
-        var_name = _detect_app_variable(content)
-        if var_name:
-            return AppLocation(file=rel_path, variable=var_name, line=1)
-
-    return None
-
-
-def _detect_app_variable(content: str) -> Optional[str]:
-    """Detect the variable name of an Express app instance in source code."""
-    # Pattern: const app = express()
-    m = re.search(r"(?:const|let|var)\s+(\w+)\s*=\s*(?:express\s*\(\s*\)|require\s*\(\s*['\"]express['\"]\s*\)\s*\(\s*\))", content)
-    if m:
-        return m.group(1)
-
-    # Pattern: const express = require('express'); ... const app = express();
-    # First find what express is called
-    express_var = None
-    m_req = re.search(r"(?:const|let|var)\s+(\w+)\s*=\s*require\s*\(\s*['\"]express['\"]\s*\)", content)
-    if m_req:
-        express_var = m_req.group(1)
-
-    if express_var:
-        m_app = re.search(rf"(?:const|let|var)\s+(\w+)\s*=\s*{re.escape(express_var)}\s*\(\s*\)", content)
-        if m_app:
-            return m_app.group(1)
-
-    # Fallback: look for module.exports = <varname> where varname is likely the app
-    m_exp = re.search(r"module\.exports\s*=\s*(\w+)", content)
-    if m_exp:
-        return m_exp.group(1)
-
-    # Fallback: exports.app = ...
-    m_exp2 = re.search(r"exports\.(\w+)\s*=", content)
-    if m_exp2:
-        return m_exp2.group(1)
-
-    return None
-
-
 def _iter_js_files(root: Path, max_files: int = 50) -> List[Path]:
     """Iterate JS/TS files, skipping node_modules and hidden dirs."""
     skip_dirs = {
@@ -459,25 +481,3 @@ def _iter_js_files(root: Path, max_files: int = 50) -> List[Path]:
         if count >= max_files:
             break
     return files
-
-
-def _write_temp_spec(spec: Dict[str, Any], root: Path) -> str:
-    """Write extracted spec to a temp YAML file."""
-    import hashlib
-
-    try:
-        import yaml
-        formatter = yaml.dump
-        ext = ".yaml"
-    except ImportError:
-        formatter = lambda d: json.dumps(d, indent=2)
-        ext = ".json"
-
-    hash_input = str(root).encode()
-    short_hash = hashlib.sha256(hash_input).hexdigest()[:8]
-    spec_path = os.path.join(tempfile.gettempdir(), f"delimit-inferred-express-{short_hash}{ext}")
-
-    with open(spec_path, "w") as f:
-        f.write(formatter(spec))
-
-    return spec_path
