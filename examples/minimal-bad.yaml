@@ -1,0 +1,56 @@
+# Minimal Bad API — Intentionally poor spec for testing spec_health scoring.
+#
+# Problems demonstrated:
+#   - No descriptions on any endpoint or schema
+#   - No authentication defined
+#   - No examples or example values
+#   - No error responses (only 200s)
+#   - No contact or server info
+#   - Inline schemas instead of $ref (not reusable)
+#   - No operationId on any endpoint
+#   - Missing response content types
+openapi: "3.0.3"
+info:
+  title: API
+  version: "0.1"
+paths:
+  /items:
+    get:
+      responses:
+        "200":
+          description: ok
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                value:
+                  type: integer
+      responses:
+        "200":
+          description: ok
+  /items/{id}:
+    get:
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: ok
+    delete:
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: ok

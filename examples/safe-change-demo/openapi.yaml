@@ -1,0 +1,91 @@
+openapi: 3.0.0
+info:
+  title: Payment Service API
+  version: 1.1.0
+  description: Example showing safe, backward-compatible changes
+
+paths:
+  /payments:
+    get:
+      summary: List payments
+      responses:
+        '200':
+          description: List of payments
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Payment'
+    
+    post:
+      summary: Create payment
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PaymentRequest'
+      responses:
+        '201':
+          description: Payment created
+  
+  # SAFE: New endpoint added (doesn't break existing clients)
+  /payments/{id}/refund:
+    post:
+      summary: Refund a payment (NEW in v1.1)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Refund processed
+
+components:
+  schemas:
+    Payment:
+      type: object
+      required:
+        - id
+        - amount
+        - currency
+      properties:
+        id:
+          type: string
+        amount:
+          type: number
+        currency:
+          type: string
+        # SAFE: Optional field added (backward compatible)
+        description:
+          type: string
+          description: Optional payment description (added in v1.1)
+        # SAFE: New optional field
+        metadata:
+          type: object
+          description: Optional metadata (added in v1.1)
+          additionalProperties: true
+    
+    PaymentRequest:
+      type: object
+      required:
+        - amount
+        - currency
+      properties:
+        amount:
+          type: number
+        currency:
+          type: string
+        # SAFE: Optional field for requests
+        description:
+          type: string
+        # SAFE: Enum expanded (additive change)
+        payment_method:
+          type: string
+          enum:
+            - credit_card
+            - debit_card
+            - paypal
+            - apple_pay  # NEW option (safe)

@@ -1,0 +1,10 @@
+name: Safe Change Demo
+on: [pull_request]
+
+jobs:
+  check-api:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: delimit-ai/delimit-action@v1
+        # Auto-detects openapi.yaml and validates changes

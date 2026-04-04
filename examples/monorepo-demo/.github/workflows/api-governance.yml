@@ -1,0 +1,29 @@
+name: Monorepo API Governance
+on:
+  pull_request:
+    paths:
+      - 'services/**/api/*.yaml'
+      - 'services/**/api/*.yml'
+
+jobs:
+  validate-apis:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service:
+          - users
+          - orders
+    
+    name: Validate ${{ matrix.service }} API
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Check ${{ matrix.service }} API
+        uses: delimit-ai/delimit-action@v1
+        with:
+          old_spec: services/${{ matrix.service }}/api/openapi.yaml
+          new_spec: services/${{ matrix.service }}/api/openapi.yaml
+          mode: advisory
+          auto-baseline: true

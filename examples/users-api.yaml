@@ -1,0 +1,141 @@
+# Users API — A realistic CRUD API with auth, pagination, and error responses.
+# Demonstrates a well-structured spec suitable for governance scanning.
+openapi: "3.0.3"
+info:
+  title: Users API
+  version: "1.2.0"
+  description: User management service with authentication, pagination, and CRUD.
+servers:
+  - url: https://api.example.com/v1
+security:
+  - BearerAuth: []
+paths:
+  /users:
+    get:
+      operationId: listUsers
+      summary: List users with pagination
+      description: Returns a paginated list of users. Requires authentication.
+      parameters:
+        - name: page
+          in: query
+          description: Page number (1-indexed).
+          schema:
+            type: integer
+            default: 1
+        - name: per_page
+          in: query
+          description: Results per page (max 100).
+          schema:
+            type: integer
+            default: 25
+      responses:
+        "200":
+          description: Paginated list of users.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/User"
+                  total:
+                    type: integer
+                  page:
+                    type: integer
+        "401":
+          description: Missing or invalid authentication token.
+    post:
+      operationId: createUser
+      summary: Create a new user
+      description: Registers a new user account.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateUser"
+      responses:
+        "201":
+          description: User created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "409":
+          description: Email already in use.
+  /users/{userId}:
+    get:
+      operationId: getUser
+      summary: Get user by ID
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: User details.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "404":
+          description: User not found.
+    delete:
+      operationId: deleteUser
+      summary: Delete a user
+      description: Permanently removes a user account. Admin only.
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: User deleted.
+        "403":
+          description: Insufficient permissions.
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    User:
+      type: object
+      required: [id, email, role]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Unique user identifier.
+        email:
+          type: string
+          format: email
+          description: User email address.
+        name:
+          type: string
+          description: Full display name.
+        role:
+          type: string
+          enum: [admin, member, viewer]
+          description: Access role within the organization.
+        created_at:
+          type: string
+          format: date-time
+    CreateUser:
+      type: object
+      required: [email, name]
+      properties:
+        email:
+          type: string
+          format: email
+        name:
+          type: string

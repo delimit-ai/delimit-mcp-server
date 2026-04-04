@@ -1,0 +1,13 @@
+# Delimit Policy Preset: default
+# Balanced rules for most teams. Blocks destructive changes, warns on risky ones.
+# Good starting point — tighten as your API matures.
+
+override_defaults: false
+
+# Uses built-in defaults:
+#   ERROR: endpoint_removed, method_removed, required_param_added, field_removed (2xx)
+#   WARN:  type_changed
+#   ALLOW: enum_value_added
+#
+# No custom rules needed — the built-in defaults are the "default" preset.
+rules: []

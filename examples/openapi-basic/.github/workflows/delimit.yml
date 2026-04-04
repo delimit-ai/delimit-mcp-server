@@ -1,0 +1,31 @@
+name: API Governance
+on:
+  pull_request:
+    paths:
+      - 'api/**/*.yaml'
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  check-breaking-changes:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Get base API spec
+        run: |
+          git checkout ${{ github.base_ref }} -- api/openapi.yaml
+          mv api/openapi.yaml api/openapi-base.yaml
+          git checkout HEAD -- api/openapi.yaml
+      
+      - uses: delimit-ai/delimit-action@v1
+        with:
+          task: validate-api
+          old_spec: api/openapi-base.yaml
+          new_spec: api/openapi.yaml
+          mode: advisory
+          auto-baseline: true

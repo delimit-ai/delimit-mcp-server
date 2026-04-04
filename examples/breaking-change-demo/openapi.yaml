@@ -1,0 +1,64 @@
+openapi: 3.0.0
+info:
+  title: User Service API
+  version: 2.0.0
+  description: Example API showing breaking changes
+
+paths:
+  /users:
+    get:
+      summary: List all users
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/User'
+  
+  # BREAKING CHANGE: This endpoint was removed in v2
+  # Previously: /users/{id}
+  # Clients expecting this endpoint will receive 404
+  
+  /users/profile/{id}:  # Changed path (breaking)
+    get:
+      summary: Get user profile (renamed from /users/{id})
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: User found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+
+components:
+  schemas:
+    User:
+      type: object
+      required:
+        - id
+        - name
+        - email
+        - created_at  # BREAKING: New required field
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        email:
+          type: string
+          format: email
+        # BREAKING: 'username' field removed
+        created_at:
+          type: string
+          format: date-time
+          description: Required in v2 (breaking change)
