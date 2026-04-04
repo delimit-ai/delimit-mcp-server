@@ -1,19 +1,19 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.delimit-ai/delimit-mcp-server",
-  "title": "Delimit MCP Server",
-  "description": "Unify Claude Code, Codex, Cursor, and Gemini CLI with persistent context, governance, and multi-model debate.",
+  "title": "Delimit — API Governance for AI Coding Assistants",
+  "description": "API governance for AI coding assistants. Breaking changes, policies, cross-model context.",
   "repository": {
     "url": "https://github.com/delimit-ai/delimit-mcp-server",
     "source": "github"
   },
-  "version": "3.11.10",
+  "version": "4.1.34",
   "websiteUrl": "https://delimit.ai",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "delimit-cli",
-      "version": "3.11.10",
+      "version": "4.1.34",
       "transport": {
         "type": "stdio"
       }
