@@ -71,6 +71,15 @@ _CSS_VAR_RE = re.compile(r"--([a-zA-Z0-9_-]+)\s*:\s*([^;]+);")
 _MEDIA_QUERY_RE = re.compile(r"@media[^{]*\(\s*(?:min|max)-width\s*:\s*([^)]+)\)")
 
 
+def _is_color_value(v: str) -> bool:
+    v = v.lower().strip()
+    if v.startswith("#") and len(v) in (4, 7, 9):
+        return True
+    if v.startswith(("rgb", "hsl", "oklch", "lab(", "lch(")):
+        return True
+    return False
+
+
 def _extract_css_variables(text: str) -> Dict[str, List[Dict[str, str]]]:
     """Extract CSS custom properties grouped by category."""
     colors: List[Dict[str, str]] = []
@@ -94,15 +103,6 @@ def _extract_css_variables(text: str) -> Dict[str, List[Dict[str, str]]]:
             other.append(entry)
 
     return {"colors": colors, "spacing": spacing, "typography": typography, "other": other}
-
-
-def _is_color_value(v: str) -> bool:
-    v = v.lower().strip()
-    if v.startswith("#") and len(v) in (4, 7, 9):
-        return True
-    if v.startswith(("rgb", "hsl", "oklch", "lab(", "lch(")):
-        return True
-    return False
 
 
 def _parse_tailwind_config(text: str) -> Dict[str, Any]:
@@ -181,6 +181,34 @@ def _scan_vue_component(path: Path, text: str) -> Optional[Dict[str, Any]]:
 def _scan_svelte_component(path: Path, text: str) -> Optional[Dict[str, Any]]:
     props = _SVELTE_EXPORT_RE.findall(text)
     return {"name": path.stem, "path": str(path), "props": props, "exports": [path.stem], "framework": "svelte"}
+
+
+def _figma_extract_tokens(file_key: str, token: str, token_types: Optional[List[str]]) -> Dict[str, Any]:
+    """Fetch design tokens from Figma API."""
+    try:
+        import urllib.request
+        url = f"https://api.figma.com/v1/files/{file_key}/styles"
+        req = urllib.request.Request(url, headers={"X-Figma-Token": token})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+        styles = data.get("meta", {}).get("styles", [])
+        tokens: Dict[str, List] = {"colors": [], "typography": [], "spacing": [], "other": []}
+        for s in styles:
+            entry = {"name": s.get("name", ""), "key": s.get("key", ""), "style_type": s.get("style_type", "")}
+            stype = s.get("style_type", "").upper()
+            if stype == "FILL":
+                tokens["colors"].append(entry)
+            elif stype == "TEXT":
+                tokens["typography"].append(entry)
+            else:
+                tokens["other"].append(entry)
+        if token_types:
+            tokens = {k: v for k, v in tokens.items() if k in token_types}
+        return {"tool": "design.extract_tokens", "status": "ok", "tokens": tokens,
+                "total_tokens": sum(len(v) for v in tokens.values()),
+                "source_files": [f"figma:{file_key}"], "figma_used": True}
+    except Exception as e:
+        return {"tool": "design.extract_tokens", "error": f"Figma API error: {e}", "figma_used": True}
 
 
 # ---------------------------------------------------------------------------
@@ -274,34 +302,6 @@ def design_extract_tokens(
             "Local CSS/Tailwind tokens were extracted instead."
         )
     return result
-
-
-def _figma_extract_tokens(file_key: str, token: str, token_types: Optional[List[str]]) -> Dict[str, Any]:
-    """Fetch design tokens from Figma API."""
-    try:
-        import urllib.request
-        url = f"https://api.figma.com/v1/files/{file_key}/styles"
-        req = urllib.request.Request(url, headers={"X-Figma-Token": token})
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read())
-        styles = data.get("meta", {}).get("styles", [])
-        tokens: Dict[str, List] = {"colors": [], "typography": [], "spacing": [], "other": []}
-        for s in styles:
-            entry = {"name": s.get("name", ""), "key": s.get("key", ""), "style_type": s.get("style_type", "")}
-            stype = s.get("style_type", "").upper()
-            if stype == "FILL":
-                tokens["colors"].append(entry)
-            elif stype == "TEXT":
-                tokens["typography"].append(entry)
-            else:
-                tokens["other"].append(entry)
-        if token_types:
-            tokens = {k: v for k, v in tokens.items() if k in token_types}
-        return {"tool": "design.extract_tokens", "status": "ok", "tokens": tokens,
-                "total_tokens": sum(len(v) for v in tokens.values()),
-                "source_files": [f"figma:{file_key}"], "figma_used": True}
-    except Exception as e:
-        return {"tool": "design.extract_tokens", "error": f"Figma API error: {e}", "figma_used": True}
 
 
 # ---------------------------------------------------------------------------
