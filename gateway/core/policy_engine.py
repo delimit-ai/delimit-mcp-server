@@ -26,6 +26,15 @@ class RuleAction(Enum):
     WARN = "warn"        # Warns but allows
 
 @dataclass
+class Violation:
+    """A policy violation."""
+    rule_id: str
+    rule_name: str
+    severity: str
+    message: str
+    change: Change
+
+@dataclass
 class PolicyRule:
     """A single governance rule."""
     id: str
@@ -36,6 +45,32 @@ class PolicyRule:
     action: RuleAction
     conditions: Optional[Dict] = None
     message_template: Optional[str] = None
+    
+    def _check_conditions(self, change: Change, conditions: Dict) -> bool:
+        """Check if change meets additional conditions."""
+        # Example conditions: path patterns, specific fields, etc.
+        if "path_pattern" in conditions:
+            import re
+            pattern = conditions["path_pattern"]
+            if not re.match(pattern, change.path):
+                return False
+        
+        if "exclude_paths" in conditions:
+            for excluded in conditions["exclude_paths"]:
+                if excluded in change.path:
+                    return False
+        
+        return True
+    
+    def _format_message(self, change: Change) -> str:
+        """Format violation message."""
+        if self.message_template:
+            return self.message_template.format(
+                path=change.path,
+                details=change.details,
+                message=change.message
+            )
+        return f"{self.name}: {change.message}"
     
     def evaluate(self, change: Change) -> Optional['Violation']:
         """Evaluate if this rule applies to a change."""
@@ -66,41 +101,6 @@ class PolicyRule:
             )
         
         return None
-    
-    def _check_conditions(self, change: Change, conditions: Dict) -> bool:
-        """Check if change meets additional conditions."""
-        # Example conditions: path patterns, specific fields, etc.
-        if "path_pattern" in conditions:
-            import re
-            pattern = conditions["path_pattern"]
-            if not re.match(pattern, change.path):
-                return False
-        
-        if "exclude_paths" in conditions:
-            for excluded in conditions["exclude_paths"]:
-                if excluded in change.path:
-                    return False
-        
-        return True
-    
-    def _format_message(self, change: Change) -> str:
-        """Format violation message."""
-        if self.message_template:
-            return self.message_template.format(
-                path=change.path,
-                details=change.details,
-                message=change.message
-            )
-        return f"{self.name}: {change.message}"
-
-@dataclass
-class Violation:
-    """A policy violation."""
-    rule_id: str
-    rule_name: str
-    severity: str
-    message: str
-    change: Change
 
 # Available policy presets
 POLICY_PRESETS = ("strict", "default", "relaxed")
@@ -193,42 +193,6 @@ class PolicyEngine:
             else:
                 self.load_policy(policy_file)
     
-    def load_policy(self, policy_file: str):
-        """Load custom policy from YAML file."""
-        path = Path(policy_file)
-        
-        # Check common locations if file not found
-        if not path.exists():
-            for location in [".delimit/policies.yml", ".delimit/policy.yaml", "delimit.yml"]:
-                test_path = Path(location)
-                if test_path.exists():
-                    path = test_path
-                    break
-        
-        if not path.exists():
-            return  # No custom policy, use defaults
-        
-        with open(path, 'r') as f:
-            config = yaml.safe_load(f)
-        
-        if not config:
-            return
-        
-        # Parse rules
-        for rule_config in config.get("rules", []):
-            rule = self._parse_rule(rule_config)
-            if rule:
-                self.custom_rules.append(rule)
-        
-        # Override defaults if specified
-        if config.get("override_defaults", False):
-            self.rules = self.custom_rules
-        else:
-            # Merge custom rules with defaults
-            # Custom rules take precedence for same IDs
-            custom_ids = {r.id for r in self.custom_rules}
-            self.rules = self.custom_rules + [r for r in self.DEFAULT_RULES if r.id not in custom_ids]
-    
     def _parse_rule(self, config: Dict) -> Optional[PolicyRule]:
         """Parse a rule from configuration."""
         try:
@@ -264,6 +228,42 @@ class PolicyEngine:
         except Exception as e:
             print(f"Warning: Failed to parse rule {config.get('id', 'unknown')}: {e}")
             return None
+    
+    def load_policy(self, policy_file: str):
+        """Load custom policy from YAML file."""
+        path = Path(policy_file)
+        
+        # Check common locations if file not found
+        if not path.exists():
+            for location in [".delimit/policies.yml", ".delimit/policy.yaml", "delimit.yml"]:
+                test_path = Path(location)
+                if test_path.exists():
+                    path = test_path
+                    break
+        
+        if not path.exists():
+            return  # No custom policy, use defaults
+        
+        with open(path, 'r') as f:
+            config = yaml.safe_load(f)
+        
+        if not config:
+            return
+        
+        # Parse rules
+        for rule_config in config.get("rules", []):
+            rule = self._parse_rule(rule_config)
+            if rule:
+                self.custom_rules.append(rule)
+        
+        # Override defaults if specified
+        if config.get("override_defaults", False):
+            self.rules = self.custom_rules
+        else:
+            # Merge custom rules with defaults
+            # Custom rules take precedence for same IDs
+            custom_ids = {r.id for r in self.custom_rules}
+            self.rules = self.custom_rules + [r for r in self.DEFAULT_RULES if r.id not in custom_ids]
     
     def evaluate(self, changes: List[Change]) -> List[Violation]:
         """Evaluate all changes against policy rules."""
