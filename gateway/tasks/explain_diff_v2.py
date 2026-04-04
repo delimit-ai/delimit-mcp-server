@@ -16,6 +16,52 @@ from schemas.evidence import (
 )
 
 
+def load_spec(file_path: str) -> Dict:
+    """Load API specification from file"""
+    path = Path(file_path)
+    with path.open('r') as f:
+        if path.suffix in ['.yaml', '.yml']:
+            return yaml.safe_load(f)
+        elif path.suffix == '.json':
+            return json.load(f)
+        else:
+            # Try YAML first, then JSON
+            content = f.read()
+            try:
+                return yaml.safe_load(content)
+            except:
+                return json.loads(content)
+
+
+def extract_schemas(spec: Dict) -> Dict:
+    """Extract schemas/models from specification"""
+    if "components" in spec and "schemas" in spec.get("components", {}):
+        return spec["components"]["schemas"]
+    elif "definitions" in spec:
+        return spec["definitions"]
+    return {}
+
+
+def schemas_differ(old_schema: Dict, new_schema: Dict) -> bool:
+    """Check if two schemas are different"""
+    # Simple comparison - could be enhanced
+    old_props = set(old_schema.get("properties", {}).keys())
+    new_props = set(new_schema.get("properties", {}).keys())
+    
+    # Check for property changes
+    if old_props != new_props:
+        return True
+    
+    # Check for type changes
+    for prop in old_props:
+        old_type = old_schema.get("properties", {}).get(prop, {}).get("type")
+        new_type = new_schema.get("properties", {}).get(prop, {}).get("type")
+        if old_type != new_type:
+            return True
+    
+    return False
+
+
 @task_registry.register("explain-diff", task_version="1.0", description="Explain API differences")
 def explain_diff_handler(request: ExplainDiffRequest) -> DiffExplanationEvidence:
     """Generate human-readable explanation of API changes with evidence contract"""
@@ -219,49 +265,3 @@ def explain_diff_handler(request: ExplainDiffRequest) -> DiffExplanationEvidence
         migration_required=migration_required,
         impact_level=impact_level
     )
-
-
-def load_spec(file_path: str) -> Dict:
-    """Load API specification from file"""
-    path = Path(file_path)
-    with path.open('r') as f:
-        if path.suffix in ['.yaml', '.yml']:
-            return yaml.safe_load(f)
-        elif path.suffix == '.json':
-            return json.load(f)
-        else:
-            # Try YAML first, then JSON
-            content = f.read()
-            try:
-                return yaml.safe_load(content)
-            except:
-                return json.loads(content)
-
-
-def extract_schemas(spec: Dict) -> Dict:
-    """Extract schemas/models from specification"""
-    if "components" in spec and "schemas" in spec.get("components", {}):
-        return spec["components"]["schemas"]
-    elif "definitions" in spec:
-        return spec["definitions"]
-    return {}
-
-
-def schemas_differ(old_schema: Dict, new_schema: Dict) -> bool:
-    """Check if two schemas are different"""
-    # Simple comparison - could be enhanced
-    old_props = set(old_schema.get("properties", {}).keys())
-    new_props = set(new_schema.get("properties", {}).keys())
-    
-    # Check for property changes
-    if old_props != new_props:
-        return True
-    
-    # Check for type changes
-    for prop in old_props:
-        old_type = old_schema.get("properties", {}).get(prop, {}).get("type")
-        new_type = new_schema.get("properties", {}).get(prop, {}).get("type")
-        if old_type != new_type:
-            return True
-    
-    return False
