@@ -3044,6 +3044,140 @@ program
         }
     });
 
+// Hooks command — install/remove git hooks for governance
+program
+    .command('hooks <action>')
+    .description('Install or remove git hooks (install | remove | status)')
+    .option('--pre-push', 'Also add pre-push hook')
+    .action(async (action, opts) => {
+        const projectDir = process.cwd();
+        const gitDir = path.join(projectDir, '.git');
+
+        if (!fs.existsSync(gitDir)) {
+            console.log(chalk.red('\n  Not a git repository. Run git init first.\n'));
+            process.exitCode = 1;
+            return;
+        }
+
+        const hooksDir = path.join(gitDir, 'hooks');
+        fs.mkdirSync(hooksDir, { recursive: true });
+
+        const preCommitPath = path.join(hooksDir, 'pre-commit');
+        const prePushPath = path.join(hooksDir, 'pre-push');
+        const marker = '# delimit-governance-hook';
+
+        const preCommitHook = `#!/bin/sh
+${marker}
+# Delimit API governance gate
+# Blocks commits with breaking API changes
+npx delimit-cli check --staged
+`;
+
+        const prePushHook = `#!/bin/sh
+${marker}
+# Delimit API governance gate
+# Blocks pushes with breaking API changes
+npx delimit-cli check --base origin/main
+`;
+
+        if (action === 'install') {
+            console.log(chalk.bold('\n  Delimit Hooks\n'));
+
+            let installed = 0;
+
+            // Pre-commit hook
+            if (fs.existsSync(preCommitPath)) {
+                const existing = fs.readFileSync(preCommitPath, 'utf-8');
+                if (existing.includes(marker)) {
+                    console.log(chalk.gray('  pre-commit hook already installed'));
+                } else {
+                    // Append to existing hook
+                    fs.appendFileSync(preCommitPath, '\n' + preCommitHook.split('\n').slice(1).join('\n'));
+                    console.log(chalk.green('  + pre-commit hook added (appended to existing)'));
+                    installed++;
+                }
+            } else {
+                fs.writeFileSync(preCommitPath, preCommitHook);
+                fs.chmodSync(preCommitPath, '755');
+                console.log(chalk.green('  + pre-commit hook installed'));
+                installed++;
+            }
+
+            // Pre-push hook (optional)
+            if (opts.prePush) {
+                if (fs.existsSync(prePushPath)) {
+                    const existing = fs.readFileSync(prePushPath, 'utf-8');
+                    if (existing.includes(marker)) {
+                        console.log(chalk.gray('  pre-push hook already installed'));
+                    } else {
+                        fs.appendFileSync(prePushPath, '\n' + prePushHook.split('\n').slice(1).join('\n'));
+                        console.log(chalk.green('  + pre-push hook added (appended to existing)'));
+                        installed++;
+                    }
+                } else {
+                    fs.writeFileSync(prePushPath, prePushHook);
+                    fs.chmodSync(prePushPath, '755');
+                    console.log(chalk.green('  + pre-push hook installed'));
+                    installed++;
+                }
+            }
+
+            if (installed > 0) {
+                console.log(chalk.bold(`\n  ${installed} hook(s) installed.`));
+                console.log(chalk.gray('  Commits that introduce breaking API changes will be blocked.'));
+                console.log(chalk.gray('  Override with: git commit --no-verify\n'));
+            } else {
+                console.log(chalk.gray('\n  All hooks already installed.\n'));
+            }
+
+        } else if (action === 'remove') {
+            console.log(chalk.bold('\n  Delimit Hooks — Remove\n'));
+            let removed = 0;
+
+            for (const [hookPath, name] of [[preCommitPath, 'pre-commit'], [prePushPath, 'pre-push']]) {
+                if (fs.existsSync(hookPath)) {
+                    const content = fs.readFileSync(hookPath, 'utf-8');
+                    if (content.includes(marker)) {
+                        // If the entire hook is ours, remove it
+                        const lines = content.split('\n');
+                        const delimitStart = lines.findIndex(l => l.includes(marker));
+                        if (delimitStart <= 1) {
+                            // Whole file is ours
+                            fs.unlinkSync(hookPath);
+                            console.log(chalk.yellow(`  - ${name} hook removed`));
+                        } else {
+                            // Remove just our section
+                            const before = lines.slice(0, delimitStart).join('\n');
+                            fs.writeFileSync(hookPath, before + '\n');
+                            console.log(chalk.yellow(`  - ${name} Delimit section removed`));
+                        }
+                        removed++;
+                    }
+                }
+            }
+            if (removed === 0) {
+                console.log(chalk.gray('  No Delimit hooks found.\n'));
+            } else {
+                console.log(chalk.bold(`\n  ${removed} hook(s) removed.\n`));
+            }
+
+        } else if (action === 'status') {
+            console.log(chalk.bold('\n  Delimit Hooks — Status\n'));
+            for (const [hookPath, name] of [[preCommitPath, 'pre-commit'], [prePushPath, 'pre-push']]) {
+                if (fs.existsSync(hookPath) && fs.readFileSync(hookPath, 'utf-8').includes(marker)) {
+                    console.log(`  ${chalk.green('●')} ${name} — installed`);
+                } else {
+                    console.log(`  ${chalk.gray('○')} ${name} — not installed`);
+                }
+            }
+            console.log('');
+
+        } else {
+            console.log(chalk.red(`\n  Unknown action: ${action}`));
+            console.log(chalk.gray('  Usage: delimit hooks install | remove | status\n'));
+        }
+    });
+
 // Check command — pre-commit/pre-push governance check
 program
     .command('check')

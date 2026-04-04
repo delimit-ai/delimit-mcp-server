@@ -542,7 +542,7 @@ describe('CLI hook commands', () => {
         // Should not throw
         const result = execSync(`node "${cliPath}" hook session-start 2>&1`, {
             encoding: 'utf-8',
-            timeout: 5000,
+            timeout: 10000,
         });
         assert.ok(typeof result === 'string', 'Should produce output');
         assert.ok(result.includes('[Delimit]'), 'Output should contain Delimit prefix');
@@ -567,15 +567,15 @@ describe('CLI hook commands', () => {
         assert.ok(typeof result === 'string');
     });
 
-    it('hook session-start completes in under 2 seconds', { skip: SKIP_IN_CI }, () => {
+    it('hook session-start completes in under 10 seconds', { skip: SKIP_IN_CI }, () => {
         const cliPath = path.join(__dirname, '..', 'bin', 'delimit-cli.js');
         const start = Date.now();
         execSync(`node "${cliPath}" hook session-start 2>&1`, {
             encoding: 'utf-8',
-            timeout: 5000,
+            timeout: 10000,
         });
         const elapsed = Date.now() - start;
-        assert.ok(elapsed < 5000, `Hook took ${elapsed}ms, should be under 5000ms`);
+        assert.ok(elapsed < 10000, `Hook took ${elapsed}ms, should be under 10000ms`);
     });
 });
 

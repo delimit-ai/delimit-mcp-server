@@ -156,6 +156,8 @@ npx delimit-cli diff old.yaml new.yaml           # Compare two specs
 npx delimit-cli explain old.yaml new.yaml        # Generate migration guide
 npx delimit-cli check                            # Pre-commit governance check
 npx delimit-cli check --staged --fix             # Check staged files + show guidance
+npx delimit-cli hooks install                    # Install git pre-commit hook
+npx delimit-cli hooks install --pre-push         # Also add pre-push hook
 npx delimit-cli ci                               # Generate GitHub Action workflow
 npx delimit-cli ci --strict --dry-run            # Preview strict workflow
 npx delimit-cli doctor                           # Check setup health
