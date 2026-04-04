@@ -27,6 +27,35 @@ class MCPSubprocessClient:
         self._lock = threading.Lock()
         self._request_id = 0
 
+    def _next_id(self) -> int:
+        self._request_id += 1
+        return self._request_id
+
+    def _write(self, msg: dict):
+        if self._proc is None or self._proc.stdin is None:
+            raise RuntimeError("MCP subprocess not running")
+        self._proc.stdin.write((json.dumps(msg) + "\n").encode())
+        self._proc.stdin.flush()
+
+    def _send_notification(self, method: str, params: dict):
+        self._write({"jsonrpc": "2.0", "method": method, "params": params})
+
+    def _read(self, timeout: float = 30.0):
+        if self._proc is None or self._proc.stdout is None:
+            return None
+        ready, _, _ = select.select([self._proc.stdout], [], [], timeout)
+        if not ready:
+            logger.warning("Timeout waiting for MCP response")
+            return None
+        line = self._proc.stdout.readline()
+        return json.loads(line.decode().strip()) if line else None
+
+    def _send_request(self, method: str, params: dict, timeout: float = 30.0):
+        with self._lock:
+            req_id = self._next_id()
+            self._write({"jsonrpc": "2.0", "id": req_id, "method": method, "params": params})
+            return self._read(timeout=timeout)
+
     def start(self):
         self._proc = subprocess.Popen(
             self.command, shell=True,
@@ -54,35 +83,6 @@ class MCPSubprocessClient:
 
     def call_tool(self, name: str, arguments: dict) -> dict:
         return self._send_request("tools/call", {"name": name, "arguments": arguments})
-
-    def _next_id(self) -> int:
-        self._request_id += 1
-        return self._request_id
-
-    def _send_notification(self, method: str, params: dict):
-        self._write({"jsonrpc": "2.0", "method": method, "params": params})
-
-    def _send_request(self, method: str, params: dict, timeout: float = 30.0):
-        with self._lock:
-            req_id = self._next_id()
-            self._write({"jsonrpc": "2.0", "id": req_id, "method": method, "params": params})
-            return self._read(timeout=timeout)
-
-    def _write(self, msg: dict):
-        if self._proc is None or self._proc.stdin is None:
-            raise RuntimeError("MCP subprocess not running")
-        self._proc.stdin.write((json.dumps(msg) + "\n").encode())
-        self._proc.stdin.flush()
-
-    def _read(self, timeout: float = 30.0):
-        if self._proc is None or self._proc.stdout is None:
-            return None
-        ready, _, _ = select.select([self._proc.stdout], [], [], timeout)
-        if not ready:
-            logger.warning("Timeout waiting for MCP response")
-            return None
-        line = self._proc.stdout.readline()
-        return json.loads(line.decode().strip()) if line else None
 
 
 class BridgeHandler(BaseHTTPRequestHandler):
