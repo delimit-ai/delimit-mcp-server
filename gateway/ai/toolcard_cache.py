@@ -76,17 +76,6 @@ def _atomic_write_json(path: Path, data: Any) -> None:
 class ToolcardCache:
     """Hashed tool schema registry. Sends full schemas on first session, diffs after."""
 
-    def __init__(self, cache_file: Optional[Path] = None, session_dir: Optional[Path] = None):
-        self._cache_file = cache_file or CACHE_FILE
-        self._session_dir = session_dir or SESSION_DIR
-        self.cache: Dict[str, Dict[str, Any]] = self._load()
-        # Per-session tracking
-        self._session_start = datetime.now(timezone.utc).isoformat()
-        self._session_calls: Dict[str, int] = {}  # tool_name -> call count
-        self._session_registered = 0
-        self._session_hits = 0
-        self._session_misses = 0
-
     def _load(self) -> Dict[str, Dict[str, Any]]:
         """Load cache from disk. Returns empty dict if missing or corrupt."""
         try:
@@ -98,6 +87,17 @@ class ToolcardCache:
         except (json.JSONDecodeError, OSError) as e:
             logger.warning("Toolcard cache load failed: %s", e)
         return {}
+
+    def __init__(self, cache_file: Optional[Path] = None, session_dir: Optional[Path] = None):
+        self._cache_file = cache_file or CACHE_FILE
+        self._session_dir = session_dir or SESSION_DIR
+        self.cache: Dict[str, Dict[str, Any]] = self._load()
+        # Per-session tracking
+        self._session_start = datetime.now(timezone.utc).isoformat()
+        self._session_calls: Dict[str, int] = {}  # tool_name -> call count
+        self._session_registered = 0
+        self._session_hits = 0
+        self._session_misses = 0
 
     def _save(self) -> None:
         """Persist cache to disk atomically."""
