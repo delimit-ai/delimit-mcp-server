@@ -491,6 +491,16 @@ def score_and_classify(
     return scored
 
 
+def _save_scan(result: Dict[str, Any], scan_time: datetime) -> Path:
+    """Save scan results to ~/.delimit/reddit_scans/{date}.json."""
+    SCANS_DIR.mkdir(parents=True, exist_ok=True)
+    filename = scan_time.strftime("%Y-%m-%dT%H%M%S") + ".json"
+    path = SCANS_DIR / filename
+    path.write_text(json.dumps(result, indent=2, default=str))
+    logger.info("Scan saved to %s", path)
+    return path
+
+
 # ---------------------------------------------------------------------------
 #  Main scan orchestrator
 # ---------------------------------------------------------------------------
@@ -550,13 +560,3 @@ def scan_all(
     _save_scan(result, scan_start)
 
     return result
-
-
-def _save_scan(result: Dict[str, Any], scan_time: datetime) -> Path:
-    """Save scan results to ~/.delimit/reddit_scans/{date}.json."""
-    SCANS_DIR.mkdir(parents=True, exist_ok=True)
-    filename = scan_time.strftime("%Y-%m-%dT%H%M%S") + ".json"
-    path = SCANS_DIR / filename
-    path.write_text(json.dumps(result, indent=2, default=str))
-    logger.info("Scan saved to %s", path)
-    return path
