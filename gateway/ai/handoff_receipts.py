@@ -153,6 +153,39 @@ def _save_index(project_path: str, index: Dict[str, Any]) -> None:
     _index_path(project_path).write_text(json.dumps(index, indent=2))
 
 
+def _store_receipt(receipt: HandoffReceipt) -> Path:
+    """Persist a receipt to disk and update the index."""
+    proj_dir = _project_dir(receipt.project_path)
+    proj_dir.mkdir(parents=True, exist_ok=True)
+
+    filename = f"{receipt.receipt_id}.json"
+    filepath = proj_dir / filename
+    filepath.write_text(json.dumps(asdict(receipt), indent=2))
+
+    # Update index
+    index = _load_index(receipt.project_path)
+    index["receipts"].append({
+        "receipt_id": receipt.receipt_id,
+        "created_at": receipt.created_at,
+        "task_description": receipt.task_description,
+        "from_model": receipt.from_model,
+        "to_model": receipt.to_model,
+        "priority": receipt.priority,
+        "acknowledged": False,
+    })
+
+    # Prune old receipts
+    if len(index["receipts"]) > MAX_RECEIPTS_PER_PROJECT:
+        old_entries = index["receipts"][:-MAX_RECEIPTS_PER_PROJECT]
+        index["receipts"] = index["receipts"][-MAX_RECEIPTS_PER_PROJECT:]
+        for entry in old_entries:
+            old_file = proj_dir / f"{entry['receipt_id']}.json"
+            old_file.unlink(missing_ok=True)
+
+    _save_index(receipt.project_path, index)
+    return filepath
+
+
 def create_receipt(
     task_description: str,
     completed: Optional[List[str]] = None,
@@ -197,39 +230,6 @@ def create_receipt(
 
     _store_receipt(receipt)
     return receipt
-
-
-def _store_receipt(receipt: HandoffReceipt) -> Path:
-    """Persist a receipt to disk and update the index."""
-    proj_dir = _project_dir(receipt.project_path)
-    proj_dir.mkdir(parents=True, exist_ok=True)
-
-    filename = f"{receipt.receipt_id}.json"
-    filepath = proj_dir / filename
-    filepath.write_text(json.dumps(asdict(receipt), indent=2))
-
-    # Update index
-    index = _load_index(receipt.project_path)
-    index["receipts"].append({
-        "receipt_id": receipt.receipt_id,
-        "created_at": receipt.created_at,
-        "task_description": receipt.task_description,
-        "from_model": receipt.from_model,
-        "to_model": receipt.to_model,
-        "priority": receipt.priority,
-        "acknowledged": False,
-    })
-
-    # Prune old receipts
-    if len(index["receipts"]) > MAX_RECEIPTS_PER_PROJECT:
-        old_entries = index["receipts"][:-MAX_RECEIPTS_PER_PROJECT]
-        index["receipts"] = index["receipts"][-MAX_RECEIPTS_PER_PROJECT:]
-        for entry in old_entries:
-            old_file = proj_dir / f"{entry['receipt_id']}.json"
-            old_file.unlink(missing_ok=True)
-
-    _save_index(receipt.project_path, index)
-    return filepath
 
 
 def _load_receipt(project_path: str, receipt_id: str) -> Optional[HandoffReceipt]:
