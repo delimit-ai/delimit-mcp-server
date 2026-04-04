@@ -75,165 +75,76 @@ class OpenAPIDiffEngine:
     def __init__(self):
         self.changes: List[Change] = []
     
-    def compare(self, old_spec: Dict, new_spec: Dict) -> List[Change]:
-        """Compare two OpenAPI specifications and return all changes."""
-        self.changes = []
-        old_spec = old_spec or {}
-        new_spec = new_spec or {}
-
-        # Compare paths
-        self._compare_paths(old_spec.get("paths", {}), new_spec.get("paths", {}))
+    def _compare_enums(self, path: str, old_enum: List, new_enum: List):
+        """Compare enum values."""
+        old_set = set(old_enum)
+        new_set = set(new_enum)
         
-        # Compare components/schemas
-        self._compare_schemas(
-            old_spec.get("components", {}).get("schemas", {}),
-            new_spec.get("components", {}).get("schemas", {})
-        )
-        
-        # Compare security schemes
-        self._compare_security(
-            old_spec.get("components", {}).get("securitySchemes", {}),
-            new_spec.get("components", {}).get("securitySchemes", {})
-        )
-        
-        return self.changes
-    
-    def _compare_paths(self, old_paths: Dict, new_paths: Dict):
-        """Compare API paths/endpoints."""
-        old_set = set(old_paths.keys())
-        new_set = set(new_paths.keys())
-        
-        # Check removed endpoints
-        for path in old_set - new_set:
+        # Removed enum values are breaking
+        for value in old_set - new_set:
             self.changes.append(Change(
-                type=ChangeType.ENDPOINT_REMOVED,
+                type=ChangeType.ENUM_VALUE_REMOVED,
                 path=path,
-                details={"endpoint": path},
+                details={"value": value},
                 severity="high",
-                message=f"Endpoint removed: {path}"
+                message=f"Enum value '{value}' removed at {path}"
             ))
         
-        # Check added endpoints
-        for path in new_set - old_set:
+        # Added enum values are non-breaking
+        for value in new_set - old_set:
             self.changes.append(Change(
-                type=ChangeType.ENDPOINT_ADDED,
+                type=ChangeType.ENUM_VALUE_ADDED,
                 path=path,
-                details={"endpoint": path},
+                details={"value": value},
                 severity="low",
-                message=f"New endpoint added: {path}"
+                message=f"Enum value '{value}' added at {path}"
             ))
-        
-        # Check modified endpoints
-        for path in old_set & new_set:
-            self._compare_methods(path, old_paths[path], new_paths[path])
     
-    def _compare_methods(self, path: str, old_methods: Dict, new_methods: Dict):
-        """Compare HTTP methods for an endpoint."""
-        old_set = set(m for m in old_methods.keys() if m in ["get", "post", "put", "delete", "patch", "head", "options"])
-        new_set = set(m for m in new_methods.keys() if m in ["get", "post", "put", "delete", "patch", "head", "options"])
-        
-        # Check removed methods
-        for method in old_set - new_set:
-            self.changes.append(Change(
-                type=ChangeType.METHOD_REMOVED,
-                path=f"{path}:{method.upper()}",
-                details={"endpoint": path, "method": method.upper()},
-                severity="high",
-                message=f"Method removed: {method.upper()} {path}"
-            ))
-        
-        # Check modified methods
-        for method in old_set & new_set:
-            self._compare_operation(
-                f"{path}:{method.upper()}",
-                old_methods[method],
-                new_methods[method]
-            )
-    
-    def _compare_operation(self, operation_id: str, old_op: Dict, new_op: Dict):
-        """Compare operation details (parameters, responses, etc.)."""
-        
-        # Compare parameters
-        old_params = {self._param_key(p): p for p in old_op.get("parameters", [])}
-        new_params = {self._param_key(p): p for p in new_op.get("parameters", [])}
-        
-        # Check removed parameters
-        for param_key in set(old_params.keys()) - set(new_params.keys()):
-            param = old_params[param_key]
-            self.changes.append(Change(
-                type=ChangeType.PARAM_REMOVED,
-                path=operation_id,
-                details={"parameter": param["name"], "in": param["in"]},
-                severity="high",
-                message=f"Parameter removed: {param['name']} from {operation_id}"
-            ))
-        
-        # Check added required parameters
-        for param_key in set(new_params.keys()) - set(old_params.keys()):
-            param = new_params[param_key]
-            if param.get("required", False):
+    def _compare_constraints(self, path: str, old_schema: Dict, new_schema: Dict):
+        """Compare schema constraints (maxLength, minLength, maxItems, minItems)."""
+        # maxLength / maxItems decreased = breaking (stricter)
+        for prop in ("maxLength", "maxItems"):
+            old_val = old_schema.get(prop)
+            new_val = new_schema.get(prop)
+            if old_val is not None and new_val is not None and new_val < old_val:
                 self.changes.append(Change(
-                    type=ChangeType.REQUIRED_PARAM_ADDED,
-                    path=operation_id,
-                    details={"parameter": param["name"], "in": param["in"]},
+                    type=ChangeType.MAX_LENGTH_DECREASED,
+                    path=path,
+                    details={"constraint": prop, "old_value": old_val, "new_value": new_val},
                     severity="high",
-                    message=f"Required parameter added: {param['name']} to {operation_id}"
+                    message=f"{prop} decreased from {old_val} to {new_val} at {path}"
                 ))
-        
-        # Check added optional parameters (non-breaking)
-        for param_key in set(new_params.keys()) - set(old_params.keys()):
-            param = new_params[param_key]
-            if not param.get("required", False):
+            elif old_val is None and new_val is not None:
+                # Adding a max constraint where there was none is also stricter
                 self.changes.append(Change(
-                    type=ChangeType.OPTIONAL_PARAM_ADDED,
-                    path=operation_id,
-                    details={"parameter": param["name"], "in": param["in"]},
-                    severity="low",
-                    message=f"Optional parameter added: {param['name']} to {operation_id}"
+                    type=ChangeType.MAX_LENGTH_DECREASED,
+                    path=path,
+                    details={"constraint": prop, "old_value": None, "new_value": new_val},
+                    severity="high",
+                    message=f"{prop} added ({new_val}) at {path} where none existed"
                 ))
 
-        # Check parameter schema changes
-        for param_key in set(old_params.keys()) & set(new_params.keys()):
-            self._compare_parameter_schemas(
-                operation_id,
-                old_params[param_key],
-                new_params[param_key]
-            )
-
-        # Compare operation-level security
-        if "security" in old_op or "security" in new_op:
-            self._compare_operation_security(
-                operation_id,
-                old_op.get("security"),
-                new_op.get("security")
-            )
-
-        # Check deprecated flag
-        old_deprecated = old_op.get("deprecated", False)
-        new_deprecated = new_op.get("deprecated", False)
-        if not old_deprecated and new_deprecated:
-            self.changes.append(Change(
-                type=ChangeType.DEPRECATED_ADDED,
-                path=operation_id,
-                details={"target": "operation"},
-                severity="low",
-                message=f"Operation marked as deprecated: {operation_id}"
-            ))
-
-        # Compare request body
-        if "requestBody" in old_op or "requestBody" in new_op:
-            self._compare_request_body(
-                operation_id,
-                old_op.get("requestBody"),
-                new_op.get("requestBody")
-            )
-        
-        # Compare responses
-        self._compare_responses(
-            operation_id,
-            old_op.get("responses", {}),
-            new_op.get("responses", {})
-        )
+        # minLength / minItems increased = breaking (stricter)
+        for prop in ("minLength", "minItems"):
+            old_val = old_schema.get(prop)
+            new_val = new_schema.get(prop)
+            if old_val is not None and new_val is not None and new_val > old_val:
+                self.changes.append(Change(
+                    type=ChangeType.MIN_LENGTH_INCREASED,
+                    path=path,
+                    details={"constraint": prop, "old_value": old_val, "new_value": new_val},
+                    severity="high",
+                    message=f"{prop} increased from {old_val} to {new_val} at {path}"
+                ))
+            elif old_val is None and new_val is not None and new_val > 0:
+                # Adding a min constraint where there was none is stricter
+                self.changes.append(Change(
+                    type=ChangeType.MIN_LENGTH_INCREASED,
+                    path=path,
+                    details={"constraint": prop, "old_value": None, "new_value": new_val},
+                    severity="high",
+                    message=f"{prop} added ({new_val}) at {path} where none existed"
+                ))
     
     def _compare_parameter_schemas(self, operation_id: str, old_param: Dict, new_param: Dict):
         """Compare parameter schemas for type changes, required changes, and constraints."""
@@ -301,69 +212,6 @@ class OpenAPIDiffEngine:
                 old_schema.get("enum", []),
                 new_schema.get("enum", [])
             )
-    
-    def _compare_request_body(self, operation_id: str, old_body: Optional[Dict], new_body: Optional[Dict]):
-        """Compare request body schemas."""
-        if old_body and not new_body:
-            self.changes.append(Change(
-                type=ChangeType.FIELD_REMOVED,
-                path=operation_id,
-                details={"field": "request_body"},
-                severity="high",
-                message=f"Request body removed from {operation_id}"
-            ))
-        elif not old_body and new_body and new_body.get("required", False):
-            self.changes.append(Change(
-                type=ChangeType.REQUIRED_FIELD_ADDED,
-                path=operation_id,
-                details={"field": "request_body"},
-                severity="high",
-                message=f"Required request body added to {operation_id}"
-            ))
-        elif old_body and new_body:
-            # Compare content types
-            old_content = old_body.get("content", {})
-            new_content = new_body.get("content", {})
-            
-            for content_type in old_content.keys() & new_content.keys():
-                self._compare_schema_deep(
-                    f"{operation_id}:request",
-                    old_content[content_type].get("schema", {}),
-                    new_content[content_type].get("schema", {})
-                )
-    
-    def _compare_responses(self, operation_id: str, old_responses: Dict, new_responses: Dict):
-        """Compare response definitions."""
-        old_codes = set(old_responses.keys())
-        new_codes = set(new_responses.keys())
-        
-        # Check removed responses
-        for code in old_codes - new_codes:
-            # Only flag 2xx responses as breaking
-            if code.startswith("2"):
-                self.changes.append(Change(
-                    type=ChangeType.RESPONSE_REMOVED,
-                    path=operation_id,
-                    details={"response_code": code},
-                    severity="high",
-                    message=f"Success response {code} removed from {operation_id}"
-                ))
-        
-        # Compare response schemas
-        for code in old_codes & new_codes:
-            old_resp = old_responses[code]
-            new_resp = new_responses[code]
-            
-            if "content" in old_resp or "content" in new_resp:
-                old_content = old_resp.get("content", {})
-                new_content = new_resp.get("content", {})
-                
-                for content_type in old_content.keys() & new_content.keys():
-                    self._compare_schema_deep(
-                        f"{operation_id}:{code}",
-                        old_content[content_type].get("schema", {}),
-                        new_content[content_type].get("schema", {})
-                    )
     
     def _compare_schema_deep(self, path: str, old_schema: Dict, new_schema: Dict, required_fields: Optional[Set[str]] = None):
         """Deep comparison of schemas including nested objects."""
@@ -491,96 +339,68 @@ class OpenAPIDiffEngine:
         if old_type != "object":
             self._compare_constraints(path, old_schema, new_schema)
     
-    def _compare_enums(self, path: str, old_enum: List, new_enum: List):
-        """Compare enum values."""
-        old_set = set(old_enum)
-        new_set = set(new_enum)
-        
-        # Removed enum values are breaking
-        for value in old_set - new_set:
-            self.changes.append(Change(
-                type=ChangeType.ENUM_VALUE_REMOVED,
-                path=path,
-                details={"value": value},
-                severity="high",
-                message=f"Enum value '{value}' removed at {path}"
-            ))
-        
-        # Added enum values are non-breaking
-        for value in new_set - old_set:
-            self.changes.append(Change(
-                type=ChangeType.ENUM_VALUE_ADDED,
-                path=path,
-                details={"value": value},
-                severity="low",
-                message=f"Enum value '{value}' added at {path}"
-            ))
-    
-    def _compare_schemas(self, old_schemas: Dict, new_schemas: Dict):
-        """Compare component schemas."""
-        # Schema removal is breaking if referenced
-        for schema_name in set(old_schemas.keys()) - set(new_schemas.keys()):
+    def _compare_request_body(self, operation_id: str, old_body: Optional[Dict], new_body: Optional[Dict]):
+        """Compare request body schemas."""
+        if old_body and not new_body:
             self.changes.append(Change(
                 type=ChangeType.FIELD_REMOVED,
-                path=f"#/components/schemas/{schema_name}",
-                details={"schema": schema_name},
-                severity="medium",
-                message=f"Schema '{schema_name}' removed"
+                path=operation_id,
+                details={"field": "request_body"},
+                severity="high",
+                message=f"Request body removed from {operation_id}"
             ))
-        
-        # Compare existing schemas
-        for schema_name in set(old_schemas.keys()) & set(new_schemas.keys()):
-            self._compare_schema_deep(
-                f"#/components/schemas/{schema_name}",
-                old_schemas[schema_name],
-                new_schemas[schema_name]
-            )
+        elif not old_body and new_body and new_body.get("required", False):
+            self.changes.append(Change(
+                type=ChangeType.REQUIRED_FIELD_ADDED,
+                path=operation_id,
+                details={"field": "request_body"},
+                severity="high",
+                message=f"Required request body added to {operation_id}"
+            ))
+        elif old_body and new_body:
+            # Compare content types
+            old_content = old_body.get("content", {})
+            new_content = new_body.get("content", {})
+            
+            for content_type in old_content.keys() & new_content.keys():
+                self._compare_schema_deep(
+                    f"{operation_id}:request",
+                    old_content[content_type].get("schema", {}),
+                    new_content[content_type].get("schema", {})
+                )
     
-    def _compare_constraints(self, path: str, old_schema: Dict, new_schema: Dict):
-        """Compare schema constraints (maxLength, minLength, maxItems, minItems)."""
-        # maxLength / maxItems decreased = breaking (stricter)
-        for prop in ("maxLength", "maxItems"):
-            old_val = old_schema.get(prop)
-            new_val = new_schema.get(prop)
-            if old_val is not None and new_val is not None and new_val < old_val:
+    def _compare_responses(self, operation_id: str, old_responses: Dict, new_responses: Dict):
+        """Compare response definitions."""
+        old_codes = set(old_responses.keys())
+        new_codes = set(new_responses.keys())
+        
+        # Check removed responses
+        for code in old_codes - new_codes:
+            # Only flag 2xx responses as breaking
+            if code.startswith("2"):
                 self.changes.append(Change(
-                    type=ChangeType.MAX_LENGTH_DECREASED,
-                    path=path,
-                    details={"constraint": prop, "old_value": old_val, "new_value": new_val},
+                    type=ChangeType.RESPONSE_REMOVED,
+                    path=operation_id,
+                    details={"response_code": code},
                     severity="high",
-                    message=f"{prop} decreased from {old_val} to {new_val} at {path}"
+                    message=f"Success response {code} removed from {operation_id}"
                 ))
-            elif old_val is None and new_val is not None:
-                # Adding a max constraint where there was none is also stricter
-                self.changes.append(Change(
-                    type=ChangeType.MAX_LENGTH_DECREASED,
-                    path=path,
-                    details={"constraint": prop, "old_value": None, "new_value": new_val},
-                    severity="high",
-                    message=f"{prop} added ({new_val}) at {path} where none existed"
-                ))
-
-        # minLength / minItems increased = breaking (stricter)
-        for prop in ("minLength", "minItems"):
-            old_val = old_schema.get(prop)
-            new_val = new_schema.get(prop)
-            if old_val is not None and new_val is not None and new_val > old_val:
-                self.changes.append(Change(
-                    type=ChangeType.MIN_LENGTH_INCREASED,
-                    path=path,
-                    details={"constraint": prop, "old_value": old_val, "new_value": new_val},
-                    severity="high",
-                    message=f"{prop} increased from {old_val} to {new_val} at {path}"
-                ))
-            elif old_val is None and new_val is not None and new_val > 0:
-                # Adding a min constraint where there was none is stricter
-                self.changes.append(Change(
-                    type=ChangeType.MIN_LENGTH_INCREASED,
-                    path=path,
-                    details={"constraint": prop, "old_value": None, "new_value": new_val},
-                    severity="high",
-                    message=f"{prop} added ({new_val}) at {path} where none existed"
-                ))
+        
+        # Compare response schemas
+        for code in old_codes & new_codes:
+            old_resp = old_responses[code]
+            new_resp = new_responses[code]
+            
+            if "content" in old_resp or "content" in new_resp:
+                old_content = old_resp.get("content", {})
+                new_content = new_resp.get("content", {})
+                
+                for content_type in old_content.keys() & new_content.keys():
+                    self._compare_schema_deep(
+                        f"{operation_id}:{code}",
+                        old_content[content_type].get("schema", {}),
+                        new_content[content_type].get("schema", {})
+                    )
 
     def _compare_operation_security(self, operation_id: str, old_security: Optional[list], new_security: Optional[list]):
         """Compare operation-level security requirements."""
@@ -631,6 +451,167 @@ class OpenAPIDiffEngine:
                     severity="high",
                     message=f"OAuth scope '{scope}' removed from scheme '{scheme}' at {operation_id}"
                 ))
+    
+    def _param_key(self, param: Dict) -> str:
+        """Generate unique key for parameter."""
+        return f"{param.get('in', 'query')}:{param.get('name', '')}"
+    
+    def _compare_operation(self, operation_id: str, old_op: Dict, new_op: Dict):
+        """Compare operation details (parameters, responses, etc.)."""
+        
+        # Compare parameters
+        old_params = {self._param_key(p): p for p in old_op.get("parameters", [])}
+        new_params = {self._param_key(p): p for p in new_op.get("parameters", [])}
+        
+        # Check removed parameters
+        for param_key in set(old_params.keys()) - set(new_params.keys()):
+            param = old_params[param_key]
+            self.changes.append(Change(
+                type=ChangeType.PARAM_REMOVED,
+                path=operation_id,
+                details={"parameter": param["name"], "in": param["in"]},
+                severity="high",
+                message=f"Parameter removed: {param['name']} from {operation_id}"
+            ))
+        
+        # Check added required parameters
+        for param_key in set(new_params.keys()) - set(old_params.keys()):
+            param = new_params[param_key]
+            if param.get("required", False):
+                self.changes.append(Change(
+                    type=ChangeType.REQUIRED_PARAM_ADDED,
+                    path=operation_id,
+                    details={"parameter": param["name"], "in": param["in"]},
+                    severity="high",
+                    message=f"Required parameter added: {param['name']} to {operation_id}"
+                ))
+        
+        # Check added optional parameters (non-breaking)
+        for param_key in set(new_params.keys()) - set(old_params.keys()):
+            param = new_params[param_key]
+            if not param.get("required", False):
+                self.changes.append(Change(
+                    type=ChangeType.OPTIONAL_PARAM_ADDED,
+                    path=operation_id,
+                    details={"parameter": param["name"], "in": param["in"]},
+                    severity="low",
+                    message=f"Optional parameter added: {param['name']} to {operation_id}"
+                ))
+
+        # Check parameter schema changes
+        for param_key in set(old_params.keys()) & set(new_params.keys()):
+            self._compare_parameter_schemas(
+                operation_id,
+                old_params[param_key],
+                new_params[param_key]
+            )
+
+        # Compare operation-level security
+        if "security" in old_op or "security" in new_op:
+            self._compare_operation_security(
+                operation_id,
+                old_op.get("security"),
+                new_op.get("security")
+            )
+
+        # Check deprecated flag
+        old_deprecated = old_op.get("deprecated", False)
+        new_deprecated = new_op.get("deprecated", False)
+        if not old_deprecated and new_deprecated:
+            self.changes.append(Change(
+                type=ChangeType.DEPRECATED_ADDED,
+                path=operation_id,
+                details={"target": "operation"},
+                severity="low",
+                message=f"Operation marked as deprecated: {operation_id}"
+            ))
+
+        # Compare request body
+        if "requestBody" in old_op or "requestBody" in new_op:
+            self._compare_request_body(
+                operation_id,
+                old_op.get("requestBody"),
+                new_op.get("requestBody")
+            )
+        
+        # Compare responses
+        self._compare_responses(
+            operation_id,
+            old_op.get("responses", {}),
+            new_op.get("responses", {})
+        )
+    
+    def _compare_methods(self, path: str, old_methods: Dict, new_methods: Dict):
+        """Compare HTTP methods for an endpoint."""
+        old_set = set(m for m in old_methods.keys() if m in ["get", "post", "put", "delete", "patch", "head", "options"])
+        new_set = set(m for m in new_methods.keys() if m in ["get", "post", "put", "delete", "patch", "head", "options"])
+        
+        # Check removed methods
+        for method in old_set - new_set:
+            self.changes.append(Change(
+                type=ChangeType.METHOD_REMOVED,
+                path=f"{path}:{method.upper()}",
+                details={"endpoint": path, "method": method.upper()},
+                severity="high",
+                message=f"Method removed: {method.upper()} {path}"
+            ))
+        
+        # Check modified methods
+        for method in old_set & new_set:
+            self._compare_operation(
+                f"{path}:{method.upper()}",
+                old_methods[method],
+                new_methods[method]
+            )
+    
+    def _compare_paths(self, old_paths: Dict, new_paths: Dict):
+        """Compare API paths/endpoints."""
+        old_set = set(old_paths.keys())
+        new_set = set(new_paths.keys())
+        
+        # Check removed endpoints
+        for path in old_set - new_set:
+            self.changes.append(Change(
+                type=ChangeType.ENDPOINT_REMOVED,
+                path=path,
+                details={"endpoint": path},
+                severity="high",
+                message=f"Endpoint removed: {path}"
+            ))
+        
+        # Check added endpoints
+        for path in new_set - old_set:
+            self.changes.append(Change(
+                type=ChangeType.ENDPOINT_ADDED,
+                path=path,
+                details={"endpoint": path},
+                severity="low",
+                message=f"New endpoint added: {path}"
+            ))
+        
+        # Check modified endpoints
+        for path in old_set & new_set:
+            self._compare_methods(path, old_paths[path], new_paths[path])
+    
+    def _compare_schemas(self, old_schemas: Dict, new_schemas: Dict):
+        """Compare component schemas."""
+        # Schema removal is breaking if referenced
+        for schema_name in set(old_schemas.keys()) - set(new_schemas.keys()):
+            self.changes.append(Change(
+                type=ChangeType.FIELD_REMOVED,
+                path=f"#/components/schemas/{schema_name}",
+                details={"schema": schema_name},
+                severity="medium",
+                message=f"Schema '{schema_name}' removed"
+            ))
+        
+        # Compare existing schemas
+        for schema_name in set(old_schemas.keys()) & set(new_schemas.keys()):
+            self._compare_schema_deep(
+                f"#/components/schemas/{schema_name}",
+                old_schemas[schema_name],
+                new_schemas[schema_name]
+            )
 
     def _compare_security(self, old_security: Dict, new_security: Dict):
         """Compare security schemes."""
@@ -654,9 +635,28 @@ class OpenAPIDiffEngine:
                 message=f"Security scheme '{scheme}' added"
             ))
     
-    def _param_key(self, param: Dict) -> str:
-        """Generate unique key for parameter."""
-        return f"{param.get('in', 'query')}:{param.get('name', '')}"
+    def compare(self, old_spec: Dict, new_spec: Dict) -> List[Change]:
+        """Compare two OpenAPI specifications and return all changes."""
+        self.changes = []
+        old_spec = old_spec or {}
+        new_spec = new_spec or {}
+
+        # Compare paths
+        self._compare_paths(old_spec.get("paths", {}), new_spec.get("paths", {}))
+        
+        # Compare components/schemas
+        self._compare_schemas(
+            old_spec.get("components", {}).get("schemas", {}),
+            new_spec.get("components", {}).get("schemas", {})
+        )
+        
+        # Compare security schemes
+        self._compare_security(
+            old_spec.get("components", {}).get("securitySchemes", {}),
+            new_spec.get("components", {}).get("securitySchemes", {})
+        )
+        
+        return self.changes
     
     def get_breaking_changes(self) -> List[Change]:
         """Get only breaking changes."""
