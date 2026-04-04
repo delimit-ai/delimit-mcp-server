@@ -147,6 +147,12 @@ def _get_open_items(venture: str = "", project_path: str = ".") -> List[Dict[str
     return items
 
 
+def _risk_level(risk: str) -> int:
+    """Convert risk string to numeric level for comparison."""
+    levels = {"low": 1, "medium": 2, "high": 3, "critical": 4}
+    return levels.get(risk.lower(), 2)
+
+
 def _filter_actionable(items: List[Dict[str, Any]], max_risk: str = "") -> List[Dict[str, Any]]:
     """Filter out owner-only items and apply risk filtering.
 
@@ -192,10 +198,20 @@ def _resolve_project_path(venture: str) -> str:
     return "."
 
 
-def _risk_level(risk: str) -> int:
-    """Convert risk string to numeric level for comparison."""
-    levels = {"low": 1, "medium": 2, "high": 3, "critical": 4}
-    return levels.get(risk.lower(), 2)
+def _session_summary(session: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a concise session summary for inclusion in responses."""
+    return {
+        "session_id": session["session_id"],
+        "status": session["status"],
+        "iterations": session["iterations"],
+        "max_iterations": session["max_iterations"],
+        "cost_incurred": round(session["cost_incurred"], 4),
+        "cost_cap": session["cost_cap"],
+        "errors": session["errors"],
+        "error_threshold": session["error_threshold"],
+        "tasks_done": len(session.get("tasks_completed", [])),
+        "auto_consensus": session.get("auto_consensus", False),
+    }
 
 
 def next_task(
@@ -311,6 +327,21 @@ def task_complete(
     return next_task(venture=venture, session_id=session["session_id"])
 
 
+def _list_sessions() -> List[Dict[str, Any]]:
+    """List all sessions, most recent first."""
+    if not SESSIONS_DIR.exists():
+        return []
+    sessions = []
+    for f in SESSIONS_DIR.glob("*.json"):
+        try:
+            s = json.loads(f.read_text())
+            sessions.append(s)
+        except (json.JSONDecodeError, OSError):
+            continue
+    sessions.sort(key=lambda x: x.get("started_at", ""), reverse=True)
+    return sessions
+
+
 def loop_status(session_id: str = "") -> Dict[str, Any]:
     """Return current session metrics."""
     if not session_id:
@@ -375,34 +406,3 @@ def loop_config(
         "changes": changes,
         "current_config": _session_summary(session),
     }
-
-
-def _session_summary(session: Dict[str, Any]) -> Dict[str, Any]:
-    """Return a concise session summary for inclusion in responses."""
-    return {
-        "session_id": session["session_id"],
-        "status": session["status"],
-        "iterations": session["iterations"],
-        "max_iterations": session["max_iterations"],
-        "cost_incurred": round(session["cost_incurred"], 4),
-        "cost_cap": session["cost_cap"],
-        "errors": session["errors"],
-        "error_threshold": session["error_threshold"],
-        "tasks_done": len(session.get("tasks_completed", [])),
-        "auto_consensus": session.get("auto_consensus", False),
-    }
-
-
-def _list_sessions() -> List[Dict[str, Any]]:
-    """List all sessions, most recent first."""
-    if not SESSIONS_DIR.exists():
-        return []
-    sessions = []
-    for f in SESSIONS_DIR.glob("*.json"):
-        try:
-            s = json.loads(f.read_text())
-            sessions.append(s)
-        except (json.JSONDecodeError, OSError):
-            continue
-    sessions.sort(key=lambda x: x.get("started_at", ""), reverse=True)
-    return sessions
