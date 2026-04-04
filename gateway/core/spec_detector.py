@@ -33,6 +33,22 @@ class SpecDetector:
     def __init__(self, root_path: str = "."):
         self.root = Path(root_path)
     
+    def _is_valid_openapi(self, file_path: Path) -> bool:
+        """Check if file is a valid OpenAPI specification."""
+        if not file_path.is_file():
+            return False
+        
+        try:
+            with open(file_path, 'r') as f:
+                data = yaml.safe_load(f)
+                # Check for OpenAPI/Swagger markers
+                if isinstance(data, dict):
+                    return 'openapi' in data or 'swagger' in data
+        except:
+            return False
+        
+        return False
+    
     def detect_specs(self) -> Tuple[List[str], Optional[str]]:
         """
         Detect OpenAPI specifications.
@@ -72,22 +88,6 @@ class SpecDetector:
             message = f"Multiple specs found: {', '.join(found_specs[:3])}. Please specify 'files' parameter."
         
         return found_specs, message
-    
-    def _is_valid_openapi(self, file_path: Path) -> bool:
-        """Check if file is a valid OpenAPI specification."""
-        if not file_path.is_file():
-            return False
-        
-        try:
-            with open(file_path, 'r') as f:
-                data = yaml.safe_load(f)
-                # Check for OpenAPI/Swagger markers
-                if isinstance(data, dict):
-                    return 'openapi' in data or 'swagger' in data
-        except:
-            return False
-        
-        return False
     
     def get_default_specs(self) -> Tuple[Optional[str], Optional[str]]:
         """
