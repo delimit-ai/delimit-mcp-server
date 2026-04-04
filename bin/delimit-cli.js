@@ -67,7 +67,8 @@ function normalizeNaturalLanguageArgs(argv) {
 
     const explicitCommands = new Set([
         'install', 'mode', 'status', 'session', 'build', 'ask', 'policy', 'auth', 'audit',
-        'explain-decision', 'uninstall', 'proxy', 'hook', 'version', 'vault', 'deliberate'
+        'explain-decision', 'uninstall', 'proxy', 'hook', 'version', 'vault', 'deliberate',
+        'remember', 'recall', 'forget'
     ]);
     if (explicitCommands.has((raw[0] || '').toLowerCase())) {
         return raw;
@@ -4226,6 +4227,228 @@ program
         console.log('');
         console.log(chalk.gray('  Copy the line above and paste it in your README.md'));
         console.log(chalk.gray('  The badge links to Delimit so visitors can learn more.\n'));
+    });
+
+// ---------------------------------------------------------------------------
+// Memory commands: remember, recall, forget
+// ---------------------------------------------------------------------------
+
+const MEMORY_DIR = path.join(os.homedir(), '.delimit', 'memory');
+const MEMORY_FILE = path.join(MEMORY_DIR, 'memories.jsonl');
+
+const KNOWN_TECH_TERMS = new Set([
+    'redis', 'jwt', 'docker', 'k8s', 'kubernetes', 'aws', 'gcp', 'azure', 'api',
+    'graphql', 'rest', 'grpc', 'postgres', 'mysql', 'mongo', 'mongodb', 'nginx',
+    'kafka', 'rabbitmq', 'terraform', 'ansible', 'helm', 'react', 'vue', 'angular',
+    'node', 'python', 'rust', 'go', 'java', 'typescript', 'webpack', 'vite',
+    'supabase', 'firebase', 'vercel', 'netlify', 'cloudflare', 'lambda', 'sqs',
+    'sns', 's3', 'ec2', 'ecs', 'eks', 'fargate', 'dynamodb', 'elasticsearch',
+    'kibana', 'prometheus', 'grafana', 'datadog', 'sentry', 'pagerduty',
+    'github', 'gitlab', 'bitbucket', 'jira', 'linear', 'notion', 'slack',
+    'openapi', 'swagger', 'oauth', 'saml', 'sso', 'cicd', 'ci', 'cd',
+    'cdn', 'dns', 'ssl', 'tls', 'http', 'https', 'websocket', 'ssh',
+    'cron', 'celery', 'sidekiq', 'redis', 'memcached', 'clickhouse',
+]);
+
+function generateShortId() {
+    const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+    let id = '';
+    for (let i = 0; i < 6; i++) {
+        id += chars[Math.floor(Math.random() * chars.length)];
+    }
+    return id;
+}
+
+function extractTags(text) {
+    const tags = new Set();
+    const words = text.split(/[\s,;:.!?()\[\]{}"']+/).filter(Boolean);
+    for (const word of words) {
+        // @mentions
+        if (word.startsWith('@') && word.length > 1) {
+            tags.add(word.toLowerCase());
+            continue;
+        }
+        // ALL_CAPS words (at least 2 chars, allow underscores)
+        if (/^[A-Z][A-Z0-9_]{1,}$/.test(word)) {
+            tags.add(word.toLowerCase());
+            continue;
+        }
+        // Known tech terms
+        const lower = word.toLowerCase().replace(/[^a-z0-9]/g, '');
+        if (lower.length >= 2 && KNOWN_TECH_TERMS.has(lower)) {
+            tags.add(lower);
+        }
+    }
+    return [...tags];
+}
+
+function readMemories() {
+    if (!fs.existsSync(MEMORY_FILE)) return [];
+    const lines = fs.readFileSync(MEMORY_FILE, 'utf-8').split('\n').filter(l => l.trim());
+    const memories = [];
+    for (const line of lines) {
+        try { memories.push(JSON.parse(line)); } catch {}
+    }
+    return memories;
+}
+
+function writeMemories(memories) {
+    fs.mkdirSync(MEMORY_DIR, { recursive: true });
+    fs.writeFileSync(MEMORY_FILE, memories.map(m => JSON.stringify(m)).join('\n') + (memories.length ? '\n' : ''));
+}
+
+function relativeTime(isoDate) {
+    const now = Date.now();
+    const then = new Date(isoDate).getTime();
+    const diffSec = Math.floor((now - then) / 1000);
+    if (diffSec < 60) return 'just now';
+    const diffMin = Math.floor(diffSec / 60);
+    if (diffMin < 60) return `${diffMin} minute${diffMin === 1 ? '' : 's'} ago`;
+    const diffHr = Math.floor(diffMin / 60);
+    if (diffHr < 24) return `${diffHr} hour${diffHr === 1 ? '' : 's'} ago`;
+    const diffDay = Math.floor(diffHr / 24);
+    if (diffDay < 7) return `${diffDay} day${diffDay === 1 ? '' : 's'} ago`;
+    const diffWeek = Math.floor(diffDay / 7);
+    if (diffWeek < 5) return `${diffWeek} week${diffWeek === 1 ? '' : 's'} ago`;
+    const diffMonth = Math.floor(diffDay / 30);
+    if (diffMonth < 12) return `${diffMonth} month${diffMonth === 1 ? '' : 's'} ago`;
+    const diffYear = Math.floor(diffDay / 365);
+    return `${diffYear} year${diffYear === 1 ? '' : 's'} ago`;
+}
+
+function displayMemory(mem) {
+    console.log(`    ${chalk.gray('[' + mem.id + ']')} ${chalk.gray(relativeTime(mem.created))}`);
+    console.log(`    ${mem.text}`);
+    if (mem.tags && mem.tags.length > 0) {
+        console.log(`    ${chalk.blue(mem.tags.map(t => '#' + t).join(' '))}`);
+    }
+    console.log('');
+}
+
+program
+    .command('remember <text...>')
+    .description('Save a memory that persists across all AI assistants')
+    .option('--tag <tag>', 'Add a manual tag (repeatable)', (val, prev) => prev ? [...prev, val] : [val])
+    .action((textParts, options) => {
+        const text = textParts.join(' ');
+        const autoTags = extractTags(text);
+        const manualTags = (options.tag || []).map(t => t.toLowerCase());
+        const allTags = [...new Set([...autoTags, ...manualTags])];
+
+        const memories = readMemories();
+        const entry = {
+            id: generateShortId(),
+            text,
+            tags: allTags,
+            created: new Date().toISOString(),
+            source: 'cli',
+        };
+        memories.push(entry);
+        writeMemories(memories);
+
+        console.log(chalk.green(`\n  Remembered.`) + chalk.gray(` (${memories.length} memor${memories.length === 1 ? 'y' : 'ies'} total)\n`));
+    });
+
+program
+    .command('recall [query...]')
+    .description('Search your memories — with no query, shows the most recent')
+    .option('--tag <tag>', 'Filter by tag')
+    .option('--all', 'Show all memories')
+    .option('--forget <id>', 'Delete a memory by ID')
+    .option('--export', 'Export memories as markdown')
+    .action((queryParts, options) => {
+        const memories = readMemories();
+
+        // --forget mode
+        if (options.forget) {
+            const idx = memories.findIndex(m => m.id === options.forget);
+            if (idx === -1) {
+                console.log(chalk.red(`\n  No memory found with ID: ${options.forget}\n`));
+                process.exit(1);
+            }
+            memories.splice(idx, 1);
+            writeMemories(memories);
+            console.log(chalk.green(`\n  Forgotten.`) + chalk.gray(` (${memories.length} memor${memories.length === 1 ? 'y' : 'ies'} remaining)\n`));
+            return;
+        }
+
+        if (memories.length === 0) {
+            console.log(chalk.gray('\n  No memories yet. Save one with:\n'));
+            console.log(`    ${chalk.green('delimit remember')} "Your first memory"\n`);
+            return;
+        }
+
+        // --export mode
+        if (options.export) {
+            console.log('# Delimit Memories\n');
+            for (const mem of memories) {
+                const date = new Date(mem.created).toISOString().split('T')[0];
+                console.log(`- **${date}** — ${mem.text}`);
+                if (mem.tags && mem.tags.length > 0) {
+                    console.log(`  Tags: ${mem.tags.map(t => '`' + t + '`').join(', ')}`);
+                }
+            }
+            console.log(`\n_${memories.length} memories exported._`);
+            return;
+        }
+
+        let results = [...memories];
+        const query = (queryParts || []).join(' ').trim().toLowerCase();
+
+        // Filter by tag
+        if (options.tag) {
+            const tagFilter = options.tag.toLowerCase();
+            results = results.filter(m => m.tags && m.tags.some(t => t.includes(tagFilter)));
+        }
+
+        // Filter by query (case-insensitive substring on text + tags)
+        if (query) {
+            results = results.filter(m => {
+                const haystack = (m.text + ' ' + (m.tags || []).join(' ')).toLowerCase();
+                return haystack.includes(query);
+            });
+        }
+
+        // Unless --all, limit to last 10
+        const total = results.length;
+        if (!options.all && !query && !options.tag) {
+            results = results.slice(-10);
+        }
+
+        // Display newest first
+        results.reverse();
+
+        console.log(chalk.bold('\n  Delimit Memories\n'));
+
+        if (results.length === 0) {
+            console.log(chalk.gray('  No matching memories found.\n'));
+            return;
+        }
+
+        for (const mem of results) {
+            displayMemory(mem);
+        }
+
+        const shownCount = results.length;
+        const label = query || options.tag
+            ? `${shownCount} memor${shownCount === 1 ? 'y' : 'ies'} found`
+            : `${shownCount} shown`;
+        console.log(chalk.gray(`  ${label} (${memories.length} total)\n`));
+    });
+
+program
+    .command('forget <id>')
+    .description('Delete a memory by ID (alias for recall --forget)')
+    .action((id) => {
+        const memories = readMemories();
+        const idx = memories.findIndex(m => m.id === id);
+        if (idx === -1) {
+            console.log(chalk.red(`\n  No memory found with ID: ${id}\n`));
+            process.exit(1);
+        }
+        memories.splice(idx, 1);
+        writeMemories(memories);
+        console.log(chalk.green(`\n  Forgotten.`) + chalk.gray(` (${memories.length} memor${memories.length === 1 ? 'y' : 'ies'} remaining)\n`));
     });
 
 const normalizedArgs = normalizeNaturalLanguageArgs(process.argv);

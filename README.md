@@ -161,6 +161,12 @@ npx delimit-cli hooks install                    # Install git pre-commit hook
 npx delimit-cli hooks install --pre-push         # Also add pre-push hook
 npx delimit-cli ci                               # Generate GitHub Action workflow
 npx delimit-cli ci --strict --dry-run            # Preview strict workflow
+npx delimit-cli remember "Redis uses JWT 15min"   # Save a persistent memory
+npx delimit-cli recall redis                     # Search memories
+npx delimit-cli recall                           # Show recent memories
+npx delimit-cli recall --tag deploy --all        # Filter by tag, show all
+npx delimit-cli recall --export                  # Export as markdown
+npx delimit-cli forget abc123                    # Delete a memory by ID
 npx delimit-cli doctor                           # Check setup health
 npx delimit-cli uninstall --dry-run              # Preview removal
 ```
