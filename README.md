@@ -30,9 +30,9 @@ Works across any configuration — from a single model on a budget to an enterpr
 ## Try it in 2 minutes
 
 ```bash
-npx delimit-cli scan     # Instant health grade for your API spec
-npx delimit-cli demo     # See governance in action — no setup needed
-npx delimit-cli setup    # Configure your AI assistants
+npx delimit-cli scan              # Instant health grade for your API spec
+npx delimit-cli demo              # See governance in action — no setup needed
+npx delimit-cli setup && source ~/.bashrc  # Configure AI assistants + activate
 ```
 
 No API keys. No account. No config files.

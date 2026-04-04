@@ -743,12 +743,16 @@ printf "  \${MAGENTA}\${BOLD}[Delimit]\${RESET} \${MAGENTA}═══════
 sleep 0.08
 printf "  \${GREEN}\${BOLD}[Delimit]\${RESET} \${GREEN}✓ Allowed\${RESET}\\n"
 echo ""
-# Find real binary — check common paths then fallback to PATH search (excluding shim dir)
+# Find real binary — check renamed binary first, then common paths
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# 1. Check for renamed binary (tool-real) next to this shim
+[ -x "$SCRIPT_DIR/${toolName}-real" ] && exec "$SCRIPT_DIR/${toolName}-real" "$@"
+# 2. Check common paths (skip self)
 SELF="$(readlink -f "$0" 2>/dev/null || echo "$0")"
-for c in /usr/bin/${toolName} /usr/local/bin/${toolName} "$HOME/.local/bin/${toolName}" "$(npm bin -g 2>/dev/null)/${toolName}"; do
+for c in /usr/local/bin/${toolName}-real /usr/bin/${toolName}-real "$HOME/.local/bin/${toolName}-real" /usr/bin/${toolName} /usr/local/bin/${toolName} "$HOME/.local/bin/${toolName}" "$(npm bin -g 2>/dev/null)/${toolName}"; do
     [ -x "$c" ] && [ "$(readlink -f "$c" 2>/dev/null)" != "$SELF" ] && exec "$c" "$@"
 done
-# Last resort: search PATH excluding shim directory
+# 3. Last resort: search PATH excluding shim directory
 REAL=$(PATH=$(echo "$PATH" | tr ':' '\\n' | grep -v '.delimit/shims' | tr '\\n' ':') command -v ${toolName} 2>/dev/null)
 [ -x "$REAL" ] && exec "$REAL" "$@"
 echo "[Delimit] ${toolName} not found in PATH" >&2
@@ -767,10 +771,66 @@ exit 127
                 fs.chmodSync(shimPath, '755');
             }
 
+            // Rename+wrap: place shim at the real binary's location
+            // so it works immediately without PATH changes
+            for (const tool of ['claude', 'codex', 'gemini']) {
+                try {
+                    // Find real binary location
+                    let realPath = null;
+                    const searchPaths = [
+                        `/usr/local/bin/${tool}`,
+                        `/usr/bin/${tool}`,
+                        path.join(os.homedir(), '.local', 'bin', tool),
+                    ];
+                    // Also check npm global bin
+                    try {
+                        const npmBin = execSync('npm bin -g 2>/dev/null', { encoding: 'utf-8', timeout: 3000 }).trim();
+                        if (npmBin) searchPaths.push(path.join(npmBin, tool));
+                    } catch {}
+
+                    for (const p of searchPaths) {
+                        try {
+                            if (fs.existsSync(p) && fs.statSync(p).isFile()) {
+                                // Check it's the real binary, not already our shim
+                                const content = fs.readFileSync(p, 'utf-8').substring(0, 200);
+                                if (!content.includes('Delimit Governance Shim')) {
+                                    realPath = p;
+                                    break;
+                                }
+                            }
+                        } catch {}
+                    }
+
+                    if (realPath) {
+                        const dir = path.dirname(realPath);
+                        const realDest = path.join(dir, `${tool}-real`);
+                        // Only rename if not already renamed
+                        if (!fs.existsSync(realDest)) {
+                            fs.renameSync(realPath, realDest);
+                        }
+                        // Place our shim at the original location
+                        const shimContent = fs.readFileSync(path.join(shimsDir, tool), 'utf-8');
+                        // Update shim to also check for tool-real in same directory
+                        const patchedShim = shimContent.replace(
+                            `echo "[Delimit] ${tool} not found in PATH"`,
+                            `# Check for renamed binary next to shim\n` +
+                            `SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"\n` +
+                            `[ -x "$SCRIPT_DIR/${tool}-real" ] && exec "$SCRIPT_DIR/${tool}-real" "$@"\n` +
+                            `echo "[Delimit] ${tool} not found in PATH"`
+                        );
+                        fs.writeFileSync(realPath, patchedShim);
+                        fs.chmodSync(realPath, '755');
+                        log(`  ${green('✓')} ${tool}: wrapped at ${dim(realPath)}`);
+                    }
+                } catch {}
+            }
+
             // Add to PATH in shell rc files (create if missing)
             const pathLine = `export PATH="${shimsDir}:$PATH"  # Delimit governance wrapping`;
             let pathWritten = false;
-            for (const rc of ['.bashrc', '.zshrc', '.profile']) {
+            // Write to ALL rc files that exist — SSH login shells source
+            // .bash_profile (not .bashrc), so we need both
+            for (const rc of ['.bashrc', '.bash_profile', '.zshrc', '.zprofile', '.profile']) {
                 const rcPath = path.join(os.homedir(), rc);
                 try {
                     if (fs.existsSync(rcPath)) {
@@ -782,10 +842,13 @@ exit 127
                     }
                 } catch { /* skip unreadable files */ }
             }
-            // If no rc files exist, create .bashrc with the PATH export
+            // If no rc files exist, create both .bashrc AND .bash_profile
+            // (.bash_profile for SSH login shells, .bashrc for interactive)
             if (!pathWritten) {
-                const bashrc = path.join(os.homedir(), '.bashrc');
-                fs.writeFileSync(bashrc, `# Delimit governance wrapping\n${pathLine}\n`);
+                const snippet = `# Delimit governance wrapping\n${pathLine}\n`;
+                for (const rc of ['.bashrc', '.bash_profile']) {
+                    fs.writeFileSync(path.join(os.homedir(), rc), snippet);
+                }
                 pathWritten = true;
             }
             // Also write to /etc/profile.d/ if writable (login shells)
@@ -800,11 +863,19 @@ exit 127
                 await logp(`  ${green('✓')} Governance shims updated`);
             } else {
                 log(`  ${green('✓')} Governance wrapping enabled`);
+            }
+
+            // Check if shims are already in current PATH
+            const currentPath = process.env.PATH || '';
+            if (!currentPath.includes('.delimit/shims')) {
+                // Can't modify parent shell, but try exec $SHELL -l to reload
                 log('');
-                log(`  ${bold('To activate now, run:')}`);
-                log(`  ${green('source ~/.bashrc')}`);
+                log(`  ${yellow('!')} Run this to activate the banner now:`);
+                log(`  ${green(`export PATH="${shimsDir}:$PATH"`)}`);
                 log('');
-                log(`  ${dim('Or restart your terminal. The banner appears before each AI session.')}`);
+                log(`  ${dim('Or just open a new terminal. Future sessions load it automatically.')}`);
+            } else {
+                log(`  ${green('✓')} Shim active in current shell`);
             }
         } else {
             log(`  ${dim('  Skipped. Enable later: delimit shims enable')}`);
@@ -1170,6 +1241,44 @@ exit 127
     log('');
     log(`  ${bold('Keep Building.')}`);
     log('');
+
+    // Show governance banner preview
+    const shimFile = path.join(DELIMIT_HOME, 'shims', 'claude');
+    if (fs.existsSync(shimFile)) {
+        log(dim('  --- Governance Banner Preview ---'));
+        try {
+            // Run the shim with DELIMIT_WRAPPED=true so it exits after banner
+            // We simulate the banner directly instead
+            const toolCount = (() => {
+                try {
+                    const srv = fs.readFileSync(path.join(DELIMIT_HOME, 'server', 'ai', 'server.py'), 'utf-8');
+                    return (srv.match(/@mcp\.tool/g) || []).length + (srv.match(/mcp\.tool\(\)\(/g) || []).length;
+                } catch { return 0; }
+            })();
+            const version = require('../package.json').version;
+            const purple = '\x1b[35m', magenta = '\x1b[91m', orange = '\x1b[33m';
+            const bold2 = '\x1b[1m', dim2 = '\x1b[2m', reset = '\x1b[0m', green2 = '\x1b[32m';
+            console.log('');
+            console.log(`  ${purple}${bold2}    ____  ________    ______  _____________${reset}`);
+            console.log(`  ${purple}${bold2}   / __ \\/ ____/ /   /  _/  |/  /  _/_  __/${reset}`);
+            console.log(`  ${magenta}${bold2}  / / / / __/ / /    / // /|_/ // /  / /   ${reset}`);
+            console.log(`  ${magenta}${bold2} / /_/ / /___/ /____/ // /  / // /  / /    ${reset}`);
+            console.log(`  ${orange}${bold2}/_____/_____/_____/___/_/  /_/___/ /_/     ${reset}`);
+            console.log(`  ${dim2}v${version}${reset}`);
+            console.log('');
+            console.log(`  ${purple}${bold2}[Delimit]${reset} ${dim2}Executing governance check...${reset}`);
+            console.log(`  ${purple}${bold2}[Delimit]${reset} ${orange}Mode: advisory${reset}`);
+            console.log(`  ${purple}${bold2}[Delimit]${reset} ${dim2}MCP server: ${toolCount} tools${reset}`);
+            console.log(`  ${magenta}${bold2}[Delimit]${reset} ${magenta}═══════════════════════════════════════════${reset}`);
+            console.log(`  ${magenta}${bold2}[Delimit]${reset} ${purple}<${magenta}/${orange}>${reset} ${bold2}GOVERNANCE ACTIVE: CLAUDE${reset}`);
+            console.log(`  ${magenta}${bold2}[Delimit]${reset} ${magenta}═══════════════════════════════════════════${reset}`);
+            console.log(`  ${green2}${bold2}[Delimit]${reset} ${green2}✓ Allowed${reset}`);
+            console.log('');
+            log(dim('  This banner appears before each AI session.'));
+            log(dim('  If you don\'t see it, run: source ~/.bashrc'));
+        } catch {}
+        log('');
+    }
 }
 
 // LED-213: Import canonical template from shared module

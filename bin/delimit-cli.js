@@ -874,10 +874,19 @@ program
             } catch (e) {}
         }
 
-        // 7. Shims
+        // 7. Shims + wrapped binaries
         const shimsDir = path.join(HOME, '.delimit', 'shims');
         if (fs.existsSync(shimsDir)) {
             changes.push({ target: '~/.delimit/shims/', action: 'Remove CLI shims directory' });
+        }
+        for (const tool of ['claude', 'codex', 'gemini']) {
+            const searchPaths = [`/usr/local/bin/${tool}-real`, `/usr/bin/${tool}-real`, path.join(HOME, '.local', 'bin', `${tool}-real`)];
+            for (const p of searchPaths) {
+                if (fs.existsSync(p)) {
+                    changes.push({ target: p.replace(HOME, '~'), action: `Restore original ${tool} binary` });
+                    break;
+                }
+            }
         }
 
         // 8. Cross-model governance hooks (LED-202)
@@ -990,6 +999,29 @@ program
                     console.log(chalk.green('✓ Removed from Codex TOML config'));
                 }
             } catch (e) {}
+        }
+
+        // Restore wrapped binaries before removing shims
+        for (const tool of ['claude', 'codex', 'gemini']) {
+            const searchPaths = [
+                `/usr/local/bin/${tool}`,
+                `/usr/bin/${tool}`,
+                path.join(HOME, '.local', 'bin', tool),
+            ];
+            try {
+                const npmBin = execSync('npm bin -g 2>/dev/null', { encoding: 'utf-8', timeout: 3000 }).trim();
+                if (npmBin) searchPaths.push(path.join(npmBin, tool));
+            } catch {}
+            for (const p of searchPaths) {
+                const realPath = p + '-real';
+                try {
+                    if (fs.existsSync(realPath)) {
+                        fs.renameSync(realPath, p);
+                        console.log(chalk.green(`✓ Restored original ${tool} binary`));
+                        break;
+                    }
+                } catch {}
+            }
         }
 
         // Remove shims
