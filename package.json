@@ -27,7 +27,7 @@
   "scripts": {
     "postinstall": "node scripts/postinstall.js",
     "sync-gateway": "bash scripts/sync-gateway.sh",
-    "prepublishOnly": "npm run sync-gateway && bash scripts/security-check.sh",
+    "prepublishOnly": "bash scripts/publish-ci-guard.sh && npm run sync-gateway && bash scripts/security-check.sh",
     "test": "node --test tests/setup-onboarding.test.js tests/setup-matrix.test.js tests/config-export-import.test.js tests/cross-model-hooks.test.js tests/golden-path.test.js"
   },
   "keywords": [

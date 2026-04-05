@@ -10,7 +10,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 NPM_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-GATEWAY_SRC="/home/delimit/delimit-gateway"
+GATEWAY_SRC="${GATEWAY_OVERRIDE:-/home/delimit/delimit-gateway}"
 
 # ── Verify gateway source exists ─────────────────────────────────────
 if [ ! -d "$GATEWAY_SRC/ai" ]; then
