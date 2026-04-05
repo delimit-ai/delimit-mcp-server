@@ -57,6 +57,21 @@ rsync -a --delete \
 # ── Sync requirements.txt ────────────────────────────────────────────
 cp "$GATEWAY_SRC/requirements.txt" "$NPM_ROOT/gateway/requirements.txt" 2>/dev/null || true
 
+# ── Also sync to installed server (if present) ────────────────────────
+INSTALLED_SERVER="$HOME/.delimit/server"
+if [ -d "$INSTALLED_SERVER/ai" ]; then
+    echo "  Syncing to installed server ($INSTALLED_SERVER)..."
+    rsync -a --delete \
+        --exclude='__pycache__' \
+        --exclude='*.pyc' \
+        "$GATEWAY_SRC/ai/" "$INSTALLED_SERVER/ai/"
+    rsync -a --delete \
+        --exclude='__pycache__' \
+        --exclude='*.pyc' \
+        "$GATEWAY_SRC/core/" "$INSTALLED_SERVER/core/" 2>/dev/null || true
+    echo "  ✅ installed server synced"
+fi
+
 # ── Report ────────────────────────────────────────────────────────────
 AI_COUNT=$(find "$NPM_ROOT/gateway/ai" -name '*.py' -not -name '__pycache__' | wc -l)
 CORE_COUNT=$(find "$NPM_ROOT/gateway/core" -name '*.py' -not -name '__pycache__' | wc -l)
