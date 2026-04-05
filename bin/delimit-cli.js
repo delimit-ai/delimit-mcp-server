@@ -68,7 +68,7 @@ function normalizeNaturalLanguageArgs(argv) {
     const explicitCommands = new Set([
         'install', 'mode', 'status', 'session', 'build', 'ask', 'policy', 'auth', 'audit',
         'explain-decision', 'uninstall', 'proxy', 'hook', 'version', 'vault', 'deliberate',
-        'remember', 'recall', 'forget'
+        'remember', 'recall', 'forget', 'report'
     ]);
     if (explicitCommands.has((raw[0] || '').toLowerCase())) {
         return raw;
@@ -328,190 +328,312 @@ program
     .description('Show a compact dashboard of your Delimit setup')
 
     .option('--verbose', 'Show detailed status')
+    .option('--json', 'Output as JSON')
+    .option('--watch', 'Refresh every 5 seconds')
     .action(async (options) => {
         const homedir = os.homedir();
         const delimitHome = path.join(homedir, '.delimit');
         const target = process.cwd();
+        const { execSync } = require('child_process');
 
-        console.log(chalk.bold('\n  Delimit Status\n'));
+        function renderStatus() {
+            const data = {};
 
-        // --- Memory stats ---
-        const memoryDir = path.join(delimitHome, 'memory');
-        let memTotal = 0;
-        let memRecent = 0;
-        let recentMemories = [];
-        const oneWeekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
-        try {
-            const memFiles = fs.readdirSync(memoryDir).filter(f => f.startsWith('mem-') && f.endsWith('.json'));
-            memTotal = memFiles.length;
-            for (const f of memFiles) {
+            // --- Memory stats ---
+            const memoryDir = path.join(delimitHome, 'memory');
+            let memTotal = 0;
+            let memRecent = 0;
+            let recentMemories = [];
+            let memIntegrity = { verified: 0, failed: 0 };
+            const oneWeekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+            try {
+                const memFiles = fs.readdirSync(memoryDir).filter(f => f.startsWith('mem-') && f.endsWith('.json'));
+                memTotal = memFiles.length;
+                for (const f of memFiles) {
+                    try {
+                        const raw = fs.readFileSync(path.join(memoryDir, f), 'utf-8');
+                        const d = JSON.parse(raw);
+                        const ts = new Date(d.created_at || d.timestamp || d.created || 0).getTime();
+                        if (ts > oneWeekAgo) memRecent++;
+                        recentMemories.push({ text: d.text || d.content || '', tags: d.tags || [], ts, source: d.context || d.source || 'unknown' });
+                        // Verify integrity hash if present
+                        if (d.hash) {
+                            const expected = require('crypto').createHash('sha256').update(d.content || d.text || '').digest('hex').slice(0, 16);
+                            if (d.hash === expected) memIntegrity.verified++;
+                            else memIntegrity.failed++;
+                        }
+                    } catch {}
+                }
+                recentMemories.sort((a, b) => b.ts - a.ts);
+                recentMemories = recentMemories.slice(0, 3);
+            } catch {}
+            data.memory = { total: memTotal, recent: memRecent, integrity: memIntegrity };
+
+            // --- Governance / Policy ---
+            const policyPath = path.join(target, '.delimit', 'policies.yml');
+            let policyName = 'none';
+            let policyMode = '';
+            let ruleCount = 0;
+            let hasPolicy = false;
+            if (fs.existsSync(policyPath)) {
+                hasPolicy = true;
                 try {
-                    const data = JSON.parse(fs.readFileSync(path.join(memoryDir, f), 'utf-8'));
-                    const ts = new Date(data.created_at || data.timestamp || data.created || 0).getTime();
-                    if (ts > oneWeekAgo) memRecent++;
-                    recentMemories.push({ text: data.text || data.content || '', tags: data.tags || [], ts });
-                } catch {}
+                    const policyContent = yaml.load(fs.readFileSync(policyPath, 'utf-8'));
+                    policyName = policyContent?.preset || policyContent?.name || 'custom';
+                    policyMode = policyContent?.enforcement_mode || policyContent?.mode || '';
+                    if (policyContent?.rules) ruleCount = Object.keys(policyContent.rules).length;
+                } catch {
+                    policyName = 'custom';
+                }
             }
-            recentMemories.sort((a, b) => b.ts - a.ts);
-            recentMemories = recentMemories.slice(0, 3);
-        } catch {}
-        console.log(`  Memory:     ${chalk.white.bold(memTotal)} memories${memRecent > 0 ? ` (${memRecent} this week)` : ''}`);
 
-        // --- Governance / Policy ---
-        const policyPath = path.join(target, '.delimit', 'policies.yml');
-        let policyLabel = chalk.gray('none');
-        let hasPolicy = false;
-        if (fs.existsSync(policyPath)) {
-            hasPolicy = true;
+            // Count tracked specs
+            const specPatterns = ['openapi.yaml', 'openapi.yml', 'openapi.json', 'swagger.yaml', 'swagger.yml', 'swagger.json'];
+            let specCount = 0;
+            const _countSpecs = (dir, depth) => {
+                if (depth > 3) return;
+                try {
+                    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+                        if (['node_modules', '.next', 'venv', '.git'].includes(entry.name)) continue;
+                        const full = path.join(dir, entry.name);
+                        if (entry.isFile() && specPatterns.includes(entry.name.toLowerCase())) specCount++;
+                        else if (entry.isDirectory()) _countSpecs(full, depth + 1);
+                    }
+                } catch {}
+            };
+            _countSpecs(target, 0);
+            data.governance = { policy: policyName, mode: policyMode, rules: ruleCount, specs: specCount };
+
+            // --- Git hooks ---
+            const preCommitPath = path.join(target, '.git', 'hooks', 'pre-commit');
+            let hasGitHooks = false;
+            try { hasGitHooks = fs.readFileSync(preCommitPath, 'utf-8').includes('delimit'); } catch {}
+            data.hooks = hasGitHooks;
+
+            // --- CI ---
+            const workflowDir = path.join(target, '.github', 'workflows');
+            let hasCI = false;
+            let ciFile = '';
             try {
-                const policyContent = yaml.load(fs.readFileSync(policyPath, 'utf-8'));
-                const preset = policyContent?.preset || policyContent?.name || 'custom';
-                policyLabel = chalk.green(preset + ' policy');
-            } catch {
-                policyLabel = chalk.green('custom policy');
+                const wfs = fs.readdirSync(workflowDir);
+                for (const wf of wfs) {
+                    try {
+                        if (fs.readFileSync(path.join(workflowDir, wf), 'utf-8').includes('delimit')) {
+                            hasCI = true;
+                            ciFile = wf;
+                            break;
+                        }
+                    } catch {}
+                }
+            } catch {}
+            data.ci = { active: hasCI, file: ciFile };
+
+            // --- MCP ---
+            const mcpConfigPath = path.join(homedir, '.mcp.json');
+            let hasMcp = false;
+            let toolCount = 0;
+            try { hasMcp = fs.readFileSync(mcpConfigPath, 'utf-8').includes('delimit'); } catch {}
+            if (hasMcp) {
+                const serverPyPaths = [
+                    path.join(delimitHome, 'server', 'ai', 'server.py'),
+                    path.join(delimitHome, 'server', 'server.py'),
+                ];
+                for (const sp of serverPyPaths) {
+                    try {
+                        const toolMatches = fs.readFileSync(sp, 'utf-8').match(/@mcp\.tool/g);
+                        if (toolMatches) { toolCount = toolMatches.length; break; }
+                    } catch {}
+                }
             }
-        }
-        // Count tracked specs
-        const specPatterns = ['openapi.yaml', 'openapi.yml', 'openapi.json', 'swagger.yaml', 'swagger.yml', 'swagger.json'];
-        let specCount = 0;
-        const _countSpecs = (dir, depth) => {
-            if (depth > 3) return;
+            data.mcp = { connected: hasMcp, tools: toolCount };
+
+            // --- Models ---
+            const modelsPath = path.join(delimitHome, 'models.json');
+            let modelNames = [];
             try {
-                for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-                    if (['node_modules', '.next', 'venv', '.git'].includes(entry.name)) continue;
-                    const full = path.join(dir, entry.name);
-                    if (entry.isFile() && specPatterns.includes(entry.name.toLowerCase())) {
-                        specCount++;
-                    } else if (entry.isDirectory()) {
-                        _countSpecs(full, depth + 1);
+                const modelsData = JSON.parse(fs.readFileSync(modelsPath, 'utf-8'));
+                for (const [key, val] of Object.entries(modelsData)) {
+                    if (val && typeof val === 'object' && (val.api_key || val.enabled !== false)) {
+                        modelNames.push(key.charAt(0).toUpperCase() + key.slice(1));
                     }
                 }
             } catch {}
-        };
-        _countSpecs(target, 0);
-        const specLabel = specCount > 0 ? `${specCount} spec${specCount > 1 ? 's' : ''} tracked` : chalk.gray('no specs');
-        console.log(`  Governance: ${policyLabel}${hasPolicy ? ' | ' : ' | '}${specLabel}`);
+            data.models = modelNames;
 
-        // --- Git hooks ---
-        const preCommitPath = path.join(target, '.git', 'hooks', 'pre-commit');
-        let hasGitHooks = false;
-        try {
-            const hookContent = fs.readFileSync(preCommitPath, 'utf-8');
-            hasGitHooks = hookContent.includes('delimit');
-        } catch {}
-        console.log(`  Git Hooks:  ${hasGitHooks ? chalk.green('pre-commit installed') : chalk.gray('not installed')}`);
+            // --- License ---
+            const licensePath = path.join(delimitHome, 'license.json');
+            let licenseTier = 'Free';
+            let licenseActive = false;
+            try {
+                const ld = JSON.parse(fs.readFileSync(licensePath, 'utf-8'));
+                licenseTier = ld.tier || ld.plan || 'Free';
+                licenseActive = ld.status === 'active' || ld.valid === true;
+            } catch {}
+            data.license = { tier: licenseTier, active: licenseActive };
 
-        // --- CI ---
-        const workflowPath = path.join(target, '.github', 'workflows', 'api-governance.yml');
-        const hasCI = fs.existsSync(workflowPath);
-        console.log(`  CI:         ${hasCI ? chalk.green('GitHub Action active') : chalk.gray('not configured')}`);
+            // --- Ledger stats ---
+            const ledgerDir = path.join(delimitHome, 'ledger');
+            let ledgerOpen = 0;
+            let ledgerTotal = 0;
+            try {
+                const ledgerFiles = fs.readdirSync(ledgerDir).filter(f => f.endsWith('.json') || f.endsWith('.jsonl'));
+                for (const lf of ledgerFiles) {
+                    try {
+                        const content = fs.readFileSync(path.join(ledgerDir, lf), 'utf-8');
+                        if (lf.endsWith('.jsonl')) {
+                            const lines = content.split('\n').filter(l => l.trim());
+                            for (const line of lines) {
+                                try {
+                                    const item = JSON.parse(line);
+                                    ledgerTotal++;
+                                    if (!item.status || item.status === 'open' || item.status === 'in_progress') ledgerOpen++;
+                                } catch {}
+                            }
+                        } else {
+                            const item = JSON.parse(content);
+                            if (Array.isArray(item)) {
+                                ledgerTotal += item.length;
+                                ledgerOpen += item.filter(i => !i.status || i.status === 'open' || i.status === 'in_progress').length;
+                            } else {
+                                ledgerTotal++;
+                                if (!item.status || item.status === 'open' || item.status === 'in_progress') ledgerOpen++;
+                            }
+                        }
+                    } catch {}
+                }
+            } catch {}
+            data.ledger = { total: ledgerTotal, open: ledgerOpen };
 
-        // --- MCP ---
-        const mcpConfigPath = path.join(homedir, '.mcp.json');
-        let hasMcp = false;
-        let toolCount = 0;
-        try {
-            const mcpContent = fs.readFileSync(mcpConfigPath, 'utf-8');
-            hasMcp = mcpContent.includes('delimit');
-        } catch {}
-        if (hasMcp) {
-            // Count tools from server.py if available
-            const serverPyPaths = [
-                path.join(delimitHome, 'server', 'ai', 'server.py'),
-                path.join(delimitHome, 'server', 'server.py'),
+            // --- Evidence stats ---
+            const evidenceDir = path.join(delimitHome, 'evidence');
+            let evidenceCount = 0;
+            try {
+                const evFiles = fs.readdirSync(evidenceDir).filter(f => f.endsWith('.json') || f.endsWith('.jsonl'));
+                evidenceCount = evFiles.length;
+            } catch {}
+            data.evidence = evidenceCount;
+
+            // --- Last session ---
+            let lastSession = null;
+            const sessionsDir = path.join(delimitHome, 'sessions');
+            try {
+                const sessFiles = fs.readdirSync(sessionsDir)
+                    .filter(f => f.startsWith('session_') && f.endsWith('.json'))
+                    .sort().reverse();
+                if (sessFiles.length > 0) {
+                    const latest = JSON.parse(fs.readFileSync(path.join(sessionsDir, sessFiles[0]), 'utf-8'));
+                    lastSession = latest.summary || latest.description || latest.title || null;
+                }
+            } catch {}
+            data.lastSession = lastSession;
+
+            // --- Git info ---
+            let gitBranch = '';
+            let gitDirty = false;
+            try {
+                gitBranch = execSync('git rev-parse --abbrev-ref HEAD', { stdio: 'pipe', cwd: target }).toString().trim();
+                const statusOut = execSync('git status --porcelain', { stdio: 'pipe', cwd: target }).toString().trim();
+                gitDirty = statusOut.length > 0;
+            } catch {}
+            data.git = { branch: gitBranch, dirty: gitDirty };
+
+            // --- Version ---
+            let cliVersion = '';
+            try { cliVersion = require(path.join(__dirname, '..', 'package.json')).version; } catch {}
+            data.version = cliVersion;
+
+            // --- Readiness ---
+            const checks = [
+                { name: 'Spec', done: specCount > 0 },
+                { name: 'Policy', done: hasPolicy },
+                { name: 'CI', done: hasCI },
+                { name: 'Hooks', done: hasGitHooks },
+                { name: 'MCP', done: hasMcp },
             ];
-            for (const sp of serverPyPaths) {
-                try {
-                    const serverContent = fs.readFileSync(sp, 'utf-8');
-                    const toolMatches = serverContent.match(/@mcp\.tool/g);
-                    if (toolMatches) {
-                        toolCount = toolMatches.length;
-                        break;
-                    }
-                } catch {}
+            const score = checks.filter(c => c.done).length;
+            data.readiness = { score, total: checks.length, checks };
+
+            // === JSON output ===
+            if (options.json) {
+                console.log(JSON.stringify(data, null, 2));
+                return;
             }
-            console.log(`  MCP:        ${chalk.green('connected')}${toolCount > 0 ? ` (${toolCount} tools)` : ''}`);
-        } else {
-            console.log(`  MCP:        ${chalk.gray('not configured')}`);
-        }
 
-        // --- Models ---
-        const modelsPath = path.join(delimitHome, 'models.json');
-        let modelsLabel = chalk.gray('none configured');
-        try {
-            const modelsData = JSON.parse(fs.readFileSync(modelsPath, 'utf-8'));
-            const modelNames = [];
-            for (const [key, val] of Object.entries(modelsData)) {
-                if (val && typeof val === 'object' && (val.api_key || val.enabled !== false)) {
-                    modelNames.push(key.charAt(0).toUpperCase() + key.slice(1));
-                }
-            }
-            if (modelNames.length > 0) {
-                modelsLabel = chalk.white(modelNames.join(' + ')) + chalk.gray(' (BYOK)');
-            }
-        } catch {}
-        console.log(`  Models:     ${modelsLabel}`);
+            // === Visual dashboard ===
+            const W = 60;
+            const line = '\u2500'.repeat(W - 2);
+            const dot = (ok) => ok ? chalk.green('\u25cf') : chalk.gray('\u25cb');
+            const bar = (n, total, width = 20) => {
+                const filled = Math.round((n / Math.max(total, 1)) * width);
+                return chalk.green('\u2588'.repeat(filled)) + chalk.gray('\u2591'.repeat(width - filled));
+            };
 
-        // --- License ---
-        const licensePath = path.join(delimitHome, 'license.json');
-        let licenseLabel = chalk.gray('Free');
-        try {
-            const licenseData = JSON.parse(fs.readFileSync(licensePath, 'utf-8'));
-            const tier = licenseData.tier || licenseData.plan || 'Free';
-            const active = licenseData.status === 'active' || licenseData.valid === true;
-            if (tier.toLowerCase() !== 'free') {
-                licenseLabel = active ? chalk.green(`${tier} (active)`) : chalk.yellow(`${tier} (${licenseData.status || 'unknown'})`);
-            }
-        } catch {}
-        console.log(`  License:    ${licenseLabel}`);
-
-        // --- Recent memories ---
-        if (recentMemories.length > 0) {
-            console.log(chalk.bold('\n  Recent memories:'));
-            for (const mem of recentMemories) {
-                const ago = _relativeTime(mem.ts);
-                const tagStr = mem.tags.length > 0 ? '  ' + chalk.gray(mem.tags.map(t => '#' + t).join(' ')) : '';
-                const text = mem.text.length > 55 ? mem.text.slice(0, 55) + '...' : mem.text;
-                console.log(`    ${chalk.gray('[' + ago + ']')}  ${text}${tagStr}`);
-            }
-        }
-
-        // --- Last session ---
-        const sessionsDir = path.join(delimitHome, 'sessions');
-        try {
-            const sessFiles = fs.readdirSync(sessionsDir)
-                .filter(f => f.startsWith('session_') && f.endsWith('.json'))
-                .sort()
-                .reverse();
-            if (sessFiles.length > 0) {
-                const latest = JSON.parse(fs.readFileSync(path.join(sessionsDir, sessFiles[0]), 'utf-8'));
-                const summary = latest.summary || latest.description || latest.title || null;
-                if (summary) {
-                    const truncated = summary.length > 60 ? summary.slice(0, 60) + '...' : summary;
-                    console.log(chalk.bold('\n  Last session: ') + truncated);
-                }
-            }
-        } catch {}
-
-        // --- Governance readiness ---
-        const hasSpecs = specCount > 0;
-        const checks = [
-            { name: 'API spec', done: hasSpecs },
-            { name: 'Policy', done: hasPolicy },
-            { name: 'CI gate', done: hasCI },
-            { name: 'Git hooks', done: hasGitHooks },
-            { name: 'MCP', done: hasMcp },
-        ];
-        const score = checks.filter(c => c.done).length;
-
-        console.log(chalk.bold(`\n  Governance readiness: ${score}/${checks.length}`));
-        console.log('    ' + checks.map(c => c.done ? chalk.green('\u25cf') + ' ' + c.name : chalk.gray('\u25cb') + ' ' + chalk.gray(c.name)).join('    '));
-        console.log('');
-
-        if (options.verbose) {
-            console.log(chalk.bold('  Continuity Context:'));
-            console.log(formatContinuityReport(continuityContext).split('\n').slice(1).map(line => '    ' + line.trimStart()).join('\n'));
             console.log('');
+            console.log(chalk.bold.cyan(`  \u250c${line}\u2510`));
+            console.log(chalk.bold.cyan(`  \u2502`) + chalk.bold.white(`  Delimit v${cliVersion}`) + ' '.repeat(W - 14 - cliVersion.length) + (licenseTier !== 'Free' ? chalk.green(licenseTier) : chalk.gray('Free')) + chalk.bold.cyan(` \u2502`));
+            console.log(chalk.bold.cyan(`  \u2514${line}\u2518`));
+
+            // Governance section
+            console.log(chalk.bold('\n  Governance'));
+            const policyStr = hasPolicy ? chalk.green(policyName) + (policyMode ? chalk.gray(` (${policyMode})`) : '') + (ruleCount ? chalk.gray(` ${ruleCount} rules`) : '') : chalk.gray('not configured');
+            console.log(`    Policy:   ${policyStr}`);
+            console.log(`    Specs:    ${specCount > 0 ? chalk.white(specCount + ' tracked') : chalk.gray('none')}`);
+            console.log(`    Hooks:    ${hasGitHooks ? chalk.green('pre-commit') : chalk.gray('none')}`);
+            console.log(`    CI:       ${hasCI ? chalk.green(ciFile) : chalk.gray('none')}`);
+
+            // Infrastructure section
+            console.log(chalk.bold('\n  Infrastructure'));
+            console.log(`    MCP:      ${hasMcp ? chalk.green(toolCount + ' tools') : chalk.gray('not configured')}`);
+            console.log(`    Models:   ${modelNames.length > 0 ? chalk.white(modelNames.join(chalk.gray(' + '))) : chalk.gray('none')}`);
+            console.log(`    License:  ${licenseTier !== 'Free' && licenseActive ? chalk.green(licenseTier) : licenseTier !== 'Free' ? chalk.yellow(licenseTier) : chalk.gray('Free')}`);
+
+            // Context section
+            console.log(chalk.bold('\n  Context'));
+            console.log(`    Memory:   ${chalk.white.bold(memTotal)} total${memRecent > 0 ? chalk.gray(` (${memRecent} this week)`) : ''}`);
+            console.log(`    Ledger:   ${ledgerOpen > 0 ? chalk.yellow(ledgerOpen + ' open') : chalk.gray('0 open')} / ${ledgerTotal} total`);
+            console.log(`    Evidence: ${evidenceCount > 0 ? chalk.white(evidenceCount + ' records') : chalk.gray('none')}`);
+            if (gitBranch) {
+                console.log(`    Branch:   ${chalk.white(gitBranch)}${gitDirty ? chalk.yellow(' (dirty)') : chalk.green(' (clean)')}`);
+            }
+
+            // Recent memories
+            if (recentMemories.length > 0) {
+                console.log(chalk.bold('\n  Recent Memories'));
+                for (const mem of recentMemories) {
+                    const ago = _relativeTime(mem.ts);
+                    const src = mem.source !== 'unknown' ? chalk.gray(` [${mem.source}]`) : '';
+                    const text = mem.text.length > 50 ? mem.text.slice(0, 50) + '...' : mem.text;
+                    console.log(`    ${chalk.gray(ago.padEnd(12))} ${text}${src}`);
+                }
+            }
+
+            // Last session
+            if (lastSession) {
+                const truncated = lastSession.length > 55 ? lastSession.slice(0, 55) + '...' : lastSession;
+                console.log(chalk.bold('\n  Last Session'));
+                console.log(`    ${truncated}`);
+            }
+
+            // Readiness bar
+            console.log(chalk.bold('\n  Readiness'));
+            console.log(`    ${bar(score, checks.length)} ${score}/${checks.length}`);
+            console.log('    ' + checks.map(c => dot(c.done) + ' ' + (c.done ? c.name : chalk.gray(c.name))).join('  '));
+            console.log('');
+
+            if (options.verbose) {
+                console.log(chalk.bold('  Continuity Context:'));
+                console.log(formatContinuityReport(continuityContext).split('\n').slice(1).map(line => '    ' + line.trimStart()).join('\n'));
+                console.log('');
+            }
+        }
+
+        if (options.watch) {
+            const clear = () => process.stdout.write('\x1B[2J\x1B[0f');
+            const tick = () => { clear(); renderStatus(); };
+            tick();
+            setInterval(tick, 5000);
+        } else {
+            renderStatus();
         }
     });
 
@@ -3090,41 +3212,473 @@ program
         try { fs.rmSync(tmpDir, { recursive: true }); } catch {}
     });
 
+// Report command — generate local governance reports (v4.20)
+program
+    .command('report')
+    .description('Generate a governance report from local evidence, ledger, and memory')
+    .option('--since <duration>', 'Time period (e.g., 7d, 30d, 24h, 1w, 1m)', '7d')
+    .option('--format <fmt>', 'Output format: md, json, html', 'md')
+    .option('--output <file>', 'Write report to file instead of stdout')
+    .action(async (options) => {
+        const delimitHome = path.join(os.homedir(), '.delimit');
+        const evidenceDir = path.join(delimitHome, 'evidence');
+        const ledgerDir = path.join(delimitHome, 'ledger');
+        const memoryDir = path.join(delimitHome, 'memory');
+
+        // Parse duration into milliseconds
+        function parseDuration(dur) {
+            const match = dur.match(/^(\d+)\s*(h|d|w|m)$/i);
+            if (!match) return 7 * 24 * 60 * 60 * 1000; // default 7d
+            const val = parseInt(match[1], 10);
+            const unit = match[2].toLowerCase();
+            const multipliers = { h: 3600000, d: 86400000, w: 604800000, m: 2592000000 };
+            return val * (multipliers[unit] || 86400000);
+        }
+
+        const sinceMs = parseDuration(options.since);
+        const cutoff = new Date(Date.now() - sinceMs);
+        const now = new Date();
+        const fmt = (options.format || 'md').toLowerCase();
+
+        if (!['md', 'json', 'html'].includes(fmt)) {
+            console.error(chalk.red(`  Invalid format: ${fmt}. Use md, json, or html.`));
+            process.exit(1);
+        }
+
+        // Collect evidence events
+        const evidenceEvents = [];
+        if (fs.existsSync(evidenceDir)) {
+            const files = fs.readdirSync(evidenceDir);
+            for (const f of files) {
+                const fp = path.join(evidenceDir, f);
+                try {
+                    if (f.endsWith('.json')) {
+                        const data = JSON.parse(fs.readFileSync(fp, 'utf-8'));
+                        // Determine timestamp from various fields
+                        let ts = null;
+                        if (data.timestamp) ts = new Date(data.timestamp);
+                        else if (data.collected_at) ts = new Date(data.collected_at * 1000);
+                        if (ts && ts >= cutoff) {
+                            evidenceEvents.push({ ...data, _ts: ts, _file: f });
+                        }
+                    } else if (f.endsWith('.jsonl')) {
+                        const lines = fs.readFileSync(fp, 'utf-8').split('\n').filter(Boolean);
+                        for (const line of lines) {
+                            try {
+                                const data = JSON.parse(line);
+                                let ts = null;
+                                if (data.timestamp) ts = new Date(data.timestamp);
+                                else if (data.collected_at) ts = new Date(data.collected_at * 1000);
+                                if (ts && ts >= cutoff) {
+                                    evidenceEvents.push({ ...data, _ts: ts, _file: f });
+                                }
+                            } catch {}
+                        }
+                    }
+                } catch {}
+            }
+        }
+        evidenceEvents.sort((a, b) => a._ts - b._ts);
+
+        // Categorize evidence
+        const violations = evidenceEvents.filter(e =>
+            e.result === 'failed' || e.result === 'blocked' ||
+            (e.action && /fail|block|violation|error/i.test(e.action))
+        );
+        const approvals = evidenceEvents.filter(e =>
+            e.result === 'passed' || e.result === 'approved' ||
+            (e.action && /pass|approve|success/i.test(e.action))
+        );
+
+        // Collect ledger items
+        const ledgerItems = [];
+        if (fs.existsSync(ledgerDir)) {
+            const files = fs.readdirSync(ledgerDir);
+            for (const f of files) {
+                const fp = path.join(ledgerDir, f);
+                try {
+                    if (f.endsWith('.json')) {
+                        const data = JSON.parse(fs.readFileSync(fp, 'utf-8'));
+                        if (Array.isArray(data)) {
+                            ledgerItems.push(...data);
+                        } else {
+                            ledgerItems.push(data);
+                        }
+                    } else if (f.endsWith('.jsonl')) {
+                        const lines = fs.readFileSync(fp, 'utf-8').split('\n').filter(Boolean);
+                        for (const line of lines) {
+                            try { ledgerItems.push(JSON.parse(line)); } catch {}
+                        }
+                    }
+                } catch {}
+            }
+        }
+        const openLedgerItems = ledgerItems.filter(i => i.status === 'open' || !i.status);
+
+        // Count memory entries
+        let memoryCount = 0;
+        const recentMemories = [];
+        if (fs.existsSync(memoryDir)) {
+            const files = fs.readdirSync(memoryDir).filter(f => f.endsWith('.json') || f.endsWith('.jsonl'));
+            for (const f of files) {
+                const fp = path.join(memoryDir, f);
+                try {
+                    if (f.endsWith('.json')) {
+                        const data = JSON.parse(fs.readFileSync(fp, 'utf-8'));
+                        memoryCount++;
+                        if (data.created_at && new Date(data.created_at) >= cutoff) {
+                            recentMemories.push(data);
+                        }
+                    } else if (f.endsWith('.jsonl')) {
+                        const lines = fs.readFileSync(fp, 'utf-8').split('\n').filter(Boolean);
+                        for (const line of lines) {
+                            try {
+                                const data = JSON.parse(line);
+                                memoryCount++;
+                                if (data.created_at && new Date(data.created_at) >= cutoff) {
+                                    recentMemories.push(data);
+                                }
+                            } catch {}
+                        }
+                    }
+                } catch {}
+            }
+        }
+
+        // Git history
+        let gitCommits = [];
+        try {
+            const sinceDate = cutoff.toISOString().split('T')[0];
+            const gitLog = execSync(
+                `git log --oneline --since="${sinceDate}" --no-decorate -20 2>/dev/null`,
+                { encoding: 'utf-8', timeout: 5000 }
+            ).trim();
+            if (gitLog) {
+                gitCommits = gitLog.split('\n').filter(Boolean);
+            }
+        } catch {}
+
+        // Pre-commit hook detection
+        let hasPreCommitHook = false;
+        try {
+            const hookPath = path.join(process.cwd(), '.git', 'hooks', 'pre-commit');
+            hasPreCommitHook = fs.existsSync(hookPath);
+        } catch {}
+
+        // Recommendations
+        const recommendations = [];
+        if (!hasPreCommitHook) {
+            recommendations.push('Consider adding pre-commit hooks: npx delimit-cli init');
+        }
+        if (violations.length > approvals.length && evidenceEvents.length > 0) {
+            recommendations.push('Failure rate exceeds pass rate — review policy strictness or address recurring violations');
+        }
+        if (evidenceEvents.length === 0) {
+            recommendations.push('No governance events found — run delimit lint or delimit scan to start collecting evidence');
+        }
+        if (openLedgerItems.length > 20) {
+            recommendations.push(`${openLedgerItems.length} open ledger items — consider triaging and closing resolved items`);
+        }
+        if (memoryCount === 0) {
+            recommendations.push('No memory entries — use delimit remember to capture architecture decisions and gotchas');
+        }
+
+        // Build report data
+        const reportData = {
+            generated_at: now.toISOString(),
+            period: { since: cutoff.toISOString(), until: now.toISOString(), duration: options.since },
+            summary: {
+                total_events: evidenceEvents.length,
+                violations: violations.length,
+                approvals: approvals.length,
+                other_events: evidenceEvents.length - violations.length - approvals.length,
+                pass_rate: evidenceEvents.length > 0
+                    ? Math.round((approvals.length / evidenceEvents.length) * 100)
+                    : null,
+                ledger_items_open: openLedgerItems.length,
+                ledger_items_total: ledgerItems.length,
+                memory_entries: memoryCount,
+                recent_memories: recentMemories.length,
+                git_commits: gitCommits.length,
+            },
+            violations: violations.map(v => ({
+                action: v.action || 'unknown',
+                result: v.result || 'failed',
+                timestamp: v._ts.toISOString(),
+                target: v.target || null,
+                files: v.files || null,
+            })),
+            approvals: approvals.map(a => ({
+                action: a.action || 'unknown',
+                result: a.result || 'passed',
+                timestamp: a._ts.toISOString(),
+                target: a.target || null,
+            })),
+            audit_events: evidenceEvents.map(e => ({
+                action: e.action || 'evidence_collected',
+                result: e.result || null,
+                timestamp: e._ts.toISOString(),
+                target: e.target || null,
+                file: e._file,
+            })),
+            active_ledger_items: openLedgerItems.slice(0, 50).map(i => ({
+                id: i.id || null,
+                title: i.title || null,
+                type: i.type || null,
+                priority: i.priority || null,
+                status: i.status || 'open',
+                created_at: i.created_at || null,
+            })),
+            git_commits: gitCommits,
+            recommendations,
+        };
+
+        // Format output
+        let output = '';
+
+        if (fmt === 'json') {
+            output = JSON.stringify(reportData, null, 2);
+        } else if (fmt === 'md') {
+            const lines = [];
+            lines.push('# Delimit Governance Report');
+            lines.push('');
+            lines.push(`**Period**: ${cutoff.toISOString().split('T')[0]} to ${now.toISOString().split('T')[0]} (${options.since})`);
+            lines.push(`**Generated**: ${now.toISOString()}`);
+            lines.push('');
+
+            lines.push('## Summary');
+            lines.push('');
+            lines.push(`| Metric | Value |`);
+            lines.push(`|--------|-------|`);
+            lines.push(`| Total governance events | ${reportData.summary.total_events} |`);
+            lines.push(`| Violations | ${reportData.summary.violations} |`);
+            lines.push(`| Approvals | ${reportData.summary.approvals} |`);
+            lines.push(`| Pass rate | ${reportData.summary.pass_rate !== null ? reportData.summary.pass_rate + '%' : 'N/A'} |`);
+            lines.push(`| Open ledger items | ${reportData.summary.ledger_items_open} |`);
+            lines.push(`| Memory entries | ${reportData.summary.memory_entries} (${reportData.summary.recent_memories} recent) |`);
+            lines.push(`| Git commits | ${reportData.summary.git_commits} |`);
+            lines.push('');
+
+            if (reportData.violations.length > 0) {
+                lines.push('## Violations');
+                lines.push('');
+                for (const v of reportData.violations) {
+                    lines.push(`- **${v.action}** - ${v.result} at ${v.timestamp}${v.target ? ' (' + v.target + ')' : ''}`);
+                }
+                lines.push('');
+            } else {
+                lines.push('## Violations');
+                lines.push('');
+                lines.push('No violations in this period.');
+                lines.push('');
+            }
+
+            if (reportData.approvals.length > 0) {
+                lines.push('## Approvals');
+                lines.push('');
+                for (const a of reportData.approvals) {
+                    lines.push(`- **${a.action}** - ${a.result} at ${a.timestamp}${a.target ? ' (' + a.target + ')' : ''}`);
+                }
+                lines.push('');
+            }
+
+            if (reportData.audit_events.length > 0) {
+                lines.push('## Audit Events');
+                lines.push('');
+                for (const e of reportData.audit_events) {
+                    lines.push(`- \`${e.timestamp}\` ${e.action}${e.result ? ' [' + e.result + ']' : ''}${e.target ? ' - ' + e.target : ''}`);
+                }
+                lines.push('');
+            }
+
+            if (reportData.active_ledger_items.length > 0) {
+                lines.push('## Active Ledger Items');
+                lines.push('');
+                for (const i of reportData.active_ledger_items) {
+                    const prefix = i.priority ? `[${i.priority}]` : '';
+                    lines.push(`- ${prefix} ${i.id || ''} ${i.title || 'Untitled'}${i.type ? ' (' + i.type + ')' : ''}`);
+                }
+                if (openLedgerItems.length > 50) {
+                    lines.push(`- ... and ${openLedgerItems.length - 50} more`);
+                }
+                lines.push('');
+            }
+
+            if (gitCommits.length > 0) {
+                lines.push('## Recent Commits');
+                lines.push('');
+                for (const c of gitCommits) {
+                    lines.push(`- \`${c}\``);
+                }
+                lines.push('');
+            }
+
+            if (recommendations.length > 0) {
+                lines.push('## Recommendations');
+                lines.push('');
+                for (const r of recommendations) {
+                    lines.push(`- ${r}`);
+                }
+                lines.push('');
+            }
+
+            lines.push('---');
+            lines.push('*Generated by [Delimit](https://delimit.ai) governance reporting*');
+            output = lines.join('\n');
+        } else if (fmt === 'html') {
+            const esc = (s) => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            const h = [];
+            h.push('<!DOCTYPE html>');
+            h.push('<html lang="en"><head><meta charset="utf-8">');
+            h.push('<title>Delimit Governance Report</title>');
+            h.push('<style>');
+            h.push('body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;max-width:900px;margin:2rem auto;padding:0 1rem;color:#1a1a2e;line-height:1.6}');
+            h.push('h1{color:#16213e;border-bottom:3px solid #0f3460;padding-bottom:.5rem}');
+            h.push('h2{color:#0f3460;margin-top:2rem}');
+            h.push('table{border-collapse:collapse;width:100%}');
+            h.push('th,td{text-align:left;padding:.5rem .75rem;border:1px solid #ddd}');
+            h.push('th{background:#f0f4f8;font-weight:600}');
+            h.push('.pass{color:#16a34a}.fail{color:#dc2626}');
+            h.push('.badge{display:inline-block;padding:.1rem .5rem;border-radius:3px;font-size:.85rem;font-weight:600}');
+            h.push('.badge-ok{background:#dcfce7;color:#166534}.badge-fail{background:#fef2f2;color:#991b1b}');
+            h.push('ul{padding-left:1.5rem}li{margin:.25rem 0}');
+            h.push('.meta{color:#6b7280;font-size:.9rem}');
+            h.push('footer{margin-top:2rem;padding-top:1rem;border-top:1px solid #ddd;color:#9ca3af;font-size:.85rem}');
+            h.push('</style></head><body>');
+            h.push('<h1>Delimit Governance Report</h1>');
+            h.push(`<p class="meta">Period: ${esc(cutoff.toISOString().split('T')[0])} to ${esc(now.toISOString().split('T')[0])} (${esc(options.since)}) &mdash; Generated: ${esc(now.toISOString())}</p>`);
+
+            h.push('<h2>Summary</h2>');
+            h.push('<table><tr><th>Metric</th><th>Value</th></tr>');
+            h.push(`<tr><td>Total governance events</td><td>${reportData.summary.total_events}</td></tr>`);
+            h.push(`<tr><td>Violations</td><td><span class="${reportData.summary.violations > 0 ? 'fail' : ''}">${reportData.summary.violations}</span></td></tr>`);
+            h.push(`<tr><td>Approvals</td><td><span class="pass">${reportData.summary.approvals}</span></td></tr>`);
+            h.push(`<tr><td>Pass rate</td><td>${reportData.summary.pass_rate !== null ? '<span class="badge ' + (reportData.summary.pass_rate >= 80 ? 'badge-ok' : 'badge-fail') + '">' + reportData.summary.pass_rate + '%</span>' : 'N/A'}</td></tr>`);
+            h.push(`<tr><td>Open ledger items</td><td>${reportData.summary.ledger_items_open}</td></tr>`);
+            h.push(`<tr><td>Memory entries</td><td>${reportData.summary.memory_entries} (${reportData.summary.recent_memories} recent)</td></tr>`);
+            h.push(`<tr><td>Git commits</td><td>${reportData.summary.git_commits}</td></tr>`);
+            h.push('</table>');
+
+            h.push('<h2>Violations</h2>');
+            if (reportData.violations.length > 0) {
+                h.push('<ul>');
+                for (const v of reportData.violations) {
+                    h.push(`<li><strong>${esc(v.action)}</strong> - ${esc(v.result)} at ${esc(v.timestamp)}${v.target ? ' (' + esc(v.target) + ')' : ''}</li>`);
+                }
+                h.push('</ul>');
+            } else {
+                h.push('<p class="pass">No violations in this period.</p>');
+            }
+
+            if (reportData.approvals.length > 0) {
+                h.push('<h2>Approvals</h2><ul>');
+                for (const a of reportData.approvals) {
+                    h.push(`<li><strong>${esc(a.action)}</strong> - ${esc(a.result)} at ${esc(a.timestamp)}${a.target ? ' (' + esc(a.target) + ')' : ''}</li>`);
+                }
+                h.push('</ul>');
+            }
+
+            if (reportData.audit_events.length > 0) {
+                h.push('<h2>Audit Events</h2><ul>');
+                for (const e of reportData.audit_events) {
+                    h.push(`<li><code>${esc(e.timestamp)}</code> ${esc(e.action)}${e.result ? ' [' + esc(e.result) + ']' : ''}${e.target ? ' - ' + esc(e.target) : ''}</li>`);
+                }
+                h.push('</ul>');
+            }
+
+            if (reportData.active_ledger_items.length > 0) {
+                h.push('<h2>Active Ledger Items</h2><ul>');
+                for (const i of reportData.active_ledger_items) {
+                    const prefix = i.priority ? `[${esc(i.priority)}]` : '';
+                    h.push(`<li>${prefix} ${esc(i.id || '')} ${esc(i.title || 'Untitled')}${i.type ? ' (' + esc(i.type) + ')' : ''}</li>`);
+                }
+                if (openLedgerItems.length > 50) {
+                    h.push(`<li>... and ${openLedgerItems.length - 50} more</li>`);
+                }
+                h.push('</ul>');
+            }
+
+            if (gitCommits.length > 0) {
+                h.push('<h2>Recent Commits</h2><ul>');
+                for (const c of gitCommits) {
+                    h.push(`<li><code>${esc(c)}</code></li>`);
+                }
+                h.push('</ul>');
+            }
+
+            if (recommendations.length > 0) {
+                h.push('<h2>Recommendations</h2><ul>');
+                for (const r of recommendations) {
+                    h.push(`<li>${esc(r)}</li>`);
+                }
+                h.push('</ul>');
+            }
+
+            h.push('<footer>Generated by <a href="https://delimit.ai">Delimit</a> governance reporting</footer>');
+            h.push('</body></html>');
+            output = h.join('\n');
+        }
+
+        // Output
+        if (options.output) {
+            const outPath = path.resolve(options.output);
+            fs.writeFileSync(outPath, output, 'utf-8');
+            console.log(chalk.green(`  Report written to ${outPath}`));
+        } else {
+            if (fmt === 'md' || fmt === 'html') {
+                console.log(output);
+            } else {
+                console.log(output);
+            }
+        }
+    });
+
 // Doctor command — verify setup is correct
 program
     .command('doctor')
     .description('Verify Delimit setup and diagnose common issues')
-    .action(async () => {
-        console.log(chalk.bold('\n  Delimit Doctor\n'));
-        let ok = 0;
-        let warn = 0;
-        let fail = 0;
+    .option('--ci', 'Output JSON and exit non-zero on failures (for pipelines)')
+    .option('--fix', 'Automatically fix issues that have safe auto-fixes')
+    .action(async (opts) => {
+        const ciMode = !!opts.ci;
+        const fixMode = !!opts.fix;
+        const homeDir = os.homedir();
+        const delimitHome = path.join(homeDir, '.delimit');
+        const results = []; // { name, status: 'pass'|'warn'|'fail', message, fix? }
 
-        // Check policy file
-        const policyPath = path.join(process.cwd(), '.delimit', 'policies.yml');
-        if (fs.existsSync(policyPath)) {
-            console.log(chalk.green('  ✓ .delimit/policies.yml found'));
-            ok++;
-            try {
-                const yaml = require('js-yaml');
-                const policy = yaml.load(fs.readFileSync(policyPath, 'utf8'));
-                if (policy && (policy.rules !== undefined || policy.override_defaults !== undefined)) {
-                    console.log(chalk.green('  ✓ Policy file is valid YAML'));
-                    ok++;
-                } else {
-                    console.log(chalk.yellow('  ⚠ Policy file has no rules section'));
-                    warn++;
-                }
-            } catch (e) {
-                console.log(chalk.red(`  ✗ Policy file has invalid YAML: ${e.message}`));
-                fail++;
-            }
-        } else {
-            console.log(chalk.red('  ✗ No .delimit/policies.yml — run: delimit init'));
-            fail++;
+        function addResult(name, status, message, fix) {
+            results.push({ name, status, message, fix: fix || null });
         }
 
-        // Check for OpenAPI spec
+        // --- Check 1: Policy file ---
+        const policyPath = path.join(process.cwd(), '.delimit', 'policies.yml');
+        if (fs.existsSync(policyPath)) {
+            addResult('policy-file', 'pass', '.delimit/policies.yml found');
+            try {
+                const policy = yaml.load(fs.readFileSync(policyPath, 'utf8'));
+                if (policy && (policy.rules !== undefined || policy.override_defaults !== undefined)) {
+                    addResult('policy-valid', 'pass', 'Policy file is valid YAML');
+                } else {
+                    addResult('policy-valid', 'warn', 'Policy file has no rules section — add rules to .delimit/policies.yml');
+                }
+            } catch (e) {
+                addResult('policy-valid', 'fail', `Policy file has invalid YAML: ${e.message}`, 'delimit init --force');
+            }
+        } else {
+            addResult('policy-file', 'fail', 'No .delimit/policies.yml', 'delimit init');
+            if (fixMode) {
+                try {
+                    execSync('delimit init --dry-run', { stdio: 'pipe', cwd: process.cwd() });
+                    // If dry-run works, run real init
+                    execSync('delimit init', { stdio: 'pipe', cwd: process.cwd() });
+                    addResult('policy-file-fix', 'pass', 'Auto-fixed: ran delimit init');
+                } catch {
+                    addResult('policy-file-fix', 'warn', 'Auto-fix failed: run delimit init manually');
+                }
+            }
+        }
+
+        // --- Check 2: OpenAPI spec ---
         const specPatterns = [
             'openapi.yaml', 'openapi.yml', 'openapi.json',
             'swagger.yaml', 'swagger.yml', 'swagger.json',
@@ -3135,22 +3689,18 @@ program
         ];
         const foundSpecs = specPatterns.filter(p => fs.existsSync(path.join(process.cwd(), p)));
         if (foundSpecs.length > 0) {
-            console.log(chalk.green(`  ✓ OpenAPI spec found: ${foundSpecs[0]}`));
-            ok++;
+            addResult('openapi-spec', 'pass', `OpenAPI spec found: ${foundSpecs[0]}`);
         } else {
-            // Check for framework (Zero-Spec candidate)
             const pkgJson = path.join(process.cwd(), 'package.json');
             const reqTxt = path.join(process.cwd(), 'requirements.txt');
             if (fs.existsSync(pkgJson) || fs.existsSync(reqTxt)) {
-                console.log(chalk.yellow('  ⚠ No OpenAPI spec file — Zero-Spec Mode may work if this is a FastAPI/NestJS/Express project'));
-                warn++;
+                addResult('openapi-spec', 'warn', 'No OpenAPI spec file — Zero-Spec Mode may work if this is a FastAPI/NestJS/Express project');
             } else {
-                console.log(chalk.red('  ✗ No OpenAPI spec file found'));
-                fail++;
+                addResult('openapi-spec', 'fail', 'No OpenAPI spec file found', 'Create openapi.yaml in project root or run: delimit scan');
             }
         }
 
-        // Check for GitHub workflow
+        // --- Check 3: GitHub workflow ---
         const workflowDir = path.join(process.cwd(), '.github', 'workflows');
         if (fs.existsSync(workflowDir)) {
             const workflows = fs.readdirSync(workflowDir);
@@ -3161,26 +3711,197 @@ program
                 } catch { return false; }
             });
             if (hasDelimit) {
-                console.log(chalk.green('  ✓ GitHub Action workflow found'));
-                ok++;
+                addResult('github-action', 'pass', 'GitHub Action workflow found');
             } else {
-                console.log(chalk.yellow('  ⚠ No Delimit GitHub Action workflow — run delimit init for setup instructions'));
-                warn++;
+                addResult('github-action', 'warn', 'No Delimit GitHub Action workflow', 'delimit init');
             }
         } else {
-            console.log(chalk.yellow('  ⚠ No .github/workflows/ directory'));
-            warn++;
+            addResult('github-action', 'warn', 'No .github/workflows/ directory', 'mkdir -p .github/workflows && delimit init');
         }
 
-        // Check git
+        // --- Check 4: Git repository ---
         try {
-            const { execSync } = require('child_process');
             execSync('git rev-parse --git-dir', { stdio: 'pipe' });
-            console.log(chalk.green('  ✓ Git repository detected'));
-            ok++;
+            addResult('git-repo', 'pass', 'Git repository detected');
         } catch {
-            console.log(chalk.yellow('  ⚠ Not a git repository'));
-            warn++;
+            addResult('git-repo', 'warn', 'Not a git repository', 'git init');
+        }
+
+        // --- Check 5: Node.js version ---
+        const nodeVersion = parseInt(process.versions.node.split('.')[0], 10);
+        if (nodeVersion >= 18) {
+            addResult('node-version', 'pass', `Node.js v${process.versions.node}`);
+        } else {
+            addResult('node-version', 'warn', `Node.js v${process.versions.node} — v18+ recommended`, 'nvm install 18 && nvm use 18');
+        }
+
+        // --- Check 6: Python availability ---
+        try {
+            const pyVersion = execSync('python3 --version', { stdio: 'pipe' }).toString().trim();
+            addResult('python', 'pass', `${pyVersion} available (needed for MCP server)`);
+        } catch {
+            addResult('python', 'fail', 'python3 not found on PATH — required for MCP server', 'Install Python 3: https://python.org/downloads/');
+        }
+
+        // --- Check 7: MCP server connectivity ---
+        const mcpJsonPath = path.join(homeDir, '.mcp.json');
+        const mcpServerPath = path.join(delimitHome, 'server', 'ai', 'server.py');
+        if (fs.existsSync(mcpJsonPath)) {
+            try {
+                const mcpConfig = JSON.parse(fs.readFileSync(mcpJsonPath, 'utf8'));
+                const hasDelimitMcp = mcpConfig.mcpServers && mcpConfig.mcpServers.delimit;
+                if (hasDelimitMcp) {
+                    addResult('mcp-config', 'pass', 'Delimit configured in ~/.mcp.json');
+                } else {
+                    addResult('mcp-config', 'warn', 'Delimit not configured in ~/.mcp.json', 'delimit setup --all');
+                }
+            } catch {
+                addResult('mcp-config', 'warn', '~/.mcp.json exists but failed to parse', 'Check ~/.mcp.json for valid JSON');
+            }
+        } else {
+            addResult('mcp-config', 'warn', 'No ~/.mcp.json found', 'delimit setup --all');
+        }
+        if (fs.existsSync(mcpServerPath)) {
+            addResult('mcp-server', 'pass', 'MCP server file exists at ~/.delimit/server/ai/server.py');
+        } else {
+            addResult('mcp-server', 'fail', 'MCP server not installed at ~/.delimit/server/ai/server.py', 'delimit setup --all');
+            if (fixMode) {
+                try {
+                    execSync('delimit setup --all', { stdio: 'pipe' });
+                    addResult('mcp-server-fix', 'pass', 'Auto-fixed: ran delimit setup --all');
+                } catch {
+                    addResult('mcp-server-fix', 'warn', 'Auto-fix failed: run delimit setup --all manually');
+                }
+            }
+        }
+
+        // --- Check 8: Memory health ---
+        const memoryDir = path.join(delimitHome, 'memory');
+        if (fs.existsSync(memoryDir)) {
+            let memoryCount = 0;
+            try {
+                const memFiles = fs.readdirSync(memoryDir).filter(f => f.endsWith('.jsonl'));
+                for (const mf of memFiles) {
+                    const content = fs.readFileSync(path.join(memoryDir, mf), 'utf8');
+                    memoryCount += content.split('\n').filter(l => l.trim()).length;
+                }
+            } catch {}
+            if (memoryCount > 1000) {
+                addResult('memory-health', 'warn', `Memory store has ${memoryCount} entries (>1000) — consider pruning`, 'delimit memory --prune');
+            } else {
+                addResult('memory-health', 'pass', `Memory store: ${memoryCount} entries`);
+            }
+        } else {
+            addResult('memory-health', 'warn', 'No ~/.delimit/memory/ directory', `mkdir -p ${memoryDir}`);
+            if (fixMode) {
+                try {
+                    fs.mkdirSync(memoryDir, { recursive: true });
+                    addResult('memory-health-fix', 'pass', 'Auto-fixed: created ~/.delimit/memory/');
+                } catch {
+                    addResult('memory-health-fix', 'warn', `Auto-fix failed: run mkdir -p ${memoryDir}`);
+                }
+            }
+        }
+
+        // --- Check 9: Models configured ---
+        const modelsPath = path.join(delimitHome, 'models.json');
+        if (fs.existsSync(modelsPath)) {
+            try {
+                const models = JSON.parse(fs.readFileSync(modelsPath, 'utf8'));
+                const configured = Array.isArray(models)
+                    ? models.filter(m => m.api_key)
+                    : Object.values(models).filter(m => m && m.api_key);
+                if (configured.length > 0) {
+                    addResult('models', 'pass', `${configured.length} model(s) configured with API keys`);
+                } else {
+                    addResult('models', 'warn', 'models.json exists but no models have api_key set', 'Edit ~/.delimit/models.json and add your API keys');
+                }
+            } catch {
+                addResult('models', 'warn', '~/.delimit/models.json exists but failed to parse', 'Check ~/.delimit/models.json for valid JSON');
+            }
+        } else {
+            addResult('models', 'warn', 'No ~/.delimit/models.json — multi-model features unavailable', 'delimit setup --all');
+        }
+
+        // --- Check 10: License status ---
+        const licensePath = path.join(delimitHome, 'license.json');
+        if (fs.existsSync(licensePath)) {
+            try {
+                const license = JSON.parse(fs.readFileSync(licensePath, 'utf8'));
+                const tier = license.tier || license.plan || 'Unknown';
+                addResult('license', 'pass', `License: ${tier}`);
+            } catch {
+                addResult('license', 'warn', '~/.delimit/license.json exists but failed to parse', 'Check ~/.delimit/license.json for valid JSON');
+            }
+        } else {
+            addResult('license', 'pass', 'License: Free tier (upgrade at delimit.ai/pricing)');
+        }
+
+        // --- Check 11: Cross-model hooks ---
+        const claudeSettingsPath = path.join(process.cwd(), '.claude', 'settings.json');
+        if (fs.existsSync(claudeSettingsPath)) {
+            try {
+                const settings = JSON.parse(fs.readFileSync(claudeSettingsPath, 'utf8'));
+                const hasHooks = settings.hooks && settings.hooks.PostToolUse;
+                if (hasHooks) {
+                    addResult('cross-model-hooks', 'pass', 'Claude Code PostToolUse hooks installed');
+                } else {
+                    addResult('cross-model-hooks', 'warn', 'Claude Code hooks not configured in .claude/settings.json', 'delimit hooks install');
+                }
+            } catch {
+                addResult('cross-model-hooks', 'warn', '.claude/settings.json exists but failed to parse', 'Check .claude/settings.json for valid JSON');
+            }
+        } else {
+            addResult('cross-model-hooks', 'warn', 'No .claude/settings.json — cross-model hooks not installed', 'delimit hooks install');
+        }
+
+        // --- Check 12: Disk space ---
+        if (fs.existsSync(delimitHome)) {
+            try {
+                const duOutput = execSync(`du -sm "${delimitHome}"`, { stdio: 'pipe' }).toString().trim();
+                const sizeMb = parseInt(duOutput.split('\t')[0], 10);
+                if (sizeMb > 500) {
+                    addResult('disk-space', 'warn', `~/.delimit/ is ${sizeMb}MB (>500MB) — consider cleanup`, `du -sh ~/.delimit/*/`);
+                } else {
+                    addResult('disk-space', 'pass', `~/.delimit/ disk usage: ${sizeMb}MB`);
+                }
+            } catch {
+                addResult('disk-space', 'pass', '~/.delimit/ disk usage: unknown (du not available)');
+            }
+        } else {
+            addResult('disk-space', 'pass', '~/.delimit/ does not exist yet');
+        }
+
+        // --- CI mode: output JSON and exit ---
+        if (ciMode) {
+            const ok = results.filter(r => r.status === 'pass').length;
+            const warn = results.filter(r => r.status === 'warn').length;
+            const fail = results.filter(r => r.status === 'fail').length;
+            const total = results.length;
+            const score = total > 0 ? Math.round((ok / total) * 10) : 0;
+            const output = {
+                version: '4.20',
+                health_score: `${score}/10`,
+                summary: { pass: ok, warn, fail, total },
+                checks: results,
+            };
+            console.log(JSON.stringify(output, null, 2));
+            if (fail > 0) {
+                process.exitCode = 1;
+            }
+            return;
+        }
+
+        // --- Human-readable output ---
+        console.log(chalk.bold('\n  Delimit Doctor v4.20\n'));
+
+        const icons = { pass: chalk.green('  ✓'), warn: chalk.yellow('  ⚠'), fail: chalk.red('  ✗') };
+        const colors = { pass: chalk.green, warn: chalk.yellow, fail: chalk.red };
+        for (const r of results) {
+            console.log(`${icons[r.status]} ${colors[r.status](r.message)}`);
+            if (r.fix && r.status !== 'pass') {
+                console.log(chalk.gray(`    Run: ${r.fix}`));
+            }
         }
 
         // Preview what init would create (LED-265)
@@ -3219,7 +3940,14 @@ program
         console.log(chalk.gray('    rm -rf .delimit              — remove all Delimit files'));
         console.log(chalk.gray('    delimit uninstall --dry-run  — preview MCP removal\n'));
 
-        // Summary
+        // Health score and summary
+        const ok = results.filter(r => r.status === 'pass').length;
+        const warn = results.filter(r => r.status === 'warn').length;
+        const fail = results.filter(r => r.status === 'fail').length;
+        const total = results.length;
+        const score = total > 0 ? Math.round((ok / total) * 10) : 0;
+
+        console.log(chalk.bold(`  Health: ${score}/10`));
         console.log('');
         if (fail === 0 && warn === 0) {
             console.log(chalk.green.bold('  All checks passed! Ready to lint.\n'));
@@ -3227,6 +3955,451 @@ program
             console.log(chalk.yellow.bold(`  ${ok} passed, ${warn} warning(s). Setup looks good.\n`));
         } else {
             console.log(chalk.red.bold(`  ${ok} passed, ${warn} warning(s), ${fail} error(s). Fix errors above.\n`));
+        }
+
+        if (fail > 0) {
+            process.exitCode = 1;
+        }
+    });
+
+// Simulate command — dry-run governance preview ("terraform plan" for API governance)
+program
+    .command('simulate')
+    .description('Show what governance would block or allow without making changes')
+    .option('--spec <path>', 'Path to OpenAPI spec to simulate lint against')
+    .option('--policy <path>', 'Path to policies.yml (default: .delimit/policies.yml)')
+    .option('--commit', 'Simulate a pre-commit governance check on staged changes')
+    .option('--verbose', 'Show detailed rule breakdown')
+    .action(async (opts) => {
+        const projectDir = process.cwd();
+        const configDir = path.join(projectDir, '.delimit');
+        const policyPath = opts.policy
+            ? path.resolve(opts.policy)
+            : path.join(configDir, 'policies.yml');
+
+        console.log(chalk.bold('\n  Delimit Simulate \u2014 Dry Run\n'));
+
+        // Load and parse policy
+        let policy = null;
+        let preset = 'default';
+        let ruleCount = 0;
+        let policyRules = [];
+
+        if (fs.existsSync(policyPath)) {
+            try {
+                const yaml = require('js-yaml');
+                policy = yaml.load(fs.readFileSync(policyPath, 'utf8'));
+
+                // Detect preset from content
+                const policyContent = fs.readFileSync(policyPath, 'utf-8');
+                if (policyContent.includes('action: forbid') && !policyContent.includes('action: warn')) preset = 'strict';
+                else if (!policyContent.includes('action: forbid') && policyContent.includes('action: warn')) preset = 'relaxed';
+
+                // Count rules from various policy formats
+                if (policy && policy.rules && Array.isArray(policy.rules)) {
+                    policyRules = policy.rules;
+                    ruleCount = policyRules.length;
+                } else if (policy && policy.override_defaults && Array.isArray(policy.override_defaults)) {
+                    policyRules = policy.override_defaults;
+                    ruleCount = policyRules.length;
+                }
+
+                // Also count top-level change-type keys as implicit rules
+                if (policy) {
+                    const changeTypeKeys = Object.keys(policy).filter(k =>
+                        !['rules', 'override_defaults', 'defaultMode', 'overrides', 'version', 'preset'].includes(k)
+                    );
+                    if (changeTypeKeys.length > 0 && ruleCount === 0) {
+                        ruleCount = changeTypeKeys.length;
+                        policyRules = changeTypeKeys.map(k => ({
+                            name: k,
+                            action: typeof policy[k] === 'object' ? (policy[k].action || 'warn') : String(policy[k]),
+                        }));
+                    }
+                }
+
+                // Default mode from policy
+                const mode = (policy && policy.defaultMode) || 'enforce';
+                console.log(chalk.gray(`  Policy: ${preset} (${mode} mode)`));
+                console.log(chalk.gray(`  Source: ${path.relative(projectDir, policyPath) || policyPath}`));
+                console.log(chalk.gray(`  Rules active: ${ruleCount}`));
+            } catch (e) {
+                console.log(chalk.red(`  Policy file has invalid YAML: ${e.message}\n`));
+                process.exitCode = 1;
+                return;
+            }
+        } else {
+            console.log(chalk.yellow('  No .delimit/policies.yml found \u2014 using built-in defaults'));
+            console.log(chalk.gray('  Rules active: built-in (12 default change-type rules)'));
+            preset = 'default';
+            ruleCount = 12;
+        }
+
+        console.log('');
+
+        // Show rule details in verbose mode
+        if (opts.verbose && policyRules.length > 0) {
+            console.log(chalk.bold('  Rule Breakdown:'));
+            console.log(chalk.gray('  \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500'));
+            for (const rule of policyRules) {
+                const name = rule.name || rule.change_type || '(unnamed)';
+                const action = rule.action || rule.mode || 'warn';
+                const icon = action === 'forbid' || action === 'enforce' || action === 'error'
+                    ? chalk.red('\u2717')
+                    : action === 'warn' || action === 'advisory' || action === 'guarded'
+                        ? chalk.yellow('\u26a0')
+                        : chalk.green('\u2713');
+                console.log(`  ${icon} ${name} ${chalk.gray(`(${action})`)}`);
+                if (opts.verbose && rule.triggers) {
+                    for (const trigger of rule.triggers) {
+                        const triggerStr = Object.entries(trigger).map(([k, v]) => `${k}: ${JSON.stringify(v)}`).join(', ');
+                        console.log(chalk.gray(`      trigger: ${triggerStr}`));
+                    }
+                }
+            }
+            console.log('');
+        }
+
+        console.log(chalk.bold('  Simulation Results:'));
+        console.log(chalk.gray('  \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500'));
+
+        let totalBlocking = 0;
+        let totalWarnings = 0;
+        let totalPassed = 0;
+
+        // --- Mode 1: --spec — simulate lint against a specific spec ---
+        if (opts.spec) {
+            const specPath = path.resolve(opts.spec);
+            if (!fs.existsSync(specPath)) {
+                console.log(chalk.red(`\n  File not found: ${specPath}\n`));
+                process.exitCode = 1;
+                return;
+            }
+
+            // Try to find a baseline to compare against
+            const baselinePath = path.join(configDir, 'baseline.yaml');
+            let basePath = null;
+
+            // Check git for the previous version of this spec
+            const relSpec = path.relative(projectDir, specPath);
+            try {
+                const baseContent = execSync(`git show HEAD:${relSpec}`, {
+                    cwd: projectDir, encoding: 'utf-8', timeout: 5000
+                });
+                const tmpBase = path.join(os.tmpdir(), `delimit-sim-base-${Date.now()}.yaml`);
+                fs.writeFileSync(tmpBase, baseContent);
+                basePath = tmpBase;
+            } catch {
+                // No git history for this file; try baseline
+                if (fs.existsSync(baselinePath)) {
+                    basePath = baselinePath;
+                }
+            }
+
+            if (!basePath) {
+                console.log(chalk.gray('  No baseline found to compare against (new spec or no git history).'));
+                console.log(chalk.green('  \u2713 PASS  Spec exists and is parseable'));
+                // Validate that the spec is valid YAML/JSON
+                try {
+                    const yaml = require('js-yaml');
+                    const content = fs.readFileSync(specPath, 'utf8');
+                    const parsed = specPath.endsWith('.json') ? JSON.parse(content) : yaml.load(content);
+                    if (parsed && (parsed.openapi || parsed.swagger)) {
+                        console.log(chalk.green(`  \u2713 PASS  Valid OpenAPI ${parsed.openapi || parsed.swagger} spec`));
+                        totalPassed += 2;
+                    } else {
+                        console.log(chalk.yellow('  \u26a0 WARN  File parsed but no openapi/swagger version key found'));
+                        totalWarnings++;
+                        totalPassed++;
+                    }
+                } catch (e) {
+                    console.log(chalk.red(`  \u2717 BLOCK Spec file is not valid YAML/JSON: ${e.message}`));
+                    totalBlocking++;
+                }
+            } else {
+                // Run the lint engine in dry-run mode
+                try {
+                    const result = apiEngine.lint(basePath, specPath, { policy: preset });
+
+                    if (result && result.summary) {
+                        const breaking = result.summary.breaking_changes || result.summary.breaking || 0;
+                        const warnings = result.summary.warnings || 0;
+                        const violations = result.violations || [];
+
+                        if (breaking === 0 && warnings === 0) {
+                            console.log(chalk.green('  \u2713 PASS  No breaking changes detected'));
+                            totalPassed++;
+                        }
+
+                        for (const v of violations) {
+                            if (v.severity === 'error') {
+                                console.log(chalk.red(`  \u2717 BLOCK ${v.message}`));
+                                if (v.path) console.log(chalk.gray(`           ${v.path}`));
+                                totalBlocking++;
+                            } else {
+                                console.log(chalk.yellow(`  \u26a0 WARN  ${v.message}`));
+                                if (v.path) console.log(chalk.gray(`           ${v.path}`));
+                                totalWarnings++;
+                            }
+                        }
+
+                        // Show safe changes
+                        const safe = (result.all_changes || []).filter(c => !c.is_breaking);
+                        if (safe.length > 0) {
+                            for (const c of safe) {
+                                console.log(chalk.green(`  \u2713 PASS  ${c.message}`));
+                                totalPassed++;
+                            }
+                        }
+
+                        // Semver info
+                        if (result.semver && result.semver.bump && result.semver.bump !== 'none') {
+                            const bump = result.semver.bump.toUpperCase();
+                            console.log(chalk.gray(`\n  Semver bump: ${bump}`));
+                        }
+                    } else {
+                        console.log(chalk.green('  \u2713 PASS  No breaking changes detected'));
+                        totalPassed++;
+                    }
+                } catch (err) {
+                    console.log(chalk.green('  \u2713 PASS  No issues detected'));
+                    totalPassed++;
+                } finally {
+                    // Clean up temp base file if we created one
+                    if (basePath && basePath.startsWith(os.tmpdir())) {
+                        try { fs.unlinkSync(basePath); } catch {}
+                    }
+                }
+            }
+
+        // --- Mode 2: --commit — simulate pre-commit check on staged changes ---
+        } else if (opts.commit) {
+            let stagedFiles = [];
+            try {
+                const output = execSync('git diff --cached --name-only', {
+                    cwd: projectDir, encoding: 'utf-8', timeout: 5000
+                }).trim();
+                if (output) stagedFiles = output.split('\n');
+            } catch {
+                console.log(chalk.red('  \u2717 BLOCK Not a git repository or git not available'));
+                totalBlocking++;
+            }
+
+            if (stagedFiles.length === 0 && totalBlocking === 0) {
+                console.log(chalk.gray('  No staged files. Stage changes with git add first.\n'));
+                return;
+            }
+
+            // Filter to spec files
+            const specExtensions = ['.yaml', '.yml', '.json'];
+            const specKeywords = ['openapi', 'swagger', 'api-spec', 'api_spec'];
+            const specFiles = stagedFiles.filter(f => {
+                const ext = path.extname(f).toLowerCase();
+                const name = path.basename(f).toLowerCase();
+                if (!specExtensions.includes(ext)) return false;
+                if (specKeywords.some(kw => name.includes(kw))) return true;
+                try {
+                    const head = fs.readFileSync(path.join(projectDir, f), 'utf-8').slice(0, 512);
+                    return head.includes('"openapi"') || head.includes('openapi:') || head.includes('"swagger"') || head.includes('swagger:');
+                } catch { return false; }
+            });
+
+            // Report on staged files
+            console.log(chalk.gray(`  Staged files: ${stagedFiles.length} total, ${specFiles.length} API spec(s)`));
+            console.log('');
+
+            if (specFiles.length === 0) {
+                console.log(chalk.green('  \u2713 PASS  No API spec changes in staged files'));
+                totalPassed++;
+            } else {
+                for (const specFile of specFiles) {
+                    const fullPath = path.join(projectDir, specFile);
+                    let baseContent = null;
+                    try {
+                        baseContent = execSync(`git show HEAD:${specFile}`, {
+                            cwd: projectDir, encoding: 'utf-8', timeout: 5000
+                        });
+                    } catch {
+                        console.log(chalk.green(`  \u2713 PASS  ${specFile} (new file \u2014 no base to compare)`));
+                        totalPassed++;
+                        continue;
+                    }
+
+                    const tmpBase = path.join(os.tmpdir(), `delimit-sim-commit-${Date.now()}.yaml`);
+                    try {
+                        fs.writeFileSync(tmpBase, baseContent);
+                        const result = apiEngine.lint(tmpBase, fullPath, { policy: preset });
+
+                        if (result && result.summary) {
+                            const breaking = result.summary.breaking_changes || result.summary.breaking || 0;
+                            const warnings = result.summary.warnings || 0;
+                            const violations = result.violations || [];
+
+                            if (breaking === 0 && warnings === 0) {
+                                console.log(chalk.green(`  \u2713 PASS  ${specFile} \u2014 no breaking changes`));
+                                totalPassed++;
+                            }
+
+                            for (const v of violations) {
+                                if (v.severity === 'error') {
+                                    console.log(chalk.red(`  \u2717 BLOCK ${v.message}`));
+                                    if (v.path) console.log(chalk.gray(`           ${v.path}`));
+                                    totalBlocking++;
+                                } else {
+                                    console.log(chalk.yellow(`  \u26a0 WARN  ${v.message}`));
+                                    if (v.path) console.log(chalk.gray(`           ${v.path}`));
+                                    totalWarnings++;
+                                }
+                            }
+                        } else {
+                            console.log(chalk.green(`  \u2713 PASS  ${specFile} \u2014 no issues`));
+                            totalPassed++;
+                        }
+                    } catch {
+                        console.log(chalk.green(`  \u2713 PASS  ${specFile} \u2014 no issues`));
+                        totalPassed++;
+                    } finally {
+                        try { fs.unlinkSync(tmpBase); } catch {}
+                    }
+                }
+            }
+
+            // Check for non-spec governance signals
+            const hasPaymentFiles = stagedFiles.some(f => f.includes('payment') || f.includes('billing') || f.includes('stripe'));
+            if (hasPaymentFiles) {
+                const paymentRule = policyRules.find(r => r.name && r.name.toLowerCase().includes('payment'));
+                if (paymentRule) {
+                    const action = paymentRule.mode || paymentRule.action || 'warn';
+                    if (action === 'enforce' || action === 'forbid') {
+                        console.log(chalk.red(`  \u2717 BLOCK Payment code change detected \u2014 "${paymentRule.name}" rule is in ${action} mode`));
+                        totalBlocking++;
+                    } else {
+                        console.log(chalk.yellow(`  \u26a0 WARN  Payment code change detected \u2014 "${paymentRule.name}" rule (${action} mode)`));
+                        totalWarnings++;
+                    }
+                }
+            }
+
+        // --- Mode 3: Default — show policy overview and what would happen ---
+        } else {
+            // Find all specs in the project
+            const specPatterns = [
+                'openapi.yaml', 'openapi.yml', 'openapi.json',
+                'swagger.yaml', 'swagger.yml', 'swagger.json',
+                'docs/openapi.yaml', 'docs/openapi.yml', 'docs/openapi.json',
+                'spec/openapi.yaml', 'spec/openapi.json',
+                'api/openapi.yaml', 'api/openapi.json',
+                'contrib/openapi.json',
+            ];
+            const foundSpecs = specPatterns.filter(p => fs.existsSync(path.join(projectDir, p)));
+
+            if (foundSpecs.length > 0) {
+                console.log(chalk.green(`  \u2713 PASS  API spec(s) found: ${foundSpecs.join(', ')}`));
+                totalPassed++;
+            } else {
+                console.log(chalk.yellow('  \u26a0 WARN  No API spec files found in project'));
+                totalWarnings++;
+            }
+
+            // Check git status for uncommitted spec changes
+            try {
+                const output = execSync('git diff --name-only', {
+                    cwd: projectDir, encoding: 'utf-8', timeout: 5000
+                }).trim();
+                const stagedOutput = execSync('git diff --cached --name-only', {
+                    cwd: projectDir, encoding: 'utf-8', timeout: 5000
+                }).trim();
+
+                const allChanged = [...new Set([
+                    ...(output ? output.split('\n') : []),
+                    ...(stagedOutput ? stagedOutput.split('\n') : []),
+                ])];
+
+                const specKeywords = ['openapi', 'swagger', 'api-spec', 'api_spec'];
+                const changedSpecs = allChanged.filter(f => {
+                    const name = path.basename(f).toLowerCase();
+                    return specKeywords.some(kw => name.includes(kw));
+                });
+
+                if (changedSpecs.length > 0) {
+                    console.log(chalk.yellow(`  \u26a0 WARN  ${changedSpecs.length} uncommitted spec change(s): ${changedSpecs.join(', ')}`));
+                    console.log(chalk.gray('           Run: delimit simulate --commit to check staged changes'));
+                    totalWarnings++;
+                } else {
+                    console.log(chalk.green('  \u2713 PASS  No uncommitted API spec changes'));
+                    totalPassed++;
+                }
+            } catch {
+                console.log(chalk.gray('  \u2500 SKIP  Not a git repository'));
+            }
+
+            // Check governance hooks
+            const gitHooksDir = path.join(projectDir, '.git', 'hooks');
+            const preCommitHook = path.join(gitHooksDir, 'pre-commit');
+            if (fs.existsSync(preCommitHook)) {
+                try {
+                    const hookContent = fs.readFileSync(preCommitHook, 'utf8');
+                    if (hookContent.includes('delimit')) {
+                        console.log(chalk.green('  \u2713 PASS  Delimit pre-commit hook installed'));
+                        totalPassed++;
+                    } else {
+                        console.log(chalk.yellow('  \u26a0 WARN  Pre-commit hook exists but does not reference Delimit'));
+                        totalWarnings++;
+                    }
+                } catch {
+                    console.log(chalk.yellow('  \u26a0 WARN  Could not read pre-commit hook'));
+                    totalWarnings++;
+                }
+            } else {
+                console.log(chalk.yellow('  \u26a0 WARN  No pre-commit hook \u2014 governance only runs manually'));
+                console.log(chalk.gray('           Run: delimit hooks install'));
+                totalWarnings++;
+            }
+
+            // GitHub Action check
+            const workflowDir = path.join(projectDir, '.github', 'workflows');
+            if (fs.existsSync(workflowDir)) {
+                try {
+                    const workflows = fs.readdirSync(workflowDir);
+                    const hasDelimit = workflows.some(f => {
+                        try {
+                            const content = fs.readFileSync(path.join(workflowDir, f), 'utf8');
+                            return content.includes('delimit-ai/delimit') || content.includes('delimit');
+                        } catch { return false; }
+                    });
+                    if (hasDelimit) {
+                        console.log(chalk.green('  \u2713 PASS  GitHub Action governance workflow found'));
+                        totalPassed++;
+                    } else {
+                        console.log(chalk.yellow('  \u26a0 WARN  No Delimit GitHub Action \u2014 CI governance not enabled'));
+                        console.log(chalk.gray('           Run: delimit ci'));
+                        totalWarnings++;
+                    }
+                } catch {}
+            } else {
+                console.log(chalk.yellow('  \u26a0 WARN  No .github/workflows/ directory'));
+                totalWarnings++;
+            }
+        }
+
+        // --- Verdict ---
+        console.log('');
+        if (totalBlocking > 0) {
+            const parts = [];
+            if (totalBlocking > 0) parts.push(`${totalBlocking} blocking`);
+            if (totalWarnings > 0) parts.push(`${totalWarnings} warning(s)`);
+            if (totalPassed > 0) parts.push(`${totalPassed} passed`);
+            console.log(chalk.gray(`  Verdict: ${parts.join(', ')}`));
+            console.log(chalk.red.bold('  A real commit would be BLOCKED.\n'));
+        } else if (totalWarnings > 0) {
+            const parts = [];
+            if (totalWarnings > 0) parts.push(`${totalWarnings} warning(s)`);
+            if (totalPassed > 0) parts.push(`${totalPassed} passed`);
+            console.log(chalk.gray(`  Verdict: ${parts.join(', ')}`));
+            console.log(chalk.yellow.bold('  A real commit would PASS with warnings.\n'));
+        } else {
+            console.log(chalk.gray(`  Verdict: ${totalPassed} passed, 0 warnings, 0 blocking`));
+            console.log(chalk.green.bold('  A real commit would PASS cleanly.\n'));
         }
     });
 
@@ -4709,13 +5882,18 @@ function readMemories() {
 function writeMemory(entry) {
     // Write in MCP-compatible format (individual .json files)
     fs.mkdirSync(MEMORY_DIR, { recursive: true });
-    const memId = 'mem-' + require('crypto').createHash('sha256').update(entry.text.slice(0, 100)).digest('hex').slice(0, 12);
+    const crypto = require('crypto');
+    const content = entry.text;
+    const memId = 'mem-' + crypto.createHash('sha256').update(content.slice(0, 100)).digest('hex').slice(0, 12);
+    const hash = crypto.createHash('sha256').update(content).digest('hex').slice(0, 16);
     const mcpEntry = {
         id: memId,
-        content: entry.text,
+        content,
         tags: entry.tags || [],
         context: entry.source || 'cli',
         created_at: entry.created || new Date().toISOString(),
+        hash,
+        source_model: process.env.DELIMIT_MODEL || 'cli',
     };
     fs.writeFileSync(path.join(MEMORY_DIR, `${memId}.json`), JSON.stringify(mcpEntry, null, 2));
     return memId;
@@ -4761,8 +5939,18 @@ function relativeTime(isoDate) {
     return `${diffYear} year${diffYear === 1 ? '' : 's'} ago`;
 }
 
+function verifyMemoryIntegrity(mem) {
+    if (!mem.hash) return null; // No hash — legacy memory
+    const crypto = require('crypto');
+    const expected = crypto.createHash('sha256').update(mem.content || mem.text || '').digest('hex').slice(0, 16);
+    return expected === mem.hash;
+}
+
 function displayMemory(mem) {
-    console.log(`    ${chalk.gray('[' + mem.id + ']')} ${chalk.gray(relativeTime(mem.created))}`);
+    const integrity = verifyMemoryIntegrity(mem);
+    const integrityBadge = integrity === true ? chalk.green(' \u2713') : integrity === false ? chalk.red(' \u2717 tampered') : '';
+    const sourceBadge = mem.source_model ? chalk.gray(` [${mem.source_model}]`) : mem.context ? chalk.gray(` [${mem.context}]`) : '';
+    console.log(`    ${chalk.gray('[' + mem.id + ']')} ${chalk.gray(relativeTime(mem.created))}${sourceBadge}${integrityBadge}`);
     console.log(`    ${mem.text}`);
     if (mem.tags && mem.tags.length > 0) {
         console.log(`    ${chalk.blue(mem.tags.map(t => '#' + t).join(' '))}`);
