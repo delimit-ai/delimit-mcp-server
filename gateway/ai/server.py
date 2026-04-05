@@ -5756,16 +5756,108 @@ def delimit_quickstart(project_path: str = ".") -> Dict[str, Any]:
         "models": enabled_models,
     })
 
+    # Step 6: First Governance Run -- show value with bundled example specs
+    demo_result: Dict[str, Any] = {"skipped": False}
+    examples_dir = Path(__file__).resolve().parent.parent / "examples"
+    petstore_v1 = examples_dir / "petstore-v1.yaml"
+    petstore_v2 = examples_dir / "petstore-v2.yaml"
+    if petstore_v1.is_file() and petstore_v2.is_file():
+        from backends.gateway_core import run_lint as _qs_run_lint, run_spec_health as _qs_run_spec_health
+
+        # 6a: Lint petstore v1 vs v2 to show breaking change detection
+        try:
+            lint_demo = _qs_run_lint(
+                old_spec=str(petstore_v1),
+                new_spec=str(petstore_v2),
+            )
+            breaking_count = len(lint_demo.get("breaking", lint_demo.get("violations", [])))
+            total_changes = lint_demo.get("total_changes", 0)
+            demo_result["lint"] = {
+                "breaking_changes": breaking_count,
+                "total_changes": total_changes,
+                "status": lint_demo.get("status", "unknown"),
+                "sample_violations": [
+                    v.get("message", v.get("type", "unknown"))
+                    for v in lint_demo.get("breaking", lint_demo.get("violations", []))[:3]
+                ],
+            }
+        except Exception as e:
+            demo_result["lint"] = {"error": str(e)}
+
+        # 6b: Spec health score on petstore v1
+        try:
+            health_demo = _qs_run_spec_health(spec_path=str(petstore_v1))
+            demo_result["spec_health"] = {
+                "score": health_demo.get("score", health_demo.get("overall_score")),
+                "grade": health_demo.get("grade", health_demo.get("letter_grade")),
+                "dimensions": {
+                    k: v for k, v in health_demo.get("dimensions", {}).items()
+                } if health_demo.get("dimensions") else {},
+                "recommendations_count": len(health_demo.get("recommendations", [])),
+            }
+        except Exception as e:
+            demo_result["spec_health"] = {"error": str(e)}
+    else:
+        demo_result["skipped"] = True
+        demo_result["reason"] = "Example specs not found"
+
+    steps_completed.append({
+        "step": 6,
+        "name": "First Governance Run (Demo)",
+        "result": demo_result,
+    })
+
+    # Step 7: Project Spec Discovery -- check if this project has OpenAPI specs
+    project_specs: List[str] = []
+    project_lint_result: Optional[Dict[str, Any]] = None
+    spec_patterns = [
+        "**/openapi.yaml", "**/openapi.yml", "**/openapi.json",
+        "**/swagger.yaml", "**/swagger.yml", "**/swagger.json",
+    ]
+    for pattern in spec_patterns:
+        for match in p.glob(pattern):
+            rel = str(match.relative_to(p))
+            if "node_modules" not in rel and ".next" not in rel and "venv" not in rel:
+                project_specs.append(str(match))
+    project_specs = list(set(project_specs))[:5]
+
+    if project_specs:
+        # Run spec_health on the first discovered spec
+        try:
+            from backends.gateway_core import run_spec_health as _qs_health
+            proj_health = _qs_health(spec_path=project_specs[0])
+            project_lint_result = {
+                "spec": project_specs[0],
+                "score": proj_health.get("score", proj_health.get("overall_score")),
+                "grade": proj_health.get("grade", proj_health.get("letter_grade")),
+            }
+        except Exception as e:
+            project_lint_result = {"spec": project_specs[0], "error": str(e)}
+
+    steps_completed.append({
+        "step": 7,
+        "name": "Project Spec Discovery",
+        "specs_found": len(project_specs),
+        "spec_files": project_specs,
+        "health_result": project_lint_result,
+    })
+
     # Build suggested next actions based on findings
     next_actions = []
-    if scan_result.get("findings"):
-        for f in scan_result["findings"]:
-            if f.get("type") == "openapi_specs":
-                next_actions.append("Run `delimit_lint` on your OpenAPI spec to check for breaking changes")
-            if f.get("type") == "security_concerns":
-                next_actions.append("Run `delimit_security_scan` to audit for vulnerabilities")
-            if f.get("type") == "tests_found":
-                next_actions.append("Run `delimit_test_smoke` to verify tests pass")
+    if project_specs:
+        next_actions.append(f"Run `delimit_spec_health` on {project_specs[0]} to see your full quality report")
+        if len(project_specs) > 1:
+            next_actions.append(f"You have {len(project_specs)} OpenAPI specs -- run `delimit_lint` to compare versions")
+        next_actions.append("Add the Delimit GitHub Action to catch breaking changes on every PR")
+    else:
+        if scan_result.get("findings"):
+            for f in scan_result["findings"]:
+                if f.get("type") == "openapi_specs":
+                    next_actions.append("Run `delimit_lint` on your OpenAPI spec to check for breaking changes")
+                if f.get("type") == "security_concerns":
+                    next_actions.append("Run `delimit_security_scan` to audit for vulnerabilities")
+                if f.get("type") == "tests_found":
+                    next_actions.append("Run `delimit_test_smoke` to verify tests pass")
 
     if not deliberation_ready:
         next_actions.append("Add more AI models for multi-model deliberation: say 'configure delimit models'")
@@ -5773,16 +5865,54 @@ def delimit_quickstart(project_path: str = ".") -> Dict[str, Any]:
     next_actions.append("Say 'add to ledger: [task]' to start tracking work across sessions")
     next_actions.append("Say 'deliberate [question]' to get AI consensus on a decision")
 
+    # Build the "wow moment" summary
+    wow_moment: Dict[str, Any] = {}
+    lint_data = demo_result.get("lint", {})
+    health_data = demo_result.get("spec_health", {})
+    if lint_data and not lint_data.get("error"):
+        wow_moment["breaking_changes_caught"] = lint_data.get("breaking_changes", 0)
+        wow_moment["total_api_changes"] = lint_data.get("total_changes", 0)
+        wow_moment["sample_catches"] = lint_data.get("sample_violations", [])
+    if health_data and not health_data.get("error"):
+        wow_moment["spec_health_grade"] = health_data.get("grade")
+        wow_moment["spec_health_score"] = health_data.get("score")
+    wow_moment["governance_gates"] = [
+        "Breaking change detection (CI/CD)",
+        "Spec health scoring (quality)",
+        "Policy enforcement (custom rules)",
+        "Semver classification (automated)",
+        "Contract ledger (audit trail)",
+    ]
+    if project_specs:
+        wow_moment["your_project"] = {
+            "specs_found": len(project_specs),
+            "ready_to_govern": True,
+        }
+        if project_lint_result and not project_lint_result.get("error"):
+            wow_moment["your_project"]["health_grade"] = project_lint_result.get("grade")
+            wow_moment["your_project"]["health_score"] = project_lint_result.get("score")
+
+    bc = wow_moment.get("breaking_changes_caught", 0)
+    grade = wow_moment.get("spec_health_grade", "N/A")
+    msg_parts = [
+        f"Quickstart complete! {len(steps_completed)} steps run.",
+        f"Demo: {bc} breaking changes caught, spec health grade: {grade}.",
+        f"5 governance gates ready.",
+    ]
+    if project_specs:
+        msg_parts.append(f"Found {len(project_specs)} OpenAPI spec(s) in your project -- ready to govern.")
+
     return _with_next_steps("quickstart", {
         "tool": "quickstart",
         "status": "complete",
         "project": str(p),
         "steps": steps_completed,
+        "wow_moment": wow_moment,
         "environment": environment,
         "scan_findings": scan_result.get("findings", []),
         "scan_suggestions": scan_result.get("suggestions", []),
         "next_actions": next_actions,
-        "message": f"Quickstart complete! {len(steps_completed)} steps run. {len(next_actions)} suggested next actions.",
+        "message": " ".join(msg_parts),
     })
 
 
@@ -6817,7 +6947,7 @@ def delimit_build_loop(action: str = "run", session_id: str = "") -> Dict[str, A
     """Execute the governed continuous build loop (LED-239).
 
     Requirements:
-    - root ledger in ~/.delimit is authoritative
+    - root ledger in /root/.delimit is authoritative
     - select only build-safe open items
     - resolve venture + repo before dispatch
     - use Delimit swarm/governance as control plane

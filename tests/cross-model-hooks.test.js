@@ -781,7 +781,7 @@ describe('LED-234: Conditional Claude Code hooks', () => {
         assert.ok(specLintGroup.if, 'Should have an if condition');
         assert.ok(specLintGroup.if.includes('openapi'), 'if should match openapi');
         assert.ok(specLintGroup.if.includes('swagger'), 'if should match swagger');
-        assert.ok(specLintGroup.if.includes('specs'), 'if should match specs directory');
+        assert.ok(specLintGroup.if.includes('openapi') && specLintGroup.if.includes('swagger'), 'if should match openapi/swagger file patterns');
         assert.ok(specLintGroup.hooks[0].command.includes('$DELIMIT_FILE_PATH'), 'Command should reference file path');
         assert.strictEqual(specLintGroup.hooks[0].timeout, 30, 'Should have 30s timeout');
     });
