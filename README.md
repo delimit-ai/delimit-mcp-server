@@ -30,10 +30,11 @@ Works across any configuration — from a single model on a budget to an enterpr
 ## Try it in 2 minutes
 
 ```bash
+npx delimit-cli doctor            # 14 prescriptive checks — tells you exactly what to fix
+npx delimit-cli status            # Visual dashboard of your entire governance setup
+npx delimit-cli simulate          # Dry-run: see what would be blocked before you commit
 npx delimit-cli scan              # Instant health grade for your API spec
 npx delimit-cli try owner/repo    # Try governance on any GitHub repo
-npx delimit-cli pr owner/repo#123 # Review any GitHub PR for breaking changes
-npx delimit-cli setup && source ~/.bashrc  # Configure AI assistants + activate
 ```
 
 No API keys. No account. No config files.
@@ -64,7 +65,18 @@ npx delimit-cli init        # Sets up governance + drift baseline
 
 ---
 
-## What's New in v4.1
+## What's New in v4.20
+
+*The highest state of AI governance.*
+
+- **`delimit doctor`** -- 14 prescriptive diagnostics. Every failure prints the exact command to fix it. `--ci` for pipelines, `--fix` for auto-repair.
+- **`delimit simulate`** -- policy dry-run. See what would be blocked before you commit. The `terraform plan` for API governance.
+- **`delimit status`** -- visual terminal dashboard. Policy, specs, hooks, CI, MCP, models, memory, ledger, evidence, git branch. `--watch` for live refresh.
+- **`delimit report`** -- governance report. `--since 7d --format md|html|json`. Audit-friendly output for PRs and compliance.
+- **Memory hardening** -- SHA-256 integrity hash + source model tag on every `remember`. Cross-model trust, verified on every `recall`.
+- **Tag-based publishing** -- automated gateway sync, no more version drift between source and npm bundle.
+
+### v4.1
 
 - **TUI** -- terminal-native Ventures panel, real `delimit think` and `delimit build` commands
 - **Security hardening** -- notify.py stubbed in npm, axios pinned against supply chain attacks
