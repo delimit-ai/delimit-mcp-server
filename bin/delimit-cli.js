@@ -128,6 +128,20 @@ if (process.env.DELIMIT_DEBUG_CONTINUITY === '1') {
     console.log('');
 }
 
+// Helper to format a timestamp as relative time (e.g. "2h ago", "3d ago")
+function _relativeTime(ts) {
+    const diff = Date.now() - ts;
+    const mins = Math.floor(diff / 60000);
+    if (mins < 1) return 'just now';
+    if (mins < 60) return mins + 'm ago';
+    const hrs = Math.floor(mins / 60);
+    if (hrs < 24) return hrs + 'h ago';
+    const days = Math.floor(hrs / 24);
+    if (days < 30) return days + 'd ago';
+    const months = Math.floor(days / 30);
+    return months + 'mo ago';
+}
+
 // Helper to check if agent is running
 async function checkAgent() {
     try {
@@ -311,99 +325,193 @@ program
 // Status command
 program
     .command('status')
-    .description('Show governance status')
+    .description('Show a compact dashboard of your Delimit setup')
 
     .option('--verbose', 'Show detailed status')
     .action(async (options) => {
-        const agentRunning = await checkAgent();
-        
-        console.log(chalk.blue.bold('\nDelimit Governance Status\n'));
-        console.log('Agent:', agentRunning ? chalk.green('✓ Running') : chalk.red('✗ Not running'));
+        const homedir = os.homedir();
+        const delimitHome = path.join(homedir, '.delimit');
+        const target = process.cwd();
+
+        console.log(chalk.bold('\n  Delimit Status\n'));
+
+        // --- Memory stats ---
+        const memoryDir = path.join(delimitHome, 'memory');
+        let memTotal = 0;
+        let memRecent = 0;
+        let recentMemories = [];
+        const oneWeekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+        try {
+            const memFiles = fs.readdirSync(memoryDir).filter(f => f.startsWith('mem-') && f.endsWith('.json'));
+            memTotal = memFiles.length;
+            for (const f of memFiles) {
+                try {
+                    const data = JSON.parse(fs.readFileSync(path.join(memoryDir, f), 'utf-8'));
+                    const ts = new Date(data.created_at || data.timestamp || data.created || 0).getTime();
+                    if (ts > oneWeekAgo) memRecent++;
+                    recentMemories.push({ text: data.text || data.content || '', tags: data.tags || [], ts });
+                } catch {}
+            }
+            recentMemories.sort((a, b) => b.ts - a.ts);
+            recentMemories = recentMemories.slice(0, 3);
+        } catch {}
+        console.log(`  Memory:     ${chalk.white.bold(memTotal)} memories${memRecent > 0 ? ` (${memRecent} this week)` : ''}`);
+
+        // --- Governance / Policy ---
+        const policyPath = path.join(target, '.delimit', 'policies.yml');
+        let policyLabel = chalk.gray('none');
+        let hasPolicy = false;
+        if (fs.existsSync(policyPath)) {
+            hasPolicy = true;
+            try {
+                const policyContent = yaml.load(fs.readFileSync(policyPath, 'utf-8'));
+                const preset = policyContent?.preset || policyContent?.name || 'custom';
+                policyLabel = chalk.green(preset + ' policy');
+            } catch {
+                policyLabel = chalk.green('custom policy');
+            }
+        }
+        // Count tracked specs
+        const specPatterns = ['openapi.yaml', 'openapi.yml', 'openapi.json', 'swagger.yaml', 'swagger.yml', 'swagger.json'];
+        let specCount = 0;
+        const _countSpecs = (dir, depth) => {
+            if (depth > 3) return;
+            try {
+                for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+                    if (['node_modules', '.next', 'venv', '.git'].includes(entry.name)) continue;
+                    const full = path.join(dir, entry.name);
+                    if (entry.isFile() && specPatterns.includes(entry.name.toLowerCase())) {
+                        specCount++;
+                    } else if (entry.isDirectory()) {
+                        _countSpecs(full, depth + 1);
+                    }
+                }
+            } catch {}
+        };
+        _countSpecs(target, 0);
+        const specLabel = specCount > 0 ? `${specCount} spec${specCount > 1 ? 's' : ''} tracked` : chalk.gray('no specs');
+        console.log(`  Governance: ${policyLabel}${hasPolicy ? ' | ' : ' | '}${specLabel}`);
+
+        // --- Git hooks ---
+        const preCommitPath = path.join(target, '.git', 'hooks', 'pre-commit');
+        let hasGitHooks = false;
+        try {
+            const hookContent = fs.readFileSync(preCommitPath, 'utf-8');
+            hasGitHooks = hookContent.includes('delimit');
+        } catch {}
+        console.log(`  Git Hooks:  ${hasGitHooks ? chalk.green('pre-commit installed') : chalk.gray('not installed')}`);
+
+        // --- CI ---
+        const workflowPath = path.join(target, '.github', 'workflows', 'api-governance.yml');
+        const hasCI = fs.existsSync(workflowPath);
+        console.log(`  CI:         ${hasCI ? chalk.green('GitHub Action active') : chalk.gray('not configured')}`);
+
+        // --- MCP ---
+        const mcpConfigPath = path.join(homedir, '.mcp.json');
+        let hasMcp = false;
+        let toolCount = 0;
+        try {
+            const mcpContent = fs.readFileSync(mcpConfigPath, 'utf-8');
+            hasMcp = mcpContent.includes('delimit');
+        } catch {}
+        if (hasMcp) {
+            // Count tools from server.py if available
+            const serverPyPaths = [
+                path.join(delimitHome, 'server', 'ai', 'server.py'),
+                path.join(delimitHome, 'server', 'server.py'),
+            ];
+            for (const sp of serverPyPaths) {
+                try {
+                    const serverContent = fs.readFileSync(sp, 'utf-8');
+                    const toolMatches = serverContent.match(/@mcp\.tool/g);
+                    if (toolMatches) {
+                        toolCount = toolMatches.length;
+                        break;
+                    }
+                } catch {}
+            }
+            console.log(`  MCP:        ${chalk.green('connected')}${toolCount > 0 ? ` (${toolCount} tools)` : ''}`);
+        } else {
+            console.log(`  MCP:        ${chalk.gray('not configured')}`);
+        }
+
+        // --- Models ---
+        const modelsPath = path.join(delimitHome, 'models.json');
+        let modelsLabel = chalk.gray('none configured');
+        try {
+            const modelsData = JSON.parse(fs.readFileSync(modelsPath, 'utf-8'));
+            const modelNames = [];
+            for (const [key, val] of Object.entries(modelsData)) {
+                if (val && typeof val === 'object' && (val.api_key || val.enabled !== false)) {
+                    modelNames.push(key.charAt(0).toUpperCase() + key.slice(1));
+                }
+            }
+            if (modelNames.length > 0) {
+                modelsLabel = chalk.white(modelNames.join(' + ')) + chalk.gray(' (BYOK)');
+            }
+        } catch {}
+        console.log(`  Models:     ${modelsLabel}`);
+
+        // --- License ---
+        const licensePath = path.join(delimitHome, 'license.json');
+        let licenseLabel = chalk.gray('Free');
+        try {
+            const licenseData = JSON.parse(fs.readFileSync(licensePath, 'utf-8'));
+            const tier = licenseData.tier || licenseData.plan || 'Free';
+            const active = licenseData.status === 'active' || licenseData.valid === true;
+            if (tier.toLowerCase() !== 'free') {
+                licenseLabel = active ? chalk.green(`${tier} (active)`) : chalk.yellow(`${tier} (${licenseData.status || 'unknown'})`);
+            }
+        } catch {}
+        console.log(`  License:    ${licenseLabel}`);
+
+        // --- Recent memories ---
+        if (recentMemories.length > 0) {
+            console.log(chalk.bold('\n  Recent memories:'));
+            for (const mem of recentMemories) {
+                const ago = _relativeTime(mem.ts);
+                const tagStr = mem.tags.length > 0 ? '  ' + chalk.gray(mem.tags.map(t => '#' + t).join(' ')) : '';
+                const text = mem.text.length > 55 ? mem.text.slice(0, 55) + '...' : mem.text;
+                console.log(`    ${chalk.gray('[' + ago + ']')}  ${text}${tagStr}`);
+            }
+        }
+
+        // --- Last session ---
+        const sessionsDir = path.join(delimitHome, 'sessions');
+        try {
+            const sessFiles = fs.readdirSync(sessionsDir)
+                .filter(f => f.startsWith('session_') && f.endsWith('.json'))
+                .sort()
+                .reverse();
+            if (sessFiles.length > 0) {
+                const latest = JSON.parse(fs.readFileSync(path.join(sessionsDir, sessFiles[0]), 'utf-8'));
+                const summary = latest.summary || latest.description || latest.title || null;
+                if (summary) {
+                    const truncated = summary.length > 60 ? summary.slice(0, 60) + '...' : summary;
+                    console.log(chalk.bold('\n  Last session: ') + truncated);
+                }
+            }
+        } catch {}
+
+        // --- Governance readiness ---
+        const hasSpecs = specCount > 0;
+        const checks = [
+            { name: 'API spec', done: hasSpecs },
+            { name: 'Policy', done: hasPolicy },
+            { name: 'CI gate', done: hasCI },
+            { name: 'Git hooks', done: hasGitHooks },
+            { name: 'MCP', done: hasMcp },
+        ];
+        const score = checks.filter(c => c.done).length;
+
+        console.log(chalk.bold(`\n  Governance readiness: ${score}/${checks.length}`));
+        console.log('    ' + checks.map(c => c.done ? chalk.green('\u25cf') + ' ' + c.name : chalk.gray('\u25cb') + ' ' + chalk.gray(c.name)).join('    '));
+        console.log('');
 
         if (options.verbose) {
-            console.log('\n' + chalk.bold('Continuity Context:'));
-            console.log(formatContinuityReport(continuityContext).split('\n').slice(1).map(line => '  ' + line.trimStart()).join('\n'));
-        }
-        
-        if (agentRunning) {
-            const { data } = await axios.get(`${AGENT_URL}/status`);
-            
-            // Mode information
-            console.log('\n' + chalk.bold('Mode Configuration:'));
-            console.log(`  Current Mode: ${chalk.bold(data.sessionMode)}`);
-            if (data.defaultMode) {
-                console.log(`  Default Mode: ${data.defaultMode}`);
-            }
-            if (data.effectiveMode && data.effectiveMode !== data.sessionMode) {
-                console.log(`  Effective Mode: ${chalk.yellow(data.effectiveMode)} (escalated)`);
-            }
-            
-            // Policies
-            console.log('\n' + chalk.bold('Policies:'));
-            if (data.policiesLoaded.length > 0) {
-                data.policiesLoaded.forEach(policy => {
-                    console.log(`  • ${policy}`);
-                });
-                if (data.totalRules) {
-                    console.log(`  Total Rules: ${data.totalRules}`);
-                }
-            } else {
-                console.log('  No policies loaded');
-            }
-            
-            // Recent activity
-            console.log('\n' + chalk.bold('Activity:'));
-            console.log(`  Audit Log Entries: ${data.auditLogSize}`);
-            if (data.lastDecision) {
-                const timeSince = Date.now() - new Date(data.lastDecision.timestamp);
-                const minutes = Math.floor(timeSince / 60000);
-                console.log(`  Last Decision: ${minutes} minutes ago (${data.lastDecision.action})`);
-            }
-            console.log(`  Uptime: ${Math.floor(data.uptime / 60)} minutes`);
-            
-            // Verbose mode shows recent decisions
-            if (options.verbose && data.recentDecisions) {
-                console.log('\n' + chalk.bold('Recent Decisions:'));
-                data.recentDecisions.forEach(decision => {
-                    const color = decision.action === 'block' ? chalk.red :
-                                 decision.action === 'prompt' ? chalk.yellow :
-                                 chalk.green;
-                    console.log(`  ${decision.timestamp} | ${color(decision.mode)} | ${decision.rule || 'no rule'}`);
-                });
-            }
-        }
-        
-        // System integration
-        console.log('\n' + chalk.bold('System Integration:'));
-        
-        // Git hooks
-        try {
-            const hooksPath = execSync('git config --global core.hooksPath').toString().trim();
-            const hooksActive = hooksPath.includes('.delimit');
-            console.log(`  Git Hooks: ${hooksActive ? chalk.green('✓ Active') : chalk.yellow('⚠ Not configured')}`);
-        } catch (e) {
-            console.log(`  Git Hooks: ${chalk.red('✗ Not configured')}`);
-        }
-        
-        // PATH
-        if (process.env.PATH.includes('.delimit/shims')) {
-            console.log(`  AI Tool Interception: ${chalk.green('✓ Active')}`);
-        } else {
-            console.log(`  AI Tool Interception: ${chalk.gray('Not active')}`);
-        }
-        
-        // Policy files
-        const policyFiles = [];
-        if (fs.existsSync('delimit.yml')) {
-            policyFiles.push('project');
-        }
-        if (fs.existsSync(path.join(process.env.HOME, '.config', 'delimit', 'delimit.yml'))) {
-            policyFiles.push('user');
-        }
-        console.log(`  Policy Files: ${policyFiles.length > 0 ? policyFiles.join(', ') : chalk.gray('none')}`);
-        
-        if (options.verbose) {
-            console.log('\n' + chalk.gray('Run "delimit doctor" for detailed diagnostics'));
+            console.log(chalk.bold('  Continuity Context:'));
+            console.log(formatContinuityReport(continuityContext).split('\n').slice(1).map(line => '    ' + line.trimStart()).join('\n'));
+            console.log('');
         }
     });
 

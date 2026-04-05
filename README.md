@@ -169,6 +169,7 @@ npx delimit-cli recall --export                  # Export as markdown
 npx delimit-cli forget abc123                    # Delete a memory by ID
 npx delimit-cli models                            # Configure deliberation API keys (BYOK wizard)
 npx delimit-cli models --status                   # Show current model config
+npx delimit-cli status                           # Compact dashboard of your Delimit setup
 npx delimit-cli doctor                           # Check setup health
 npx delimit-cli uninstall --dry-run              # Preview removal
 ```
