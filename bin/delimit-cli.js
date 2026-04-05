@@ -3960,6 +3960,11 @@ program
         if (fail > 0) {
             process.exitCode = 1;
         }
+
+        // Occasional star nudge (show ~20% of the time on success)
+        if (fail === 0 && Math.random() < 0.2) {
+            console.log(chalk.gray('  Useful? Star us: https://github.com/delimit-ai/delimit-mcp-server\n'));
+        }
     });
 
 // Simulate command — dry-run governance preview ("terraform plan" for API governance)
