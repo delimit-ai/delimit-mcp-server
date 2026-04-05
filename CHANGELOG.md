@@ -1,5 +1,32 @@
 # Changelog
 
+## [4.20.0] - 2026-04-20
+
+*The highest state of AI governance.*
+
+### Added
+- `delimit doctor` — 14 prescriptive diagnostics with `--ci` JSON, `--fix` auto-repair, health score
+- `delimit status` — visual terminal dashboard with `--json`, `--watch` live refresh
+- `delimit simulate` — policy dry-run (terraform plan for API governance)
+- `delimit report` — governance report with `--since`, `--format md|html|json`
+- Memory hardening — SHA-256 integrity hash + source_model on every `remember`
+- Tag-based publishing — `scripts/release.sh` + GitHub Actions workflow
+- Gateway sync gate — `prepublishOnly` auto-syncs from gateway (drift impossible)
+- YouTube auto-publish pipeline — `scripts/record-and-upload.sh`
+- VS Code extension v0.2.0 — simulate + report commands
+- 17 new tests for v4.20 features (total: 123)
+
+### Fixed
+- Flaky test timeouts (5s → 15s for hook/deliberate tests)
+- PostToolUse hook test updated for tightened spec patterns
+- Dashboard workspace filter now filters data by project (LED-330)
+- Hardcoded usernames scrubbed from gateway (moved to env var)
+
+### Changed
+- README updated with v4.20 features and new quick-start commands
+- Landing page: tool count 176 → 186, doctor + simulate cards, YouTube embed
+- Demo GIF updated with clean mock data (Acme API)
+
 ## [4.1.0] - 2026-04-03
 
 ### Added
