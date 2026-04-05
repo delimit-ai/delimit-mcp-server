@@ -901,8 +901,73 @@ overrides:
         }
         
         if (options.validate) {
-            // TODO: Implement validation
-            console.log(chalk.yellow('Policy validation coming soon'));
+            const policyPaths = [
+                path.join(process.cwd(), '.delimit', 'policies.yml'),
+                path.join(process.cwd(), 'delimit.yml'),
+                path.join(process.cwd(), '.delimit.yml'),
+            ];
+            const policyFile = policyPaths.find(p => fs.existsSync(p));
+            if (!policyFile) {
+                console.log(chalk.red('No policy file found.'));
+                console.log(chalk.dim('  Expected: .delimit/policies.yml, delimit.yml, or .delimit.yml'));
+                console.log('  Run ' + chalk.cyan('delimit policy --init') + ' to create one.');
+                process.exit(1);
+            }
+            console.log(chalk.bold('Validating: ') + chalk.dim(policyFile));
+            try {
+                const raw = fs.readFileSync(policyFile, 'utf-8');
+                let parsed;
+                try {
+                    parsed = require('js-yaml').load(raw);
+                } catch {
+                    // Fallback: try JSON
+                    parsed = JSON.parse(raw);
+                }
+                const errors = [];
+                const warnings = [];
+                if (!parsed || typeof parsed !== 'object') {
+                    errors.push('Policy file is empty or not a valid object');
+                } else {
+                    // Check required structure
+                    if (!parsed.rules && !parsed.mode && !parsed.governance) {
+                        warnings.push('No "rules", "mode", or "governance" key found');
+                    }
+                    if (parsed.rules) {
+                        if (!Array.isArray(parsed.rules)) {
+                            errors.push('"rules" must be an array');
+                        } else {
+                            parsed.rules.forEach((rule, i) => {
+                                if (!rule.id) warnings.push(`Rule ${i + 1}: missing "id"`);
+                                if (!rule.change_types && !rule.name) warnings.push(`Rule ${i + 1}: missing "change_types" or "name"`);
+                                if (rule.severity && !['error', 'warning', 'info'].includes(rule.severity)) {
+                                    errors.push(`Rule ${i + 1}: invalid severity "${rule.severity}" (use: error, warning, info)`);
+                                }
+                                if (rule.action && !['forbid', 'warn', 'allow', 'require_approval'].includes(rule.action)) {
+                                    errors.push(`Rule ${i + 1}: invalid action "${rule.action}" (use: forbid, warn, allow, require_approval)`);
+                                }
+                            });
+                            console.log(chalk.dim(`  Rules: ${parsed.rules.length} defined`));
+                        }
+                    }
+                    if (parsed.mode && !['strict', 'default', 'relaxed'].includes(parsed.mode)) {
+                        warnings.push(`Unknown mode "${parsed.mode}" (expected: strict, default, relaxed)`);
+                    }
+                }
+                if (errors.length > 0) {
+                    errors.forEach(e => console.log(chalk.red(`  ✗ ${e}`)));
+                }
+                if (warnings.length > 0) {
+                    warnings.forEach(w => console.log(chalk.yellow(`  ⚠ ${w}`)));
+                }
+                if (errors.length === 0) {
+                    console.log(chalk.green('  ✓ Policy file is valid'));
+                } else {
+                    process.exit(1);
+                }
+            } catch (e) {
+                console.log(chalk.red(`  ✗ Failed to parse policy: ${e.message}`));
+                process.exit(1);
+            }
         }
     });
 
@@ -5729,7 +5794,7 @@ program
     .argument("[action]", "Action: status | set | list | reveal", "status")
     .option("--verbose", "Show encryption details and backend status")
     .action(async (action, options) => {
-        console.log(chalk.purple.bold("\n🔒 Delimit Vault\n"));
+        console.log(chalk.magenta.bold("\n  Delimit Vault\n"));
         
         if (action === "status") {
             console.log(chalk.bold("Backend Status:"));
@@ -5744,13 +5809,70 @@ program
             console.log("\nUse " + chalk.cyan("delimit vault list") + " to see configured secrets.");
         } else if (action === "list") {
             console.log(chalk.bold("Configured Secrets:"));
-            // Mock list for now
-            const secrets = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "REDDIT_PROXY_URL"];
-            secrets.forEach(s => console.log(`  • ${s}  ${chalk.gray("********")}`));
-            console.log("\nRun " + chalk.cyan("delimit vault set <NAME>") + " to update.");
+            const secretsDir = path.join(os.homedir(), '.delimit', 'secrets');
+            if (fs.existsSync(secretsDir)) {
+                const files = fs.readdirSync(secretsDir).filter(f => f.endsWith('.json') && !f.startsWith('.'));
+                if (files.length === 0) {
+                    console.log(chalk.dim("  No secrets configured yet."));
+                } else {
+                    files.forEach(f => {
+                        const name = f.replace('.json', '');
+                        console.log(`  • ${name}  ${chalk.gray("********")}`);
+                    });
+                }
+            } else {
+                console.log(chalk.dim("  No secrets directory found."));
+            }
+            console.log("\nRun " + chalk.cyan("delimit vault set <NAME>") + " to add a secret.");
+        } else if (action === "set") {
+            const name = process.argv[4];
+            if (!name) {
+                console.log(chalk.red("Usage: delimit vault set <NAME>"));
+                console.log(chalk.dim("  Example: delimit vault set OPENAI_API_KEY"));
+                process.exit(1);
+            }
+            const secretsDir = path.join(os.homedir(), '.delimit', 'secrets');
+            fs.mkdirSync(secretsDir, { recursive: true });
+            const filePath = path.join(secretsDir, `${name}.json`);
+            const existing = fs.existsSync(filePath);
+            // Read value from stdin or prompt
+            const readline = require('readline');
+            const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+            rl.question(`  Enter value for ${chalk.bold(name)}: `, (value) => {
+                rl.close();
+                if (!value || !value.trim()) {
+                    console.log(chalk.red("  Empty value. Aborted."));
+                    return;
+                }
+                fs.writeFileSync(filePath, JSON.stringify({ key: name, value: value.trim(), updated: new Date().toISOString() }), 'utf-8');
+                fs.chmodSync(filePath, 0o600);
+                console.log(chalk.green(`  ${existing ? 'Updated' : 'Saved'}: ${name}`));
+                console.log(chalk.dim(`  Location: ${filePath}`));
+            });
+        } else if (action === "reveal") {
+            const name = process.argv[4];
+            if (!name) {
+                console.log(chalk.red("Usage: delimit vault reveal <NAME>"));
+                process.exit(1);
+            }
+            const secretsDir = path.join(os.homedir(), '.delimit', 'secrets');
+            const filePath = path.join(secretsDir, `${name}.json`);
+            if (!fs.existsSync(filePath)) {
+                console.log(chalk.red(`  Secret "${name}" not found.`));
+                console.log(chalk.dim("  Run " + chalk.cyan("delimit vault list") + " to see configured secrets."));
+                process.exit(1);
+            }
+            try {
+                const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+                const val = data.value || data.key || '(empty)';
+                console.log(`  ${chalk.bold(name)}: ${val}`);
+                if (data.updated) console.log(chalk.dim(`  Updated: ${data.updated}`));
+            } catch {
+                console.log(chalk.red(`  Failed to read secret "${name}".`));
+            }
         } else {
-            console.log(chalk.yellow(`Action "${action}" is coming soon.`));
-            console.log("To configure secrets today, use " + chalk.cyan("delimit setup") + " or edit " + chalk.dim("~/.delimit/secrets/"));
+            console.log(chalk.yellow(`Unknown action: "${action}"`));
+            console.log("Available: " + chalk.cyan("status") + " | " + chalk.cyan("list") + " | " + chalk.cyan("set <NAME>") + " | " + chalk.cyan("reveal <NAME>"));
         }
         console.log("");
     });

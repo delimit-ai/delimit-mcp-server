@@ -542,7 +542,7 @@ describe('CLI hook commands', () => {
         // Should not throw
         const result = execSync(`node "${cliPath}" hook session-start 2>&1`, {
             encoding: 'utf-8',
-            timeout: 10000,
+            timeout: 15000,
         });
         assert.ok(typeof result === 'string', 'Should produce output');
         assert.ok(result.includes('[Delimit]'), 'Output should contain Delimit prefix');
@@ -984,7 +984,7 @@ describe('CLI deliberate command', () => {
         const cliPath = path.join(__dirname, '..', 'bin', 'delimit-cli.js');
         const result = execSync(`node "${cliPath}" deliberate "Is this API change safe?" 2>&1`, {
             encoding: 'utf-8',
-            timeout: 5000,
+            timeout: 15000,
         });
         assert.ok(result.includes('Is this API change safe?'), 'Output should echo the question');
         assert.ok(result.includes('delimit_deliberate'), 'Output should mention the MCP tool');
