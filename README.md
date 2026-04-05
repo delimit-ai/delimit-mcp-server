@@ -16,13 +16,18 @@ The universal command for the Delimit Swarm. When you say **"Think and Build"**,
 Works across any configuration — from a single model on a budget to an enterprise swarm of 4+ models.
 
 [![npm](https://img.shields.io/npm/v/delimit-cli)](https://www.npmjs.com/package/delimit-cli)
+[![Tests](https://img.shields.io/badge/tests-123%20passing-brightgreen)](https://github.com/delimit-ai/delimit-mcp-server)
+[![MCP Tools](https://img.shields.io/badge/MCP%20tools-186-blue)](https://delimit.ai)
 [![GitHub Action](https://img.shields.io/badge/GitHub%20Action-v1.6.0-blue)](https://github.com/marketplace/actions/delimit-api-governance)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Glama](https://glama.ai/mcp/servers/delimit-ai/delimit/badge)](https://glama.ai/mcp/servers/delimit-ai/delimit)
-[![API Governance](https://delimit-ai.github.io/badge/pass.svg)](https://github.com/marketplace/actions/delimit-api-governance)
 
 <p align="center">
-  <img src="docs/demo.gif" alt="Delimit detecting breaking API changes" width="700">
+  <img src="docs/demo.gif" alt="Delimit v4.20 — doctor, simulate, status, memory" width="700">
+</p>
+
+<p align="center">
+  <a href="https://youtu.be/8e_6P7rkFxo">Watch the demo</a> · <a href="https://youtu.be/4O1wY4vWmiY">Multi-model deliberation</a> · <a href="https://delimit.ai">Website</a>
 </p>
 
 ---
@@ -75,6 +80,30 @@ npx delimit-cli init        # Sets up governance + drift baseline
 - **`delimit report`** -- governance report. `--since 7d --format md|html|json`. Audit-friendly output for PRs and compliance.
 - **Memory hardening** -- SHA-256 integrity hash + source model tag on every `remember`. Cross-model trust, verified on every `recall`.
 - **Tag-based publishing** -- automated gateway sync, no more version drift between source and npm bundle.
+
+### Multi-Model Deliberation
+
+Run your question through 4 AI models simultaneously. They debate each other until unanimous agreement.
+
+```bash
+delimit deliberate "Should we build rate limiting in-house or use a managed service?"
+```
+
+```
+  Round 1 (independent):
+    Claude:  Build in-house. Redis sliding window is 50 lines.
+    Gemini:  Build. You already have Redis.
+    Codex:   Agree — but add circuit breaker for Redis failures.
+    Grok:    Build. Managed service costs $200/mo for 50 lines of code.
+
+  Round 2 (deliberation):
+    All models: AGREE
+
+  UNANIMOUS CONSENSUS (2 rounds, confidence 94/100)
+  Build rate limiting in-house with Redis + circuit breaker.
+```
+
+3 free deliberations, then BYOK for unlimited. Works with Grok, Gemini, Claude, GPT-4o.
 
 ### v4.1
 
