@@ -97,4 +97,16 @@ if [ $LEAKED -ne 0 ]; then
     exit 1
 fi
 
-echo "✅ Gateway sync complete"
+# ── Run credential scan on synced gateway files ─────────────────────
+echo -n "  Credential scan... "
+CRED_HITS=$(grep -rEin '["'"'"'](?:password|passwd|secret|api_key|apikey|token|auth_token|access_token|private_key)["'"'"']\s*:\s*["'"'"'][^"'"'"']{4,}["'"'"']' "$NPM_ROOT/gateway/" --include="*.py" --include="*.js" --include="*.json" 2>/dev/null | grep -v 'environ\|getenv\|process\.env\|os\.environ\|example\|placeholder\|REDACTED\|your_\|change.me\|TODO\|FIXME\|xxx\|None\|null\|undefined\|test_password\|test_secret' || true)
+if [ -n "$CRED_HITS" ]; then
+    echo "FAILED"
+    echo "  Hardcoded credentials detected in gateway bundle:"
+    echo "$CRED_HITS" | while read -r line; do echo "    $line"; done
+    echo "  Fix: replace hardcoded values with env var lookups"
+    exit 1
+fi
+echo "clean"
+
+echo "Gateway sync complete"

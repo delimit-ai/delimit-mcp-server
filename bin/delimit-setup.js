@@ -723,6 +723,9 @@ if [ "$DELIMIT_WRAPPED" = "true" ] || [ ! -t 1 ]; then
         [ -x "$c" ] && exec "$c" "$@"
     done
 fi
+# Record session start for exit screen
+SESSION_START=\$(date +%s)
+SESSION_CWD="\$(pwd)"
 # Auto-update in background (non-blocking)
 ( CURR=\$(delimit-cli --version 2>/dev/null); LATE=\$(npm view delimit-cli version 2>/dev/null); \\
   if [ -n "\$LATE" ] && [ "\$LATE" != "\$CURR" ]; then \\
@@ -754,18 +757,93 @@ printf "  \${MAGENTA}\${BOLD}[Delimit]\${RESET} \${MAGENTA}═══════
 sleep 0.08
 printf "  \${GREEN}\${BOLD}[Delimit]\${RESET} \${GREEN}✓ Allowed\${RESET}\\n"
 echo ""
-# Find real binary — check renamed binary first, then common paths
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-# 1. Check for renamed binary (tool-real) next to this shim
-[ -x "$SCRIPT_DIR/${toolName}-real" ] && exec "$SCRIPT_DIR/${toolName}-real" "$@"
-# 2. Check common paths (skip self)
-SELF="$(readlink -f "$0" 2>/dev/null || echo "$0")"
-for c in /usr/local/bin/${toolName}-real /usr/bin/${toolName}-real "$HOME/.local/bin/${toolName}-real" /usr/bin/${toolName} /usr/local/bin/${toolName} "$HOME/.local/bin/${toolName}" "$(npm bin -g 2>/dev/null)/${toolName}"; do
-    [ -x "$c" ] && [ "$(readlink -f "$c" 2>/dev/null)" != "$SELF" ] && exec "$c" "$@"
-done
-# 3. Last resort: search PATH excluding shim directory
+
+# --- Exit screen: session summary after AI exits ---
+delimit_exit_screen() {
+    _EXIT_CODE=\$1
+    # Only show exit screen on interactive terminals
+    [ ! -t 1 ] && return
+    SESSION_END=\$(date +%s)
+    ELAPSED=\$((SESSION_END - SESSION_START))
+    # Format duration
+    if [ \$ELAPSED -ge 3600 ]; then
+        HOURS=\$((ELAPSED / 3600))
+        MINS=\$(( (ELAPSED % 3600) / 60 ))
+        DURATION="\${HOURS}h \${MINS}m"
+    elif [ \$ELAPSED -ge 60 ]; then
+        MINS=\$((ELAPSED / 60))
+        SECS=\$((ELAPSED % 60))
+        DURATION="\${MINS}m \${SECS}s"
+    else
+        DURATION="\${ELAPSED}s"
+    fi
+    # Count git commits made during session
+    COMMITS=0
+    if [ -d "\$SESSION_CWD/.git" ] || git -C "\$SESSION_CWD" rev-parse --git-dir >/dev/null 2>&1; then
+        COMMITS=\$(git -C "\$SESSION_CWD" log --oneline --after="\$SESSION_START" --format="%H" 2>/dev/null | wc -l | tr -d ' ')
+    fi
+    # Count ledger items created during session (by timestamp)
+    LEDGER_DIR="\$DELIMIT_HOME/ledger"
+    LEDGER_ITEMS=0
+    if [ -d "\$LEDGER_DIR" ]; then
+        for lf in "\$LEDGER_DIR"/*.jsonl; do
+            [ -f "\$lf" ] || continue
+            COUNT=\$(awk -v start="\$SESSION_START" '
+                BEGIN { n=0 }
+                {
+                    if (match(\$0, /"(created_at|ts)":"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}/)) {
+                        n++
+                    } else if (match(\$0, /"(created_at|ts)":([0-9]+)/, arr)) {
+                        if (arr[2]+0 >= start+0) n++
+                    }
+                }
+                END { print n }
+            ' "\$lf" 2>/dev/null || echo "0")
+            LEDGER_ITEMS=\$((LEDGER_ITEMS + COUNT))
+        done
+    fi
+    # Count deliberations (governance decisions)
+    DELIBERATIONS=0
+    if [ -f "\$DELIMIT_HOME/deliberations.jsonl" ]; then
+        DELIBERATIONS=\$(awk -v start="\$SESSION_START" '
+            BEGIN { n=0 }
+            { if (match(\$0, /"ts":([0-9]+)/, arr)) { if (arr[1]+0 >= start+0) n++ } }
+            END { print n }
+        ' "\$DELIMIT_HOME/deliberations.jsonl" 2>/dev/null || echo "0")
+    fi
+    # Determine exit status label
+    if [ "\$_EXIT_CODE" -eq 0 ]; then
+        STATUS_LABEL="\${GREEN}clean exit\${RESET}"
+    else
+        STATUS_LABEL="\${ORANGE}exit code \${_EXIT_CODE}\${RESET}"
+    fi
+    echo ""
+    printf "  \${MAGENTA}\${BOLD}[Delimit]\${RESET} \${MAGENTA}═══════════════════════════════════════════\${RESET}\\n"
+    printf "  \${MAGENTA}\${BOLD}[Delimit]\${RESET} \${PURPLE}<\${MAGENTA}/\${ORANGE}>\${RESET} \${BOLD}SESSION COMPLETE: ${displayName.toUpperCase()}\${RESET}\\n"
+    printf "  \${MAGENTA}\${BOLD}[Delimit]\${RESET} \${MAGENTA}═══════════════════════════════════════════\${RESET}\\n"
+    printf "  \${PURPLE}\${BOLD}[Delimit]\${RESET} \${DIM}Duration:\${RESET}       \${WHITE}\${DURATION}\${RESET}\\n"
+    printf "  \${PURPLE}\${BOLD}[Delimit]\${RESET} \${DIM}Status:\${RESET}         \${STATUS_LABEL}\\n"
+    printf "  \${PURPLE}\${BOLD}[Delimit]\${RESET} \${DIM}Git commits:\${RESET}    \${WHITE}\${COMMITS}\${RESET}\\n"
+    printf "  \${PURPLE}\${BOLD}[Delimit]\${RESET} \${DIM}Ledger items:\${RESET}   \${WHITE}\${LEDGER_ITEMS}\${RESET}\\n"
+    printf "  \${PURPLE}\${BOLD}[Delimit]\${RESET} \${DIM}Deliberations:\${RESET}  \${WHITE}\${DELIBERATIONS}\${RESET}\\n"
+    printf "  \${MAGENTA}\${BOLD}[Delimit]\${RESET} \${MAGENTA}═══════════════════════════════════════════\${RESET}\\n"
+    echo ""
+}
+
+# Run real binary and show exit screen (replaces exec to allow post-exit code)
+delimit_run_and_exit() {
+    "\$@"
+    _RC=\$?
+    delimit_exit_screen \$_RC
+    exit \$_RC
+}
+
+# Find real binary by stripping shim dir from PATH.
+# We rely on PATH ordering ($HOME/.delimit/shims first) — no rename hack,
+# no race with npm reinstalls. Previously we used mv tool→tool-real + cp shim,
+# which broke whenever npm/brew clobbered the binary mid-operation.
 REAL=$(PATH=$(echo "$PATH" | tr ':' '\\n' | grep -v '.delimit/shims' | tr '\\n' ':') command -v ${toolName} 2>/dev/null)
-[ -x "$REAL" ] && exec "$REAL" "$@"
+[ -x "$REAL" ] && delimit_run_and_exit "$REAL" "$@"
 echo "[Delimit] ${toolName} not found in PATH" >&2
 case "${toolName}" in
   claude) echo "  Install: npm install -g @anthropic-ai/claude-code" >&2 ;;
@@ -782,59 +860,17 @@ exit 127
                 fs.chmodSync(shimPath, '755');
             }
 
-            // Rename+wrap: place shim at the real binary's location
-            // so it works immediately without PATH changes
-            for (const tool of ['claude', 'codex', 'gemini']) {
-                try {
-                    // Find real binary location
-                    let realPath = null;
-                    const searchPaths = [
-                        `/usr/local/bin/${tool}`,
-                        `/usr/bin/${tool}`,
-                        path.join(os.homedir(), '.local', 'bin', tool),
-                    ];
-                    // Also check npm global bin
-                    try {
-                        const npmBin = execSync('npm bin -g 2>/dev/null', { encoding: 'utf-8', timeout: 3000 }).trim();
-                        if (npmBin) searchPaths.push(path.join(npmBin, tool));
-                    } catch {}
-
-                    for (const p of searchPaths) {
-                        try {
-                            if (fs.existsSync(p) && fs.statSync(p).isFile()) {
-                                // Check it's the real binary, not already our shim
-                                const content = fs.readFileSync(p, 'utf-8').substring(0, 200);
-                                if (!content.includes('Delimit Governance Shim')) {
-                                    realPath = p;
-                                    break;
-                                }
-                            }
-                        } catch {}
-                    }
-
-                    if (realPath) {
-                        const dir = path.dirname(realPath);
-                        const realDest = path.join(dir, `${tool}-real`);
-                        // Only rename if not already renamed
-                        if (!fs.existsSync(realDest)) {
-                            fs.renameSync(realPath, realDest);
-                        }
-                        // Place our shim at the original location
-                        const shimContent = fs.readFileSync(path.join(shimsDir, tool), 'utf-8');
-                        // Update shim to also check for tool-real in same directory
-                        const patchedShim = shimContent.replace(
-                            `echo "[Delimit] ${tool} not found in PATH"`,
-                            `# Check for renamed binary next to shim\n` +
-                            `SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"\n` +
-                            `[ -x "$SCRIPT_DIR/${tool}-real" ] && exec "$SCRIPT_DIR/${tool}-real" "$@"\n` +
-                            `echo "[Delimit] ${tool} not found in PATH"`
-                        );
-                        fs.writeFileSync(realPath, patchedShim);
-                        fs.chmodSync(realPath, '755');
-                        log(`  ${green('✓')} ${tool}: wrapped at ${dim(realPath)}`);
-                    }
-                } catch {}
-            }
+            // Governance is enforced via PATH ordering — $HOME/.delimit/shims
+            // is prepended to PATH (see below), so `claude`/`codex`/`gemini`
+            // resolve to our shim first, and the shim then PATH-strips itself
+            // and execs the real binary.
+            //
+            // We deliberately do NOT mv /usr/bin/claude → claude-real and copy
+            // the shim into /usr/bin/claude. That rename+wrap approach raced
+            // with npm reinstalls (which clobber /usr/bin/claude back to a
+            // symlink), leaving users with "[Delimit] claude not found in PATH"
+            // when the rename ran but the shim copy failed or the symlink got
+            // re-created mid-operation. PATH ordering is the durable contract.
 
             // Add to PATH in shell rc files (create if missing)
             const pathLine = `export PATH="${shimsDir}:$PATH"  # Delimit governance wrapping`;

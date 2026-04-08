@@ -3704,15 +3704,125 @@ program
     .description('Verify Delimit setup and diagnose common issues')
     .option('--ci', 'Output JSON and exit non-zero on failures (for pipelines)')
     .option('--fix', 'Automatically fix issues that have safe auto-fixes')
+    .option('--dry-run', 'Preview what doctor --fix would create/modify without making changes')
+    .option('--undo', 'Revert changes made by the last doctor --fix run')
     .action(async (opts) => {
         const ciMode = !!opts.ci;
         const fixMode = !!opts.fix;
+        const dryRunMode = !!opts.dryRun;
+        const undoMode = !!opts.undo;
         const homeDir = os.homedir();
         const delimitHome = path.join(homeDir, '.delimit');
+        const manifestPath = path.join(process.cwd(), '.delimit', 'doctor-manifest.json');
+
+        // --- Undo mode: revert last doctor --fix changes ---
+        if (undoMode) {
+            if (!fs.existsSync(manifestPath)) {
+                console.log(chalk.yellow('\n  No doctor-manifest.json found. Nothing to undo.\n'));
+                return;
+            }
+            try {
+                const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+                const actions = manifest.actions || [];
+                let reverted = 0;
+                let skipped = 0;
+                console.log(chalk.bold('\n  Delimit Doctor — Undo\n'));
+                for (const entry of actions) {
+                    const targetPath = entry.path;
+                    if (entry.action === 'created') {
+                        if (fs.existsSync(targetPath)) {
+                            const stat = fs.statSync(targetPath);
+                            if (stat.isDirectory()) {
+                                fs.rmSync(targetPath, { recursive: true, force: true });
+                            } else {
+                                fs.unlinkSync(targetPath);
+                            }
+                            console.log(chalk.red(`  - Removed: ${targetPath}`));
+                            reverted++;
+                        } else {
+                            console.log(chalk.gray(`  - Already gone: ${targetPath}`));
+                            skipped++;
+                        }
+                    } else {
+                        console.log(chalk.yellow(`  - Skipped (${entry.action}): ${targetPath}`));
+                        skipped++;
+                    }
+                }
+                fs.unlinkSync(manifestPath);
+                console.log(chalk.green(`\n  Reverted ${reverted} item(s), skipped ${skipped}.\n`));
+            } catch (e) {
+                console.log(chalk.red(`\n  Failed to read manifest: ${e.message}\n`));
+                process.exitCode = 1;
+            }
+            return;
+        }
+
+        // --- Dry-run mode: preview what --fix would create/modify ---
+        if (dryRunMode) {
+            console.log(chalk.bold('\n  Delimit Doctor — Dry Run Preview\n'));
+            const planned = [];
+            const delimitDir = path.join(process.cwd(), '.delimit');
+            const policyFile = path.join(delimitDir, 'policies.yml');
+            const ledgerDir = path.join(delimitDir, 'ledger');
+            const evidenceDir = path.join(delimitDir, 'evidence');
+            const memoryDir = path.join(delimitHome, 'memory');
+            const mcpServerPath = path.join(delimitHome, 'server', 'ai', 'server.py');
+
+            if (!fs.existsSync(policyFile)) {
+                if (!fs.existsSync(delimitDir)) {
+                    planned.push({ path: delimitDir, action: 'create_dir', description: '.delimit/ governance directory' });
+                }
+                planned.push({ path: policyFile, action: 'create_file', description: 'Governance policy rules (via delimit init)' });
+            }
+            if (!fs.existsSync(ledgerDir)) {
+                planned.push({ path: ledgerDir, action: 'create_dir', description: 'Operations ledger directory' });
+            }
+            if (!fs.existsSync(evidenceDir)) {
+                planned.push({ path: evidenceDir, action: 'create_dir', description: 'Audit trail events directory' });
+            }
+            if (!fs.existsSync(memoryDir)) {
+                planned.push({ path: memoryDir, action: 'create_dir', description: '~/.delimit/memory/ directory' });
+            }
+            if (!fs.existsSync(mcpServerPath)) {
+                planned.push({ path: mcpServerPath, action: 'create_file', description: 'MCP server (via delimit setup --all)' });
+            }
+            // GitHub workflow
+            const workflowDir = path.join(process.cwd(), '.github', 'workflows');
+            if (fs.existsSync(path.join(process.cwd(), '.github'))) {
+                const wf = path.join(workflowDir, 'api-governance.yml');
+                if (!fs.existsSync(wf)) {
+                    planned.push({ path: wf, action: 'create_file', description: 'API governance GitHub Action workflow' });
+                }
+            }
+
+            if (planned.length === 0) {
+                console.log(chalk.green('  No changes needed. Everything looks good.\n'));
+            } else {
+                console.log(chalk.gray(`  doctor --fix would create/modify ${planned.length} item(s):\n`));
+                for (const p of planned) {
+                    const icon = p.action.startsWith('create') ? '+' : '~';
+                    console.log(chalk.gray(`    ${icon} ${p.path}`));
+                    console.log(chalk.gray(`      ${p.description}`));
+                }
+                console.log(chalk.gray(`\n  Run ${chalk.bold('delimit doctor --fix')} to apply these changes.\n`));
+            }
+
+            if (ciMode) {
+                console.log(JSON.stringify({ status: 'dry_run', planned_changes: planned, change_count: planned.length }, null, 2));
+            }
+            return;
+        }
+
         const results = []; // { name, status: 'pass'|'warn'|'fail', message, fix? }
+        const manifestActions = []; // track what --fix creates
 
         function addResult(name, status, message, fix) {
             results.push({ name, status, message, fix: fix || null });
+        }
+
+        // Helper: record a created file/dir in the manifest
+        function trackCreated(filePath) {
+            manifestActions.push({ path: filePath, action: 'created', timestamp: new Date().toISOString() });
         }
 
         // --- Check 1: Policy file ---
@@ -3733,10 +3843,13 @@ program
             addResult('policy-file', 'fail', 'No .delimit/policies.yml', 'delimit init');
             if (fixMode) {
                 try {
+                    const delimitDirPre = fs.existsSync(path.join(process.cwd(), '.delimit'));
                     execSync('delimit init --dry-run', { stdio: 'pipe', cwd: process.cwd() });
                     // If dry-run works, run real init
                     execSync('delimit init', { stdio: 'pipe', cwd: process.cwd() });
                     addResult('policy-file-fix', 'pass', 'Auto-fixed: ran delimit init');
+                    if (!delimitDirPre) trackCreated(path.join(process.cwd(), '.delimit'));
+                    trackCreated(policyPath);
                 } catch {
                     addResult('policy-file-fix', 'warn', 'Auto-fix failed: run delimit init manually');
                 }
@@ -3834,6 +3947,7 @@ program
                 try {
                     execSync('delimit setup --all', { stdio: 'pipe' });
                     addResult('mcp-server-fix', 'pass', 'Auto-fixed: ran delimit setup --all');
+                    trackCreated(mcpServerPath);
                 } catch {
                     addResult('mcp-server-fix', 'warn', 'Auto-fix failed: run delimit setup --all manually');
                 }
@@ -3862,6 +3976,7 @@ program
                 try {
                     fs.mkdirSync(memoryDir, { recursive: true });
                     addResult('memory-health-fix', 'pass', 'Auto-fixed: created ~/.delimit/memory/');
+                    trackCreated(memoryDir);
                 } catch {
                     addResult('memory-health-fix', 'warn', `Auto-fix failed: run mkdir -p ${memoryDir}`);
                 }
@@ -4000,10 +4115,30 @@ program
             }
         }
 
-        // Undo instruction (LED-265)
-        console.log(chalk.bold('\n  Undo:'));
-        console.log(chalk.gray('    rm -rf .delimit              — remove all Delimit files'));
-        console.log(chalk.gray('    delimit uninstall --dry-run  — preview MCP removal\n'));
+        // Save manifest if --fix made changes (LED-265)
+        if (fixMode && manifestActions.length > 0) {
+            const manifestDir = path.join(process.cwd(), '.delimit');
+            if (!fs.existsSync(manifestDir)) {
+                fs.mkdirSync(manifestDir, { recursive: true });
+            }
+            const manifest = {
+                version: 1,
+                created: new Date().toISOString(),
+                actions: manifestActions,
+            };
+            fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+            console.log(chalk.bold('\n  Manifest:'));
+            console.log(chalk.gray(`    Saved ${manifestActions.length} action(s) to .delimit/doctor-manifest.json`));
+            console.log(chalk.gray('    Run: delimit doctor --undo    to revert\n'));
+        } else {
+            // Undo instruction (LED-265)
+            console.log(chalk.bold('\n  Undo:'));
+            if (fs.existsSync(manifestPath)) {
+                console.log(chalk.gray('    delimit doctor --undo        — revert last doctor --fix changes'));
+            }
+            console.log(chalk.gray('    rm -rf .delimit              — remove all Delimit files'));
+            console.log(chalk.gray('    delimit uninstall --dry-run  — preview MCP removal\n'));
+        }
 
         // Health score and summary
         const ok = results.filter(r => r.status === 'pass').length;
@@ -4955,50 +5090,250 @@ program
                 return;
             }
 
-            // Decision banner
+            // Detect CI environment — use plain output (no color) when not a TTY
+            const isCI = !!(process.env.CI || process.env.GITHUB_ACTIONS || process.env.JENKINS_URL || process.env.GITLAB_CI || process.env.CIRCLECI || process.env.TRAVIS);
+            const isTTY = process.stdout.isTTY;
+            const useColor = isTTY && !isCI && !process.env.NO_COLOR;
+
+            // Severity classification for violations (mirrors Action's ci_formatter.py)
+            const SEVERITY_MAP = {
+                'no_endpoint_removal': { label: 'Critical', color: 'red' },
+                'no_method_removal': { label: 'Critical', color: 'red' },
+                'no_field_removal': { label: 'Critical', color: 'red' },
+                'no_response_field_removal': { label: 'Critical', color: 'red' },
+                'no_required_param_addition': { label: 'High', color: 'yellow' },
+                'no_type_changes': { label: 'High', color: 'yellow' },
+                'warn_type_change': { label: 'High', color: 'yellow' },
+                'no_enum_removal': { label: 'High', color: 'yellow' },
+            };
+
+            // Teachings — WHY each rule matters (mirrors Action's ci_formatter.py TEACHINGS)
+            const TEACHINGS = {
+                'no_endpoint_removal': 'Removing an endpoint breaks existing clients actively calling it. Their requests will return 404.',
+                'no_method_removal': 'Removing an HTTP method breaks clients using that verb. They will receive 405 Method Not Allowed.',
+                'no_required_param_addition': 'Adding a required parameter breaks every existing request that omits it. Clients get 400 Bad Request.',
+                'no_field_removal': 'Removing a request field breaks clients sending it if the server rejects the payload or silently drops data.',
+                'no_response_field_removal': 'Removing a response field breaks clients reading it. Their code hits undefined/null.',
+                'no_type_changes': 'Changing a field type breaks serialization. Clients parsing the old type will fail.',
+                'warn_type_change': 'Changing a field type breaks serialization. Clients parsing the old type will fail.',
+                'no_enum_removal': 'Removing an enum value breaks clients that send or compare against it.',
+            };
+
+            // Fix hints — HOW to fix each rule (mirrors Action's ci_formatter.py FIX_HINTS)
+            const FIX_HINTS = {
+                'no_endpoint_removal': 'Deprecate the endpoint first, then remove in a future major version.',
+                'no_method_removal': 'Keep the old method available or redirect it. Remove only after a deprecation period.',
+                'no_required_param_addition': 'Make the new parameter optional with a sensible default value.',
+                'no_field_removal': 'Keep the field in the schema. Mark it deprecated and stop populating in a future version.',
+                'no_response_field_removal': 'Restore the field. If removing is intentional, version the endpoint (e.g., /v2/).',
+                'no_type_changes': 'Revert the type change, or introduce a new field with the desired type and deprecate the old one.',
+                'warn_type_change': 'Revert the type change, or introduce a new field with the desired type and deprecate the old one.',
+                'no_enum_removal': 'Keep the enum value and mark it deprecated. Remove only in a coordinated major release.',
+            };
+
+            // Helper: colorize or plain text
+            const c = {
+                red: (s) => useColor ? chalk.red(s) : s,
+                green: (s) => useColor ? chalk.green(s) : s,
+                yellow: (s) => useColor ? chalk.yellow(s) : s,
+                gray: (s) => useColor ? chalk.gray(s) : s,
+                bold: (s) => useColor ? chalk.bold(s) : s,
+                redBold: (s) => useColor ? chalk.red.bold(s) : s,
+                greenBold: (s) => useColor ? chalk.green.bold(s) : s,
+                yellowBold: (s) => useColor ? chalk.yellow.bold(s) : s,
+                dim: (s) => useColor ? chalk.dim(s) : s,
+                cyan: (s) => useColor ? chalk.cyan(s) : s,
+            };
+
             const decision = result.decision;
             const semver = result.semver;
-            const banner = decision === 'fail'
-                ? chalk.red.bold('FAIL')
-                : decision === 'warn'
-                    ? chalk.yellow.bold('WARN')
-                    : chalk.green.bold('PASS');
-
-            const bump = semver ? ` — ${chalk.bold(semver.bump.toUpperCase())}` : '';
-            const nextVer = semver && semver.next_version ? ` (${semver.next_version})` : '';
-
-            console.log(`\n${banner}${bump}${nextVer}\n`);
-
-            // Summary
             const s = result.summary;
-            console.log(`  Changes: ${s.total_changes} total, ${s.breaking_changes} breaking`);
+            const violations = result.violations || [];
+            const allChanges = result.all_changes || [];
+            const errors = violations.filter(v => v.severity === 'error');
+            const warnings = violations.filter(v => v.severity === 'warning');
+            const safe = allChanges.filter(ch => !ch.is_breaking);
+
+            // ── Header Banner ──
+            const divider = useColor ? chalk.dim('─'.repeat(60)) : '-'.repeat(60);
+            console.log('');
+            console.log(divider);
+
+            if (decision === 'fail') {
+                console.log(c.redBold('  GOVERNANCE FAILED'));
+            } else if (decision === 'warn') {
+                console.log(c.yellowBold('  GOVERNANCE PASSED WITH WARNINGS'));
+            } else {
+                console.log(c.greenBold('  GOVERNANCE PASSED'));
+            }
+
+            // Semver line
+            const bumpLabel = semver ? semver.bump.toUpperCase() : 'NONE';
+            const nextVerStr = semver && semver.next_version ? `  Next: ${semver.next_version}` : '';
+            console.log(`  Semver: ${c.bold(bumpLabel)}${nextVerStr}`);
+            console.log(divider);
+
+            // ── Summary Stats ──
+            console.log('');
+            console.log(`  Total changes:     ${s.total_changes}`);
+            console.log(`  Breaking changes:  ${s.breaking_changes > 0 ? c.red(String(s.breaking_changes)) : c.green('0')}`);
+            console.log(`  Policy violations: ${s.violations > 0 ? c.red(String(s.violations)) : c.green('0')}`);
             if (s.violations > 0) {
-                console.log(`  Violations: ${s.errors} error(s), ${s.warnings} warning(s)`);
+                console.log(`    Errors:   ${s.errors}`);
+                console.log(`    Warnings: ${s.warnings}`);
             }
             console.log('');
 
-            // Violations
-            const violations = result.violations || [];
-            if (violations.length > 0) {
-                violations.forEach(v => {
-                    const icon = v.severity === 'error' ? chalk.red('ERR') : chalk.yellow('WRN');
-                    console.log(`  ${icon}  ${v.message}`);
-                    if (v.path) console.log(`       ${chalk.gray(v.path)}`);
+            // ── Breaking Changes Table ──
+            if (errors.length > 0 || warnings.length > 0) {
+                console.log(c.bold('  Breaking Changes'));
+                console.log(divider);
+                console.log('');
+
+                // Table header
+                const colSev = 10;
+                const colLoc = 32;
+                const colMsg = 50;
+                const pad = (str, len) => {
+                    const stripped = str.replace(/\x1b\[[0-9;]*m/g, '');
+                    const diff = len - stripped.length;
+                    return diff > 0 ? str + ' '.repeat(diff) : str;
+                };
+
+                console.log(`  ${pad(c.bold('Severity'), colSev)}  ${pad(c.bold('Location'), colLoc)}  ${c.bold('Description')}`);
+                console.log(`  ${'-'.repeat(colSev)}  ${'-'.repeat(colLoc)}  ${'-'.repeat(colMsg)}`);
+
+                errors.forEach(v => {
+                    const sev = SEVERITY_MAP[v.rule] || { label: 'Error', color: 'red' };
+                    const sevStr = sev.color === 'red' ? c.red(sev.label) : c.yellow(sev.label);
+                    const loc = v.path || '-';
+                    const truncLoc = loc.length > colLoc ? loc.substring(0, colLoc - 3) + '...' : loc;
+                    console.log(`  ${pad(sevStr, colSev)}  ${pad(c.cyan(truncLoc), colLoc)}  ${v.message}`);
+                });
+
+                warnings.forEach(v => {
+                    const sev = SEVERITY_MAP[v.rule] || { label: 'Medium', color: 'yellow' };
+                    const sevStr = c.yellow(sev.label);
+                    const loc = v.path || '-';
+                    const truncLoc = loc.length > colLoc ? loc.substring(0, colLoc - 3) + '...' : loc;
+                    console.log(`  ${pad(sevStr, colSev)}  ${pad(c.cyan(truncLoc), colLoc)}  ${v.message}`);
+                });
+
+                console.log('');
+            }
+
+            // ── Why This Breaks (Teachings) ──
+            if (errors.length > 0) {
+                console.log(c.bold('  Why This Breaks'));
+                console.log(divider);
+                console.log('');
+
+                // Deduplicate by rule
+                const seenRules = new Set();
+                errors.forEach(v => {
+                    if (v.rule && TEACHINGS[v.rule] && !seenRules.has(v.rule)) {
+                        seenRules.add(v.rule);
+                        const ruleName = v.rule.replace(/^no_/, '').replace(/_/g, ' ');
+                        console.log(`  ${c.red('*')} ${c.bold(ruleName)}`);
+                        console.log(`    ${c.gray(TEACHINGS[v.rule])}`);
+                        console.log('');
+                    }
+                });
+            }
+
+            // ── How to Fix (Migration Hints) ──
+            if (errors.length > 0) {
+                console.log(c.bold('  How to Fix'));
+                console.log(divider);
+                console.log('');
+
+                errors.forEach((v, i) => {
+                    const loc = v.path || '-';
+                    const hint = FIX_HINTS[v.rule] || 'Review this change and update consumers accordingly.';
+                    console.log(`  ${c.bold(`${i + 1}. ${loc}`)}`);
+                    console.log(`     ${hint}`);
+                    console.log('');
+                });
+            }
+
+            // ── Migration Guide (if available from engine) ──
+            if (result.migration && decision === 'fail') {
+                console.log(c.bold('  Migration Guide'));
+                console.log(divider);
+                console.log('');
+                // Indent migration text
+                const migrationLines = result.migration.split('\n');
+                migrationLines.forEach(line => {
+                    console.log(`  ${line}`);
                 });
                 console.log('');
             }
 
-            // Non-breaking changes
-            const safe = (result.all_changes || []).filter(c => !c.is_breaking);
-            if (safe.length > 0) {
-                console.log(chalk.green('  Additions:'));
-                safe.forEach(c => console.log(`    + ${c.message}`));
+            // ── Non-Breaking Additions ──
+            if (safe.length > 0 && safe.length <= 20) {
+                console.log(c.bold(`  Non-Breaking Additions (${safe.length})`));
+                console.log(divider);
+                console.log('');
+                safe.forEach(ch => {
+                    console.log(`  ${c.green('+')} ${ch.message}`);
+                    if (ch.path) console.log(`    ${c.gray(ch.path)}`);
+                });
+                console.log('');
+            } else if (safe.length > 20) {
+                console.log(c.bold(`  Non-Breaking Additions (${safe.length})`));
+                console.log(divider);
+                console.log('');
+                safe.slice(0, 10).forEach(ch => {
+                    console.log(`  ${c.green('+')} ${ch.message}`);
+                });
+                console.log(c.gray(`  ... and ${safe.length - 10} more additions`));
                 console.log('');
             }
 
-            if (decision === 'pass') {
-                console.log('Keep Building.\n');
+            // ── Governance Gates ──
+            console.log(c.bold('  Governance Gates'));
+            console.log(divider);
+            console.log('');
+
+            const lintPass = s.breaking_changes === 0;
+            const policyPass = violations.length === 0;
+            const deployReady = lintPass && policyPass;
+
+            const gateIcon = (pass) => pass ? c.green('PASS') : c.red('FAIL');
+            const gates = [
+                ['API Lint', lintPass],
+                ['Policy Compliance', policyPass],
+                ['Deploy Readiness', deployReady],
+            ];
+
+            const gateCol = 22;
+            console.log(`  ${c.bold('Gate'.padEnd(gateCol))}  ${c.bold('Status')}`);
+            console.log(`  ${'-'.repeat(gateCol)}  ${'-'.repeat(10)}`);
+            gates.forEach(([name, pass]) => {
+                const status = pass ? gateIcon(true) : gateIcon(false);
+                if (name === 'Policy Compliance' && !policyPass) {
+                    console.log(`  ${name.padEnd(gateCol)}  ${status} (${violations.length} violation${violations.length !== 1 ? 's' : ''})`);
+                } else if (name === 'Deploy Readiness' && !deployReady) {
+                    console.log(`  ${name.padEnd(gateCol)}  ${c.yellow('BLOCKED')}`);
+                } else {
+                    console.log(`  ${name.padEnd(gateCol)}  ${status}`);
+                }
+            });
+            console.log('');
+
+            if (!deployReady) {
+                console.log(c.yellow('  Deploy blocked until all gates pass.'));
+                console.log('');
             }
+
+            // ── Footer ──
+            console.log(divider);
+            if (decision === 'pass') {
+                console.log(c.green('  Keep Building.'));
+            } else {
+                console.log(c.gray('  Fix the issues above, then re-run: npx delimit-cli lint'));
+            }
+            console.log('');
 
             process.exit(result.exit_code || 0);
         } catch (err) {
