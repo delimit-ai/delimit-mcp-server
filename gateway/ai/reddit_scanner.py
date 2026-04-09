@@ -596,11 +596,156 @@ def fetch_thread(thread_id: str, *, proxy_url: str = PROXY_URL) -> Optional[Dict
     return None
 
 
-def monitor_user_engagement(username: str = "delimitdev") -> list:
+def monitor_user_engagement(username: str = "delimitdev", proxy_url: str = PROXY_URL) -> list:
     """Monitor engagement on posts by a Reddit user (LED-300).
 
-    Checks recent posts/comments by the user for new replies, upvotes,
-    and engagement signals. Returns a list of alert dicts.
+    Fetches the user's recent comments via the residential proxy and checks
+    for new replies. Returns a list of alert dicts for actionable engagement.
     """
-    # Stub — full implementation requires residential proxy + Playwright (LED-248)
-    return []
+    alerts: list = []
+    seen_file = Path.home() / ".delimit" / "reddit_engagement_seen.json"
+    seen: dict = {}
+    if seen_file.exists():
+        try:
+            seen = json.loads(seen_file.read_text())
+        except Exception:
+            seen = {}
+
+    # Fetch user's recent comments
+    reddit_url = f"https://www.reddit.com/user/{username}/comments.json?limit=25&raw_json=1"
+    fetch_url = f"{proxy_url}?url={urllib.request.quote(reddit_url, safe='')}"
+    req = urllib.request.Request(
+        fetch_url,
+        headers={"User-Agent": "delimit-scanner/1.0", "Accept": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            body = json.loads(resp.read().decode())
+    except Exception as exc:
+        logger.warning("Failed to fetch u/%s comments: %s", username, exc)
+        return []
+
+    children = []
+    if isinstance(body, dict):
+        children = body.get("data", {}).get("children", [])
+
+    for child in children:
+        d = child.get("data", {})
+        if not d:
+            continue
+        comment_id = d.get("id", "")
+        num_replies = d.get("num_replies", 0) if "num_replies" in d else 0
+        score = d.get("score", 1)
+        permalink = d.get("permalink", "")
+        link_title = d.get("link_title", "")
+        subreddit = d.get("subreddit", "")
+        comment_body = (d.get("body") or "")[:150]
+
+        prev = seen.get(comment_id, {})
+        prev_score = prev.get("score", 1)
+        prev_replies = prev.get("replies", 0)
+
+        # Detect new replies (check via the thread)
+        # For now, detect score changes as engagement signal
+        score_delta = score - prev_score
+        is_fresh = comment_id not in seen
+        is_actionable = False
+
+        if score_delta >= 5 and not is_fresh:
+            alerts.append({
+                "type": "score_change",
+                "comment_id": comment_id,
+                "subreddit": subreddit,
+                "title": link_title,
+                "message": f"Your comment in r/{subreddit} gained +{score_delta} upvotes (now {score})",
+                "url": f"https://reddit.com{permalink}" if permalink else "",
+                "score": score,
+                "delta": score_delta,
+                "actionable": False,
+                "fresh": False,
+            })
+
+        # Update seen state
+        seen[comment_id] = {
+            "score": score,
+            "replies": num_replies,
+            "subreddit": subreddit,
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    # Now check for replies to our comments by fetching each thread
+    # (expensive — only do top 5 most recent)
+    for child in children[:5]:
+        d = child.get("data", {})
+        comment_id = d.get("id", "")
+        link_id = d.get("link_id", "").replace("t3_", "")
+        permalink = d.get("permalink", "")
+        if not link_id or not permalink:
+            continue
+
+        # Fetch the comment context to see replies
+        context_url = f"https://www.reddit.com{permalink}.json?raw_json=1"
+        ctx_fetch = f"{proxy_url}?url={urllib.request.quote(context_url, safe='')}"
+        ctx_req = urllib.request.Request(
+            ctx_fetch,
+            headers={"User-Agent": "delimit-scanner/1.0", "Accept": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(ctx_req, timeout=15) as resp:
+                thread_data = json.loads(resp.read().decode())
+        except Exception:
+            continue
+
+        # thread_data is [post_listing, comment_listing]
+        if not isinstance(thread_data, list) or len(thread_data) < 2:
+            continue
+
+        # Find replies to our comment
+        comment_children = thread_data[1].get("data", {}).get("children", [])
+        for cc in comment_children:
+            cd = cc.get("data", {})
+            if cd.get("id") != comment_id:
+                continue
+            replies_listing = cd.get("replies")
+            if not isinstance(replies_listing, dict):
+                continue
+            reply_children = replies_listing.get("data", {}).get("children", [])
+            for rc in reply_children:
+                rd = rc.get("data", {})
+                reply_id = rd.get("id", "")
+                reply_author = rd.get("author", "")
+                reply_body = (rd.get("body") or "")[:200]
+                if not reply_id or reply_author == username:
+                    continue
+                seen_key = f"reply_{reply_id}"
+                if seen_key in seen:
+                    continue
+                alerts.append({
+                    "type": "reply",
+                    "comment_id": comment_id,
+                    "reply_id": reply_id,
+                    "reply_author": reply_author,
+                    "reply_body": reply_body,
+                    "subreddit": d.get("subreddit", ""),
+                    "title": d.get("link_title", ""),
+                    "message": f"u/{reply_author} replied to your comment in r/{d.get('subreddit','')}: {reply_body[:100]}",
+                    "url": f"https://reddit.com{permalink}" if permalink else "",
+                    "actionable": True,
+                    "fresh": True,
+                })
+                seen[seen_key] = {
+                    "author": reply_author,
+                    "checked_at": datetime.now(timezone.utc).isoformat(),
+                }
+
+        # Rate limit between thread fetches
+        time.sleep(2)
+
+    # Persist seen state
+    try:
+        seen_file.parent.mkdir(parents=True, exist_ok=True)
+        seen_file.write_text(json.dumps(seen, indent=2))
+    except Exception as exc:
+        logger.warning("Failed to save engagement seen state: %s", exc)
+
+    return alerts

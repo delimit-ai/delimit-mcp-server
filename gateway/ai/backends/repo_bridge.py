@@ -158,21 +158,80 @@ def config_audit(target: str = ".", options: Optional[Dict] = None) -> Dict[str,
 # ─── EvidencePack ───────────────────────────────────────────────────────
 
 def evidence_collect(target: str = ".", options: Optional[Dict] = None) -> Dict[str, Any]:
-    """Collect project evidence: git log, test files, configs, governance data."""
-    import subprocess, time as _time
-    root = Path(target).resolve()
-    evidence: Dict[str, Any] = {"collected_at": _time.time(), "target": str(root)}
-    # Git log
-    try:
-        r = subprocess.run(["git", "-C", str(root), "log", "--oneline", "-10"], capture_output=True, text=True, timeout=10)
-        evidence["git_log"] = r.stdout.strip().splitlines() if r.returncode == 0 else []
-    except Exception:
+    """Collect project evidence: git log, test files, configs, governance data.
+
+    Accepts either a local filesystem path (repo directory) or a remote
+    reference (GitHub URL, owner/repo#N, or any non-filesystem string).
+    Remote targets skip the filesystem walk and store reference metadata.
+    """
+    import re
+    import subprocess
+    import time as _time
+
+    opts = options or {}
+    evidence_type = opts.get("evidence_type", "")
+
+    # Detect non-filesystem targets: URLs, owner/repo#N, bare issue refs, etc.
+    is_remote = (
+        "://" in target
+        or target.startswith("http")
+        or re.match(r"^[\w.-]+/[\w.-]+#\d+$", target) is not None
+        or "#" in target
+    )
+
+    evidence: Dict[str, Any] = {"collected_at": _time.time(), "target": target}
+    if evidence_type:
+        evidence["evidence_type"] = evidence_type
+
+    if is_remote:
+        # Remote/reference target — no filesystem walk, just record metadata.
+        evidence["target_type"] = "remote"
         evidence["git_log"] = []
-    # Test files
-    test_dirs = [d for d in ["tests", "test", "__tests__", "spec"] if (root / d).exists()]
-    evidence["test_directories"] = test_dirs
-    # Configs
-    evidence["configs"] = [f.name for f in root.iterdir() if f.is_file() and (f.suffix in [".json", ".yaml", ".yml", ".toml"] or f.name.startswith("."))]
+        evidence["test_directories"] = []
+        evidence["configs"] = []
+        m = re.match(r"^([\w.-]+)/([\w.-]+)#(\d+)$", target)
+        if m:
+            evidence["repo"] = f"{m.group(1)}/{m.group(2)}"
+            evidence["issue_number"] = int(m.group(3))
+    else:
+        root = Path(target).resolve()
+        evidence["target"] = str(root)
+        evidence["target_type"] = "local"
+
+        if not root.exists():
+            return {
+                "tool": "evidence.collect",
+                "status": "error",
+                "error": "target_not_found",
+                "message": f"Path {root} does not exist. For remote targets, pass a URL or owner/repo#N.",
+                "target": target,
+            }
+
+        # Git log (safe for non-git dirs)
+        try:
+            r = subprocess.run(
+                ["git", "-C", str(root), "log", "--oneline", "-10"],
+                capture_output=True, text=True, timeout=10,
+            )
+            evidence["git_log"] = r.stdout.strip().splitlines() if r.returncode == 0 else []
+        except Exception:
+            evidence["git_log"] = []
+
+        # Test dirs + configs (only if target is a directory)
+        if root.is_dir():
+            test_dirs = [d for d in ["tests", "test", "__tests__", "spec"] if (root / d).exists()]
+            evidence["test_directories"] = test_dirs
+            try:
+                evidence["configs"] = [
+                    f.name for f in root.iterdir()
+                    if f.is_file() and (f.suffix in [".json", ".yaml", ".yml", ".toml"] or f.name.startswith("."))
+                ]
+            except (PermissionError, OSError):
+                evidence["configs"] = []
+        else:
+            evidence["test_directories"] = []
+            evidence["configs"] = []
+
     # Save bundle
     ev_dir = Path(os.environ.get("DELIMIT_HOME", str(Path.home() / ".delimit"))) / "evidence"
     ev_dir.mkdir(parents=True, exist_ok=True)
@@ -180,8 +239,13 @@ def evidence_collect(target: str = ".", options: Optional[Dict] = None) -> Dict[
     bundle_path = ev_dir / f"{bundle_id}.json"
     evidence["bundle_id"] = bundle_id
     bundle_path.write_text(json.dumps(evidence, indent=2))
-    return {"tool": "evidence.collect", "status": "ok", "bundle_id": bundle_id,
-            "bundle_path": str(bundle_path), "summary": {k: len(v) if isinstance(v, list) else v for k, v in evidence.items()}}
+    return {
+        "tool": "evidence.collect",
+        "status": "ok",
+        "bundle_id": bundle_id,
+        "bundle_path": str(bundle_path),
+        "summary": {k: len(v) if isinstance(v, list) else v for k, v in evidence.items()},
+    }
 
 
 def evidence_verify(bundle_id: Optional[str] = None, bundle_path: Optional[str] = None, options: Optional[Dict] = None) -> Dict[str, Any]:

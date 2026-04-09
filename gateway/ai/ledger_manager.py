@@ -94,6 +94,40 @@ def _register_venture(info: Dict[str, str]):
 CENTRAL_LEDGER_DIR = Path.home() / ".delimit" / "ledger"
 
 
+def _detect_model() -> str:
+    """Auto-detect which AI model is running this session.
+
+    Checks environment variables set by various AI coding assistants:
+    - CLAUDE_MODEL / CLAUDE_CODE_MODEL: Claude Code
+    - CODEX_MODEL: OpenAI Codex CLI
+    - GEMINI_MODEL: Gemini CLI
+    - MCP_CLIENT_NAME: Generic MCP client identifier
+    Falls back to "unknown" if none are set.
+    """
+    # Claude Code
+    for var in ("CLAUDE_MODEL", "CLAUDE_CODE_MODEL"):
+        val = os.environ.get(var)
+        if val:
+            return val
+
+    # OpenAI Codex
+    val = os.environ.get("CODEX_MODEL")
+    if val:
+        return val
+
+    # Gemini
+    val = os.environ.get("GEMINI_MODEL")
+    if val:
+        return val
+
+    # Generic MCP client
+    val = os.environ.get("MCP_CLIENT_NAME")
+    if val:
+        return val
+
+    return "unknown"
+
+
 def _project_ledger_dir(project_path: str = ".") -> Path:
     """Get the ledger directory — ALWAYS uses central ~/.delimit/ledger/.
 
@@ -161,6 +195,7 @@ def add_item(
     context: str = "",
     tools_needed: Optional[List[str]] = None,
     estimated_complexity: str = "",
+    worked_by: str = "",
 ) -> Dict[str, Any]:
     """Add a new item to the project's strategy or operational ledger.
 
@@ -191,6 +226,7 @@ def add_item(
         "venture": venture["name"],
         "status": "open",
         "tags": tags or [],
+        "worked_by": worked_by or _detect_model(),
     }
     # LED-189: Optional acceptance criteria
     if acceptance_criteria:
@@ -244,6 +280,7 @@ def update_item(
     blocked_by: Optional[str] = None,
     blocks: Optional[str] = None,
     project_path: str = ".",
+    worked_by: str = "",
 ) -> Dict[str, Any]:
     """Update an existing ledger item's fields."""
     _ensure(project_path)
@@ -281,6 +318,7 @@ def update_item(
             "id": item_id,
             "type": "update",
             "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "worked_by": worked_by or _detect_model(),
         }
         if status:
             update["status"] = status
@@ -348,6 +386,8 @@ def list_items(
                         state[item_id]["last_note"] = item["note"]
                     if "priority" in item:
                         state[item_id]["priority"] = item["priority"]
+                    if "worked_by" in item:
+                        state[item_id]["last_worked_by"] = item["worked_by"]
                     state[item_id]["updated_at"] = item.get("updated_at")
             else:
                 state[item_id] = {**item}

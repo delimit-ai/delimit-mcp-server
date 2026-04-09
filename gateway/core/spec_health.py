@@ -32,8 +32,11 @@ PII_PATTERNS = [
     re.compile(r"password\s*[:=]\s*['\"][^'\"]+['\"]", re.IGNORECASE),  # Hardcoded passwords
 ]
 
-# HTTP methods that are standard for REST
-STANDARD_METHODS = {"get", "post", "put", "patch", "delete", "head", "options"}
+# HTTP methods that are standard for REST.
+# LED-290: "trace" (OpenAPI 3.x) and "query" (OpenAPI 3.2.0) are recognized
+# but not required. The QUERY method allows safe, idempotent requests with
+# a request body, so it is intentionally absent from NO_BODY_METHODS.
+STANDARD_METHODS = {"get", "post", "put", "patch", "delete", "head", "options", "trace", "query"}
 
 # Methods that should not have request bodies per HTTP semantics
 NO_BODY_METHODS = {"get", "head", "delete"}

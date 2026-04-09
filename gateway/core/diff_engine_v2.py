@@ -127,10 +127,14 @@ class OpenAPIDiffEngine:
         for path in old_set & new_set:
             self._compare_methods(path, old_paths[path], new_paths[path])
     
+    # LED-290: include "trace" (OpenAPI 3.0+) and "query" (OpenAPI 3.2.0
+    # adds the QUERY HTTP method for safe, idempotent requests with bodies).
+    HTTP_METHODS = ("get", "post", "put", "delete", "patch", "head", "options", "trace", "query")
+
     def _compare_methods(self, path: str, old_methods: Dict, new_methods: Dict):
         """Compare HTTP methods for an endpoint."""
-        old_set = set(m for m in old_methods.keys() if m in ["get", "post", "put", "delete", "patch", "head", "options"])
-        new_set = set(m for m in new_methods.keys() if m in ["get", "post", "put", "delete", "patch", "head", "options"])
+        old_set = set(m for m in old_methods.keys() if m in self.HTTP_METHODS)
+        new_set = set(m for m in new_methods.keys() if m in self.HTTP_METHODS)
         
         # Check removed methods
         for method in old_set - new_set:

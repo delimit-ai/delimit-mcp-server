@@ -6,8 +6,9 @@ heavy MCP decorator dependencies).
 
 import json
 import os
+import stat
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 
 def activate_auto_permissions(auto_permissions: bool) -> dict:
@@ -94,6 +95,228 @@ def configure_codex_permissions(config_path: Path) -> dict:
         return {"item": "Permissions", "status": "Pass", "detail": f"Codex: added trust_level=trusted to {config_path}"}
     else:
         return {"item": "Permissions", "status": "Pass", "detail": "Codex: delimit section exists"}
+
+
+# ─── LED-269: Filesystem permission auto-config for delimit_init ──────
+#
+# Safety contract:
+#   - Never chmod 777
+#   - Never touch anything outside <project>/.delimit/ or
+#     <project>/.claude/settings.json
+#   - Never modify existing permissions on files we did not create
+#     (we only chmod files/dirs we just created or that match our
+#     known-safe set: .delimit/ itself, .delimit/secrets/* files)
+#   - Idempotent: running twice is a no-op for already-correct state
+#   - Backwards compatible: existing installs work without re-running init
+
+
+# Reasonable default permission allowlist for AI assistants working
+# inside a Delimit-governed project. Mirrors what most projects already
+# grant manually. Conservative — no `Bash(rm:*)`, no wildcards on dangerous
+# commands, no network egress beyond what tools need.
+_DEFAULT_CLAUDE_PROJECT_ALLOW: List[str] = [
+    "Edit",
+    "Write",
+    "Read",
+    "Glob",
+    "Grep",
+    "Bash(git status)",
+    "Bash(git diff:*)",
+    "Bash(git log:*)",
+    "Bash(git add:*)",
+    "Bash(ls:*)",
+    "Bash(cat:*)",
+    "Bash(pwd)",
+    "Bash(delimit:*)",
+    "Bash(npm test:*)",
+    "Bash(npm run:*)",
+    "Bash(pytest:*)",
+    "Bash(python:*)",
+    "Bash(python3:*)",
+    "mcp__delimit__*",
+]
+
+
+def _safe_chmod(path: Path, mode: int) -> bool:
+    """chmod a path defensively. Returns True if applied, False on any error.
+
+    Refuses world-writable bits (0o002) outright. Never raises.
+    """
+    if mode & 0o002:
+        return False
+    try:
+        path.chmod(mode)
+        return True
+    except (OSError, PermissionError):
+        return False
+
+
+def _detect_target_owner(project_root: Path) -> tuple:
+    """If running as root, detect the (uid, gid) of the project owner so
+    we can chown anything we create back to them. Returns (None, None)
+    if not running as root or detection fails.
+    """
+    try:
+        if os.geteuid() != 0:
+            return (None, None)
+    except AttributeError:
+        # Windows or platform without geteuid
+        return (None, None)
+
+    try:
+        st = project_root.stat()
+        # Don't chown to root-owned projects (no-op)
+        if st.st_uid == 0 and st.st_gid == 0:
+            return (None, None)
+        return (st.st_uid, st.st_gid)
+    except OSError:
+        return (None, None)
+
+
+def _safe_chown(path: Path, uid, gid) -> None:
+    """chown a path defensively. Never raises."""
+    if uid is None or gid is None:
+        return
+    try:
+        os.chown(str(path), uid, gid)
+    except (OSError, PermissionError, AttributeError):
+        pass
+
+
+def setup_init_permissions(project_root: Path, no_permissions: bool = False) -> Dict[str, Any]:
+    """LED-269: Configure filesystem permissions for a freshly-initialized
+    Delimit project.
+
+    Performs:
+      1. chmod 755 on <project>/.delimit/ (idempotent)
+      2. chmod 600 on every file under <project>/.delimit/secrets/ (if dir exists)
+      3. Creates <project>/.claude/settings.json with a reasonable Edit/Write/
+         Bash allowlist if it does not already exist (never overwrites)
+      4. If running as root, chowns anything we created back to the project
+         owner so the user can still access their own files
+
+    Args:
+        project_root: Resolved absolute path to the project root.
+        no_permissions: If True, skip everything and return a 'skipped' result.
+
+    Returns:
+        Dict with keys: status, applied (list of changes), skipped (list of
+        items skipped with reason), warnings (list).
+    """
+    result: Dict[str, Any] = {
+        "status": "skipped" if no_permissions else "ok",
+        "applied": [],
+        "skipped": [],
+        "warnings": [],
+    }
+
+    if no_permissions:
+        result["skipped"].append("--no-permissions flag set")
+        return result
+
+    project_root = Path(project_root).resolve()
+    delimit_dir = project_root / ".delimit"
+
+    # Hard safety guard: refuse to operate if .delimit/ doesn't exist.
+    # delimit_init creates it before calling us — if it's missing something
+    # is wrong and we should not silently chmod random paths.
+    if not delimit_dir.is_dir():
+        result["status"] = "error"
+        result["warnings"].append(f".delimit/ not found at {delimit_dir} — refusing to set permissions")
+        return result
+
+    target_uid, target_gid = _detect_target_owner(project_root)
+    running_as_root = target_uid is not None
+
+    # 1. chmod 755 on .delimit/
+    try:
+        current_mode = stat.S_IMODE(delimit_dir.stat().st_mode)
+        if current_mode != 0o755:
+            if _safe_chmod(delimit_dir, 0o755):
+                result["applied"].append(f"chmod 755 {delimit_dir}")
+            else:
+                result["warnings"].append(f"Could not chmod {delimit_dir}")
+        else:
+            result["skipped"].append(f"{delimit_dir} already 755")
+    except OSError as e:
+        result["warnings"].append(f"stat failed on {delimit_dir}: {e}")
+
+    # 2. chmod 600 on secrets files (only if secrets dir exists)
+    secrets_dir = delimit_dir / "secrets"
+    if secrets_dir.is_dir():
+        # Lock the secrets dir itself to 700
+        try:
+            current_mode = stat.S_IMODE(secrets_dir.stat().st_mode)
+            if current_mode != 0o700:
+                if _safe_chmod(secrets_dir, 0o700):
+                    result["applied"].append(f"chmod 700 {secrets_dir}")
+        except OSError:
+            pass
+
+        for entry in secrets_dir.iterdir():
+            if not entry.is_file():
+                continue
+            try:
+                current_mode = stat.S_IMODE(entry.stat().st_mode)
+                if current_mode != 0o600:
+                    if _safe_chmod(entry, 0o600):
+                        result["applied"].append(f"chmod 600 {entry}")
+                    else:
+                        result["warnings"].append(f"Could not chmod {entry}")
+            except OSError:
+                continue
+    else:
+        result["skipped"].append("no secrets/ directory present")
+
+    # 3. Create project-local .claude/settings.json with reasonable allowlist
+    claude_dir = project_root / ".claude"
+    claude_settings = claude_dir / "settings.json"
+    if claude_settings.exists():
+        result["skipped"].append(f"{claude_settings} already exists (not modified)")
+    else:
+        try:
+            claude_dir.mkdir(parents=True, exist_ok=True)
+            settings_payload = {
+                "permissions": {
+                    "allow": list(_DEFAULT_CLAUDE_PROJECT_ALLOW),
+                    "deny": [
+                        "Bash(rm -rf:*)",
+                        "Bash(sudo:*)",
+                    ],
+                },
+                "_generated_by": "delimit_init",
+                "_note": "Edit freely. Delimit will never overwrite this file.",
+            }
+            claude_settings.write_text(json.dumps(settings_payload, indent=2) + "\n")
+            # Lock to 644 (or 600 if it lives in a secrets dir, which it doesn't)
+            _safe_chmod(claude_settings, 0o644)
+            result["applied"].append(f"created {claude_settings}")
+
+            if running_as_root:
+                _safe_chown(claude_dir, target_uid, target_gid)
+                _safe_chown(claude_settings, target_uid, target_gid)
+        except OSError as e:
+            result["warnings"].append(f"Could not create {claude_settings}: {e}")
+
+    # 4. Re-chown .delimit/ tree if we're root and there's a non-root owner
+    if running_as_root:
+        try:
+            for path in [delimit_dir, *delimit_dir.rglob("*")]:
+                # Only chown if currently owned by root — never override
+                # an existing non-root owner
+                try:
+                    if path.stat().st_uid == 0:
+                        _safe_chown(path, target_uid, target_gid)
+                except OSError:
+                    continue
+            result["applied"].append(f"chown -R {target_uid}:{target_gid} {delimit_dir} (root-owned entries)")
+        except OSError:
+            pass
+
+    if not result["applied"] and not result["warnings"]:
+        result["status"] = "noop"
+
+    return result
 
 
 def build_checklist(
@@ -185,26 +408,49 @@ def build_checklist(
             checklist.append({"item": label, "status": "Skip (Pro)", "detail": "Requires Delimit Pro"})
 
     # --- Score: only count applicable checks (exclude skips) ---
+    # LED-270: explicitly distinguish passed / failed / skipped so callers
+    # (CI, dashboards, CLI summaries) can render them separately. Skipped
+    # checks (premium on free tier, no test framework, no AI assistant)
+    # never count as failures and are excluded from the score denominator.
     applicable = [c for c in checklist if not c["status"].startswith("Skip")]
     passed_total = sum(1 for c in applicable if c["status"] == "Pass")
+    failed_total = sum(1 for c in applicable if c["status"] == "Fail")
+    skipped_total = len(checklist) - len(applicable)
+    # Break out skip reasons so the UI can show "X Pro features locked"
+    # without conflating them with "no test framework"-style skips.
+    skipped_premium = sum(1 for c in checklist if c["status"] == "Skip (Pro)")
+    skipped_other = skipped_total - skipped_premium
     total = len(applicable)
     score = f"{passed_total}/{total}"
+
+    tier = get_license().get("tier", "free")
 
     result: Dict[str, Any] = {
         "tool": "activate",
         "status": "complete",
         "score": score,
         "passed": passed_total,
+        "failed": failed_total,
         "total": total,
-        "skipped": len(checklist) - total,
+        "skipped": skipped_total,
+        "skipped_premium": skipped_premium,
+        "skipped_other": skipped_other,
         "checklist": checklist,
-        "tier": get_license().get("tier", "free"),
+        "tier": tier,
         "project": str(p),
     }
-    if passed_total == total and total > 0:
-        result["message"] = f"All {total} checks passed. Delimit is fully operational."
-    elif passed_total < total:
+    if failed_total == 0 and total > 0:
+        msg = f"All {total} checks passed. Delimit is fully operational."
+        if skipped_premium > 0 and tier == "free":
+            msg += f" ({skipped_premium} Pro features available with upgrade.)"
+        result["message"] = msg
+    elif failed_total > 0:
         failed_items = [c["item"] for c in applicable if c["status"] == "Fail"]
-        result["message"] = f"{passed_total}/{total} checks passed. Fix: {', '.join(failed_items)}"
+        result["message"] = (
+            f"{passed_total}/{total} checks passed, {failed_total} failed. "
+            f"Fix: {', '.join(failed_items)}"
+        )
+    else:
+        result["message"] = f"{passed_total}/{total} checks passed."
 
     return result

@@ -1677,12 +1677,19 @@ def delimit_zero_spec(
 def delimit_init(
     project_path: str = ".",
     preset: str = "default",
+    no_permissions: bool = False,
 ) -> Dict[str, Any]:
     """Initialize Delimit governance for a project. Creates .delimit/policies.yml and ledger directory.
+
+    Also auto-configures filesystem permissions: chmod 755 on .delimit/,
+    chmod 600 on any .delimit/secrets/* files, and creates a project-local
+    .claude/settings.json with a reasonable Edit/Write/Bash allowlist if one
+    does not already exist. Pass no_permissions=True to skip permission setup.
 
     Args:
         project_path: Project root directory.
         preset: Policy preset - strict, default, or relaxed.
+        no_permissions: Skip the filesystem permission auto-config (LED-269).
     """
     VALID_PRESETS = ("strict", "default", "relaxed")
     if preset not in VALID_PRESETS:
@@ -1708,12 +1715,18 @@ def delimit_init(
         and strategy_file.exists()
     ):
         environment = _detect_environment()
+        # LED-269: Re-run permission setup on idempotent re-init so existing
+        # installs (created before LED-269) can pick up correct perms by
+        # simply re-running delimit_init.
+        from ai.activate_helpers import setup_init_permissions
+        permissions = setup_init_permissions(root, no_permissions=no_permissions)
         return _with_next_steps("init", {
             "tool": "init",
             "status": "already_initialized",
             "project_path": str(root),
             "preset": preset,
             "environment": environment,
+            "permissions": permissions,
             "message": f"Project already initialized at {delimit_dir}. No files overwritten.",
         })
 
@@ -1761,6 +1774,11 @@ def delimit_init(
     # Auto-detect available API keys and CLIs
     environment = _detect_environment()
 
+    # LED-269: Filesystem permission auto-config (chmod, .claude/settings.json,
+    # ownership). Pass no_permissions=True to skip.
+    from ai.activate_helpers import setup_init_permissions
+    permissions = setup_init_permissions(root, no_permissions=no_permissions)
+
     return _with_next_steps("init", {
         "tool": "init",
         "status": "initialized",
@@ -1768,6 +1786,7 @@ def delimit_init(
         "preset": preset,
         "created": created,
         "environment": environment,
+        "permissions": permissions,
         "message": f"Governance initialized with '{preset}' preset. {len(created)} items created.",
     })
 
@@ -2983,18 +3002,22 @@ def delimit_security_audit(target: str = ".") -> Dict[str, Any]:
 # ─── Evidence ───────────────────────────────────────────────────────────
 
 @mcp.tool()
-def delimit_evidence_collect(target: str = ".") -> Dict[str, Any]:
+def delimit_evidence_collect(target: str = ".", evidence_type: str = "") -> Dict[str, Any]:
     """Collect evidence artifacts for governance (Pro).
 
     Args:
         target: Repository or task path.
+        evidence_type: Type of evidence (e.g. "deploy", "security", "test", "audit"). Stored in bundle metadata.
     """
     from ai.license import require_premium
     gate = require_premium("evidence_collect")
     if gate:
         return gate
     from backends.repo_bridge import evidence_collect
-    return _with_next_steps("evidence_collect", _safe_call(evidence_collect, target=target))
+    options = {}
+    if evidence_type:
+        options["evidence_type"] = evidence_type
+    return _with_next_steps("evidence_collect", _safe_call(evidence_collect, target=target, options=options or None))
 
 
 @mcp.tool()
@@ -4332,7 +4355,7 @@ def delimit_help(tool_name: str = "") -> Dict[str, Any]:
 
 
 @mcp.tool()
-def delimit_diagnose(project_path: str = ".") -> Dict[str, Any]:
+def delimit_diagnose(project_path: str = ".", dry_run: bool = False, undo: bool = False) -> Dict[str, Any]:
     """Comprehensive health check of your Delimit installation (delimit doctor).
 
     Universal debugging tool. Runs 10 checks covering MCP connectivity,
@@ -4342,10 +4365,84 @@ def delimit_diagnose(project_path: str = ".") -> Dict[str, Any]:
 
     Args:
         project_path: Project to diagnose.
+        dry_run: If True, return a preview of what doctor would create/modify without executing changes.
+        undo: If True, revert changes from the last doctor --fix run using the saved manifest.
     """
     import sys
+    import hashlib
     import urllib.request
     import urllib.error
+
+    p_resolve = Path(project_path).resolve()
+    manifest_path = p_resolve / ".delimit" / "doctor-manifest.json"
+
+    # ── Undo mode: revert changes from last doctor run ──────────────────
+    if undo:
+        if not manifest_path.is_file():
+            return {"status": "no_manifest", "message": "No doctor-manifest.json found. Nothing to undo."}
+        try:
+            manifest = json.loads(manifest_path.read_text())
+        except Exception as exc:
+            return {"status": "error", "message": f"Failed to read manifest: {exc}"}
+        reverted = []
+        skipped = []
+        for entry in manifest.get("actions", []):
+            target = Path(entry["path"])
+            action = entry["action"]
+            if action == "created":
+                if target.is_file():
+                    target.unlink()
+                    reverted.append({"path": str(target), "action": "deleted"})
+                elif target.is_dir():
+                    import shutil
+                    shutil.rmtree(target, ignore_errors=True)
+                    reverted.append({"path": str(target), "action": "deleted_dir"})
+                else:
+                    skipped.append({"path": str(target), "reason": "already_gone"})
+            elif action == "modified":
+                # We stored original_hash but not original content — cannot restore
+                skipped.append({"path": str(target), "reason": "modified_files_cannot_be_restored"})
+            else:
+                skipped.append({"path": str(target), "reason": f"unknown_action_{action}"})
+        # Remove the manifest itself
+        manifest_path.unlink(missing_ok=True)
+        return {
+            "status": "undo_complete",
+            "reverted": reverted,
+            "skipped": skipped,
+            "message": f"Reverted {len(reverted)} item(s), skipped {len(skipped)}.",
+        }
+
+    # ── Dry-run mode: preview what doctor would create/modify ───────────
+    if dry_run:
+        planned = []
+        delimit_dir = p_resolve / ".delimit"
+        if not delimit_dir.is_dir():
+            planned.append({"path": str(delimit_dir), "action": "create_dir", "description": ".delimit/ governance directory"})
+            planned.append({"path": str(delimit_dir / "policies.yml"), "action": "create_file", "description": "Governance policy rules"})
+            planned.append({"path": str(delimit_dir / "ledger"), "action": "create_dir", "description": "Operations ledger directory"})
+            planned.append({"path": str(delimit_dir / "ledger" / "operations.jsonl"), "action": "create_file", "description": "Operations ledger"})
+            planned.append({"path": str(delimit_dir / "evidence"), "action": "create_dir", "description": "Audit trail events directory"})
+        else:
+            if not (delimit_dir / "policies.yml").is_file():
+                planned.append({"path": str(delimit_dir / "policies.yml"), "action": "create_file", "description": "Governance policy rules"})
+            if not (delimit_dir / "ledger").is_dir():
+                planned.append({"path": str(delimit_dir / "ledger"), "action": "create_dir", "description": "Operations ledger directory"})
+            if not (delimit_dir / "evidence").is_dir():
+                planned.append({"path": str(delimit_dir / "evidence"), "action": "create_dir", "description": "Audit trail events directory"})
+        # Check for GitHub workflow creation
+        github_dir = p_resolve / ".github" / "workflows"
+        if github_dir.is_dir():
+            wf = github_dir / "api-governance.yml"
+            if not wf.is_file():
+                planned.append({"path": str(wf), "action": "create_file", "description": "API governance GitHub Action workflow"})
+        return {
+            "status": "dry_run",
+            "planned_changes": planned,
+            "change_count": len(planned),
+            "message": f"Doctor would create/modify {len(planned)} item(s). Run without --dry-run to apply."
+                       if planned else "No changes needed.",
+        }
 
     issues: List[Dict[str, str]] = []
     checks: Dict[str, Any] = {}
@@ -4832,10 +4929,12 @@ def delimit_ledger_add(
     priority: str = "P1",
     description: str = "",
     source: str = "session",
+    tags: Optional[Union[str, List[str]]] = None,
     acceptance_criteria: Optional[Union[str, List[str]]] = None,
     context: str = "",
     tools_needed: Optional[Union[str, List[str]]] = None,
     estimated_complexity: str = "",
+    worked_by: str = "",
 ) -> Dict[str, Any]:
     """Add a new item to a project's ledger.
 
@@ -4850,11 +4949,17 @@ def delimit_ledger_add(
         priority: P0 (urgent), P1 (important), P2 (nice to have).
         description: Details.
         source: Where this came from (session, consensus, focus-group, etc).
+        tags: Labels/tags (e.g. ["deploy-ready", "ship"] or "deploy-ready,ship").
         acceptance_criteria: List of testable "done when" conditions (e.g. "tests pass", "coverage > 80%").
         context: Background info an AI agent needs to work on this item.
         tools_needed: Delimit tools needed (e.g. "delimit_lint", "delimit_test_coverage").
         estimated_complexity: small, medium, or large.
+        worked_by: Which AI model is working on this. Auto-detected if empty.
     """
+    try:
+        tags = _coerce_list_arg(tags, "tags")
+    except ValueError:
+        tags = None
     try:
         acceptance_criteria = _coerce_list_arg(acceptance_criteria, "acceptance_criteria")
     except ValueError:
@@ -4867,8 +4972,9 @@ def delimit_ledger_add(
     project = _resolve_venture(venture)
     result = add_item(title=title, ledger=ledger, type=item_type, priority=priority,
                       description=description, source=source, project_path=project,
-                      acceptance_criteria=acceptance_criteria, context=context,
-                      tools_needed=tools_needed, estimated_complexity=estimated_complexity)
+                      tags=tags, acceptance_criteria=acceptance_criteria, context=context,
+                      tools_needed=tools_needed, estimated_complexity=estimated_complexity,
+                      worked_by=worked_by)
     return _with_next_steps("ledger_add", result)
 
 
@@ -4886,6 +4992,7 @@ def delimit_ledger_update(
     labels: Optional[Union[str, List[str]]] = None,
     blocked_by: str = "",
     blocks: str = "",
+    worked_by: str = "",
 ) -> Dict[str, Any]:
     """Update any field on a ledger item.
 
@@ -4905,6 +5012,7 @@ def delimit_ledger_update(
         labels: Labels/tags (e.g. ["dashboard", "ux"] or "dashboard,ux").
         blocked_by: Item ID that blocks this item (e.g. "LED-025").
         blocks: Item ID that this item blocks (e.g. "STR-005").
+        worked_by: Which AI model is working on this. Auto-detected if empty.
     """
     try:
         labels = _coerce_list_arg(labels, "labels") if labels else None
@@ -4917,7 +5025,7 @@ def delimit_ledger_update(
         title=title or None, description=description or None, note=note or None,
         assignee=assignee or None, due_date=due_date or None, labels=labels,
         blocked_by=blocked_by or None, blocks=blocks or None,
-        project_path=project,
+        project_path=project, worked_by=worked_by,
     )
     return _with_next_steps("ledger_update", result)
 
@@ -6943,29 +7051,70 @@ def delimit_daemon_run(iterations: int = 1, dry_run: bool = True) -> Dict[str, A
     ))
 
 @mcp.tool()
-def delimit_build_loop(action: str = "run", session_id: str = "") -> Dict[str, Any]:
-    """Execute the governed continuous build loop (LED-239).
+def delimit_build_loop(action: str = "run", session_id: str = "", loop_type: str = "build") -> Dict[str, Any]:
+    """Execute a governed continuous loop (LED-239).
 
-    Requirements:
-    - root ledger in /root/.delimit is authoritative
-    - select only build-safe open items
-    - resolve venture + repo before dispatch
-    - use Delimit swarm/governance as control plane
-    - enforce max-iteration, max-error, and max-cost safeguards
+    Supports three loop types matching the OS terminal model:
+    - **build**: picks feat/fix/task items from ledger, dispatches via swarm
+    - **social** (think): scans Reddit/X/HN, drafts replies, handles social/outreach/content/sensor ledger items
+    - **deploy**: runs deploy gates, publishes, verifies
 
     Args:
         action: 'init' to start a session, 'run' to execute one iteration.
         session_id: Optional session ID to continue.
+        loop_type: 'build', 'social', or 'deploy' (default: build).
     """
-    from ai.loop_engine import create_governed_session, run_governed_iteration
+    from ai.loop_engine import create_governed_session, run_governed_iteration, run_social_iteration
 
     if action == "init":
-        return _with_next_steps("build_loop", create_governed_session())
+        return _with_next_steps("build_loop", create_governed_session(loop_type=loop_type))
     else:
         if not session_id:
-            # Try to pick up existing or create new
-            session_id = create_governed_session()["session_id"]
-        return _with_next_steps("build_loop", run_governed_iteration(session_id))
+            session_id = create_governed_session(loop_type=loop_type)["session_id"]
+        if loop_type == "social" or session_id.startswith("social-"):
+            return _with_next_steps("build_loop", run_social_iteration(session_id))
+        else:
+            return _with_next_steps("build_loop", run_governed_iteration(session_id))
+
+
+@mcp.tool()
+def delimit_build_loop_daemon(
+    action: str = "status",
+    session_id: str = "",
+    interval_seconds: int = 900,
+    loop_type: str = "build",
+) -> Dict[str, Any]:
+    """Background auto-pull daemon for the governed build/social/deploy loops (Pro).
+
+    Spawns a daemon thread that calls run_governed_iteration (or run_social_iteration)
+    every interval_seconds. Preserves the pull-based triage pattern — each tick logs
+    the returned task_id to ~/.delimit/logs/loop_daemon_{session_id}.jsonl so the
+    orchestrating Claude session can tail the log and handle triage.
+
+    Respects existing delimit_loop_config safeguards (cost_cap, error_threshold,
+    max_iterations, status=paused/stopped) via loop_status check before each tick.
+
+    Args:
+        action: 'start', 'stop', or 'status' (default: status)
+        session_id: Session to run (required for all actions)
+        interval_seconds: Tick interval in seconds (default 900 = 15 min). Only used on start.
+        loop_type: 'build', 'social', or 'deploy' (default: build). Only used on start.
+    """
+    from ai.license import require_premium
+    gate = require_premium("build_loop_daemon")
+    if gate:
+        return gate
+    from ai import loop_daemon
+    if not session_id:
+        return {"error": "session_id is required"}
+    if action == "start":
+        return _with_next_steps("build_loop_daemon", loop_daemon.start(session_id, interval_seconds, loop_type))
+    elif action == "stop":
+        return _with_next_steps("build_loop_daemon", loop_daemon.stop(session_id))
+    elif action == "status":
+        return _with_next_steps("build_loop_daemon", loop_daemon.status(session_id))
+    else:
+        return {"error": f"unknown action: {action}. Expected start, stop, or status."}
 
 
 @mcp.tool()
@@ -8072,6 +8221,92 @@ def main():
     """Entry point for `delimit-mcp` console script."""
     import asyncio
     asyncio.run(run_mcp_server(mcp))
+
+# ═══════════════════════════════════════════════════════════════════════
+#  CONTENT INTELLIGENCE (LED-797) — tweet corpus → long-form content radar
+# ═══════════════════════════════════════════════════════════════════════
+
+
+@mcp.tool()
+def delimit_content_intel_daily(
+    date: str = "",
+    since_hours: int = 72,
+    top_n: int = 5,
+    email: bool = True,
+) -> Dict[str, Any]:
+    """Run the daily content intelligence digest (LED-797).
+
+    Clusters the tweet corpus over a trailing window, intersects with
+    Delimit's ground truth feature list, and drafts per-channel content
+    seeds (Reddit targets, blog topics, Dev.to tutorials, HN submissions).
+
+    Every draft cites at least 3 corpus rows verbatim with engagement counts
+    and grounds all product claims in shipped features. NO AUTO-POSTING —
+    drafts are written to ~/.delimit/content/ and (if email=True) emailed
+    to the founder for manual approval.
+
+    Args:
+        date: ISO date string (YYYY-MM-DD). Default = today UTC.
+        since_hours: Trailing window for clustering. Default 72h.
+        top_n: Max topics to draft per channel. Default 5.
+        email: Send the digest email via delimit_notify. Default True.
+    """
+    from ai.content_intel import ContentIntelligence
+    try:
+        ci = ContentIntelligence()
+        return ci.generate_daily_digest(
+            date=date or None,
+            since_hours=since_hours,
+            top_n=top_n,
+            email=email,
+        )
+    except Exception as e:
+        logger.error("delimit_content_intel_daily failed: %s", e)
+        return {"error": str(e)}
+
+
+@mcp.tool()
+def delimit_content_intel_topic(keyword: str, since_hours: int = 168) -> Dict[str, Any]:
+    """On-demand content intelligence probe for a single keyword (LED-797).
+
+    Runs the same cluster → intersect → rank pipeline as the daily digest
+    but filtered to one keyword and over a longer 7-day window by default.
+    Returns ranked topics with cited sample tweets — does NOT write files
+    or send email.
+
+    Args:
+        keyword: Topic keyword to probe (e.g. "openapi", "claude code").
+        since_hours: Trailing window in hours. Default 168 (7 days).
+    """
+    from ai.content_intel import ContentIntelligence
+    try:
+        ci = ContentIntelligence()
+        return ci.topic_probe(keyword=keyword, since_hours=since_hours)
+    except Exception as e:
+        logger.error("delimit_content_intel_topic failed: %s", e)
+        return {"error": str(e)}
+
+
+@mcp.tool()
+def delimit_content_intel_weekly(date: str = "") -> Dict[str, Any]:
+    """Run the weekly content intelligence summary (LED-797).
+
+    7-day rollup: top topics that intersect Delimit ground truth, plus a
+    covered/missed split showing which topics already made it into a daily
+    digest and which slipped through. Designed to run every Monday 09:00 UTC
+    via cron (`delimit_content_intel_weekly`).
+
+    Args:
+        date: ISO date (YYYY-MM-DD). Default = today UTC.
+    """
+    from ai.content_intel import ContentIntelligence
+    try:
+        ci = ContentIntelligence()
+        return ci.generate_weekly_summary(date=date or None)
+    except Exception as e:
+        logger.error("delimit_content_intel_weekly failed: %s", e)
+        return {"error": str(e)}
+
 
 @mcp.tool()
 def delimit_reddit_fetch_thread(thread_id: str) -> Dict[str, Any]:

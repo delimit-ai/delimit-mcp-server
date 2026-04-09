@@ -45,8 +45,162 @@ FREE_TRIAL_LIMITS = {
 }
 
 
+def needs_revalidation(data: dict) -> bool:
+    """Check if a license needs re-validation (30+ days since last check).
+
+    Args:
+        data: License data dict (from license.json).
+
+    Returns:
+        True if 30+ days have elapsed since last_validated_at (or activated_at
+        as fallback). Also returns True if neither timestamp exists (legacy
+        license.json files without last_validated_at).
+    """
+    if data.get("tier") not in ("pro", "enterprise"):
+        return False
+    last_validated = data.get("last_validated_at", data.get("activated_at", 0))
+    if last_validated == 0:
+        return True  # Legacy file — treat as needing validation
+    return (time.time() - last_validated) > REVALIDATION_INTERVAL
+
+
+def revalidate_license(data: dict) -> dict:
+    """Re-validate a license against Lemon Squeezy.
+
+    Privacy-preserving: only sends license_key and instance_name (machine hash).
+    Non-blocking: network failures return offline grace status, never crash.
+
+    Args:
+        data: License data dict (must contain 'key').
+
+    Returns:
+        Dict with 'status' key:
+          - "valid": API confirmed license is active, last_validated_at updated
+          - "grace": API unreachable or returned invalid, but within grace period
+          - "expired": beyond grace + hard block cutoff, Pro tools should be blocked
+        Also includes 'updated_data' with the (possibly modified) license data.
+    """
+    key = data.get("key", "")
+    # Internal/founder keys always pass
+    if not key or key.startswith("JAMSONS"):
+        data["last_validated_at"] = time.time()
+        data["validation_status"] = "current"
+        _write_license(data)
+        return {"status": "valid", "updated_data": data}
+
+    last_validated = data.get("last_validated_at", data.get("activated_at", 0))
+    elapsed = time.time() - last_validated
+
+    # Try API call
+    api_valid = _call_lemon_squeezy(data)
+
+    if api_valid is True:
+        data["last_validated_at"] = time.time()
+        data["validation_status"] = "current"
+        data.pop("grace_days_remaining", None)
+        _write_license(data)
+        return {"status": "valid", "updated_data": data}
+
+    # API said invalid or was unreachable — check grace/expiry windows
+    if elapsed > REVALIDATION_INTERVAL + HARD_BLOCK:
+        data["validation_status"] = "expired"
+        data["valid"] = False
+        _write_license(data)
+        return {
+            "status": "expired",
+            "updated_data": data,
+            "reason": "License expired — no successful re-validation in 44 days. Renew at https://delimit.ai/pricing",
+        }
+
+    if elapsed > REVALIDATION_INTERVAL + GRACE_PERIOD:
+        days_left = max(0, int((REVALIDATION_INTERVAL + HARD_BLOCK - elapsed) / 86400))
+        data["validation_status"] = "grace_period"
+        data["grace_days_remaining"] = days_left
+        _write_license(data)
+        return {
+            "status": "grace",
+            "updated_data": data,
+            "grace_days_remaining": days_left,
+            "message": f"License re-validation failed. {days_left} days until Pro features are disabled.",
+        }
+
+    # Within first 7 days after revalidation interval — soft pending
+    data["validation_status"] = "revalidation_pending"
+    _write_license(data)
+    return {"status": "grace", "updated_data": data}
+
+
+def is_license_valid(data: dict) -> bool:
+    """Check if a license is currently valid for Pro tool access.
+
+    Returns True if:
+      - last_validated_at is within 30 days (current), OR
+      - last_validated_at is within 37 days (30 + 7 grace), OR
+      - last_validated_at is within 44 days (30 + 14 hard cutoff)
+    Returns False if beyond 44 days with no successful re-validation.
+
+    Backwards compatible: missing last_validated_at falls back to activated_at,
+    and missing both returns False (triggers re-validation).
+    """
+    if data.get("tier") not in ("pro", "enterprise"):
+        return False
+    if not data.get("valid", False):
+        return False
+    # Internal/founder keys always valid
+    key = data.get("key", "")
+    if key.startswith("JAMSONS"):
+        return True
+    last_validated = data.get("last_validated_at", data.get("activated_at", 0))
+    if last_validated == 0:
+        return True  # Legacy — allow access but needs_revalidation will trigger check
+    elapsed = time.time() - last_validated
+    return elapsed <= (REVALIDATION_INTERVAL + HARD_BLOCK)
+
+
+def _write_license(data: dict) -> None:
+    """Persist license data to disk."""
+    try:
+        LICENSE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        LICENSE_FILE.write_text(json.dumps(data, indent=2))
+    except Exception:
+        pass  # Non-blocking — don't crash on disk errors
+
+
+def _call_lemon_squeezy(data: dict) -> bool | None:
+    """Call Lemon Squeezy validation API. Privacy-preserving.
+
+    Only sends license_key and instance_name (machine hash).
+
+    Returns:
+        True if valid, False if invalid, None if unreachable.
+    """
+    key = data.get("key", "")
+    machine_hash = data.get("machine_hash", hashlib.sha256(str(Path.home()).encode()).hexdigest()[:16])
+    try:
+        import urllib.request
+        req_data = json.dumps({
+            "license_key": key,
+            "instance_name": machine_hash,
+        }).encode()
+        req = urllib.request.Request(
+            LS_VALIDATE_URL, data=req_data,
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            result = json.loads(resp.read())
+        return result.get("valid", False)
+    except Exception:
+        return None  # Unreachable — caller should use grace period
+
+
 def load_license() -> dict:
-    """Load and validate license with re-validation."""
+    """Load and validate license with periodic re-validation.
+
+    Re-validates against Lemon Squeezy every 30 days. On failure, provides
+    a 7-day grace period followed by a 7-day warning period. After 44 days
+    without successful re-validation, Pro tools are blocked.
+    """
     if not LICENSE_FILE.exists():
         return {"tier": "free", "valid": True}
     try:
@@ -55,33 +209,25 @@ def load_license() -> dict:
             return {"tier": "free", "valid": True, "expired": True}
 
         if data.get("tier") in ("pro", "enterprise") and data.get("valid"):
-            last_validated = data.get("last_validated_at", data.get("activated_at", 0))
-            elapsed = time.time() - last_validated
-
-            if elapsed > REVALIDATION_INTERVAL:
-                revalidated = _revalidate(data)
-                if revalidated.get("valid"):
-                    data["last_validated_at"] = time.time()
-                    data["validation_status"] = "current"
-                    LICENSE_FILE.write_text(json.dumps(data, indent=2))
-                elif elapsed > REVALIDATION_INTERVAL + HARD_BLOCK:
+            if needs_revalidation(data):
+                result = revalidate_license(data)
+                data = result["updated_data"]
+                if result["status"] == "expired":
                     return {"tier": "free", "valid": True, "revoked": True,
-                            "reason": "License expired. Renew at https://delimit.ai/pricing"}
-                elif elapsed > REVALIDATION_INTERVAL + GRACE_PERIOD:
-                    data["validation_status"] = "grace_period"
-                    days_left = int((REVALIDATION_INTERVAL + HARD_BLOCK - elapsed) / 86400)
-                    data["grace_days_remaining"] = days_left
-                else:
-                    data["validation_status"] = "revalidation_pending"
+                            "reason": result.get("reason", "License expired. Renew at https://delimit.ai/pricing")}
         return data
     except Exception:
         return {"tier": "free", "valid": True}
 
 
 def check_premium() -> bool:
-    """Check if user has a valid premium license."""
+    """Check if user has a valid premium license.
+
+    Uses load_license() which triggers re-validation if needed, then
+    checks is_license_valid() on the result.
+    """
     lic = load_license()
-    return lic.get("tier") in ("pro", "enterprise") and lic.get("valid", False)
+    return is_license_valid(lic)
 
 
 def gate_tool(tool_name: str) -> dict | None:
@@ -164,23 +310,18 @@ def activate(key: str) -> dict:
 
 
 def _revalidate(data: dict) -> dict:
-    """Re-validate against Lemon Squeezy."""
-    key = data.get("key", "")
-    if not key or key.startswith("JAMSONS"):
+    """Re-validate against Lemon Squeezy (legacy wrapper).
+
+    Deprecated: use revalidate_license() for the full status/grace workflow.
+    Kept for backwards compatibility with any external callers.
+    """
+    result = _call_lemon_squeezy(data)
+    if result is True:
         return {"valid": True}
-    try:
-        import urllib.request
-        req_data = json.dumps({"license_key": key}).encode()
-        req = urllib.request.Request(
-            LS_VALIDATE_URL, data=req_data,
-            headers={"Content-Type": "application/json", "Accept": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            result = json.loads(resp.read())
-        return {"valid": result.get("valid", False)}
-    except Exception:
-        return {"valid": True, "offline": True}
+    if result is False:
+        return {"valid": False}
+    # None = unreachable — grant offline grace
+    return {"valid": True, "offline": True}
 
 
 def _get_monthly_usage(tool_name: str) -> int:

@@ -23,7 +23,12 @@ if str(GATEWAY_ROOT) not in sys.path:
 
 
 def _load_specs(spec_path: str) -> Dict[str, Any]:
-    """Load an OpenAPI spec from a file path."""
+    """Load an API spec (OpenAPI or JSON Schema) from a file path.
+
+    Performs a non-fatal version compatibility check (LED-290) so that
+    unknown OpenAPI versions log a warning instead of silently parsing.
+    JSON Schema documents skip the OpenAPI version assert.
+    """
     import yaml
 
     p = Path(spec_path)
@@ -32,8 +37,149 @@ def _load_specs(spec_path: str) -> Dict[str, Any]:
 
     content = p.read_text(encoding="utf-8")
     if p.suffix in (".yaml", ".yml"):
-        return yaml.safe_load(content)
-    return json.loads(content)
+        spec = yaml.safe_load(content)
+    else:
+        spec = json.loads(content)
+
+    # LED-290: warn (non-fatal) if version is outside the validated set.
+    # Only applies to OpenAPI/Swagger documents — bare JSON Schema files
+    # have no "openapi"/"swagger" key and would otherwise trip the assert.
+    try:
+        if isinstance(spec, dict) and ("openapi" in spec or "swagger" in spec):
+            from core.openapi_version import assert_supported
+            assert_supported(spec, strict=False)
+    except Exception as exc:  # pragma: no cover -- defensive only
+        logger.debug("openapi version check skipped: %s", exc)
+
+    return spec
+
+
+# ---------------------------------------------------------------------------
+# LED-713: JSON Schema spec-type dispatch helpers
+# ---------------------------------------------------------------------------
+
+
+def _spec_type(doc: Any) -> str:
+    """Classify a loaded spec doc. 'openapi' or 'json_schema'."""
+    from core.spec_detector import detect_spec_type
+    t = detect_spec_type(doc)
+    # Fallback to openapi for unknown so we never break existing flows.
+    return "json_schema" if t == "json_schema" else "openapi"
+
+
+def _json_schema_changes_to_dicts(changes: List[Any]) -> List[Dict[str, Any]]:
+    return [
+        {
+            "type": c.type.value,
+            "path": c.path,
+            "message": c.message,
+            "is_breaking": c.is_breaking,
+            "details": c.details,
+        }
+        for c in changes
+    ]
+
+
+def _json_schema_semver(changes: List[Any]) -> Dict[str, Any]:
+    """Build an OpenAPI-compatible semver result from JSON Schema changes.
+
+    Mirrors core.semver_classifier.classify_detailed shape so downstream
+    consumers (PR comment, CI formatter, ledger) don't need to branch.
+    """
+    breaking = [c for c in changes if c.is_breaking]
+    non_breaking = [c for c in changes if not c.is_breaking]
+    if breaking:
+        bump = "major"
+    elif non_breaking:
+        bump = "minor"
+    else:
+        bump = "none"
+    return {
+        "bump": bump,
+        "is_breaking": bool(breaking),
+        "counts": {
+            "breaking": len(breaking),
+            "non_breaking": len(non_breaking),
+            "total": len(changes),
+        },
+    }
+
+
+def _bump_semver_version(current: str, bump: str) -> Optional[str]:
+    """Minimal semver bump for JSON Schema path (core.semver_classifier
+    only understands OpenAPI ChangeType enums)."""
+    if not current:
+        return None
+    try:
+        parts = current.lstrip("v").split(".")
+        major, minor, patch = (int(parts[0]), int(parts[1]), int(parts[2]))
+    except Exception:
+        return None
+    if bump == "major":
+        return f"{major + 1}.0.0"
+    if bump == "minor":
+        return f"{major}.{minor + 1}.0"
+    if bump == "patch":
+        return f"{major}.{minor}.{patch + 1}"
+    return current
+
+
+def _run_json_schema_lint(
+    old_doc: Dict[str, Any],
+    new_doc: Dict[str, Any],
+    current_version: Optional[str] = None,
+    api_name: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Build an evaluate_with_policy-compatible result for JSON Schema.
+
+    Policy rules in Delimit are defined against OpenAPI ChangeType values,
+    so they do not apply here. We return zero violations and rely on the
+    breaking-change count + semver bump to drive the governance gate.
+    """
+    from core.json_schema_diff import JSONSchemaDiffEngine
+
+    engine = JSONSchemaDiffEngine()
+    changes = engine.compare(old_doc, new_doc)
+    semver = _json_schema_semver(changes)
+
+    if current_version:
+        semver["current_version"] = current_version
+        semver["next_version"] = _bump_semver_version(current_version, semver["bump"])
+
+    breaking_count = semver["counts"]["breaking"]
+    total = semver["counts"]["total"]
+
+    decision = "pass"
+    exit_code = 0
+    # No policy rules apply to JSON Schema, but breaking changes still
+    # flag MAJOR semver and the downstream gate uses that to block.
+    # Mirror the shape of evaluate_with_policy so the action/CLI renderers
+    # need no JSON Schema-specific branch.
+    result: Dict[str, Any] = {
+        "spec_type": "json_schema",
+        "api_name": api_name or new_doc.get("title") or old_doc.get("title") or "JSON Schema",
+        "decision": decision,
+        "exit_code": exit_code,
+        "violations": [],
+        "summary": {
+            "total_changes": total,
+            "breaking_changes": breaking_count,
+            "violations": 0,
+            "errors": 0,
+            "warnings": 0,
+        },
+        "all_changes": [
+            {
+                "type": c.type.value,
+                "path": c.path,
+                "message": c.message,
+                "is_breaking": c.is_breaking,
+            }
+            for c in changes
+        ],
+        "semver": semver,
+    }
+    return result
 
 
 def _read_jsonl(path: Path) -> List[Dict[str, Any]]:
@@ -101,29 +247,51 @@ def run_lint(old_spec: str, new_spec: str, policy_file: Optional[str] = None) ->
     """Run the full lint pipeline: diff + policy evaluation.
 
     This is the Tier 1 primary tool — combines diff detection with
-    policy enforcement into a single pass/fail decision.
+    policy enforcement into a single pass/fail decision. Auto-detects
+    spec type (OpenAPI vs JSON Schema, LED-713) and dispatches to the
+    matching engine.
     """
     from core.policy_engine import evaluate_with_policy
 
     old = _load_specs(old_spec)
     new = _load_specs(new_spec)
 
+    # LED-713: JSON Schema dispatch. Policy rules are OpenAPI-specific,
+    # so JSON Schema takes the no-policy (breaking-count + semver) path.
+    if _spec_type(new) == "json_schema" or _spec_type(old) == "json_schema":
+        return _run_json_schema_lint(old, new)
+
     return evaluate_with_policy(old, new, policy_file)
 
 
 def run_diff(old_spec: str, new_spec: str) -> Dict[str, Any]:
-    """Run diff engine only — no policy evaluation."""
-    from core.diff_engine_v2 import OpenAPIDiffEngine
+    """Run diff engine only — no policy evaluation.
 
+    Auto-detects OpenAPI vs JSON Schema and dispatches (LED-713).
+    """
     old = _load_specs(old_spec)
     new = _load_specs(new_spec)
 
+    if _spec_type(new) == "json_schema" or _spec_type(old) == "json_schema":
+        from core.json_schema_diff import JSONSchemaDiffEngine
+        engine = JSONSchemaDiffEngine()
+        changes = engine.compare(old, new)
+        breaking = [c for c in changes if c.is_breaking]
+        return {
+            "spec_type": "json_schema",
+            "total_changes": len(changes),
+            "breaking_changes": len(breaking),
+            "changes": _json_schema_changes_to_dicts(changes),
+        }
+
+    from core.diff_engine_v2 import OpenAPIDiffEngine
     engine = OpenAPIDiffEngine()
     changes = engine.compare(old, new)
 
     breaking = [c for c in changes if c.is_breaking]
 
     return {
+        "spec_type": "openapi",
         "total_changes": len(changes),
         "breaking_changes": len(breaking),
         "changes": [
@@ -150,13 +318,20 @@ def run_changelog(
     Uses the diff engine to detect changes, then formats them into
     a human-readable changelog grouped by category.
     """
-    from core.diff_engine_v2 import OpenAPIDiffEngine
     from datetime import datetime, timezone
 
     old = _load_specs(old_spec)
     new = _load_specs(new_spec)
 
-    engine = OpenAPIDiffEngine()
+    # LED-713: dispatch on spec type. JSONSchemaChange / Change share the
+    # (.type.value, .path, .message, .is_breaking) duck type.
+    if _spec_type(new) == "json_schema" or _spec_type(old) == "json_schema":
+        from core.json_schema_diff import JSONSchemaDiffEngine
+        engine = JSONSchemaDiffEngine()
+    else:
+        from core.diff_engine_v2 import OpenAPIDiffEngine
+        engine = OpenAPIDiffEngine()
+
     changes = engine.compare(old, new)
 
     # Categorize changes
@@ -794,13 +969,25 @@ def run_semver(
     """Classify the semver bump for a spec change.
 
     Returns detailed breakdown: bump level, per-category counts,
-    and optionally the bumped version string.
+    and optionally the bumped version string. Auto-detects OpenAPI vs
+    JSON Schema (LED-713).
     """
-    from core.diff_engine_v2 import OpenAPIDiffEngine
-    from core.semver_classifier import classify_detailed, bump_version, classify
-
     old = _load_specs(old_spec)
     new = _load_specs(new_spec)
+
+    # LED-713: JSON Schema path
+    if _spec_type(new) == "json_schema" or _spec_type(old) == "json_schema":
+        from core.json_schema_diff import JSONSchemaDiffEngine
+        engine = JSONSchemaDiffEngine()
+        changes = engine.compare(old, new)
+        result = _json_schema_semver(changes)
+        if current_version:
+            result["current_version"] = current_version
+            result["next_version"] = _bump_semver_version(current_version, result["bump"])
+        return result
+
+    from core.diff_engine_v2 import OpenAPIDiffEngine
+    from core.semver_classifier import classify_detailed, bump_version, classify
 
     engine = OpenAPIDiffEngine()
     changes = engine.compare(old, new)
@@ -932,7 +1119,6 @@ def run_diff_report(
     """
     from datetime import datetime, timezone
 
-    from core.diff_engine_v2 import OpenAPIDiffEngine
     from core.policy_engine import PolicyEngine
     from core.semver_classifier import classify_detailed, classify
     from core.spec_health import score_spec
@@ -940,6 +1126,43 @@ def run_diff_report(
 
     old = _load_specs(old_spec)
     new = _load_specs(new_spec)
+
+    # LED-713: JSON Schema dispatch — short-circuit to a minimal report
+    # shape compatible with the JSON renderer (HTML renderer remains
+    # OpenAPI-only; JSON Schema callers should use fmt="json").
+    if _spec_type(new) == "json_schema" or _spec_type(old) == "json_schema":
+        from core.json_schema_diff import JSONSchemaDiffEngine
+        js_engine = JSONSchemaDiffEngine()
+        js_changes = js_engine.compare(old, new)
+        js_breaking = [c for c in js_changes if c.is_breaking]
+        js_semver = _json_schema_semver(js_changes)
+        now_js = datetime.now(timezone.utc)
+        return {
+            "format": fmt,
+            "spec_type": "json_schema",
+            "generated_at": now_js.isoformat(),
+            "old_spec": old_spec,
+            "new_spec": new_spec,
+            "old_title": old.get("title", "") if isinstance(old, dict) else "",
+            "new_title": new.get("title", "") if isinstance(new, dict) else "",
+            "semver": js_semver,
+            "changes": _json_schema_changes_to_dicts(js_changes),
+            "breaking_count": len(js_breaking),
+            "non_breaking_count": len(js_changes) - len(js_breaking),
+            "total_changes": len(js_changes),
+            "policy": {
+                "decision": "pass",
+                "violations": [],
+                "errors": 0,
+                "warnings": 0,
+            },
+            "health": None,
+            "migration": "",
+            "output_file": output_file,
+            "note": "JSON Schema report (policy rules and HTML report are OpenAPI-only in v1)",
+        }
+
+    from core.diff_engine_v2 import OpenAPIDiffEngine
 
     # -- Diff --
     engine = OpenAPIDiffEngine()
