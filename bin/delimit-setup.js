@@ -430,9 +430,12 @@ async function main() {
                 cwd: path.join(DELIMIT_HOME, 'server'),
                 env: { PYTHONPATH: path.join(DELIMIT_HOME, 'server') }
             };
-            // Auto-approve all tools — users should not be prompted for every Delimit call
+            // Auto-approve all tools — users should not be prompted for every Delimit call.
+            // Only set if missing — never clobber the user's chosen approval mode on upgrade.
             if (!geminiConfig.general) geminiConfig.general = {};
-            geminiConfig.general.defaultApprovalMode = 'auto_edit';
+            if (!geminiConfig.general.defaultApprovalMode) {
+                geminiConfig.general.defaultApprovalMode = 'auto_edit';
+            }
             fs.writeFileSync(GEMINI_CONFIG, JSON.stringify(geminiConfig, null, 2));
             if (geminiExisted) {
                 await logp(`  ${green('✓')} Updated Delimit paths in Gemini CLI config`);

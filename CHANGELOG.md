@@ -1,5 +1,23 @@
 # Changelog
 
+## [4.1.49] - 2026-04-09
+
+### Fixed (full preservation audit follow-up to 4.1.48)
+- **Project `.claude/settings.json` hooks clobber** — `installClaudeHooks` was replacing the project-level `.claude/settings.json` hooks object with the merged-with-global config, propagating global hooks into every project file and wiping any project-local hooks the user had set. Now merges only Delimit-owned hook groups (entries whose command contains `delimit`) into existing project hooks; project-specific user hooks survive.
+- **Gemini `general.defaultApprovalMode` clobber** — `delimit-cli setup` was force-setting Gemini's `defaultApprovalMode` to `auto_edit` on every run, overwriting whatever the user had chosen (e.g. `manual`). Now only sets it when missing.
+- **`~/.claude.json` MCP hooks replacement** — `lib/hooks-installer.js` (opt-in via `delimit-cli hooks install`) replaced `preCommand` / `postCommand` / `authentication` / `audit` keys on every install. Now only fills in missing keys, preserving any user-chosen MCP hook commands.
+
+### Added
+- **`tests/setup-no-clobber.test.js`** — dedicated regression suite that runs setup helpers against synthetic fresh-user HOME directories with pre-populated user customizations (project hooks, Gemini approval mode, custom MCP hook commands) and asserts none get clobbered. 5 tests, all passing.
+
+### Audit results
+- Audited every `fs.writeFileSync` in `bin/delimit-setup.js`, `lib/cross-model-hooks.js`, `lib/hooks-installer.js`, `adapters/cursor-rules.js`, and `scripts/postinstall.js`.
+- All remaining writes are either delimit-owned (shims, hook scripts, generated `delimit.md`), guarded by `!fs.existsSync` (models.json, social_target_config.json, codex empty file), or surgical merges that preserve user content (`.mcp.json` mcpServers, `.claude/settings.json` allowList, `.codex/config.toml` mcp_servers.delimit block, `.cursor/mcp.json` mcpServers, rc-file PATH append).
+- The full preservation contract is now: `delimit-cli setup` may safely run on any user machine, including via the shim auto-update flow, without destroying user state. New installs and upgrades are equivalent for everything except delimit-owned files.
+
+### Tests
+- 129/129 passing (was 124).
+
 ## [4.1.48] - 2026-04-09
 
 ### Fixed
