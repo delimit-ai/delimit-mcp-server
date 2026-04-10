@@ -780,24 +780,24 @@ delimit_exit_screen() {
     else
         DURATION="\${ELAPSED}s"
     fi
-    # Count git commits made during session
+    # Count git commits made during session (@ prefix tells git the value is epoch)
     COMMITS=0
     if [ -d "\$SESSION_CWD/.git" ] || git -C "\$SESSION_CWD" rev-parse --git-dir >/dev/null 2>&1; then
-        COMMITS=\$(git -C "\$SESSION_CWD" log --oneline --after="\$SESSION_START" --format="%H" 2>/dev/null | wc -l | tr -d ' ')
+        COMMITS=\$(git -C "\$SESSION_CWD" log --oneline --after="@\$SESSION_START" --format="%H" 2>/dev/null | wc -l | tr -d ' ')
     fi
     # Count ledger items created during session (by timestamp)
     LEDGER_DIR="\$DELIMIT_HOME/ledger"
     LEDGER_ITEMS=0
-    if [ -d "\$LEDGER_DIR" ]; then
+    # Convert epoch SESSION_START to ISO prefix for string comparison
+    SESSION_ISO=\$(date -u -d "@\$SESSION_START" +%Y-%m-%dT%H:%M:%S 2>/dev/null || date -u -r "\$SESSION_START" +%Y-%m-%dT%H:%M:%S 2>/dev/null || echo "")
+    if [ -d "\$LEDGER_DIR" ] && [ -n "\$SESSION_ISO" ]; then
         for lf in "\$LEDGER_DIR"/*.jsonl; do
             [ -f "\$lf" ] || continue
-            COUNT=\$(awk -v start="\$SESSION_START" '
+            COUNT=\$(awk -v start="\$SESSION_ISO" '
                 BEGIN { n=0 }
                 {
-                    if (match(\$0, /"(created_at|ts)":"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}/)) {
-                        n++
-                    } else if (match(\$0, /"(created_at|ts)":([0-9]+)/, arr)) {
-                        if (arr[2]+0 >= start+0) n++
+                    if (match(\$0, /"created_at":"([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})"/, arr)) {
+                        if (arr[1] >= start) n++
                     }
                 }
                 END { print n }
@@ -805,14 +805,11 @@ delimit_exit_screen() {
             LEDGER_ITEMS=\$((LEDGER_ITEMS + COUNT))
         done
     fi
-    # Count deliberations (governance decisions)
+    # Count deliberations created during this session (stored as individual JSON files)
     DELIBERATIONS=0
-    if [ -f "\$DELIMIT_HOME/deliberations.jsonl" ]; then
-        DELIBERATIONS=\$(awk -v start="\$SESSION_START" '
-            BEGIN { n=0 }
-            { if (match(\$0, /"ts":([0-9]+)/, arr)) { if (arr[1]+0 >= start+0) n++ } }
-            END { print n }
-        ' "\$DELIMIT_HOME/deliberations.jsonl" 2>/dev/null || echo "0")
+    DELIB_DIR="\$DELIMIT_HOME/deliberations"
+    if [ -d "\$DELIB_DIR" ]; then
+        DELIBERATIONS=\$(find "\$DELIB_DIR" -maxdepth 1 -name '*.json' -newermt "@\$SESSION_START" 2>/dev/null | wc -l | tr -d ' ')
     fi
     # Determine exit status label
     if [ "\$_EXIT_CODE" -eq 0 ]; then

@@ -1,5 +1,15 @@
 # Changelog
 
+## [4.1.52] - 2026-04-10
+
+### Fixed (exit shim reporting zeros)
+- **Git commit count always zero** — `git log --after="$SESSION_START"` was passing a raw epoch integer. Git's `--after` needs `@` prefix for epoch time (`--after="@$SESSION_START"`).
+- **Ledger item count always zero** — the awk script matched any line with a `created_at` field but never compared the timestamp against the session start. Now converts `SESSION_START` to ISO format and uses string comparison to count only items created during the session.
+- **Deliberation count always zero** — looked for a `deliberations.jsonl` file that doesn't exist. Deliberations are stored as individual JSON files in `~/.delimit/deliberations/`. Now uses `find -newermt "@$SESSION_START"` to count files created during the session.
+
+### Tests
+- 134/134 npm CLI tests passing (no test changes — shell template fix only).
+
 ## [4.1.51] - 2026-04-09
 
 ### Fixed (gateway loop engine — LED-814)
