@@ -1,5 +1,25 @@
 # Changelog
 
+## [4.1.53] - 2026-04-10
+
+### Fixed (cycle engine — think→build→deploy)
+- **Strategy deliberation timeout waste** — strategy cycle ran every 4th iteration with a 120s timeout. Gemini CLI loads 187 MCP tools on startup, causing guaranteed timeouts. Now runs every 8th iteration and skips entirely if a successful deliberation exists within the last hour.
+- **Empty social drafts** — `generate_tailored_draft` returned `""` when no models were enabled instead of firing the fallback template. Added diagnostic logging (model, response length, preview) and empty-response detection.
+- **Stale deploy queue** — 15 items from 2026-04-08 were stuck as `pending`. Added `_expire_stale_deploys()` that archives items older than 48h to `expired.jsonl` before every deploy stage. Deploy stage also handles `ImportError` on server functions gracefully.
+
+### Added (gateway sync)
+- Unified think→build→deploy cycle (`run_full_cycle`, shipped earlier this session)
+- Account-aware brand voice sanitizer + Twitter prompt v2 (LED-791/796)
+- Swagger 2.0 `$ref` parameter fix in diff engine
+- twttr241 fixes: wrong secrets file, 429 retry, flaky test (LED-763/781/783)
+- Security: `..` path traversal rejection in `sensor_github_issue` (#40)
+- Scanner FP allowlist for test fixture credentials (LED-817)
+- Loop engine dispatch status fix (LED-814)
+
+### Tests
+- Gateway: 88/88 loop+social tests passing.
+- npm CLI: 134/134 passing (no CLI changes — bundled gateway only).
+
 ## [4.1.52] - 2026-04-10
 
 ### Fixed (exit shim reporting zeros)
