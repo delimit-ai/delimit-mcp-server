@@ -1,5 +1,26 @@
 # Changelog
 
+## [4.1.51] - 2026-04-09
+
+### Fixed (gateway loop engine — LED-814)
+- **`ai/loop_engine.run_governed_iteration` mishandled swarm dispatch statuses.** Only `status=='completed'` was treated as success. The swarm dispatcher returns `'dispatched'` for async handoff, so every build-loop tick fell into the failure branch and logged "Dispatch failed" even though the underlying work shipped. Session `build-loop-2026-04-09` accumulated 6 spurious failures (LED-787 / 788 / 755 / 762 / 799 / 807) for tasks that all actually shipped. Now:
+  - `'completed'` → close ledger + notify deploy loop (unchanged)
+  - `'dispatched'` → mark ledger `in_progress` with the swarm `task_id`, NOT a failure
+  - `'blocked'` → record a founder-approval gate without tripping the circuit breaker
+  - anything else → genuine failure, error message includes the unexpected status string for debuggability
+- Verified live against the running MCP session before this release: `iterations 6→7`, `errors 0`, `LED-814` recorded as `dispatched` with `swarm_task_id task-449ecdf9`.
+- Picked up via the standard `npm run sync-gateway` step in `prepublishOnly` (gateway commit `ce802cd` is now on `delimit-ai/delimit-gateway` main).
+
+### Added
+- **`tests/test_loop_engine_dispatch_status.py`** in the gateway — covers all four dispatch status branches (`completed` / `dispatched` / `blocked` / unknown), 154 lines, ships with the bundled gateway.
+
+### Scope
+- Single-purpose patch: gateway loop engine only. This is the deferred half of the multi-model deliberation that produced 4.1.50 — the deliberation explicitly required splitting the gateway fix from the CLAUDE.md regex fix so each ship has a clean rollback story.
+
+### Tests
+- npm CLI: 134/134 still passing (no CLI changes — bundled gateway only).
+- Gateway: new `test_loop_engine_dispatch_status.py` suite passing.
+
 ## [4.1.50] - 2026-04-09
 
 ### Fixed (CRITICAL — CLAUDE.md in-prose marker clobber)
