@@ -80,15 +80,18 @@ jobs:
         working-directory: npm-delimit
         run: |
           npm pack --dry-run 2>&1 | tee /tmp/pack-list.txt
-          # Filter out known false positives (e.g. secrets_broker.py is the
-          # secrets management module, not a secret file).
-          grep -v 'secrets_broker\|secret_detection\|security-check' /tmp/pack-list.txt > /tmp/pack-filtered.txt || true
-          for pattern in '.env' 'credentials' 'secret' '.npmrc' '.key' '.pem'; do
-            if grep -i "$pattern" /tmp/pack-filtered.txt; then
-              echo "::error::Potential secret file found in package: $pattern"
-              exit 1
+          # Check for actual secret files by extension or exact name.
+          # Previous approach grepped for substrings like "secret" and ".key"
+          # which false-positived on module names (secrets_broker.py,
+          # key_resolver.py, security-check.sh).
+          FAILED=0
+          for pattern in '\.env$' '\.env\.' 'credentials\.json' '\.npmrc' '\.key$' '\.pem$' '\.p12$' '\.pfx$'; do
+            if grep -iE "$pattern" /tmp/pack-list.txt; then
+              echo "::error::Potential secret file found in package matching: $pattern"
+              FAILED=1
             fi
           done
+          if [ $FAILED -ne 0 ]; then exit 1; fi
 
   publish:
     needs: validate
