@@ -73,6 +73,8 @@ function getClaudeMdContent() {
     return getDelimitSection() + '\n';
 }
 
+// Mirror of bin/delimit-setup.js upsertDelimitSection. NEVER clobbers user
+// content — always upserts between markers or appends below.
 function upsertDelimitSection(filePath) {
     const newSection = getDelimitSection();
     const version = PKG_VERSION;
@@ -101,16 +103,7 @@ function upsertDelimitSection(filePath) {
         return { action: 'updated' };
     }
 
-    const isOldDelimit = existing.includes('# Delimit AI Guardrails') ||
-        existing.includes('delimit_init') ||
-        existing.includes('persistent memory, verified execution') ||
-        (existing.includes('# Delimit') && existing.includes('delimit_ledger_context'));
-
-    if (isOldDelimit) {
-        fs.writeFileSync(filePath, newSection + '\n');
-        return { action: 'updated' };
-    }
-
+    // No markers — append below existing user content. Never clobber.
     const separator = existing.endsWith('\n') ? '\n' : '\n\n';
     fs.writeFileSync(filePath, existing + separator + newSection + '\n');
     return { action: 'appended' };
@@ -210,14 +203,48 @@ describe('upsertDelimitSection', () => {
         cleanup(f);
     });
 
-    it('replaces old Delimit content without markers', () => {
+    it('preserves old Delimit content by appending markers below (v4.1.47 clobber fix)', () => {
+        // Regression: v4.1.47 and earlier clobbered any CLAUDE.md containing
+        // `# Delimit` + `delimit_ledger_context` or `# Delimit AI Guardrails`
+        // by writing a fresh stock template over the top, destroying the
+        // founder's customizations. The new upsert behavior preserves the
+        // existing content and appends the managed section below.
         const f = tmpFile('old-delimit.md');
-        fs.writeFileSync(f, '# Delimit AI Guardrails\n\nSome old content with delimit_init');
+        const legacy = '# Delimit AI Guardrails\n\nSome old content with delimit_init and delimit_ledger_context\n';
+        fs.writeFileSync(f, legacy);
         const result = upsertDelimitSection(f);
-        assert.strictEqual(result.action, 'updated');
+        assert.strictEqual(result.action, 'appended');
         const content = fs.readFileSync(f, 'utf-8');
-        assert.ok(content.includes('<!-- delimit:start'));
-        assert.ok(!content.includes('# Delimit AI Guardrails'));
+        assert.ok(content.startsWith('# Delimit AI Guardrails'), 'Legacy content MUST be preserved at the top');
+        assert.ok(content.includes('delimit_init'), 'Legacy content MUST still contain delimit_init');
+        assert.ok(content.includes('<!-- delimit:start'), 'Managed section MUST be appended');
+        assert.ok(content.includes('<!-- delimit:end -->'), 'Managed end marker MUST be present');
+        cleanup(f);
+    });
+
+    it('never clobbers a customized CLAUDE.md containing # Delimit and delimit_ledger_context', () => {
+        // Explicit regression for the exact pattern that broke the founder's
+        // /root/CLAUDE.md on 2026-04-09 when shim auto-update ran setup.
+        const f = tmpFile('custom-delimit.md');
+        const founderCustomized = [
+            '# Delimit',
+            '',
+            '## Auto-Trigger Rules (Consensus 123)',
+            '- Session start: call delimit_ledger_context',
+            '',
+            '## Paying Customers (CRITICAL)',
+            '- Never clobber user-customized files',
+            '',
+            '## Escalation Rules',
+            '- Pre-approval of a plan does not extend to unforeseen escalations',
+            '',
+        ].join('\n');
+        fs.writeFileSync(f, founderCustomized);
+        upsertDelimitSection(f);
+        const content = fs.readFileSync(f, 'utf-8');
+        assert.ok(content.includes('## Paying Customers'), 'Founder custom sections MUST survive');
+        assert.ok(content.includes('## Escalation Rules'), 'Founder custom sections MUST survive');
+        assert.ok(content.includes('Pre-approval of a plan'), 'Full founder content MUST survive');
         cleanup(f);
     });
 

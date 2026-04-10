@@ -1337,9 +1337,16 @@ function getClaudeMdContent() {
 
 /**
  * Upsert the Delimit section in a file using <!-- delimit:start --> / <!-- delimit:end --> markers.
- * If markers exist, replaces only that region (preserving user content above/below).
- * If no markers exist but old Delimit content is detected, replaces the whole file.
- * If no Delimit content at all, appends the section.
+ *
+ * NEVER clobbers user-authored content outside the markers. The previous behavior
+ * replaced the whole file whenever it detected "old Delimit content" heuristically,
+ * which destroyed founder-customized CLAUDE.md files on every upgrade (v4.1.47 incident).
+ *
+ * Behavior:
+ * - File missing → create with just the managed section.
+ * - File has markers → replace only the region between them (user content above/below preserved).
+ * - File has no markers → append the managed section at the bottom (user content at top preserved).
+ *
  * Returns { action: 'created' | 'updated' | 'unchanged' | 'appended' }
  */
 function upsertDelimitSection(filePath) {
@@ -1354,7 +1361,7 @@ function upsertDelimitSection(filePath) {
 
     const existing = fs.readFileSync(filePath, 'utf-8');
 
-    // Check if markers already exist
+    // Check if managed markers already exist
     const startMarkerRe = /<!-- delimit:start[^>]*-->/;
     const endMarker = '<!-- delimit:end -->';
     const hasStart = startMarkerRe.test(existing);
@@ -1367,25 +1374,16 @@ function upsertDelimitSection(filePath) {
         if (currentVersion === version) {
             return { action: 'unchanged' };
         }
-        // Replace only the delimit section
+        // Replace only the managed region — preserve content above/below
         const before = existing.substring(0, existing.search(startMarkerRe));
         const after = existing.substring(existing.indexOf(endMarker) + endMarker.length);
         fs.writeFileSync(filePath, before + newSection + after);
         return { action: 'updated' };
     }
 
-    // No markers — check for old Delimit content that should be replaced
-    const isOldDelimit = existing.includes('# Delimit AI Guardrails') ||
-        existing.includes('delimit_init') ||
-        existing.includes('persistent memory, verified execution') ||
-        (existing.includes('# Delimit') && existing.includes('delimit_ledger_context'));
-
-    if (isOldDelimit) {
-        fs.writeFileSync(filePath, newSection + '\n');
-        return { action: 'updated' };
-    }
-
-    // File exists with user content but no Delimit section — append
+    // No markers present — append the managed section at the bottom.
+    // User content at the top is preserved verbatim. Markers get added so future
+    // upgrades can update just the managed region.
     const separator = existing.endsWith('\n') ? '\n' : '\n\n';
     fs.writeFileSync(filePath, existing + separator + newSection + '\n');
     return { action: 'appended' };
