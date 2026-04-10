@@ -1,5 +1,21 @@
 # Changelog
 
+## [4.1.48] - 2026-04-09
+
+### Fixed
+- **CRITICAL: CLAUDE.md clobber on upgrade** — `delimit-cli setup` used a loose heuristic (`# Delimit` + `delimit_ledger_context` or `# Delimit AI Guardrails`) to decide whether to replace a user's entire `CLAUDE.md` with the stock template. Any founder-customized CLAUDE.md that happened to mention `delimit_ledger_context` got clobbered on every upgrade — this included 4.1.47's auto-update flow, which destroyed custom auto-trigger rules, paying-customer protection blocks, and incident-derived escalation rules. The clobber path is removed entirely. `upsertDelimitSection` now either upserts between `<!-- delimit:start -->` / `<!-- delimit:end -->` markers (preserving user content above and below), or — if no markers exist — appends the managed section at the bottom, preserving all existing user content verbatim.
+- Same fix applied to `GEMINI.md` in `lib/cross-model-hooks.js` (previously did a whole-file overwrite if it did not contain the detection phrase).
+- Detection marker changed from the prose phrase `Consensus 123` to the stable structural marker `<!-- delimit:start`, so future template copy changes never break preservation logic.
+
+### Security
+- **axios** bumped from `1.13.6` → `1.15.0` to patch GHSA-3p68-rc4w-qgx5 (NO_PROXY hostname normalization bypass → SSRF, severity: critical).
+
+### Changed
+- Stock `CLAUDE.md` template is now minimal (auto-trigger lifecycle, code/commit/deploy gates, audit trail, links). Founder-only sections (Paying Customers, Strategic/Business Operations, Escalation Rules, venture portfolio context) are no longer shipped in the npm package — they belong in `~/.delimit/CLAUDE.md` or `~/.claude/CLAUDE.md` (never touched by `delimit-cli setup`).
+
+### Tests
+- Added two regression tests in `tests/setup-onboarding.test.js` covering (a) the exact legacy-content-preservation case and (b) the founder-customized CLAUDE.md pattern that triggered the 2026-04-09 incident.
+
 ## [4.1.45] - 2026-04-09
 
 ### Fixed

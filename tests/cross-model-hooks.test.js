@@ -286,7 +286,7 @@ describe('installCodexHooks', () => {
 
         const instructions = fs.readFileSync(tool.instructionsPath, 'utf-8');
         assert.ok(instructions.includes('delimit:hooks-start'));
-        assert.ok(instructions.includes('Consensus 123'), 'Should contain Consensus 123 governance template');
+        assert.ok(instructions.includes('<!-- delimit:start'), 'Should contain Delimit managed section marker');
 
         const config = JSON.parse(fs.readFileSync(tool.configPath, 'utf-8'));
         assert.ok(config.hooks['pre-commit'].includes('delimit-cli hook pre-commit'));
@@ -338,7 +338,7 @@ describe('installGeminiHooks', () => {
         assert.ok(changes.includes('GEMINI.md'));
 
         const config = JSON.parse(fs.readFileSync(tool.configPath, 'utf-8'));
-        assert.ok(config.customInstructions.includes('Consensus 123'), 'Should contain Consensus 123 governance template');
+        assert.ok(config.customInstructions.includes('<!-- delimit:start') || config.customInstructions.includes('delimit:start'), 'Should contain Delimit managed section marker');
 
         const geminiMd = fs.readFileSync(path.join(geminiDir, 'GEMINI.md'), 'utf-8');
         assert.ok(geminiMd.includes('# Delimit'), 'GEMINI.md should contain Delimit governance template');
