@@ -1,5 +1,26 @@
 # Changelog
 
+## [4.1.50] - 2026-04-09
+
+### Fixed (CRITICAL — CLAUDE.md in-prose marker clobber)
+- **`upsertDelimitSection` regex was unanchored** — `bin/delimit-setup.js` used `/<!-- delimit:start[^>]*-->/` (no line anchors) to detect the managed-section markers. If a user *quoted* the markers inside backticks in a documentation bullet (e.g. `Use managed-section markers (\`<!-- delimit:start -->\` / \`<!-- delimit:end -->\`)`), the regex matched the prose mention. On the next `delimit setup` run the upsert sliced everything between the prose start and prose end markers and replaced it with a fresh stock template — the exact "never clobber user-customized files" failure mode 4.1.48 / 4.1.49 were written to prevent. Reproduced on `/root/CLAUDE.md` 2026-04-09.
+- Both markers are now anchored to start-of-line with the multiline flag, allow optional leading horizontal whitespace (`/^[ \t]*<!-- delimit:start[^>]*-->[ \t]*$/m`), and the file is BOM-stripped before matching. Result: documentation prose that quotes the markers inside backticks, blockquotes (`> `), or bullets (`- `, `* `) is never matched, while genuine markers — flush-left, indented, or BOM-prefixed — still are. Same fix applied to the test mirror in `tests/setup-onboarding.test.js`.
+
+### Added
+- **Regression tests** in `tests/setup-onboarding.test.js` covering five failure modes the v4.1.49 regex would have matched incorrectly:
+  - Markers quoted in a bullet via inline backticks (the exact /root/CLAUDE.md 2026-04-09 incident)
+  - Markers with a CRLF (`\r\n`) line ending
+  - File starting with a UTF-8 BOM
+  - Tab- and space-indented real markers (must still be recognized)
+  - Bullet- and blockquote-prefixed markers (must NOT be recognized)
+  Each test asserts both the first-run behavior (`appended` vs `updated`) and that user content survives a subsequent version-bump upgrade verbatim.
+
+### Scope
+- Single-purpose patch: CLAUDE.md preservation only. Unrelated gateway fixes (e.g. `loop_engine` LED-814) deferred to 4.1.51 per multi-model deliberation, since 4.1.48 and 4.1.49 both shipped with the regression bug undetected and 4.1.50 must stay laser-focused.
+
+### Tests
+- 134/134 npm CLI tests passing (was 129). New regression suite (`does not match markers quoted in prose`, CRLF, BOM, indented, bullet/blockquote-prefixed) covers every edge case the multi-model deliberation surfaced.
+
 ## [4.1.49] - 2026-04-09
 
 ### Fixed (full preservation audit follow-up to 4.1.48)

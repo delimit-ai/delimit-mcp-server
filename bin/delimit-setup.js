@@ -1362,24 +1362,38 @@ function upsertDelimitSection(filePath) {
         return { action: 'created' };
     }
 
-    const existing = fs.readFileSync(filePath, 'utf-8');
+    const rawExisting = fs.readFileSync(filePath, 'utf-8');
+    // Strip a UTF-8 BOM if present so the start-of-line anchor still matches
+    // the very first line of the file. We write back the stripped form to keep
+    // serialization deterministic.
+    const existing = rawExisting.replace(/^\uFEFF/, '');
 
-    // Check if managed markers already exist
-    const startMarkerRe = /<!-- delimit:start[^>]*-->/;
-    const endMarker = '<!-- delimit:end -->';
-    const hasStart = startMarkerRe.test(existing);
-    const hasEnd = existing.includes(endMarker);
+    // Check if managed markers already exist.
+    // Markers MUST be on their own line — anchored with the multiline flag — so
+    // that documentation prose that quotes the markers (e.g. inside backticks,
+    // bullets, or blockquotes) does NOT get mistaken for a real managed section.
+    // The v4.1.49 unanchored regex caused exactly this clobber on /root/CLAUDE.md.
+    // We allow optional leading horizontal whitespace ([ \t]*) so genuinely
+    // indented markers still match, but NOT a leading "- ", "> ", "`", "*", etc.
+    const startMarkerRe = /^[ \t]*<!-- delimit:start[^>]*-->[ \t]*$/m;
+    const endMarkerRe = /^[ \t]*<!-- delimit:end -->[ \t]*$/m;
+    const startMatch = existing.match(startMarkerRe);
+    const endMatch = existing.match(endMarkerRe);
+    const hasStart = !!startMatch;
+    const hasEnd = !!endMatch;
 
     if (hasStart && hasEnd) {
-        // Extract current version from the marker
-        const versionMatch = existing.match(/<!-- delimit:start v([^ ]+) -->/);
+        // Extract current version from the marker (also anchored, allows indent)
+        const versionMatch = existing.match(/^[ \t]*<!-- delimit:start v([^ ]+) -->[ \t]*$/m);
         const currentVersion = versionMatch ? versionMatch[1] : '';
         if (currentVersion === version) {
             return { action: 'unchanged' };
         }
         // Replace only the managed region — preserve content above/below
-        const before = existing.substring(0, existing.search(startMarkerRe));
-        const after = existing.substring(existing.indexOf(endMarker) + endMarker.length);
+        const startIdx = startMatch.index;
+        const endIdx = endMatch.index + endMatch[0].length;
+        const before = existing.substring(0, startIdx);
+        const after = existing.substring(endIdx);
         fs.writeFileSync(filePath, before + newSection + after);
         return { action: 'updated' };
     }

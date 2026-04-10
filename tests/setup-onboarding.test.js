@@ -84,21 +84,30 @@ function upsertDelimitSection(filePath) {
         return { action: 'created' };
     }
 
-    const existing = fs.readFileSync(filePath, 'utf-8');
+    const rawExisting = fs.readFileSync(filePath, 'utf-8');
+    // Strip UTF-8 BOM so the start-of-line anchor matches line 1.
+    const existing = rawExisting.replace(/^\uFEFF/, '');
 
-    const startMarkerRe = /<!-- delimit:start[^>]*-->/;
-    const endMarker = '<!-- delimit:end -->';
-    const hasStart = startMarkerRe.test(existing);
-    const hasEnd = existing.includes(endMarker);
+    // Anchored to start-of-line (multiline) with optional leading horizontal
+    // whitespace only. Documentation prose that quotes the markers in
+    // backticks/bullets/blockquotes must NOT be matched. v4.1.50 regression fix.
+    const startMarkerRe = /^[ \t]*<!-- delimit:start[^>]*-->[ \t]*$/m;
+    const endMarkerRe = /^[ \t]*<!-- delimit:end -->[ \t]*$/m;
+    const startMatch = existing.match(startMarkerRe);
+    const endMatch = existing.match(endMarkerRe);
+    const hasStart = !!startMatch;
+    const hasEnd = !!endMatch;
 
     if (hasStart && hasEnd) {
-        const versionMatch = existing.match(/<!-- delimit:start v([^ ]+) -->/);
+        const versionMatch = existing.match(/^[ \t]*<!-- delimit:start v([^ ]+) -->[ \t]*$/m);
         const currentVersion = versionMatch ? versionMatch[1] : '';
         if (currentVersion === version) {
             return { action: 'unchanged' };
         }
-        const before = existing.substring(0, existing.search(startMarkerRe));
-        const after = existing.substring(existing.indexOf(endMarker) + endMarker.length);
+        const startIdx = startMatch.index;
+        const endIdx = endMatch.index + endMatch[0].length;
+        const before = existing.substring(0, startIdx);
+        const after = existing.substring(endIdx);
         fs.writeFileSync(filePath, before + newSection + after);
         return { action: 'updated' };
     }
@@ -246,6 +255,138 @@ describe('upsertDelimitSection', () => {
         assert.ok(content.includes('## Escalation Rules'), 'Founder custom sections MUST survive');
         assert.ok(content.includes('Pre-approval of a plan'), 'Full founder content MUST survive');
         cleanup(f);
+    });
+
+    it('does not match markers quoted in prose (v4.1.50 in-prose regression)', () => {
+        // Regression: v4.1.49 used an unanchored regex /<!-- delimit:start[^>]*-->/
+        // which matched the marker even when the user QUOTED it inside backticks
+        // in a documentation bullet. On the next `delimit setup` run the upsert
+        // mistook the prose mention for a real managed section, sliced everything
+        // between the prose start and prose end markers, and clobbered the
+        // founder's customizations on /root/CLAUDE.md (2026-04-09 incident).
+        // Markers must be matched only when they are on their own line.
+        const f = tmpFile('prose-markers.md');
+        const founderContent = [
+            '# Project Rules',
+            '',
+            '## Customer Protection',
+            '- **Never clobber user-customized files**: Use managed-section markers',
+            '  (`<!-- delimit:start -->` / `<!-- delimit:end -->`) or append-only writes.',
+            '  Never replace the whole file.',
+            '',
+            '## Other Rules',
+            '- Stuff that must survive upgrade',
+            '',
+        ].join('\n');
+        fs.writeFileSync(f, founderContent);
+
+        // First run should APPEND (no real markers exist), not UPDATE.
+        const result = upsertDelimitSection(f);
+        assert.strictEqual(
+            result.action,
+            'appended',
+            'In-prose marker mentions must NOT be treated as a managed section',
+        );
+
+        const content = fs.readFileSync(f, 'utf-8');
+        // Founder content must survive verbatim — no slicing between prose markers.
+        assert.ok(content.includes('## Customer Protection'), 'Customer Protection section MUST survive');
+        assert.ok(content.includes('## Other Rules'), 'Other Rules section MUST survive');
+        assert.ok(content.includes('Never replace the whole file.'), 'Full bullet text MUST survive');
+        assert.ok(content.includes('Stuff that must survive upgrade'), 'Trailing user content MUST survive');
+        // The real managed section is appended below.
+        assert.ok(content.indexOf('<!-- delimit:start v') > content.indexOf('Stuff that must survive upgrade'),
+            'Real managed section must be appended BELOW user content');
+
+        // Second run on the now-marked file must be a clean UPDATE, not a re-append.
+        // First simulate a version bump by rewriting the marker version.
+        const bumped = fs.readFileSync(f, 'utf-8').replace(`v${PKG_VERSION}`, 'v0.0.1');
+        fs.writeFileSync(f, bumped);
+        const result2 = upsertDelimitSection(f);
+        assert.strictEqual(result2.action, 'updated', 'Second run must update the real managed section');
+
+        const content2 = fs.readFileSync(f, 'utf-8');
+        // User content STILL preserved across upgrade.
+        assert.ok(content2.includes('## Customer Protection'), 'Customer Protection MUST survive upgrade');
+        assert.ok(content2.includes('Never replace the whole file.'), 'In-prose markers MUST survive upgrade');
+        assert.ok(content2.includes('Stuff that must survive upgrade'), 'Trailing content MUST survive upgrade');
+        assert.ok(!content2.includes('v0.0.1'), 'Old version must be replaced');
+        cleanup(f);
+    });
+
+    it('handles real markers with CRLF line endings (v4.1.50 edge case)', () => {
+        // Markers separated by \r\n must still be recognized as a managed section.
+        const f = tmpFile('crlf-markers.md');
+        const userTop = '# User Header\r\n\r\nUser content above.\r\n\r\n';
+        const oldSection = getDelimitSection().replace(`v${PKG_VERSION}`, 'v0.0.1').replace(/\n/g, '\r\n');
+        const userBottom = '\r\n\r\n# User Footer\r\n';
+        fs.writeFileSync(f, userTop + oldSection + userBottom);
+        const result = upsertDelimitSection(f);
+        assert.strictEqual(result.action, 'updated', 'CRLF marker file must be recognized and updated');
+        const content = fs.readFileSync(f, 'utf-8');
+        assert.ok(content.includes('# User Header'), 'CRLF: top user content preserved');
+        assert.ok(content.includes('# User Footer'), 'CRLF: bottom user content preserved');
+        assert.ok(content.includes(`v${PKG_VERSION}`), 'CRLF: version updated');
+        assert.ok(!content.includes('v0.0.1'), 'CRLF: old version gone');
+        cleanup(f);
+    });
+
+    it('handles UTF-8 BOM at file start (v4.1.50 edge case)', () => {
+        // BOM-prefixed file with markers on the first line must still be recognized.
+        const f = tmpFile('bom-markers.md');
+        const oldSection = getDelimitSection().replace(`v${PKG_VERSION}`, 'v0.0.1');
+        // BOM directly before the start marker — no other content above.
+        fs.writeFileSync(f, '\uFEFF' + oldSection + '\n\n# After Section\n');
+        const result = upsertDelimitSection(f);
+        assert.strictEqual(result.action, 'updated', 'BOM-prefixed marker file must be recognized');
+        const content = fs.readFileSync(f, 'utf-8');
+        assert.ok(content.includes('# After Section'), 'BOM: trailing user content preserved');
+        assert.ok(content.includes(`v${PKG_VERSION}`), 'BOM: version updated');
+        assert.ok(!content.includes('v0.0.1'), 'BOM: old version gone');
+        // BOM should be stripped after upsert.
+        assert.ok(!content.startsWith('\uFEFF'), 'BOM should be stripped on rewrite');
+        cleanup(f);
+    });
+
+    it('recognizes indented markers (v4.1.50 edge case)', () => {
+        // Two-space-indented markers should still be matched as a real managed section.
+        const f = tmpFile('indented-markers.md');
+        const oldSection = getDelimitSection().replace(`v${PKG_VERSION}`, 'v0.0.1');
+        const indented = oldSection
+            .split('\n')
+            .map((line, i, arr) => (i === 0 || i === arr.length - 1) ? '  ' + line : line)
+            .join('\n');
+        fs.writeFileSync(f, '# Doc\n\n' + indented + '\n\n# After\n');
+        const result = upsertDelimitSection(f);
+        assert.strictEqual(result.action, 'updated', 'Indented markers must be recognized');
+        const content = fs.readFileSync(f, 'utf-8');
+        assert.ok(content.includes('# Doc'), 'Indented: top content preserved');
+        assert.ok(content.includes('# After'), 'Indented: bottom content preserved');
+        assert.ok(!content.includes('v0.0.1'), 'Indented: old version gone');
+        cleanup(f);
+    });
+
+    it('does NOT match bullet- or blockquote-prefixed marker mentions (v4.1.50 edge case)', () => {
+        // Markers prefixed with `- `, `* `, or `> ` are documentation, not real markers.
+        // Each variant alone must result in 'appended', not 'updated'.
+        const variants = [
+            '# Doc\n\n- <!-- delimit:start v9.9.9 -->\n- some bullet text\n- <!-- delimit:end -->\n',
+            '# Doc\n\n* <!-- delimit:start v9.9.9 -->\n* some bullet text\n* <!-- delimit:end -->\n',
+            '# Doc\n\n> <!-- delimit:start v9.9.9 -->\n> blockquote text\n> <!-- delimit:end -->\n',
+        ];
+        for (const variant of variants) {
+            const f = tmpFile('prefixed-' + Math.random().toString(36).slice(2) + '.md');
+            fs.writeFileSync(f, variant);
+            const result = upsertDelimitSection(f);
+            assert.strictEqual(
+                result.action,
+                'appended',
+                `Bullet/blockquote-prefixed marker mention must NOT be treated as a real section. Variant: ${variant.slice(0, 40)}`,
+            );
+            const content = fs.readFileSync(f, 'utf-8');
+            assert.ok(content.includes('v9.9.9'), 'Documentation prose mention must survive verbatim');
+            cleanup(f);
+        }
     });
 
     it('appends to custom file without any Delimit content', () => {
