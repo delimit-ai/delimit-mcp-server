@@ -361,6 +361,37 @@ The free tier includes API governance, persistent memory, zero-spec extraction, 
 
 ---
 
+## Telemetry & cloud sync
+
+**Short version: none by default.** Nothing leaves your machine unless you explicitly configure it.
+
+**What's always local (source of truth):**
+- `~/.delimit/events/events-YYYY-MM-DD.jsonl` — per-tool-call events (tool name, timestamp, status, model id, session id, trace id). No source code, no prompts, no responses.
+- `~/.delimit/ledger/` — your ledger items, work orders, deliberation transcripts.
+- `~/.delimit/attestations/` — `delimit wrap` output bundles.
+
+**What's OPT-IN (requires you to provide your own Supabase project credentials):**
+- `gateway/ai/supabase_sync.py` mirrors the local event + ledger + work-order + deliberation rows into a Supabase project *you own* so you can view them in `app.delimit.ai`. **It only activates if you set `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` environment variables OR provide `~/.delimit/secrets/supabase.json` with those credentials.** No URL or key is hardcoded in the published package (verify with `grep -r aqbdqxnhzqzswdxifksc $(npm root -g)/delimit-cli/` — zero hits).
+- Data scope when enabled: metadata only (tool names, timestamps, IDs, statuses, venture tags). Never source code, prompts, or model responses.
+
+**Kill switch:**
+Set `DELIMIT_DISABLE_CLOUD_SYNC=1` in your environment to force all sync operations to no-op even if credentials are present. Local files continue to work normally.
+
+```bash
+# Disable cloud sync for a single invocation
+DELIMIT_DISABLE_CLOUD_SYNC=1 delimit lint api/openapi.yaml
+
+# Disable for the shell session
+export DELIMIT_DISABLE_CLOUD_SYNC=1
+```
+
+**Webhook notifications:**
+`gateway/ai/notify.py` emits governance events to a webhook endpoint *only if* you configure `DELIMIT_WEBHOOK_URL` explicitly. Unset by default.
+
+If you spot another code path that could phone home without disclosure, file an issue. This section is maintained as ship-truth, not aspirational.
+
+---
+
 ## Links
 
 - [delimit.ai](https://delimit.ai) -- homepage

@@ -1,7 +1,34 @@
-"""Supabase sync -- writes gateway data to cloud for dashboard access.
+"""Supabase sync — OPT-IN cloud mirror of local governance events.
 
-Writes are fire-and-forget (never blocks tool execution).
-If Supabase is unreachable, data stays in local files (always the source of truth).
+This module is OFF BY DEFAULT. It only activates if the user supplies BOTH
+of the following:
+  - SUPABASE_URL environment variable (or `url` key in ~/.delimit/secrets/supabase.json)
+  - SUPABASE_SERVICE_ROLE_KEY env var (or `service_role_key` key in the same file)
+
+When activated, it mirrors locally-written events/ledger/work-order/deliberation
+rows into the user's own Supabase project so they can view them in
+app.delimit.ai. The local files under ~/.delimit/ remain the source of truth;
+this is a read-side convenience, never a write-side requirement.
+
+Data scope (what gets sent when enabled):
+  - events: tool name, timestamp, status, model id, venture tag, session id,
+    risk level, trace id, span id. NO source code. NO prompts. NO responses.
+  - ledger items: id, title, priority, venture, status, description snippet.
+  - work orders: id, metadata fields, status.
+  - deliberations: summary metadata.
+
+KILL SWITCH:
+  Set DELIMIT_DISABLE_CLOUD_SYNC=1 in the environment to disable ALL cloud
+  mirroring even if Supabase credentials are present. The local files continue
+  to work. This is the same-session runtime equivalent of simply not configuring
+  SUPABASE_URL/SUPABASE_SERVICE_ROLE_KEY in the first place.
+
+Transport:
+  Writes are fire-and-forget. Tool execution never blocks on Supabase
+  reachability. All sync_* functions swallow exceptions silently; the
+  failure mode is "nothing appears in your dashboard" not "nothing runs."
+
+LED-1056: disclosure added per external issue #56 (delimit-ai/delimit-mcp-server).
 """
 import json
 import os
@@ -17,8 +44,14 @@ _init_attempted = False
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 
-# Also check local secrets file
-if not SUPABASE_URL:
+# LED-1056: explicit user kill switch. Overrides any credentials the user
+# might have configured. Setting this env var forces ALL sync_* operations
+# to no-op, making cloud sync unconditionally off for the session.
+_CLOUD_SYNC_DISABLED = os.environ.get("DELIMIT_DISABLE_CLOUD_SYNC", "").strip().lower() in ("1", "true", "yes", "on")
+
+# Also check local secrets file — only if env vars weren't already provided
+# AND the kill switch is not set.
+if not SUPABASE_URL and not _CLOUD_SYNC_DISABLED:
     secrets_file = Path.home() / ".delimit" / "secrets" / "supabase.json"
     if secrets_file.exists():
         try:
@@ -57,8 +90,15 @@ def _normalize_venture(value) -> str:
 
 
 def _get_client():
-    """Lazy-init Supabase client. Returns the SDK client, 'http' for fallback, or None."""
+    """Lazy-init Supabase client. Returns the SDK client, 'http' for fallback, or None.
+
+    Returns None (disabled) if:
+      - DELIMIT_DISABLE_CLOUD_SYNC=1 is set (user kill switch, LED-1056), OR
+      - SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY are not configured.
+    """
     global _client, _init_attempted
+    if _CLOUD_SYNC_DISABLED:
+        return None
     if _client is not None:
         return _client
     if _init_attempted:
