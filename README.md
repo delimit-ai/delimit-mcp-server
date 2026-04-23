@@ -16,8 +16,7 @@ The universal command for the Delimit Swarm. When you say **"Think and Build"**,
 Works across any configuration — from a single model on a budget to an enterprise swarm of 4+ models.
 
 [![npm](https://img.shields.io/npm/v/delimit-cli)](https://www.npmjs.com/package/delimit-cli)
-[![Tests](https://img.shields.io/badge/tests-123%20passing-brightgreen)](https://github.com/delimit-ai/delimit-mcp-server)
-[![MCP Tools](https://img.shields.io/badge/MCP%20tools-186-blue)](https://delimit.ai)
+[![Tests](https://img.shields.io/badge/tests-134%20passing-brightgreen)](https://github.com/delimit-ai/delimit-mcp-server)
 [![GitHub Action](https://img.shields.io/badge/GitHub%20Action-v1.6.0-blue)](https://github.com/marketplace/actions/delimit-api-governance)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Glama](https://glama.ai/mcp/servers/delimit-ai/delimit/badge)](https://glama.ai/mcp/servers/delimit-ai/delimit)
@@ -70,6 +69,34 @@ npx delimit-cli init        # Sets up governance + drift baseline
 
 ---
 
+## What's New in v4.3
+
+*Gate every AI-assisted invocation. Ship the receipts.*
+
+- **`delimit wrap`** — pipe `claude -p`, `cursor`, `aider`, `codex`, or any AI-assisted CLI through a signed governance gate. Snapshots the git diff before/after, runs lint + tests, HMAC-signs an `att_*` attestation, emits a public replay URL. Advisory by default; `--enforce` blocks CI on policy violations; `--max-time <s>` is a kill switch that tags the attestation as a `liability_incident` and prints a cross-model handoff command.
+- **`delimit trust-page`** — renders a directory of attestations into a static HTML trust page + JSON Feed 1.1 feed. Single file, no framework, offline-renderable. Deploy anywhere.
+- **`delimit ai-sbom`** — aggregates attestations into a CycloneDX 1.6 bill-of-materials with AI-specific fields (detected models per vendor, tool-call surface, policy gate counts). Pipe straight into procurement.
+- **Cross-model by construction** — `wrap` is agnostic to the producer. Same attestation schema whether the pipe upstream is Claude Code, Cursor, Aider, Codex, or Gemini CLI. Switch producers without losing the audit chain.
+
+```bash
+# Gate any AI-assisted CLI
+delimit wrap -- claude -p "add tests for payments"
+#   → att_7d556843c84fb881 signed, replay: https://delimit.ai/att/att_7d556843c84fb881
+
+# Kill switch + handoff after 60s wall-clock
+delimit wrap --max-time 60 -- cursor edit "refactor auth middleware"
+#   → if killed: kind=liability_incident
+#   → suggested: delimit wrap -- claude -p "refactor auth middleware"
+
+# Render accumulated attestations as a public trust page
+delimit trust-page -o ./trust
+#   → ./trust/index.html (+ feed.json)
+
+# Build a CycloneDX-AI bill of materials
+delimit ai-sbom -o ./ai-sbom.json
+#   → components: 4 models detected, 187 gates run
+```
+
 ## What's New in v4.20
 
 *The highest state of AI governance.*
@@ -121,7 +148,7 @@ delimit deliberate "Should we build rate limiting in-house or use a managed serv
 - **Cross-Model Audit** -- 3 lenses (security, correctness, governance) with deterministic synthesis
 - **4-model deliberation** -- Claude + Grok + Gemini + Codex debate until consensus
 - **Universal Swarm Triggers** -- "Think and Build", "Keep building", "Ask Delimit"
-- **187 MCP tools** -- governance, context, shipping, observability, orchestration, and swarm
+- **Full governance toolkit** -- lint, diff, policy, evidence, drift, attestation, and swarm orchestration exposed as MCP tools and CLI subcommands
 
 ---
 
@@ -213,6 +240,10 @@ npx delimit-cli models --status                   # Show current model config
 npx delimit-cli status                           # Compact dashboard of your Delimit setup
 npx delimit-cli doctor                           # Check setup health
 npx delimit-cli uninstall --dry-run              # Preview removal
+npx delimit-cli wrap -- claude -p "..."          # Gate any AI-assisted CLI + signed attestation (v4.3)
+npx delimit-cli wrap --max-time 60 -- codex "..."# With kill switch + handoff on timeout
+npx delimit-cli trust-page -o ./trust            # Render attestations into a static trust page
+npx delimit-cli ai-sbom -o ./ai-sbom.json        # Build a CycloneDX-AI bill of materials
 ```
 
 ### What the MCP toolkit adds

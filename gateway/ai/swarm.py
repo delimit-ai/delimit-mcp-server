@@ -952,6 +952,7 @@ def hot_reload(reason: str = "update") -> Dict[str, Any]:
         "ai.social",
         "ai.reddit_scanner",
         "ai.ledger_manager",
+        "ai.deliberation",  # added 2026-04-09 per LED-805 — CLI stdin fix needed hot reload
         "ai.backends.repo_bridge",
         "ai.backends.tools_infra",
         "backends.repo_bridge",  # alias used by server.py lazy imports

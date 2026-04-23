@@ -56,6 +56,10 @@ _CREDENTIAL_FALSE_POSITIVES = re.compile(
     r"change[_-]?me|TODO|FIXME|xxx+|\.{4,}|"
     r"\$\{|%\(|None|null|undefined|"
     r"test[_-]?(?:password|secret|token|key)|"
+    # Test fixture patterns — fake keys like hosted-key-1, user-key-2, sk-test, gem-test
+    r"hosted[_-]key[_-]?\d*|user[_-]key[_-]?\d*|"
+    r"(?:codex|gem|grok)[_-]test|sk[_-]test|"
+    r"bad[:\-]token|fake[_-]?(?:key|token|secret)|"
     # Demo/sample literal values used in docs, recordings, fixtures
     r"sk-ant-demo|sk-demo|AIza-demo|xai-demo|demo[_-]?(?:key|secret|token)|"
     r"-demo['\"]|"
@@ -63,7 +67,9 @@ _CREDENTIAL_FALSE_POSITIVES = re.compile(
     r"json\.loads|\.read_text\(|\.slice\(|"
     r"tokens\.get\(|token\s*=\s*_make_token|"
     # RHS that is a parameter reference like token=tokens.get("access_token"...
-    r"=\s*tokens\.get\()",
+    r"=\s*tokens\.get\(|"
+    # Dict index dereference: token_data["token"], result["secret"], etc.
+    r"_data\[|_result\[)",
     re.IGNORECASE,
 )
 

@@ -157,9 +157,10 @@ class OpenAPIDiffEngine:
     def _compare_operation(self, operation_id: str, old_op: Dict, new_op: Dict):
         """Compare operation details (parameters, responses, etc.)."""
         
-        # Compare parameters
-        old_params = {self._param_key(p): p for p in old_op.get("parameters", [])}
-        new_params = {self._param_key(p): p for p in new_op.get("parameters", [])}
+        # Compare parameters — skip unresolved $ref entries (common in Swagger 2.0)
+        # which lack inline name/in fields and would crash downstream accessors.
+        old_params = {self._param_key(p): p for p in old_op.get("parameters", []) if "name" in p}
+        new_params = {self._param_key(p): p for p in new_op.get("parameters", []) if "name" in p}
         
         # Check removed parameters
         for param_key in set(old_params.keys()) - set(new_params.keys()):
@@ -243,7 +244,7 @@ class OpenAPIDiffEngine:
         """Compare parameter schemas for type changes, required changes, and constraints."""
         old_schema = old_param.get("schema", {})
         new_schema = new_param.get("schema", {})
-        param_name = old_param["name"]
+        param_name = old_param.get("name", old_param.get("$ref", "unknown"))
 
         # Check type changes — emit both PARAM_TYPE_CHANGED (specific) and TYPE_CHANGED (legacy)
         if old_schema.get("type") != new_schema.get("type"):

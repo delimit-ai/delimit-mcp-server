@@ -6113,6 +6113,155 @@ program
         console.log(require('../package.json').version);
     });
 
+// LED-1048: delimit wrap — gate any AI-assisted CLI with signed attestation + replay
+// Surface 1 CLI-pipe extension. Cross-model-agnostic (claude -p, cursor, aider, codex, ...).
+// Advisory by default; opt-in --enforce to block on policy violations.
+program
+    .command('wrap')
+    .description('Gate an AI-assisted CLI invocation with signed attestation (advisory-first)')
+    .argument('<cmd...>', 'The command to wrap (e.g. `claude -p "add tests"`)')
+    .option('--enforce', 'Block exit on policy violation (default: advisory)', false)
+    .option('--deliberate', 'Also run multi-model deliberation (advisory)', false)
+    .option('--no-attest', 'Skip attestation emission (dry run)')
+    .option('--max-time <seconds>', 'Kill switch: SIGKILL the wrapped command after N seconds (liability_incident attestation + handoff)', parseInt)
+    .option('--json', 'Output result as JSON', false)
+    .action(async (cmdParts, options) => {
+        const { runWrap, replayUrl } = require('../lib/wrap-engine');
+        try {
+            const result = await runWrap(cmdParts, {
+                enforce: !!options.enforce,
+                deliberate: !!options.deliberate,
+                attest: options.attest !== false,
+                maxTimeSeconds: options.maxTime || 0,
+                cwd: process.cwd(),
+            });
+
+            if (result.error === 'quota_exceeded') {
+                console.error(chalk.red(`\n  [wrap] ${result.message}\n`));
+                process.exit(1);
+                return;
+            }
+
+            if (options.json) {
+                console.log(JSON.stringify(result, null, 2));
+                process.exit(result.exit);
+                return;
+            }
+
+            console.log();
+            const banner = result.kind === 'liability_incident'
+                ? chalk.bold.red(`  delimit wrap — ${result.attestation_id || '(no attestation)'} [liability_incident]`)
+                : chalk.bold.cyan(`  delimit wrap — ${result.attestation_id || '(no attestation)'}`);
+            console.log(banner);
+            console.log(chalk.gray(`  wrapped exit: ${result.wrapped_exit}   mode: ${result.advisory ? 'advisory' : 'enforce'}   tier: ${result.tier || 'n/a'}`));
+            if (result.killed_by_timeout) {
+                console.log(chalk.yellow(`  ⚠ kill switch fired — wrapped command exceeded --max-time`));
+            }
+            if (result.gates.length) {
+                console.log();
+                for (const g of result.gates) {
+                    const tag = g.exit === undefined
+                        ? chalk.gray('·')
+                        : (g.exit === 0 ? chalk.green('✓') : chalk.red('✗'));
+                    const name = g.name + (g.runner ? ':' + g.runner : '') + (g.spec ? ':' + path.basename(g.spec) : '');
+                    const note = g.result ? ` (${g.result})` : '';
+                    console.log(`  ${tag} ${name}${note}`);
+                }
+            }
+            if (result.violations.length) {
+                console.log();
+                console.log(chalk.yellow(`  ${result.violations.length} violation(s):`));
+                for (const v of result.violations) console.log(chalk.yellow(`    - ${v}`));
+                if (result.advisory) console.log(chalk.gray('  advisory mode — wrap exit unaffected. Re-run with --enforce to block.'));
+            }
+            if (result.attestation_id) {
+                console.log();
+                console.log(chalk.gray(`  attestation: ${result.attestation_path || '(not saved)'}`));
+                console.log(chalk.gray(`  replay:      ${result.replay_url}`));
+            }
+            if (result.handoff_suggestion) {
+                console.log();
+                console.log(chalk.bold('  cross-model handoff suggestion:'));
+                console.log(`    ${chalk.cyan(result.handoff_suggestion.suggested_command)}`);
+                console.log(chalk.gray(`    (alternates: ${result.handoff_suggestion.alternates.join(', ')})`));
+            }
+            console.log();
+            process.exit(result.exit);
+        } catch (e) {
+            console.error(chalk.red(`\n  [wrap] ${e.message || e}\n`));
+            process.exit(1);
+        }
+    });
+
+// LED-1018 Venture #6 MVP: trust-page + ai-sbom subcommands
+// Render aggregated attestations (from `delimit wrap`) into a public static
+// trust page (HTML + JSON Feed) and a CycloneDX-AI bill of materials.
+program
+    .command('trust-page')
+    .description('Render attestations into a public trust page (static HTML + JSON feed)')
+    .option('-d, --dir <path>', 'Attestation directory', path.join(os.homedir(), '.delimit', 'attestations'))
+    .option('-o, --out <path>', 'Output directory', './trust-page')
+    .option('-t, --title <title>', 'Trust page title', 'Trust Page')
+    .option('--json', 'Output result as JSON', false)
+    .action(async (options) => {
+        const { renderTrustPage } = require('../lib/trust-page-engine');
+        try {
+            const result = renderTrustPage(options.dir, options.out, options.title);
+            if (options.json) {
+                console.log(JSON.stringify(result, null, 2));
+                return;
+            }
+            console.log();
+            console.log(chalk.bold.cyan(`  delimit trust-page`));
+            console.log(chalk.gray(`  source: ${options.dir}`));
+            console.log(chalk.gray(`  output: ${result.outDir}/`));
+            console.log(chalk.gray(`  attestations rendered: ${result.count}`));
+            console.log(chalk.gray(`  feed items: ${result.feed_items}   html bytes: ${result.html_bytes}`));
+            console.log();
+            console.log(chalk.bold(`  Open: ${path.resolve(result.outDir)}/index.html`));
+            console.log();
+        } catch (e) {
+            console.error(chalk.red(`\n  [trust-page] ${e.message || e}\n`));
+            process.exit(1);
+        }
+    });
+
+program
+    .command('ai-sbom')
+    .description('Build a CycloneDX-AI bill of materials from attestations')
+    .option('-d, --dir <path>', 'Attestation directory', path.join(os.homedir(), '.delimit', 'attestations'))
+    .option('-o, --out <path>', 'Output file', './ai-sbom.json')
+    .option('-n, --name <name>', 'BOM subject name', 'ai-sbom')
+    .option('-v, --package-version <v>', 'BOM subject version', '1.0.0')
+    .option('--json', 'Print the SBOM to stdout instead of writing to file', false)
+    .action(async (options) => {
+        const { buildAISBOM } = require('../lib/ai-sbom-engine');
+        try {
+            const { sbom, aggregate, attestation_count } = buildAISBOM(options.dir, {
+                name: options.name,
+                version: options.packageVersion,
+            });
+            if (options.json) {
+                console.log(JSON.stringify(sbom, null, 2));
+                return;
+            }
+            fs.writeFileSync(options.out, JSON.stringify(sbom, null, 2));
+            console.log();
+            console.log(chalk.bold.cyan(`  delimit ai-sbom`));
+            console.log(chalk.gray(`  source: ${options.dir}`));
+            console.log(chalk.gray(`  output: ${path.resolve(options.out)}`));
+            console.log(chalk.gray(`  attestations scanned: ${attestation_count}`));
+            console.log(chalk.gray(`  models detected:      ${aggregate.models.length}`));
+            console.log(chalk.gray(`  tool-call surface:    ${aggregate.tool_calls.length}`));
+            console.log(chalk.gray(`  total gates run:      ${aggregate.total_gates_run}`));
+            console.log(chalk.gray(`  total violations:     ${aggregate.total_violations}`));
+            console.log();
+        } catch (e) {
+            console.error(chalk.red(`\n  [ai-sbom] ${e.message || e}\n`));
+            process.exit(1);
+        }
+    });
+
 // Hide legacy/internal commands from --help
 ['install', 'mode', 'status', 'policy', 'auth', 'audit',
  'explain-decision', 'uninstall', 'proxy', 'hook'].forEach(name => {

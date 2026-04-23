@@ -37,6 +37,8 @@ PRO_TOOLS = frozenset({
     # Agent orchestration
     "delimit_agent_dispatch", "delimit_agent_status",
     "delimit_agent_complete", "delimit_agent_handoff",
+    # Worker Pool v2 executor (LED-981)
+    "delimit_executor",
 })
 
 # Free trial limits

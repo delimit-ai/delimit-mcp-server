@@ -202,7 +202,39 @@ def add_item(
     LED-189: Items can have acceptance_criteria (testable "done when" conditions).
     LED-190: Items can have context, tools_needed, and estimated_complexity
     for agent-executable task format.
+    LED-877: Signal guard — rejects source='social_scan' writes so sensed
+    observations cannot land in the ledger. Observations belong in the intel
+    signal store (ai/sensing/signal_store.py). Bypass via env var for the
+    promote_to_ledger path: _DELIMIT_SIGNAL_PROMOTED_BY=<who>.
     """
+    _src_norm = (source or "").strip().lower()
+    _promoted_by = os.environ.get("_DELIMIT_SIGNAL_PROMOTED_BY", "")
+    _guard_mode = os.environ.get("DELIMIT_SIGNAL_GUARD", "enforce").lower()
+    if _src_norm.startswith("social_scan") or _src_norm.startswith("social_strategy"):
+        if not _promoted_by:
+            msg = (
+                f"LED-877 guard: source={source!r} is a sensed observation, not "
+                f"a ledger item. Use ai.sensing.signal_store.ingest() instead. "
+                f"Promote explicitly via promote_to_ledger(signal_id=...)."
+            )
+            if _guard_mode == "shadow":
+                try:
+                    _shadow_log = Path.home() / ".delimit" / "logs" / "signal_guard_shadow.jsonl"
+                    _shadow_log.parent.mkdir(parents=True, exist_ok=True)
+                    with _shadow_log.open("a") as _f:
+                        _f.write(json.dumps({
+                            "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                            "title": title,
+                            "source": source,
+                            "ledger": ledger,
+                            "msg": msg,
+                        }) + "\n")
+                except Exception:
+                    pass
+                # fall through
+            else:
+                raise ValueError(msg)
+
     _ensure(project_path)
     venture = _detect_venture(project_path)
     ledger_dir = _project_ledger_dir(project_path)

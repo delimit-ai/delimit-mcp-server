@@ -136,21 +136,27 @@ def _sanitize_path(user_path: str, label: str = "path") -> Path:
     return resolved
 
 
-# LED-881 / #40: Confused-deputy guard for LLM-controlled repo parameters.
-# Originally reported as command injection (not exploitable — argv list, no
-# shell=True). Reporter's second-pass framing identified the real concern: a
-# prompt-injected LLM could ask a sensor tool to read issue comments from any
-# repo the caller's gh token can see, including private ones.
+# LED-881: Confused-deputy guard for LLM-controlled repo parameters.
+# Originally reported on delimit-ai/delimit-mcp-server#40 as command injection
+# (not exploitable — argv list, no shell=True). The reporter's second-pass
+# framing is the real concern: a prompt-injected LLM could ask a sensor tool
+# to read issue comments from any repo the caller's gh token can see,
+# including private ones. Confused deputy / resource scope creep.
 #
 # Mitigation: opt-in allowlist via DELIMIT_ALLOWED_REPOS env var.
-#   - Unset (default): pass through, emit one-time warning per process.
-#   - Set: CSV of owner/repo entries. Repos outside the list are refused.
+#   - Unset (default): pass through, emit a one-time warning per process.
+#     Preserves backwards-compat for existing Pro installs.
+#   - Set: CSV of owner/repo entries. Any repo not in the list is refused
+#     with a structured error so the LLM caller gets a legible refusal.
+#
+# The pass-through-unset posture is the add-don't-remove rule from CLAUDE.md.
 _REPO_ALLOWLIST_WARNED = False
 
 
 def _check_repo_allowlist(repo: str) -> Optional[Dict[str, Any]]:
     """Return a structured refusal dict when the repo is outside the
     configured allowlist. Return None when the call should proceed.
+
     Env var: DELIMIT_ALLOWED_REPOS = "owner/a,owner/b,org/c"
     """
     global _REPO_ALLOWLIST_WARNED
@@ -165,7 +171,12 @@ def _check_repo_allowlist(repo: str) -> Optional[Dict[str, Any]]:
             )
             _REPO_ALLOWLIST_WARNED = True
         return None
-    allowed = {entry.strip().lower() for entry in allowlist_raw.split(",") if entry.strip()}
+
+    allowed = {
+        entry.strip().lower()
+        for entry in allowlist_raw.split(",")
+        if entry.strip()
+    }
     if (repo or "").strip().lower() not in allowed:
         return {
             "error": "repo_not_allowlisted",
@@ -173,7 +184,8 @@ def _check_repo_allowlist(repo: str) -> Optional[Dict[str, Any]]:
             "allowed": sorted(allowed),
             "hint": (
                 "This repo is not in DELIMIT_ALLOWED_REPOS. Add it to the env "
-                "var or use a different tool. See delimit-mcp-server#40."
+                "var or use a different tool that does not reach external APIs. "
+                "See delimit-ai/delimit-mcp-server#40 for context."
             ),
         }
     return None
@@ -2437,6 +2449,321 @@ def delimit_intel_query(
     return _with_next_steps("intel_query", _safe_call(intel_query, dataset_id=dataset_id, query=query, parameters=parameters))
 
 
+# ─── Digest (LED-966 founder daily summary) ─────────────────────────────
+
+@mcp.tool()
+def delimit_digest(
+    action: str = "run",
+    window_hours: int = 24,
+    send_email: bool = False,
+    to: str = "",
+) -> Dict[str, Any]:
+    """Generate a daily digest of loop activity (LED-966).
+
+    Produces a structured summary of the last window_hours:
+      - signals ingested by platform
+      - deliberations held + consensus rate
+      - ledger items opened/completed
+      - swarm dispatches + stuck-task count
+      - health (pause file, guard hits)
+
+    Always writes markdown + json artifacts to ~/.delimit/digest/
+    so the founder can inspect without relying on email delivery.
+    Optionally emails the digest via the notify pipeline.
+
+    Args:
+        action: 'run' to build and write, 'latest' to return existing file paths.
+        window_hours: lookback window. Default 24.
+        send_email: if True, attempt to email the digest to `to` or
+                    DELIMIT_SMTP_TO. Requires DELIMIT_DIGEST_EMAIL=true
+                    in the env to actually send (pipeline gate).
+        to: recipient email. Defaults to DELIMIT_SMTP_TO.
+    """
+    from ai.daily_digest import write_digest, send_digest_email, DIGEST_DIR
+
+    if action == "latest":
+        if not DIGEST_DIR.exists():
+            return _with_next_steps("digest", {"error": "no digest directory yet"})
+        mds = sorted(DIGEST_DIR.glob("digest-*.md"), reverse=True)
+        if not mds:
+            return _with_next_steps("digest", {"error": "no digest files written yet"})
+        latest = mds[0]
+        return _with_next_steps("digest", {
+            "action": "latest",
+            "markdown_path": str(latest),
+            "json_path": str(latest.with_suffix(".json")),
+            "preview": latest.read_text()[:2000],
+        })
+
+    if action == "run":
+        if send_email:
+            result = _safe_call(send_digest_email, to=to)
+        else:
+            result = _safe_call(write_digest, window_hours=window_hours)
+        return _with_next_steps("digest", result or {"error": "digest call failed"})
+
+    return _with_next_steps("digest", {
+        "error": f"unknown action: {action!r}",
+        "valid_actions": ["run", "latest"],
+    })
+
+
+# ─── Work Orders (STR-177 structured execution) ─────────────────────────
+
+@mcp.tool()
+def delimit_work_orders(
+    action: str = "list",
+    status: str = "pending",
+    wo_id: str = "",
+    note: str = "",
+) -> Dict[str, Any]:
+    """Manage work orders — structured task artifacts for the founder (STR-177).
+
+    Work orders bridge strategy deliberations and interactive execution.
+    Each is a copy-pasteable markdown file the founder can hand to a
+    Claude Code session.
+
+    Args:
+        action: 'list' (show pending), 'show' (read one), 'complete' (mark done).
+        status: Filter for list: 'pending', 'completed', 'all'.
+        wo_id: Work order ID for 'show' and 'complete'.
+        note: Completion note for 'complete'.
+    """
+    from ai.work_order import list_work_orders, complete_work_order, WORK_ORDERS_DIR
+
+    if action == "list":
+        orders = _safe_call(list_work_orders, status=status)
+        return _with_next_steps("work_orders", {
+            "action": "list",
+            "status": status,
+            "count": len(orders) if isinstance(orders, list) else 0,
+            "orders": orders,
+        })
+
+    if action == "show":
+        if not wo_id:
+            return _with_next_steps("work_orders", {"error": "wo_id required for action=show"})
+        md_path = WORK_ORDERS_DIR / f"{wo_id}.md"
+        if not md_path.exists():
+            return _with_next_steps("work_orders", {"error": f"{wo_id} not found"})
+        return _with_next_steps("work_orders", {
+            "action": "show",
+            "id": wo_id,
+            "content": md_path.read_text(),
+        })
+
+    if action == "complete":
+        if not wo_id:
+            return _with_next_steps("work_orders", {"error": "wo_id required for action=complete"})
+        result = _safe_call(complete_work_order, wo_id=wo_id, note=note)
+        return _with_next_steps("work_orders", result or {"error": "complete failed"})
+
+    return _with_next_steps("work_orders", {
+        "error": f"unknown action: {action!r}",
+        "valid_actions": ["list", "show", "complete"],
+    })
+
+
+# ─── Executor (LED-981 Worker Pool v2) ──────────────────────────────────
+
+@mcp.tool()
+def delimit_executor(
+    action: str = "status",
+    wo_id: str = "",
+    live: bool = False,
+    executed_by: str = "",
+) -> Dict[str, Any]:
+    """Run approved work orders from the dashboard inbox (Pro, Worker Pool v2).
+
+    Execution is bounded to a narrow whitelist of state-changing actions
+    (gh_issue_create, gh_pr_comment, gh_issue_comment). Every invocation
+    is logged to ~/.delimit/workers/audit/executor.jsonl. Dry-run is the
+    default — pass live=True to actually fire the actions.
+
+    The dashboard Approve button flips a work order to status=approved.
+    The poller (or a one-shot call with action=poll) then runs the
+    typed executable_actions list. Touch ~/.delimit/pause_executor to
+    stop the autonomous path at the next tick.
+
+    Args:
+        action: 'run' (one work order), 'poll' (scan + run all approved),
+            'status' (return paused + pending count), 'pause'/'resume'.
+        wo_id: Required for action='run'.
+        live: When False (default), dry-run — describes what would happen.
+        executed_by: Identifier for the audit log (e.g. 'dashboard', 'cron').
+    """
+    from ai.license import require_premium
+    gate = require_premium("executor")
+    if gate:
+        return gate
+    from ai.workers.executor import (
+        execute_approved,
+        poll_and_execute,
+        is_paused,
+        list_approved_pending,
+        EXECUTOR_PAUSE_FILE,
+    )
+
+    if action == "status":
+        pending = list_approved_pending()
+        return _with_next_steps("executor", {
+            "paused": is_paused(),
+            "pending_approved_count": len(pending),
+            "pending_ids": [p.get("id") for p in pending[:10]],
+        })
+
+    if action == "pause":
+        EXECUTOR_PAUSE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        EXECUTOR_PAUSE_FILE.touch()
+        return _with_next_steps("executor", {"paused": True, "file": str(EXECUTOR_PAUSE_FILE)})
+
+    if action == "resume":
+        try:
+            EXECUTOR_PAUSE_FILE.unlink()
+        except FileNotFoundError:
+            pass
+        return _with_next_steps("executor", {"paused": False})
+
+    if action == "run":
+        if not wo_id:
+            return _with_next_steps("executor", {"error": "wo_id required for action=run"})
+        result = _safe_call(
+            execute_approved,
+            wo_id=wo_id,
+            live=bool(live),
+            executed_by=executed_by or "mcp",
+        )
+        return _with_next_steps("executor", result or {"error": "execute failed"})
+
+    if action == "poll":
+        result = _safe_call(
+            poll_and_execute,
+            live=bool(live),
+            executed_by=executed_by or "mcp_poll",
+        )
+        return _with_next_steps("executor", result or {"error": "poll failed"})
+
+    return _with_next_steps("executor", {
+        "error": f"unknown action: {action!r}",
+        "valid_actions": ["status", "run", "poll", "pause", "resume"],
+    })
+
+
+# ─── Sense (LED-877 signal corpus) ──────────────────────────────────────
+
+@mcp.tool()
+def delimit_sense(
+    action: str = "query",
+    since_days: int = 1,
+    platform: str = "",
+    limit: int = 50,
+    signal_id: str = "",
+    ledger: str = "ops",
+    priority: str = "P2",
+    month: str = "",
+) -> Dict[str, Any]:
+    """Review and manage the signal corpus (LED-877).
+
+    Signals are sensed observations stored at ~/.delimit/intel/signals/,
+    physically separated from the ledger. Use this tool to inspect,
+    cluster, or explicitly promote a signal to a ledger item.
+
+    Args:
+        action: One of 'query', 'digest', 'show', 'promote', 'freeze', 'status'.
+        since_days: Lookback window in days (query/digest). Default 1 = last 24h.
+        platform: Filter by source platform (reddit, x, github, hn). Empty = all.
+        limit: Max rows to return (query). Default 50.
+        signal_id: Signal id (SIG-XXXX) for 'show' and 'promote'.
+        ledger: Target ledger for 'promote' (ops or strategy).
+        priority: Priority for the promoted ledger item (P0/P1/P2).
+        month: YYYY-MM for 'freeze' action (cold archive).
+
+    Examples:
+        delimit_sense()                        # last 24h of signals
+        delimit_sense(action="digest", since_days=7)  # 7-day clusters
+        delimit_sense(action="show", signal_id="SIG-ABC123")
+        delimit_sense(action="promote", signal_id="SIG-ABC123", priority="P1")
+    """
+    try:
+        from ai.sensing import signal_store
+    except ImportError as exc:
+        return _with_next_steps("sense", {"error": f"signal store not available: {exc}"})
+
+    act = (action or "query").lower().strip()
+
+    if act == "query":
+        rows = _safe_call(
+            signal_store.query,
+            since_days=since_days,
+            platform=platform,
+            limit=limit,
+        )
+        return _with_next_steps("sense", {
+            "action": "query",
+            "since_days": since_days,
+            "platform": platform or "all",
+            "count": len(rows) if isinstance(rows, list) else 0,
+            "signals": rows,
+        })
+
+    if act == "digest":
+        result = _safe_call(signal_store.digest, since_days=since_days or 7, top_n=limit or 20)
+        return _with_next_steps("sense", {"action": "digest", **(result or {})})
+
+    if act == "show":
+        if not signal_id:
+            return _with_next_steps("sense", {"error": "signal_id required for action=show"})
+        found = _safe_call(signal_store._find_signal, signal_id=signal_id)
+        if not found:
+            return _with_next_steps("sense", {"error": f"signal {signal_id} not found"})
+        return _with_next_steps("sense", {"action": "show", "signal": found})
+
+    if act == "promote":
+        if not signal_id:
+            return _with_next_steps("sense", {"error": "signal_id required for action=promote"})
+        try:
+            result = signal_store.promote_to_ledger(
+                signal_id=signal_id,
+                ledger=ledger,
+                priority=priority,
+            )
+        except Exception as exc:
+            return _with_next_steps("sense", {"error": f"promote failed: {exc}"})
+        return _with_next_steps("sense", {"action": "promote", "result": result})
+
+    if act == "freeze":
+        if not month:
+            return _with_next_steps("sense", {"error": "month (YYYY-MM) required for action=freeze"})
+        try:
+            archive_path = signal_store.freeze_cold(month=month)
+        except Exception as exc:
+            return _with_next_steps("sense", {"error": f"freeze failed: {exc}"})
+        return _with_next_steps("sense", {"action": "freeze", "month": month, "archive": archive_path})
+
+    if act == "status":
+        try:
+            from pathlib import Path
+            shards = sorted(signal_store.SIGNALS_DIR.glob("*.jsonl")) if signal_store.SIGNALS_DIR.exists() else []
+            archive = sorted((signal_store.SIGNALS_DIR / "archive").glob("*.jsonl")) if (signal_store.SIGNALS_DIR / "archive").exists() else []
+            hot_shards = [p.name for p in shards if not p.name.startswith("_")]
+            return _with_next_steps("sense", {
+                "action": "status",
+                "signals_dir": str(signal_store.SIGNALS_DIR),
+                "hot_shards": hot_shards,
+                "hot_shard_count": len(hot_shards),
+                "archive_files": [p.name for p in archive],
+                "hot_window_days": signal_store.HOT_WINDOW_DAYS,
+                "warm_window_days": signal_store.WARM_WINDOW_DAYS,
+            })
+        except Exception as exc:
+            return _with_next_steps("sense", {"error": f"status failed: {exc}"})
+
+    return _with_next_steps("sense", {
+        "error": f"unknown action: {action!r}",
+        "valid_actions": ["query", "digest", "show", "promote", "freeze", "status"],
+    })
+
+
 # ─── Generate ───────────────────────────────────────────────────────────
 
 @mcp.tool()
@@ -3737,7 +4064,7 @@ async def delimit_sensor_github_issue(
     if not _re.match(r'^[\w.-]+/[\w.-]+$', repo):
         return _with_next_steps("sensor_github_issue", {"error": f"Invalid repo format: {repo}. Use owner/repo."})
     if '..' in repo:
-        return _with_next_steps("sensor_github_issue", {"error": "Invalid repo: path traversal sequences not allowed"})
+        return _with_next_steps("sensor_github_issue", {"error": f"Invalid repo: path traversal sequences not allowed"})
     if not isinstance(issue_number, int) or issue_number <= 0:
         return _with_next_steps("sensor_github_issue", {"error": f"Invalid issue number: {issue_number}"})
 
@@ -5507,6 +5834,7 @@ def delimit_deliberate(
     mode: str = "dialogue",
     max_rounds: int = 3,
     save_path: str = "",
+    scope: str = "",
 ) -> Dict[str, Any]:
     """Run multi-model consensus via real AI-to-AI deliberation (Pro).
 
@@ -5521,6 +5849,11 @@ def delimit_deliberate(
         mode: "dialogue" (short turns) or "debate" (long essays).
         max_rounds: Maximum rounds (default 3 for debate, 6 for dialogue).
         save_path: Optional file path to save the full transcript.
+        scope: Optional scope override — "strategic", "social", or
+            "operational". When empty, the engine classifies from
+            keywords in the question and context. Strategic and social
+            scopes enforce the 3-model minimum (charter consensus-thresholds)
+            and allow Grok as a tiebreaker on deadlock.
     """
     from ai.license import require_premium
     gate = require_premium("deliberate")
@@ -5533,7 +5866,13 @@ def delimit_deliberate(
         mode=mode,
         max_rounds=max_rounds,
         save_path=save_path or "",
+        scope=scope or "",
     )
+
+    # LED-978: a blocked deliberation returns an error dict; pass it straight
+    # through so callers can act on it (widen scope, add models, etc).
+    if result.get("error") and result.get("scope"):
+        return result
 
     # Add summary for Claude to review
     rounds_count = len(result.get("rounds", []))
@@ -5547,12 +5886,21 @@ def delimit_deliberate(
         "transcript_saved": result.get("saved_to", save_path),
         "note": "Review the full transcript. As orchestrator, provide your own analysis and final synthesis.",
     }
+    if result.get("tiebreaker"):
+        summary["tiebreaker"] = result["tiebreaker"]
 
-    # Include last round responses for immediate review
+    # Include last round responses for immediate review. Only surface a
+    # per-model field when the model actually spoke — otherwise we'd emit
+    # empty "grok_final_response" strings for every deliberation that
+    # ran without Grok (true on every chat-login-only config), which
+    # misleads readers into thinking Grok was there but silent.
     if result.get("rounds"):
         last_round = result["rounds"][-1]
-        summary["gemini_final_response"] = last_round["responses"].get("gemini", "")[:2000]
-        summary["grok_final_response"] = last_round["responses"].get("grok", "")[:2000]
+        last_responses = last_round.get("responses") or {}
+        for model_name in ("gemini", "claude", "codex", "vertex", "grok"):
+            text = last_responses.get(model_name)
+            if text:
+                summary[f"{model_name}_final_response"] = text[:2000]
 
     # Auto-create ledger items from deliberation findings
     if unanimous and result.get("rounds"):
@@ -7115,10 +7463,14 @@ def delimit_daemon_run(iterations: int = 1, dry_run: bool = True) -> Dict[str, A
     ))
 
 @mcp.tool()
-def delimit_build_loop(action: str = "run", session_id: str = "", loop_type: str = "build") -> Dict[str, Any]:
+def delimit_build_loop(action: str = "run", session_id: str = "", loop_type: str = "build",
+                       cycle_mode: str = "full") -> Dict[str, Any]:
     """Execute a governed continuous loop (LED-239).
 
-    Supports three loop types matching the OS terminal model:
+    Supports four loop types:
+    - **cycle** (RECOMMENDED): unified think→build→deploy in one call.
+      Each stage auto-triggers the next. Failed stages don't block
+      subsequent stages.
     - **build**: picks feat/fix/task items from ledger, dispatches via swarm
     - **social** (think): scans Reddit/X/HN, drafts replies, handles social/outreach/content/sensor ledger items
     - **deploy**: runs deploy gates, publishes, verifies
@@ -7126,16 +7478,24 @@ def delimit_build_loop(action: str = "run", session_id: str = "", loop_type: str
     Args:
         action: 'init' to start a session, 'run' to execute one iteration.
         session_id: Optional session ID to continue.
-        loop_type: 'build', 'social', or 'deploy' (default: build).
+        loop_type: 'cycle', 'build', 'social', or 'deploy' (default: build).
+        cycle_mode: 'sense' (think+strategy), 'execute' (build+deploy),
+                    'full' (all stages). Only applies to loop_type='cycle'.
+                    Daemon uses 'sense', interactive sessions use 'full' or 'execute'.
     """
-    from ai.loop_engine import create_governed_session, run_governed_iteration, run_social_iteration
+    from ai.loop_engine import (
+        create_governed_session, run_governed_iteration,
+        run_social_iteration, run_full_cycle,
+    )
 
     if action == "init":
         return _with_next_steps("build_loop", create_governed_session(loop_type=loop_type))
     else:
         if not session_id:
             session_id = create_governed_session(loop_type=loop_type)["session_id"]
-        if loop_type == "social" or session_id.startswith("social-"):
+        if loop_type == "cycle":
+            return _with_next_steps("build_loop", run_full_cycle(session_id, cycle_mode=cycle_mode))
+        elif loop_type == "social" or session_id.startswith("social-"):
             return _with_next_steps("build_loop", run_social_iteration(session_id))
         else:
             return _with_next_steps("build_loop", run_governed_iteration(session_id))
@@ -8370,6 +8730,53 @@ def delimit_content_intel_weekly(date: str = "") -> Dict[str, Any]:
     except Exception as e:
         logger.error("delimit_content_intel_weekly failed: %s", e)
         return {"error": str(e)}
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  HOT RELOAD (LED-799) — pick up new tools/modules without restart
+# ═══════════════════════════════════════════════════════════════════════
+
+
+@mcp.tool()
+def delimit_hot_reload(action: str = "status", interval: float = 2.0) -> Dict[str, Any]:
+    """Control the cross-session MCP hot-reload watcher (LED-799).
+
+    The watcher polls ai/*.py for new files and changed mtimes, reloads
+    helper modules in place, and registers any new @mcp.tool() decorations
+    against the live FastMCP instance — so other Claude sessions can pick
+    up your edits without restarting the MCP server.
+
+    Limitation: edits to ai/server.py itself still require a restart.
+    Convention: put new tools in ai/tools/<name>.py instead.
+
+    Args:
+        action: 'start', 'stop', 'status', or 'tick' (run a single scan now).
+        interval: Poll interval in seconds. Only used on start. Default 2.0.
+    """
+    from ai import hot_reload as _hr
+    action = (action or "status").strip().lower()
+    if action == "start":
+        return _hr.start_hot_reload(mcp, interval=interval)
+    if action == "stop":
+        return _hr.stop_hot_reload()
+    if action == "tick":
+        with _hr._singleton_lock:
+            watcher = _hr._singleton
+        if watcher is None:
+            return {"error": "watcher not running"}
+        return watcher.tick()
+    return _hr.hot_reload_status()
+
+
+# Auto-start the watcher unless explicitly disabled. New sessions get the
+# benefit of cross-session reload without any setup. Set DELIMIT_HOT_RELOAD=0
+# to opt out (e.g. for tests that need a stable module table).
+try:
+    if os.environ.get("DELIMIT_HOT_RELOAD", "1") != "0":
+        from ai import hot_reload as _hot_reload_boot
+        _hot_reload_boot.start_hot_reload(mcp)
+except Exception as _e:
+    logger.warning("hot_reload boot failed (non-fatal): %s", _e)
 
 
 @mcp.tool()

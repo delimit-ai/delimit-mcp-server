@@ -18,10 +18,37 @@ from typing import Any, Dict, List, Optional
 AGENTS_DIR = Path.home() / ".delimit" / "agents"
 TASKS_FILE = AGENTS_DIR / "tasks.json"
 AUDIT_FILE = AGENTS_DIR / "audit.jsonl"
+PAUSE_FILE = Path.home() / ".delimit" / "pause_dispatch"
 
 VALID_PRIORITIES = {"P0", "P1", "P2"}
 VALID_ASSIGNEES = {"claude", "codex", "gemini", "any"}
 VALID_STATUSES = {"dispatched", "in_progress", "done", "handed_off", "failed"}
+
+# LED-876: auto-pause when dead-letter queue depth (stuck 'dispatched' tasks)
+# hits this threshold. Prevents runaway dispatch when no workers are pulling.
+DLQ_AUTO_PAUSE_THRESHOLD = 20
+
+# LED-878: router table — resolves assignee='any' to a specific model at
+# dispatch time based on task_type. This eliminates the dead-letter 'any'
+# bucket without requiring a worker process to exist yet. The mapping is
+# deliberately conservative: if the task type is unknown, fall through to
+# gemini (cheapest, highest throughput) rather than pile onto claude.
+TASK_TYPE_ROUTER = {
+    # Outreach and social work — Gemini Flash is fast and cheap
+    "outreach": "gemini",
+    "social": "gemini",
+    "content": "gemini",
+    "sensor": "gemini",
+    # Engineering — Claude / Codex for code, Claude for governance
+    "fix": "claude",
+    "feat": "claude",
+    "refactor": "claude",
+    "test": "codex",
+    "research": "gemini",
+    "strategy": "gemini",
+    "deliberation": "claude",
+}
+ROUTER_DEFAULT_ASSIGNEE = "gemini"
 
 
 def _ensure_dir():
@@ -74,9 +101,61 @@ def dispatch_task(
     if not title or not title.strip():
         return {"error": "title is required"}
 
+    # LED-876: reject ghost "[VENTURE] Engage:  on x" titles with empty author
+    # slot. The social_target fix drops these at the scanner, but keep this as
+    # a belt-and-suspenders check since agent_dispatch has other callers too.
+    stripped = title.strip()
+    if "Engage:  on " in stripped or "Engage: on " in stripped:
+        return {"error": f"rejected ghost engage task with empty author: {stripped!r}"}
+
+    # LED-876: manual kill switch. Touch ~/.delimit/pause_dispatch to halt all
+    # dispatches instantly without touching loop_config. Remove the file to
+    # resume. Kept deliberately simple so it works from any shell.
+    if PAUSE_FILE.exists():
+        _append_audit({
+            "action": "dispatch_rejected_paused",
+            "title": stripped,
+            "reason": str(PAUSE_FILE),
+        })
+        return {"error": f"dispatch paused: {PAUSE_FILE} exists"}
+
+    # LED-876: automatic circuit breaker. If the DLQ (count of 'dispatched'
+    # tasks that never moved to in_progress/done/failed) exceeds the threshold,
+    # auto-create the pause file and reject. This stops the cycle from growing
+    # the queue unboundedly when workers aren't consuming.
+    existing_tasks = _load_tasks()
+    dlq_depth = sum(1 for t in existing_tasks.values() if t.get("status") == "dispatched")
+    if dlq_depth >= DLQ_AUTO_PAUSE_THRESHOLD:
+        PAUSE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        PAUSE_FILE.write_text(
+            f"auto-paused at {time.strftime('%Y-%m-%dT%H:%M:%SZ')} "
+            f"(dlq_depth={dlq_depth} >= {DLQ_AUTO_PAUSE_THRESHOLD})\n"
+        )
+        _append_audit({
+            "action": "dispatch_auto_paused",
+            "dlq_depth": dlq_depth,
+            "threshold": DLQ_AUTO_PAUSE_THRESHOLD,
+        })
+        return {
+            "error": (
+                f"auto-paused: DLQ depth {dlq_depth} >= {DLQ_AUTO_PAUSE_THRESHOLD}. "
+                f"Clear stuck tasks then delete {PAUSE_FILE} to resume."
+            )
+        }
+
     assignee = assignee.lower().strip() if assignee else "any"
     if assignee not in VALID_ASSIGNEES:
         return {"error": f"assignee must be one of: {', '.join(sorted(VALID_ASSIGNEES))}"}
+
+    # LED-878: resolve 'any' to a specific model via the router table so
+    # tasks never land in a bucket no worker pulls from. The mapping uses
+    # task_type as the primary key; if unknown, falls through to the
+    # default (gemini — cheapest + highest throughput).
+    if assignee == "any":
+        tt = (task_type or "").lower().strip()
+        routed = TASK_TYPE_ROUTER.get(tt, ROUTER_DEFAULT_ASSIGNEE)
+        if routed in VALID_ASSIGNEES and routed != "any":
+            assignee = routed
 
     priority = priority.upper().strip() if priority else "P1"
     if priority not in VALID_PRIORITIES:

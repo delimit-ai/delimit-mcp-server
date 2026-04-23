@@ -284,7 +284,7 @@ def _send_scan_digest(compact: Dict, processed: Dict) -> None:
                     from ai.social import list_drafts
                     all_drafts = list_drafts(status="pending")
                     for d in all_drafts:
-                        if d.get("draft_id") == draft_id and d.get("quality") == "ready":
+                        if d.get("draft_id") == draft_id and d.get("quality") in ("ready", "review"):
                             link = action.get("link", "")
                             platform = action.get("platform", "X")
                             lines.append(f"--- {platform} DRAFT ---")

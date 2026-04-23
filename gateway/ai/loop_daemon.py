@@ -71,9 +71,35 @@ class DaemonContext:
             f.write(json.dumps(payload) + "\n")
 
 
+def _tick_executor(ctx: "DaemonContext") -> None:
+    """Run the bounded worker-pool v2 executor once per daemon tick.
+
+    Fire-and-forget: the executor has its own pause file and error handling,
+    so any failure here is logged but never crashes the tick.
+    """
+    try:
+        from ai.workers.executor import poll_and_execute, is_paused
+    except Exception as exc:
+        ctx.log_tick({"event": "executor_import_error", "error": str(exc)})
+        return
+    if is_paused():
+        ctx.log_tick({"event": "executor_paused"})
+        return
+    try:
+        summary = poll_and_execute(live=True, executed_by=f"daemon:{ctx.session_id}")
+        ctx.log_tick({
+            "event": "executor_tick",
+            "candidates": summary.get("candidates", 0),
+            "attempted": summary.get("attempted", 0),
+            "results": summary.get("results", []),
+        })
+    except Exception as exc:
+        ctx.log_tick({"event": "executor_tick_error", "error": str(exc)})
+
+
 def _run_forever(ctx: DaemonContext) -> None:
     """Daemon thread body. Fires the loop iteration every interval_seconds."""
-    from ai.loop_engine import run_governed_iteration, run_social_iteration, loop_status
+    from ai.loop_engine import run_governed_iteration, run_social_iteration, run_full_cycle, loop_status
 
     ctx.started_at = time.time()
     ctx.daemon_status = "running"
@@ -95,10 +121,20 @@ def _run_forever(ctx: DaemonContext) -> None:
 
         # Fire one iteration
         try:
-            if ctx.loop_type == "social":
+            if ctx.loop_type == "cycle":
+                # LED-917 + LED-966: daemon ran sense-only historically because
+                # there was no worker pool. LED-981 shipped the bounded
+                # worker-pool v2 executor, so the cycle loop now also ticks
+                # the executor — it only touches approved work orders, uses a
+                # typed whitelist, and respects two kill switches
+                # (pause_dispatch + pause_executor).
+                result = run_full_cycle(ctx.session_id, cycle_mode="sense")
+                _tick_executor(ctx)
+            elif ctx.loop_type == "social":
                 result = run_social_iteration(ctx.session_id)
             else:
                 result = run_governed_iteration(ctx.session_id)
+                _tick_executor(ctx)
             task_id = None
             if isinstance(result, dict):
                 task_id = result.get("task_id")

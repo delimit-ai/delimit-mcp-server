@@ -9,24 +9,35 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger("delimit.ai.reddit_proxy")
 
 def _get_proxy_config() -> Dict[str, str]:
-    """Load proxy config from private secrets or environment."""
-    config = {"proxy_url": ""}
-    
-    # 1. Check environment variable
+    """Load proxy config from private secrets or environment.
+
+    Returns {proxy_url, token}. The server-side proxy requires a bearer
+    token (LED-988 follow-up) — clients without a token still populate
+    proxy_url but will fail auth at the server unless the server is run
+    without a token (not recommended).
+    """
+    config = {"proxy_url": "", "token": ""}
+
+    # 1. Environment variables
     env_url = os.environ.get("DELIMIT_REDDIT_PROXY")
+    env_token = os.environ.get("DELIMIT_REDDIT_PROXY_TOKEN")
     if env_url:
         config["proxy_url"] = env_url
+    if env_token:
+        config["token"] = env_token
+    if config["proxy_url"]:
         return config
 
-    # 2. Check private secrets file
+    # 2. Secrets file
     secrets_path = Path.home() / ".delimit" / "secrets" / "reddit-proxy.json"
     if secrets_path.exists():
         try:
             secrets = json.loads(secrets_path.read_text())
-            config["proxy_url"] = secrets.get("proxy_url", "")
+            config["proxy_url"] = secrets.get("proxy_url", "") or config["proxy_url"]
+            config["token"] = secrets.get("token", "") or config["token"]
         except Exception as e:
             logger.debug(f"Failed to load reddit-proxy secrets: {e}")
-            
+
     return config
 
 def fetch_subreddit(subreddit: str, sort: str = "new", limit: int = 10) -> List[Dict[str, Any]]:
@@ -42,7 +53,11 @@ def fetch_subreddit(subreddit: str, sort: str = "new", limit: int = 10) -> List[
     if proxy_url:
         try:
             fetch_url = f"{proxy_url}?url={urllib.parse.quote(reddit_url, safe='')}"
-            req = urllib.request.Request(fetch_url, headers={"User-Agent": "Delimit/1.0"})
+            headers = {"User-Agent": "Delimit/1.0"}
+            token = proxy_cfg.get("token", "")
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+            req = urllib.request.Request(fetch_url, headers=headers)
             with urllib.request.urlopen(req, timeout=10) as resp:
                 body = json.loads(resp.read().decode())
                 children = body.get("data", {}).get("children", [])
@@ -84,7 +99,11 @@ def fetch_thread(thread_id: str) -> Optional[Dict[str, Any]]:
     if proxy_url:
         try:
             fetch_url = f"{proxy_url}?url={urllib.parse.quote(reddit_url, safe='')}"
-            req = urllib.request.Request(fetch_url, headers={"User-Agent": "Delimit/1.0"})
+            headers = {"User-Agent": "Delimit/1.0"}
+            token = proxy_cfg.get("token", "")
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+            req = urllib.request.Request(fetch_url, headers=headers)
             with urllib.request.urlopen(req, timeout=10) as resp:
                 data = json.loads(resp.read().decode())
                 if isinstance(data, list) and len(data) > 0:

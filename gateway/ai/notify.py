@@ -1044,17 +1044,23 @@ def _enforce_email_protocol(subject: str, message: str, event_type: str) -> tupl
     # 1. Subject must have a valid prefix bracket
     if not any(subject.startswith(p) for p in _VALID_SUBJECT_PREFIXES):
         # Try to infer from event_type
-        prefix_map = {
-            "social_draft": "[APPROVE]",
-            "outreach": "[OUTREACH]",
-            "deploy": "[DEPLOY]",
-            "gate_failure": "[ALERT]",
-            "digest": "[DIGEST]",
-            "info": "[INFO]",
-        }
-        prefix = prefix_map.get(event_type, "[INFO]")
-        subject = f"{prefix} {subject}"
-        warnings.append(f"Subject prefix added: {prefix}")
+        # LED-969: customer-facing emails should not get bracket prefixes.
+        # Any event_type starting with "customer_" is external-facing and
+        # the subject should be sent as-is (clean, professional).
+        if event_type and event_type.startswith("customer_"):
+            pass  # no prefix for customer emails
+        else:
+            prefix_map = {
+                "social_draft": "[APPROVE]",
+                "outreach": "[OUTREACH]",
+                "deploy": "[DEPLOY]",
+                "gate_failure": "[ALERT]",
+                "digest": "[DIGEST]",
+                "info": "[INFO]",
+            }
+            prefix = prefix_map.get(event_type, "[INFO]")
+            subject = f"{prefix} {subject}"
+            warnings.append(f"Subject prefix added: {prefix}")
 
     # 2. Check required sections for this event_type
     required = _EMAIL_PROTOCOL.get(event_type, [])
