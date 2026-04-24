@@ -25,7 +25,7 @@ $ delimit wrap -- claude "fix the flaky test in tests/api.spec.ts"
 Every wrapped run emits a `delimit.attestation.v1` bundle: repo head before/after, changed files, gate results, HMAC-SHA256 signature, and a replay URL. Advisory by default; flip to enforcing when you're ready.
 
 <p align="center">
-  <a href="https://youtu.be/8e_6P7rkFxo">Watch the demo</a> · <a href="https://youtu.be/4O1wY4vWmiY">Multi-model deliberation</a> · <a href="https://delimit.ai">Website</a>
+  <a href="https://github.com/delimit-ai/delimit-action/releases/tag/v1.10.0">See a signed release</a> · <a href="https://delimit.ai/docs/workflow">Workflow guide</a> · <a href="https://delimit.ai">Website</a>
 </p>
 
 ---
