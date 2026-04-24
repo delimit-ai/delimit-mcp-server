@@ -273,6 +273,29 @@ async function main() {
         }
     }
 
+    // LED-1084 week 2: build the content-grounding feature whitelist.
+    // Populates ~/.delimit/content/grounding/features.json with every
+    // @mcp.tool() entry + every CLI subcommand we ship. Drafters then
+    // have a concrete list of "things delimit actually does" to check
+    // generated text against. Fail-soft — install continues even if
+    // the build fails for any reason.
+    try {
+        const groundingModule = path.join(DELIMIT_HOME, 'server', 'ai', 'content_grounding', 'features.py');
+        if (fs.existsSync(groundingModule)) {
+            execSync(`"${python}" -m ai.content_grounding.features build`, {
+                stdio: 'pipe',
+                cwd: path.join(DELIMIT_HOME, 'server'),
+                env: { ...process.env, PYTHONPATH: path.join(DELIMIT_HOME, 'server') },
+                timeout: 10000,
+            });
+            await logp(`  ${green('✓')} Grounding whitelist built (~/.delimit/content/grounding/features.json)`);
+        }
+    } catch {
+        // Silent fail — the whitelist is optional; drafters fall back to empty
+        // which makes the gate strict but doesn't break anything. Customers
+        // can rebuild manually later: `python -m ai.content_grounding.features build`.
+    }
+
     // Step 3: Configure Claude Code MCP
     step(3, 'Configuring Claude Code MCP...');
 
