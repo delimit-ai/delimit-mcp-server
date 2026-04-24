@@ -1,33 +1,40 @@
 # `</>` Delimit
 
-Stop re-explaining your codebase every session. Memory, tasks, and governance that persist across Claude Code, Codex, Cursor, and Gemini CLI.
+**The merge gate for AI-written code — with signed, replayable attestation.**
 
+Wrap any AI coding assistant (Claude Code, Codex, Cursor, Gemini CLI) with a governance chain that runs your gates, records what changed, and signs a replayable receipt for every merge.
+
+[![npm](https://img.shields.io/npm/v/delimit-cli)](https://www.npmjs.com/package/delimit-cli)
+[![Tests](https://img.shields.io/badge/tests-165%20passing-brightgreen)](https://github.com/delimit-ai/delimit-mcp-server)
+[![GitHub Action](https://img.shields.io/badge/GitHub%20Action-v1.6.0-blue)](https://github.com/marketplace/actions/delimit-api-governance)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![Glama](https://glama.ai/mcp/servers/delimit-ai/delimit/badge)](https://glama.ai/mcp/servers/delimit-ai/delimit)
+
+```console
+$ delimit wrap -- claude "fix the flaky test in tests/api.spec.ts"
+
+✓ repo_diagnose
+✓ security_audit       0 critical · 0 secrets
+✓ test_smoke           165/165
+✓ changed_files        1
+✓ attestation signed   att_a05050eb8e13277e
+                       delimit.attestation.v1 · HMAC-SHA256
+                       replay → https://delimit.ai/att/att_a05050eb8e13277e
+```
+
+Every wrapped run emits a `delimit.attestation.v1` bundle: repo head before/after, changed files, gate results, HMAC-SHA256 signature, and a replay URL. Advisory by default; flip to enforcing when you're ready.
+
+<p align="center">
+  <a href="https://youtu.be/8e_6P7rkFxo">Watch the demo</a> · <a href="https://youtu.be/4O1wY4vWmiY">Multi-model deliberation</a> · <a href="https://delimit.ai">Website</a>
+</p>
 
 ---
 
 ## Think and Build
 
-The universal command for the Delimit Swarm. When you say **"Think and Build"**, your AI agents (Claude, Codex, Gemini, Cursor) automatically deploy a background autonomous build loop that monitors your ledger, deliberates on strategy, and implements code while you focus on the architecture.
+Beyond the merge gate, Delimit orchestrates multi-model deliberation and autonomous builds. `delimit think` dispatches a strategic question to Claude, Codex, Gemini, and Grok; `delimit build` activates a background daemon that executes ledger tasks through the gate chain. `delimit vault` manages local secrets (AES-256).
 
-- **"Think"**: Trigger multi-model deliberation and strategic dispatch.
-- **"Build"**: Activate the background daemon to execute tasks and verify gates.
-- **"Vault"**: Manage local secrets and API keys (AES-256 encrypted).
-
-Works across any configuration — from a single model on a budget to an enterprise swarm of 4+ models.
-
-[![npm](https://img.shields.io/npm/v/delimit-cli)](https://www.npmjs.com/package/delimit-cli)
-[![Tests](https://img.shields.io/badge/tests-134%20passing-brightgreen)](https://github.com/delimit-ai/delimit-mcp-server)
-[![GitHub Action](https://img.shields.io/badge/GitHub%20Action-v1.6.0-blue)](https://github.com/marketplace/actions/delimit-api-governance)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-[![Glama](https://glama.ai/mcp/servers/delimit-ai/delimit/badge)](https://glama.ai/mcp/servers/delimit-ai/delimit)
-
-<p align="center">
-  <img src="docs/demo.gif" alt="Delimit v4.20 — doctor, simulate, status, memory" width="700">
-</p>
-
-<p align="center">
-  <a href="https://youtu.be/8e_6P7rkFxo">Watch the demo</a> · <a href="https://youtu.be/4O1wY4vWmiY">Multi-model deliberation</a> · <a href="https://delimit.ai">Website</a>
-</p>
+Works across any configuration, from a single model on a budget to a full panel.
 
 ---
 
