@@ -35,6 +35,95 @@ def _is_test_mode() -> bool:
 logger = logging.getLogger("delimit.governance")
 
 
+# ── STR-183 V2-hardening B-PREREQ-4: non-delegable operation registry ─
+# Per /root/CLAUDE.md "Non-Delegable Decisions" and the 2026-04-07 ruleset-bypass postmortem,
+# these operation classes can never be auto-approved by a generic gate (e.g. "all_gates_passed").
+# Each invocation requires fresh, named-human attestation at gate-entry time.
+# This constant is the code-level encoding of the constitutional boundary.
+# Do not extend this set without an explicit founder-attested deliberation.
+NON_DELEGABLE_OPERATION_CLASSES = frozenset({
+    "ruleset_disable",       # disabling branch protection / repository rulesets
+    "force_push_shared",     # force-push to main, release branches, or floating tags (v1, latest)
+    "account_switch",        # switching gh / git author identity mid-flow
+    "cross_account_ops",     # operating on one org from another org's identity
+    "constitutional_rewrite",  # edits to founder doctrine canon outside managed sections
+    "authority_class_expansion",  # adding a new class of tool / agent / gate
+    "irreversible_capital_commit",  # capital commitments above non-delegable threshold
+    "venture_kill",          # shutting down a Jamsons venture
+    "permission_escalation",  # granting elevated access (sudo, admin, write-as-other)
+    "public_truth_claim",    # public statement / marketing assertion outrunning evidence
+})
+
+
+def is_non_delegable(operation_class: str) -> bool:
+    """Return True iff the operation class is in the non-delegable registry.
+
+    Per the 2026-04-07 postmortem and the V2 pressure-test (STR-183, unanimous round 3),
+    non-delegable operations cannot pass through any "all_gates_passed" mechanism.
+    They require per-invocation founder attestation, checked live at gate entry.
+    """
+    return operation_class in NON_DELEGABLE_OPERATION_CLASSES
+
+
+def require_founder_attestation(operation_class: str, attestation: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Fail-closed gate for non-delegable operations.
+
+    Returns a verdict dict. The caller must refuse to proceed unless verdict["allowed"] is True.
+
+    A valid attestation must include:
+      - "founder_id": the named human performing the attestation
+      - "scope": the exact operation being attested (must match operation_class)
+      - "timestamp": ISO-8601 UTC
+      - "evidence_ref": pointer to the evidence (ledger ID, postmortem path, or signed message)
+
+    Pre-approval of a parent plan does NOT extend to non-delegable escalations
+    (2026-04-07 postmortem rule). Each invocation needs its own attestation.
+    """
+    if not is_non_delegable(operation_class):
+        return {"allowed": True, "operation_class": operation_class, "non_delegable": False}
+
+    if not attestation:
+        return {
+            "allowed": False,
+            "operation_class": operation_class,
+            "non_delegable": True,
+            "reason": (
+                f"{operation_class} is non-delegable (STR-183 / 2026-04-07 postmortem). "
+                "Pre-approval of a parent plan does not extend to this operation. "
+                "Per-invocation founder attestation is required."
+            ),
+        }
+
+    required = {"founder_id", "scope", "timestamp", "evidence_ref"}
+    missing = required - set(attestation.keys())
+    if missing:
+        return {
+            "allowed": False,
+            "operation_class": operation_class,
+            "non_delegable": True,
+            "reason": f"Attestation missing required fields: {sorted(missing)}",
+        }
+
+    if attestation["scope"] != operation_class:
+        return {
+            "allowed": False,
+            "operation_class": operation_class,
+            "non_delegable": True,
+            "reason": (
+                f"Attestation scope mismatch: attested for '{attestation['scope']}' "
+                f"but invocation is for '{operation_class}'. The scope of approval is "
+                "the scope stated, not beyond (CLAUDE.md escalation rule)."
+            ),
+        }
+
+    return {
+        "allowed": True,
+        "operation_class": operation_class,
+        "non_delegable": True,
+        "attestation": attestation,
+    }
+
+
 # ── LED-263: Beta CTA for conversion ────────────────────────────────
 # Tools that should show a beta signup prompt on successful results.
 _BETA_CTA_TOOLS = frozenset({"lint", "scan", "activate", "diff", "quickstart"})
