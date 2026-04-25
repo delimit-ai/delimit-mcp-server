@@ -2045,6 +2045,33 @@ def delimit_gov_verify(task_id: str = "", repo: str = ".") -> Dict[str, Any]:
     return _delimit_gov_impl(action="verify", task_id=task_id, repo=repo)
 
 
+@mcp.tool()
+def delimit_external_pr_check(
+    repo: str,
+    author: str = "",
+    state: str = "all",
+) -> Dict[str, Any]:
+    """Pre-PR duplicate guard for external repos. Run BEFORE drafting.
+
+    Lists existing PRs from `author` against `repo` via gh CLI. Returns
+    fail-closed verdict — any open PR or PR merged in the last 30 days
+    yields verdict='duplicate' so the caller stops drafting before any
+    deliberation or submission work.
+
+    Args:
+        repo: External GitHub repo, e.g. "goharbor/harbor".
+        author: GitHub username to filter by (recommended). Empty = all.
+        state: "open" | "closed" | "merged" | "all". Default "all".
+    """
+    from backends.governance_bridge import external_pr_check
+    return _safe_call(
+        external_pr_check,
+        repo=repo,
+        author=author or None,
+        state=state,
+    )
+
+
 # ─── Memory ─────────────────────────────────────────────────────────────
 
 @mcp.tool()

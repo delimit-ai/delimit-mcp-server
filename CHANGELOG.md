@@ -1,5 +1,52 @@
 # Changelog
 
+## [4.4.0] - 2026-04-25
+
+### Added — Pre-external-PR duplicate guard
+
+- **New MCP tool `delimit_external_pr_check(repo, author)`** — pre-flight gate that runs `gh pr list` against a target repo and returns a fail-closed verdict if any matching open PR (or recently-merged PR within 30 days) already exists. Prevents autonomous workflows from drafting duplicate external-repo PRs off stale outreach signals.
+- **`delimit_gov_evaluate(action="external_pr", context={target_repo, author})`** composes the duplicate check + policy evaluation in one call. Verdict `blocked_duplicate` is a hard stop.
+- **CLAUDE.md auto-trigger rule added**: BEFORE drafting any external-repo PR, the duplicate gate must pass.
+- 12 new unit tests covering: open PR, recently-merged PR, old merged PR, closed PR, gh CLI not installed, gh auth failure, missing target_repo. End-to-end test against real `goharbor/harbor` PR #23089 confirms duplicate detection works.
+
+### Documentation
+- readme: replace stale demo links + delete old GIF (#67) (e6059dd3)
+- LED-1089 SECURITY.md — install-time + runtime threat model (#65) (4e03319c)
+- readme: canon-aligned hero + real attestation demo (#63) (9172924a)
+
+### CI/CD
+- retry verify-published-version with bounded backoff (fixes v4.3.4 race) (#62) (f5a768d5)
+
+### Other
+- LED-1084 week 2 hygiene: build features.json during `delimit setup` (#66) (8145456f)
+- sync: gateway LED-1010 design tool fixes (Tailwind awareness, status taxonomy, link-href FP) (#64) (d756e1bb)
+
+### Completed Ledger Items
+- **LED-1094**: [P1] Consensus reached: Review the full transcript. As orchestrator, provide your own analysis and final
+- **LED-1095**: [P1] Consensus reached: Review the full transcript. As orchestrator, provide your own analysis and final
+- **LED-1096**: [P1] Consensus reached: Review the full transcript. As orchestrator, provide your own analysis and final
+- **LED-1097**: [P1] Consensus reached: Review the full transcript. As orchestrator, provide your own analysis and final
+- **LED-1098**: [P1] Consensus reached: Review the full transcript. As orchestrator, provide your own analysis and final
+- **LED-1100**: [P1] Consensus reached: Review the full transcript. As orchestrator, provide your own analysis and final
+- **LED-1102**: [P1] Consensus reached: Review the full transcript. As orchestrator, provide your own analysis and final
+- **LED-1103**: [P1] Consensus reached: Review the full transcript. As orchestrator, provide your own analysis and final
+- **LED-1104**: [P1] Consensus reached: Review the full transcript. As orchestrator, provide your own analysis and final
+- **LED-1105**: [P1] Consensus reached: Review the full transcript. As orchestrator, provide your own analysis and final
+- **LED-1106**: [P1] Build responsive-overflow gate (narrow MVP) — dogfood on delimit.ai
+- **LED-1107**: [P1] Fix 3 responsive overflow bugs caught by LED-1106 gate on first dogfood run
+- **LED-1108**: [P1] Cross-venture task
+- **LED-1109**: [P1] Cross-venture task
+- **LED-1110**: [P1] Cross-venture task
+- **LED-1111**: [P1] Consensus reached: Review the full transcript. As orchestrator, provide your own analysis and final
+- **LED-1113**: [P1] Cross-venture task
+- **LED-1114**: [P1] Consensus reached: Review the full transcript. As orchestrator, provide your own analysis and final
+
+### Stats
+- **Commits**: 6
+- **Files changed**: 6
+- **Insertions**: 708(+) / 130(-)
+- **Since**: v4.3.4
+
 ## [4.2.0] - 2026-04-21
 
 ### Added (gateway sync — LED-987 through LED-1008)
