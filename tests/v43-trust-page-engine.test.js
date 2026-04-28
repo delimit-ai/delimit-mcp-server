@@ -55,8 +55,8 @@ function mintAttestation(id, wrappedCommand, key, mutate = (b) => b) {
         governance: { gates: [{ name: 'test_smoke', exit: 0 }], violations: [], advisory: true },
         delimit_wrap_version: '1.1.0',
     });
-    const canonical = JSON.stringify(bundle, Object.keys(bundle).sort());
-    const signature = crypto.createHmac('sha256', key).update(canonical).digest('hex');
+    const { canonicalize } = require('../lib/wrap-engine');
+    const signature = crypto.createHmac('sha256', key).update(canonicalize(bundle)).digest('hex');
     return { id, bundle, signature, signature_alg: 'HMAC-SHA256' };
 }
 

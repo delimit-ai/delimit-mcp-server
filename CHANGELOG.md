@@ -1,5 +1,75 @@
 # Changelog
 
+
+## [4.5.1] - 2026-04-28
+
+### Security — attestation `canonicalize()` strengthened (LED-1180)
+
+The `canonicalize()` helper used to derive attestation IDs and HMAC signatures was passing `Object.keys(bundle).sort()` as the second argument to `JSON.stringify`. JSON.stringify treats that argument as a property **allowlist**, not a sort order, and the allowlist contained only top-level keys — so nested objects serialised as `{}` and the HMAC committed only to the bundle's top-level shape.
+
+Practical effect: a bundle with `{governance: {violations: ["safe"]}}` and one with `{governance: {violations: ["malicious"]}}` produced **identical signatures**. Tampering nested fields was undetectable through signature verification.
+
+**This release replaces canonicalize with a proper recursive sorted-key serializer.** Old (v4.3 – v4.5.0) attestations remain readable but verify with the new canonicalize and will report `signature_mismatch`. New attestations produced by v4.5.1+ commit to the full content of the bundle.
+
+- `lib/wrap-engine.js` — fixed `canonicalize()`, exported it for reuse
+- `lib/trust-page-engine.js` — verifier now imports the corrected canonicalize
+- `tests/v43-wrap-engine.test.js` — added LED-1180 regression: tampering a nested field MUST change the signature; if it doesn't, canonicalize is silently dropping nested keys
+- `tests/v43-trust-page-engine.test.js` — test fixtures sign with the corrected canonicalize
+
+If you have a corpus of v4.5.0 or earlier attestations and need them re-signed under the new primitive, the migration tool is on the LED-1180 follow-up. For most users, attestations are short-lived merge-decision artifacts and re-signing is unnecessary.
+
+### Other
+
+- (Internal) LED-1175 + LED-1177 MVP shipped in `delimit-private`: signed deliberation attestations + Scanner Input v0 schema. Public docs: [delimit.ai/docs/scanner-input](https://delimit.ai/docs/scanner-input), [delimit.ai/docs/vs-bugcrawl](https://delimit.ai/docs/vs-bugcrawl). No customer-facing CLI changes in 4.5.1.
+
+## [4.5.0] - 2026-04-27
+
+### Added — Ledger hygiene toolkit (LED-1145, 7 PRs)
+
+The full hygiene loop is now a single MCP surface — call `delimit_ledger_health` to see what's wrong, then run the suggested tool to fix it.
+
+- **`delimit_ledger_health`** — one-shot traffic-light status (P0 inflation / stale / duplicates / garbage venture) with ranked next-action list
+- **`delimit_ledger_groom`** — read-only proposal: stale-open + duplicate-titles + garbage-venture detection. Each proposal includes a copy-pasteable `delimit_ledger_bulk` invocation
+- **`delimit_ledger_bulk(item_ids, action, dry_run=True)`** — batch operations (`archive`, `set_status`, `set_priority`, `add_tag`, `mark_done`, `cancel`). `dry_run=True` is the safety default. **No hard delete** — archive is an append-only soft transition
+- **`delimit_ledger_auto_close_external`** — find LEDs linked to a GitHub issue/PR and auto-close when the upstream resolves (mark_done for merged PRs / closed-as-completed; archive for not_planned closures)
+- **`delimit_ledger_auto_cancel_stale`** — auto-archive items dormant past `DELIMIT_STALE_TTL_DAYS` (default 60). Composes `bulk_action(archive)`. dry_run default
+- **Extended `delimit_ledger_list`** — new filters: `status_in`, `priority_in`, `tags_contains_all`, `text`, `linked_external_id`, `created_before/after`, `updated_before/after`, `sort`, `order`, `fields` projection (`"slim"` / explicit list / unknown=error), cursor pagination
+- **P0 soft-quota** on `delimit_ledger_add` — soft warning when count > `DELIMIT_P0_SOFT_QUOTA` (default 50). Item still added; surfaces a nudge to groom
+
+### Added — Memory-system convergence (LED-1165)
+
+`delimit_memory` is now the canonical durable memory; Claude Code auto-memory becomes a one-way client projection.
+
+- **`hot_load: bool` parameter** on `delimit_memory_store` — opt-in, default False. Marks an entry for projection
+- **`delimit_memory_index(target_path, dry_run, limit)`** — projects hot_load=True entries into a managed section of MEMORY.md (`<!-- delimit:start -->` / `<!-- delimit:end -->` markers). User content outside markers is preserved verbatim. **One-way only** — never reads MEMORY.md back into delimit_memory
+
+### Fixed — Secret-scanner false positives in `tools_infra`
+
+The `_CREDENTIAL_FALSE_POSITIVES` regex now suppresses three additional benign patterns so legitimate credential-loading code (env-var lookup, dict-getter, control-flow guards) doesn't trip the audit:
+- `\w+\.get(` (any object-method getter, was tokens-only)
+- `if not <var>:` (Python control-flow with credential variable)
+- `:\n` matched-text (block-opener colon, not key-value separator)
+
+### Fixed — OpenAPI diff engine defensive coverage
+
+Real-world specs can ship malformed shapes. The diff engine now defends against the entire dict-iteration crash class without losing any actual finding:
+
+- **`required: bool` in object schemas** (legal in parameter objects but seen leaking into nested schemas) — was raising `TypeError: 'bool' object is not iterable`. Treats as no-required-fields and continues
+- **`properties: [...]` instead of dict** (Kong-class) — `.keys()` no longer crashes; treats as empty properties and continues
+- **`paths: []`, `responses: []`, `content: []` (request and response)** — all coerce to `{}` at function entry. Diffs against the well-formed side still produce correct findings
+
+### Tests
+- 108 ledger-manager tests (15 originals + 93 new across 7 features + E2E hygiene-loop integration)
+- 24 memory-bridge tests (new test file)
+- 60 diff-engine tests (49 + 11 new defensive)
+- All backward-compatible — existing test suites pass without modification
+
+### Backward compatibility
+- All MCP tool parameter additions are optional with safe defaults
+- Existing storage format is unchanged (`hot_load` and `archived` are additive on the entry/status side)
+- No CLI command renamed or removed
+- Default `delimit_ledger_list` response shape preserved (full record by default; `fields="slim"` opts into the 90% payload reduction)
+
 ## [4.4.0] - 2026-04-25
 
 ### Added — Pre-external-PR duplicate guard

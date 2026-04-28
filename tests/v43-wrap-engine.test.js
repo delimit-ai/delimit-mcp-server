@@ -81,13 +81,29 @@ describe('v43 wrap: attestation round-trip', () => {
         assert.ok(Array.isArray(att.bundle.governance.gates));
     });
 
-    it('signature verifies against the canonical bundle with the stored HMAC key', async () => {
+    it('signature verifies + LED-1180 nested-tamper regression', async () => {
         const result = await runWrap(['true'], { cwd: SANDBOX });
         const att = JSON.parse(fs.readFileSync(result.attestation_path, 'utf-8'));
         const key = fs.readFileSync(path.join(ATT_HOME, '.delimit', 'wrap-hmac.key'));
-        const canonical = JSON.stringify(att.bundle, Object.keys(att.bundle).sort());
-        const expected = crypto.createHmac('sha256', key).update(canonical).digest('hex');
+        const { canonicalize } = require('../lib/wrap-engine');
+
+        // Recomputed HMAC equals stored signature
+        const expected = crypto.createHmac('sha256', key).update(canonicalize(att.bundle)).digest('hex');
         assert.equal(expected, att.signature, 'recomputed HMAC must equal stored signature');
+
+        // LED-1180 regression: tampering a NESTED field MUST change the signature.
+        // Pre-fix canonicalize used JSON.stringify(bundle, Object.keys(bundle).sort()),
+        // which treats the second arg as a property allowlist (only top-level keys),
+        // so nested objects serialised as {} and the HMAC committed only to shape.
+        const tampered = JSON.parse(JSON.stringify(att.bundle));
+        if (!tampered.governance) tampered.governance = {};
+        tampered.governance.violations = [{ injected: 'malicious-rule' }];
+        const tamperedSig = crypto.createHmac('sha256', key).update(canonicalize(tampered)).digest('hex');
+        assert.notEqual(
+            tamperedSig,
+            att.signature,
+            'nested-field tamper MUST change the signature; if equal, canonicalize is silently dropping nested keys'
+        );
     });
 
     it('detects changed files in the wrapped command output', async () => {
