@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/delimit-ai-delimit-mcp-server-badge.png)](https://mseep.ai/app/delimit-ai-delimit-mcp-server)
+
 # `</>` Delimit
 
 **The merge gate for AI-written code — with signed, replayable attestation.**
