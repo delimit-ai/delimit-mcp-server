@@ -16,6 +16,8 @@
     "!gateway/ai/founding_users.py",
     "!gateway/ai/inbox_daemon.py",
     "!gateway/ai/inbox_daemon_runner.py",
+    "!gateway/ai/self_repair/",
+    "!gateway/ai/self_repair_daemon.py",
     "!gateway/ai/deliberation.py",
     "!gateway/ai/dv_mention_tracker.py",
     "!gateway/ai/sensor_twttr.py",
