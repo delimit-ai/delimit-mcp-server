@@ -4921,6 +4921,14 @@ program
     .option('--no-write', 'Do not write the preview JSON to disk')
     .action(async (kind, opts) => {
         const { recordTelemetry } = require('../lib/attest-telemetry');
+        // --write is the deprecated alias for --output. Emit a one-line
+        // notice so users migrate before we remove it. (Panel verdict on
+        // STR-656 pre-push gate, 2026-04-30: retire the alias in v4.7.)
+        if (opts.write && typeof opts.write === 'string' && !opts.output) {
+            console.error(chalk.yellow(
+                '  [deprecation] --write is deprecated; use --output instead. (will be removed in v4.7)'
+            ));
+        }
         if (kind !== 'mcp') {
             console.log(chalk.yellow(`  Unknown attestation kind: ${kind}`));
             console.log(chalk.gray('  Supported kinds (v1): mcp'));

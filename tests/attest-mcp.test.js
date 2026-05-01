@@ -84,6 +84,33 @@ describe('attest mcp: --output / --no-write (Q3)', () => {
     });
 });
 
+describe('attest mcp: --write deprecation (panel verdict pre-push)', () => {
+    it('--write emits a deprecation warning to stderr',
+        { skip: SKIP_IN_CI }, () => {
+            const dir = makeFixture();
+            const out = path.join(dir, 'via-write.json');
+            const res = spawnSync('node', [CLI, 'attest', 'mcp', '--path', dir, '--write', out], {
+                env: { ...process.env, DELIMIT_NO_TELEMETRY: '1', FORCE_COLOR: '0' },
+                encoding: 'utf-8',
+            });
+            assert.match(res.stderr, /\[deprecation\] --write is deprecated/i,
+                '--write must emit a one-line deprecation warning to stderr');
+            assert.ok(fs.existsSync(out), '--write must still write the file');
+        });
+
+    it('--output does NOT emit a deprecation warning',
+        { skip: SKIP_IN_CI }, () => {
+            const dir = makeFixture();
+            const out = path.join(dir, 'via-output.json');
+            const res = spawnSync('node', [CLI, 'attest', 'mcp', '--path', dir, '--output', out], {
+                env: { ...process.env, DELIMIT_NO_TELEMETRY: '1', FORCE_COLOR: '0' },
+                encoding: 'utf-8',
+            });
+            assert.doesNotMatch(res.stderr, /deprecation/i,
+                '--output is the canonical flag and must not warn');
+        });
+});
+
 describe('attest mcp: telemetry kill switch (Q5)', () => {
     it('DELIMIT_NO_TELEMETRY=1 prevents telemetry writes',
         { skip: SKIP_IN_CI }, () => {
