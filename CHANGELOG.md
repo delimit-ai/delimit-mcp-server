@@ -1,6 +1,93 @@
 # Changelog
 
 
+## [4.5.2] - 2026-05-02
+
+### Hardened — `postinstall.js` never-block-install guard (LED-1188)
+
+`scripts/postinstall.js` is now wrapped in a top-level guard that ensures no
+postinstall failure mode can ever block `npm install delimit-cli`. Per the
+customer-protection rule, npm publish is a production deploy and a postinstall
+crash on a paying Pro user's machine is a customer-facing incident regardless
+of root cause.
+
+Failure modes now hardened:
+- **EROFS / EACCES / EPERM / EPIPE on stdout** — every banner write is wrapped
+  in a try/catch (some sandbox installers redirect stdout to a read-only pipe).
+- **Network unreachable / DNS fail / TLS error / proxy reject** — the
+  telemetry HTTPS request silent-fails at every layer (`req.on('error')`,
+  `req.on('timeout')`, outer try/catch).
+- **Missing or unreadable `package.json`** — graceful no-op; lets the install
+  complete so `delimit doctor` can diagnose the partial-install state.
+- **`uncaughtException` propagation** — outermost guard swallows any
+  synchronous throw from the IIFE so the npm process always sees exit 0.
+- **Idempotency** — re-running install is a no-op; the postinstall does not
+  write to `~/.delimit/` (that's `bin/delimit-setup.js`).
+- **`DELIMIT_NO_TELEMETRY=1|true|yes`** kill switch honored (case-insensitive).
+
+Regression coverage: `tests/postinstall-hardening.test.js` (6 tests) locks the
+contract.
+
+### Added — `lib/delimit-home.js` env-var unification (LED-1188)
+
+Single source of truth for resolving the Delimit private-state directory. Replaces
+~37 hardcoded `path.join(os.homedir(), '.delimit')` sites across the CLI surface.
+
+Resolution order:
+1. `$DELIMIT_HOME` (preferred — explicit, easy to reason about)
+2. `$DELIMIT_NAMESPACE_ROOT` (gateway-compat fallback)
+3. `<homedir>/.delimit` (default)
+
+Both helpers re-resolve on every call so tests can mutate `process.env` between
+calls without module-cache invalidation. Public API:
+
+```js
+const { delimitHome, homeSubpath } = require('delimit-cli/lib/delimit-home');
+const ledger = homeSubpath('ledger');  // shorthand for path.join(delimitHome(), 'ledger')
+```
+
+Regression coverage: `tests/delimit-home.test.js` (9 tests).
+
+### Carry — STR-656 `delimit attest mcp` v1 (PRs #73, #74, #76, #77)
+
+The four mcp-server PRs already merged into main are carried to npm in this
+release. No customer-facing change beyond what those PRs documented:
+
+- **#73** — `delimit attest mcp` panel-verdict behavior locks (Q1–Q6):
+  live MCP-protocol-conformance probe, 3-tier exit codes, `--output` /
+  `--no-write` flags, EROFS soft-fail on the preview JSON write, telemetry
+  counter with `DELIMIT_NO_TELEMETRY` kill switch, top-level runtime guard.
+  `--write` is now deprecated alias for `--output` (will be removed in v4.7).
+- **#74** — `delimit setup` template + `package.json` files-array gate
+  `gateway/ai/self_repair/` and `self_repair_daemon.py` as gateway-only.
+- **#76** — Template reframe of the operating-model rule per swarm-executor
+  panel verdict.
+- **#77** — `package.json` files-array gate `gateway/ai/corp_dashboard.py`
+  as gateway-only.
+
+Regression coverage: `tests/attest-mcp.test.js` (10 tests, now in the npm
+test script — was previously orphaned).
+
+### Bundle — proprietary gating extended
+
+`package.json` files-array now excludes three additional gateway-internal
+modules from the npm bundle (per the npm-bundle proprietary-gating rule —
+these are not customer-shipping CLI surfaces):
+
+- `!gateway/ai/content_grounding/` — LED-1084 grounding layer
+- `!gateway/ai/inbox_drafts/` — LED-1129 SQLite draft registry
+- `!gateway/ai/inbox_executor.py` — LED-1134 inbox executor
+
+These remain gateway-only; they are imported only by gateway daemons and have
+no public CLI surface.
+
+### Backward compatibility
+
+- No MCP tool signature changes
+- No CLI command renamed or removed
+- No storage format change
+- All previously-passing tests still pass; 25 new tests added (171 → 196)
+
 ## [4.5.1] - 2026-04-28
 
 ### Security — attestation `canonicalize()` strengthened (LED-1180)

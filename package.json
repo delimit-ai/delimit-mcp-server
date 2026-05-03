@@ -1,7 +1,7 @@
 {
   "name": "delimit-cli",
   "mcpName": "io.github.delimit-ai/delimit-mcp-server",
-  "version": "4.5.1",
+  "version": "4.5.2",
   "description": "Unify Claude Code, Codex, Cursor, and Gemini CLI with persistent context, governance, and multi-model debate.",
   "main": "index.js",
   "files": [
@@ -29,6 +29,9 @@
     "!gateway/ai/content_intel.py",
     "!gateway/ai/loop_daemon.py",
     "!gateway/ai/loop_engine.py",
+    "!gateway/ai/content_grounding/",
+    "!gateway/ai/inbox_drafts/",
+    "!gateway/ai/inbox_executor.py",
     "scripts/",
     "!scripts/crosspost_devto.py",
     "!scripts/repo_targeting.py",
@@ -51,7 +54,7 @@
     "postinstall": "node scripts/postinstall.js",
     "sync-gateway": "bash scripts/sync-gateway.sh",
     "prepublishOnly": "bash scripts/publish-ci-guard.sh && npm run sync-gateway && bash scripts/security-check.sh",
-    "test": "node --test tests/setup-onboarding.test.js tests/setup-matrix.test.js tests/setup-no-clobber.test.js tests/config-export-import.test.js tests/cross-model-hooks.test.js tests/golden-path.test.js tests/v420-features.test.js tests/v43-wrap-engine.test.js tests/v43-trust-page-engine.test.js tests/v43-ai-sbom-engine.test.js"
+    "test": "node --test tests/setup-onboarding.test.js tests/setup-matrix.test.js tests/setup-no-clobber.test.js tests/config-export-import.test.js tests/cross-model-hooks.test.js tests/golden-path.test.js tests/v420-features.test.js tests/v43-wrap-engine.test.js tests/v43-trust-page-engine.test.js tests/v43-ai-sbom-engine.test.js tests/attest-mcp.test.js tests/delimit-home.test.js tests/postinstall-hardening.test.js"
   },
   "keywords": [
     "openapi",
