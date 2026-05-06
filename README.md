@@ -1,6 +1,6 @@
 # `</>` Delimit
 
-**The merge gate for AI-written code — with signed, replayable attestation.**
+**The merge gate for AI-written code, with signed, replayable attestation.**
 
 Wrap any AI coding assistant (Claude Code, Codex, Cursor, Gemini CLI) with a governance chain that runs your gates, records what changed, and signs a replayable receipt for every merge.
 
@@ -25,8 +25,18 @@ $ delimit wrap -- claude "fix the flaky test in tests/api.spec.ts"
 Every wrapped run emits a `delimit.attestation.v1` bundle: repo head before/after, changed files, gate results, HMAC-SHA256 signature, and a replay URL. Advisory by default; flip to enforcing when you're ready.
 
 <p align="center">
-  <a href="https://github.com/delimit-ai/delimit-action/releases/tag/v1.10.0">See a signed release</a> · <a href="https://delimit.ai/docs/workflow">Workflow guide</a> · <a href="https://delimit.ai">Website</a>
+  <a href="https://delimit.ai/methodology/mcp-attestation">Methodology</a> · <a href="https://delimit.ai/reports/cal-com-v2-attestation">cal.com v2 worked example</a> · <a href="https://delimit.ai/docs/workflow">Workflow guide</a> · <a href="https://delimit.ai">Website</a>
 </p>
+
+---
+
+## See it in action
+
+Worked example, real OSS repo, every claim verifiable:
+
+- **[cal.com v2 API attestation](https://delimit.ai/reports/cal-com-v2-attestation)**: full diff, signed verdict, replayable bundle. Runs the same chain you get on day one.
+
+For the schema and signing methodology behind every report, see **[delimit.ai/methodology/mcp-attestation](https://delimit.ai/methodology/mcp-attestation)**.
 
 ---
 
@@ -364,7 +374,7 @@ Yes. Delimit works with Claude Code, Codex (OpenAI), Gemini CLI (Google), and Cu
 
 **Is this free?**
 
-The free tier includes API governance, persistent memory, zero-spec extraction, project scanning, and 3 multi-model deliberations. Pro ($10/mo) adds unlimited deliberation, security audit, test verification, deploy pipeline, and agent orchestration.
+The free tier includes API governance, persistent memory, zero-spec extraction, project scanning, and 3 multi-model deliberations. Pro ($10/mo) adds unlimited deliberation, security audit, test verification, deploy pipeline, and agent orchestration. Premium ($50-100/mo) adds priority support and team features. Enterprise is custom: see [delimit.ai/pricing](https://delimit.ai/pricing).
 
 ---
 
