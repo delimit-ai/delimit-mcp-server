@@ -231,28 +231,10 @@ except ImportError:
         LICENSE_FILE.write_text(json.dumps(license_data, indent=2))
         return {"status": "activated", "tier": "pro", "message": "Activated (offline fallback). Will validate on next network access."}
 
-
-# ─── LED-2060 (P1): test-mode license bypass ─────────────────────────────
-# tests/conftest.py sets DELIMIT_TEST_MODE=1 at session start. Without this
-# wrapper, every test that exercises a Pro tool got back a premium_required
-# error and asserted-against-the-wrong-shape, blocking CI on every PR.
-# Bypass is scoped: only active when the env var is explicitly set, only
-# returns None (the "no gate" sentinel), and wraps both compiled-binary
-# and fallback paths. Customers never hit this path because their
-# environments don't set DELIMIT_TEST_MODE.
-import os as _os
-
-_original_require_premium = require_premium  # type: ignore[has-type]
-_original_is_premium = is_premium  # type: ignore[has-type]
-
-
-def require_premium(tool_name: str):  # type: ignore[no-redef]
-    if _os.environ.get("DELIMIT_TEST_MODE") == "1":
-        return None
-    return _original_require_premium(tool_name)
-
-
-def is_premium() -> bool:  # type: ignore[no-redef]
-    if _os.environ.get("DELIMIT_TEST_MODE") == "1":
-        return True
-    return _original_is_premium()
+# ─── LED-1254 (P0 SECURITY) ──────────────────────────────────────────────
+# The DELIMIT_TEST_MODE bypass that previously lived here was removed:
+# it allowed any user who grepped the installed source to set
+# DELIMIT_TEST_MODE=1 and unconditionally bypass every Pro license check.
+# Test-time bypass is now provided exclusively by tests/conftest.py via
+# monkeypatch on require_premium / is_premium. The shipped library no
+# longer reads any test-mode env var.
