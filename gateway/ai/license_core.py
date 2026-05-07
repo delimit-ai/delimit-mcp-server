@@ -5,6 +5,7 @@ This module is distributed as a native binary (.so/.pyd), not readable Python.
 """
 import hashlib
 import json
+import os
 import time
 from pathlib import Path
 
@@ -24,7 +25,9 @@ PRO_TOOLS = frozenset({
     "delimit_deploy_plan", "delimit_deploy_build", "delimit_deploy_publish",
     "delimit_deploy_verify", "delimit_deploy_rollback", "delimit_deploy_status",
     "delimit_deploy_site", "delimit_deploy_npm",
-    "delimit_memory_store", "delimit_memory_search", "delimit_memory_recent",
+    # delimit_memory_store + delimit_memory_recent are FREE (LED-193 — basic
+    # store + recent retrieval). Only delimit_memory_search is Pro.
+    "delimit_memory_search",
     "delimit_vault_search", "delimit_vault_snapshot", "delimit_vault_health",
     "delimit_evidence_collect", "delimit_evidence_verify",
     "delimit_deliberate", "delimit_models",
@@ -83,8 +86,9 @@ def revalidate_license(data: dict) -> dict:
         Also includes 'updated_data' with the (possibly modified) license data.
     """
     key = data.get("key", "")
-    # Internal/founder keys always pass
-    if not key or key.startswith("JAMSONS"):
+    # Empty key (dev environments) or internal license override (env-var-driven)
+    _internal = os.environ.get("DELIMIT_INTERNAL_LICENSE_KEY", "")
+    if not key or (_internal and key == _internal):
         data["last_validated_at"] = time.time()
         data["validation_status"] = "current"
         _write_license(data)
@@ -148,9 +152,10 @@ def is_license_valid(data: dict) -> bool:
         return False
     if not data.get("valid", False):
         return False
-    # Internal/founder keys always valid
+    # Internal license override (env-var-driven; empty for customers)
     key = data.get("key", "")
-    if key.startswith("JAMSONS"):
+    _internal = os.environ.get("DELIMIT_INTERNAL_LICENSE_KEY", "")
+    if _internal and key == _internal:
         return True
     last_validated = data.get("last_validated_at", data.get("activated_at", 0))
     if last_validated == 0:
