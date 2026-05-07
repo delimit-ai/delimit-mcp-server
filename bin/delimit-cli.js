@@ -4629,18 +4629,33 @@ program
         const prePushPath = path.join(hooksDir, 'pre-push');
         const marker = '# delimit-governance-hook';
 
+        // Resolution order: local node_modules → global PATH → npx fallback.
+        // npx is last because it can fail with Arborist 'extraneous' errors
+        // when a project's node_modules / lockfile drift (LED-1248).
         const preCommitHook = `#!/bin/sh
 ${marker}
 # Delimit API governance gate
 # Blocks commits with breaking API changes
-npx delimit-cli check --staged
+if [ -x ./node_modules/.bin/delimit-cli ]; then
+  ./node_modules/.bin/delimit-cli check --staged
+elif command -v delimit-cli >/dev/null 2>&1; then
+  delimit-cli check --staged
+else
+  npx delimit-cli check --staged
+fi
 `;
 
         const prePushHook = `#!/bin/sh
 ${marker}
 # Delimit API governance gate
 # Blocks pushes with breaking API changes
-npx delimit-cli check --base origin/main
+if [ -x ./node_modules/.bin/delimit-cli ]; then
+  ./node_modules/.bin/delimit-cli check --base origin/main
+elif command -v delimit-cli >/dev/null 2>&1; then
+  delimit-cli check --base origin/main
+else
+  npx delimit-cli check --base origin/main
+fi
 `;
 
         if (action === 'install') {
