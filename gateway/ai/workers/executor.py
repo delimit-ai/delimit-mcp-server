@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shlex
 import subprocess
 import time
@@ -94,16 +95,24 @@ ACTION_SPEC: Dict[str, Dict[str, Any]] = {
 }
 
 
-# LED-988: allowlist for propose_pr. Any repo path NOT in this set is
-# rejected at runtime regardless of whether the caller claimed validation
+# LED-988 + LED-1258: allowlist for propose_pr. Any repo path NOT in this set
+# is rejected at runtime regardless of whether the caller claimed validation
 # passed. Path-traversal-safe (resolved then checked against canonical).
-PROPOSE_PR_ALLOWED_REPOS = frozenset({
-    "/home/delimit/delimit-gateway",
-    "/home/delimit/delimit-ui",
-    "/home/delimit/delimit-action",
-    "/home/delimit/npm-delimit",
-    "/root/governance-framework",
-})
+#
+# Loaded from the DELIMIT_PROPOSE_PR_REPOS env var (comma-separated absolute
+# paths), NOT hardcoded — hardcoding developer-machine paths in shipped source
+# both leaks the dev directory layout to customers AND makes the allowlist
+# dead-code on customer machines (their paths won't match). Empty / unset env
+# var = empty allowlist = propose_pr fails closed for all repo paths.
+
+def _load_propose_pr_allowed_repos() -> frozenset:
+    raw = os.environ.get("DELIMIT_PROPOSE_PR_REPOS", "").strip()
+    if not raw:
+        return frozenset()
+    return frozenset(p.strip() for p in raw.split(",") if p.strip())
+
+
+PROPOSE_PR_ALLOWED_REPOS = _load_propose_pr_allowed_repos()
 # Any branch created by propose_pr must carry this prefix so human branches
 # are never clobbered and PRs are obviously agent-authored at a glance.
 PROPOSE_PR_BRANCH_PREFIX = "delimit/"
