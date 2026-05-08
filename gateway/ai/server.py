@@ -7618,7 +7618,15 @@ def delimit_inbox_daemon(action: str = "status") -> Dict[str, Any]:
         action: 'start' (begin polling), 'stop' (halt polling),
                 'status' (show daemon state, last poll, failures).
     """
-    from ai.inbox_daemon import start_daemon, stop_daemon, get_daemon_status
+    try:
+        from ai.inbox_daemon import start_daemon, stop_daemon, get_daemon_status
+    except (ImportError, ModuleNotFoundError):
+        # LED-1261: backing module is gateway-only (excluded from npm bundle).
+        return _with_next_steps("inbox_daemon", {
+            "status": "not_available",
+            "error": "delimit_inbox_daemon is an internal Delimit feature not shipped in the npm bundle.",
+            "hint": "Pro customers interested in inbox automation can contact pro@delimit.ai.",
+        })
 
     if action == "start":
         return _with_next_steps("inbox_daemon", start_daemon())
@@ -7639,7 +7647,15 @@ def delimit_social_daemon(action: str = "status") -> Dict[str, Any]:
         action: 'start' (begin scanning), 'stop' (halt scanning),
                 'status' (show daemon state, last scan, targets found).
     """
-    from ai.social_daemon import start_daemon, stop_daemon, get_daemon_status
+    try:
+        from ai.social_daemon import start_daemon, stop_daemon, get_daemon_status
+    except (ImportError, ModuleNotFoundError):
+        # LED-1261: backing module is gateway-only (excluded from npm bundle).
+        return _with_next_steps("social_daemon", {
+            "status": "not_available",
+            "error": "delimit_social_daemon is an internal Delimit feature not shipped in the npm bundle.",
+            "hint": "Pro customers interested in social automation can contact pro@delimit.ai.",
+        })
 
     if action == "start":
         return _with_next_steps("social_daemon", start_daemon())
