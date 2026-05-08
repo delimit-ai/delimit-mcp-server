@@ -5,7 +5,7 @@ Constructs a deterministic service dependency graph from manifests.
 The graph maps each API/service to its downstream consumers,
 enabling impact analysis when an API contract changes.
 
-Per Jamsons Doctrine:
+Per Delimit governance principles:
 - Deterministic outputs (sorted, reproducible)
 - No telemetry
 - Graceful degradation when manifests are missing
