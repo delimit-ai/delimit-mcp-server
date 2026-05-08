@@ -51,7 +51,7 @@ import subprocess
 import threading
 import traceback
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
@@ -1428,112 +1428,144 @@ def delimit_lint(old_spec: str, new_spec: str, policy_file: Optional[str] = None
     recording evidence, triggering notifications, or enforcing governance.
     Useful for CI preview comments ("what would block") without side effects.
 
+    Spec arguments accept local paths or http(s) URLs. URLs are fetched
+    once into a tempfile (size cap, SSRF guard) and the resolved local
+    path is used for the rest of the pipeline.
+
     Args:
-        old_spec: Path to the old (baseline) OpenAPI spec file.
-        new_spec: Path to the new (proposed) OpenAPI spec file.
+        old_spec: Path or URL to the old (baseline) OpenAPI spec file.
+        new_spec: Path or URL to the new (proposed) OpenAPI spec file.
         policy_file: Optional path to a .delimit/policies.yml file.
         dry_run: If True, return violations without side effects (no evidence, no chains).
     """
     from backends.gateway_core import run_lint, run_semver
+    from ai.remote_resolve import RemoteResolveError, resolve_spec_input
 
-    # Step 1: Core lint
-    lint_result = _safe_call(run_lint, old_spec=old_spec, new_spec=new_spec, policy_file=policy_file)
-
-    # Dry-run mode: return raw lint + semver, skip all chains and governance
-    if dry_run:
-        lint_result["dry_run"] = True
-        lint_result["simulated"] = True
-        # Still classify semver (informational, no side effects)
-        semver_result = _safe_call(run_semver, old_spec=old_spec, new_spec=new_spec)
-        if not semver_result.get("error"):
-            lint_result["semver"] = semver_result
-        return lint_result
-
-    chain: Dict[str, Any] = {"id": "lint_chain", "steps": []}
-
-    if lint_result.get("error"):
-        lint_result["chain"] = chain
-        return _with_next_steps("lint", lint_result)
-
-    # Step 2: Auto-classify semver bump (non-blocking on failure)
-    semver_result = _chain_call("lint", "semver", run_semver,
-                                required=False, old_spec=old_spec, new_spec=new_spec)
-    chain["steps"].append({"step": "semver", "ok": not _chain_is_error(semver_result)})
-    lint_result["semver"] = semver_result
-
-    if _chain_is_error(semver_result):
-        chain["status"] = "semver_failed_nonfatal"
-        lint_result["chain"] = chain
-        return _with_next_steps("lint", lint_result)
-
-    bump = str(semver_result.get("bump", "")).upper()
-
-    # Step 2b: Impact-based notification routing (LED-233, non-blocking)
+    # Resolve any URL inputs up-front. Both contextmanagers share a
+    # single ExitStack so cleanup happens once at the end.
+    import contextlib as _contextlib
     try:
-        from ai.notify import route_by_impact
-        all_changes = lint_result.get("all_changes", lint_result.get("violations", []))
-        if all_changes:
-            routing_result = route_by_impact(all_changes, dry_run=False)
-            chain["steps"].append({"step": "impact_routing", "ok": True})
-            lint_result["impact_routing"] = routing_result
-    except Exception as e:
-        logger.debug("Impact routing non-fatal error: %s", e)
-        chain["steps"].append({"step": "impact_routing", "ok": False, "error": str(e)})
+        with _contextlib.ExitStack() as stack:
+            old_resolved, old_meta = stack.enter_context(resolve_spec_input(old_spec))
+            new_resolved, new_meta = stack.enter_context(resolve_spec_input(new_spec))
+            resolved_from = [old_meta["resolved_from"], new_meta["resolved_from"]]
 
-    if bump != "MAJOR":
-        chain["status"] = f"complete_{bump.lower() or 'none'}"
-        lint_result["chain"] = chain
-        return _with_next_steps("lint", lint_result)
+            # Step 1: Core lint (against resolved local paths)
+            lint_result = _safe_call(
+                run_lint,
+                old_spec=old_resolved,
+                new_spec=new_resolved,
+                policy_file=policy_file,
+            )
 
-    # Step 3: MAJOR bump detected -- evaluate governance
-    # Note: _delimit_gov_impl has its own Pro gate. Free-tier gets lint+semver only.
-    gov_result = _delimit_gov_impl(
-        action="evaluate",
-        eval_action="api_breaking_change",
-        context={
-            "tool": "delimit_lint",
-            "old_spec": old_spec,
-            "new_spec": new_spec,
-            "semver_bump": bump,
-            "breaking_changes": lint_result.get("breaking", []),
-        },
-        repo=".",
-    )
-    chain["steps"].append({"step": "gov_evaluate", "ok": not _chain_is_error(gov_result)})
-    lint_result["gov_evaluate"] = gov_result
+            # Dry-run mode: return raw lint + semver, skip all chains and governance
+            if dry_run:
+                lint_result["dry_run"] = True
+                lint_result["simulated"] = True
+                # Still classify semver (informational, no side effects)
+                semver_result = _safe_call(run_semver, old_spec=old_resolved, new_spec=new_resolved)
+                if not semver_result.get("error"):
+                    lint_result["semver"] = semver_result
+                lint_result["resolved_from"] = resolved_from
+                return lint_result
 
-    # If Pro gate blocked governance, return gracefully with lint+semver
-    if gov_result.get("status") == "premium_required":
-        chain["status"] = "governance_skipped_free_tier"
-        lint_result["chain"] = chain
-        return _with_next_steps("lint", lint_result)
+            chain: Dict[str, Any] = {"id": "lint_chain", "steps": []}
 
-    # Step 4: If governance blocked, record in ledger (best-effort)
-    gov_blocked = (
-        str(gov_result.get("status", "")).lower() == "blocked"
-        or gov_result.get("governance", {}).get("action") == "policy_blocked"
-    )
+            if lint_result.get("error"):
+                lint_result["chain"] = chain
+                lint_result["resolved_from"] = resolved_from
+                return _with_next_steps("lint", lint_result)
 
-    if gov_blocked:
-        from ai.ledger_manager import add_item
-        ledger_result = _chain_call(
-            "lint", "ledger_add", add_item,
-            required=False,
-            title=f"Governance blocked: MAJOR API change in {new_spec}",
-            ledger="ops",
-            item_type="fix",
-            priority="P0",
-            description="MAJOR semver bump detected. Governance blocked the change.",
-            source="chain:lint:gov_blocked",
-        )
-        chain["steps"].append({"step": "ledger_add", "ok": not _chain_is_error(ledger_result)})
-        lint_result["governance_blocked"] = True
-    else:
-        lint_result["governance_blocked"] = False
+            # Step 2: Auto-classify semver bump (non-blocking on failure)
+            semver_result = _chain_call("lint", "semver", run_semver,
+                                        required=False, old_spec=old_resolved, new_spec=new_resolved)
+            chain["steps"].append({"step": "semver", "ok": not _chain_is_error(semver_result)})
+            lint_result["semver"] = semver_result
 
-    chain["status"] = "major_change_evaluated"
-    lint_result["chain"] = chain
-    return _with_next_steps("lint", lint_result)
+            if _chain_is_error(semver_result):
+                chain["status"] = "semver_failed_nonfatal"
+                lint_result["chain"] = chain
+                lint_result["resolved_from"] = resolved_from
+                return _with_next_steps("lint", lint_result)
+
+            bump = str(semver_result.get("bump", "")).upper()
+
+            # Step 2b: Impact-based notification routing (LED-233, non-blocking)
+            try:
+                from ai.notify import route_by_impact
+                all_changes = lint_result.get("all_changes", lint_result.get("violations", []))
+                if all_changes:
+                    routing_result = route_by_impact(all_changes, dry_run=False)
+                    chain["steps"].append({"step": "impact_routing", "ok": True})
+                    lint_result["impact_routing"] = routing_result
+            except Exception as e:
+                logger.debug("Impact routing non-fatal error: %s", e)
+                chain["steps"].append({"step": "impact_routing", "ok": False, "error": str(e)})
+
+            if bump != "MAJOR":
+                chain["status"] = f"complete_{bump.lower() or 'none'}"
+                lint_result["chain"] = chain
+                lint_result["resolved_from"] = resolved_from
+                return _with_next_steps("lint", lint_result)
+
+            # Step 3: MAJOR bump detected -- evaluate governance
+            # Note: _delimit_gov_impl has its own Pro gate. Free-tier gets lint+semver only.
+            # Pass the *original* user inputs (not the tempfile paths) into the
+            # governance context so audit trails capture the real spec source.
+            gov_result = _delimit_gov_impl(
+                action="evaluate",
+                eval_action="api_breaking_change",
+                context={
+                    "tool": "delimit_lint",
+                    "old_spec": old_spec,
+                    "new_spec": new_spec,
+                    "semver_bump": bump,
+                    "breaking_changes": lint_result.get("breaking", []),
+                },
+                repo=".",
+            )
+            chain["steps"].append({"step": "gov_evaluate", "ok": not _chain_is_error(gov_result)})
+            lint_result["gov_evaluate"] = gov_result
+
+            # If Pro gate blocked governance, return gracefully with lint+semver
+            if gov_result.get("status") == "premium_required":
+                chain["status"] = "governance_skipped_free_tier"
+                lint_result["chain"] = chain
+                lint_result["resolved_from"] = resolved_from
+                return _with_next_steps("lint", lint_result)
+
+            # Step 4: If governance blocked, record in ledger (best-effort)
+            gov_blocked = (
+                str(gov_result.get("status", "")).lower() == "blocked"
+                or gov_result.get("governance", {}).get("action") == "policy_blocked"
+            )
+
+            if gov_blocked:
+                from ai.ledger_manager import add_item
+                ledger_result = _chain_call(
+                    "lint", "ledger_add", add_item,
+                    required=False,
+                    title=f"Governance blocked: MAJOR API change in {new_spec}",
+                    ledger="ops",
+                    item_type="fix",
+                    priority="P0",
+                    description="MAJOR semver bump detected. Governance blocked the change.",
+                    source="chain:lint:gov_blocked",
+                )
+                chain["steps"].append({"step": "ledger_add", "ok": not _chain_is_error(ledger_result)})
+                lint_result["governance_blocked"] = True
+            else:
+                lint_result["governance_blocked"] = False
+
+            chain["status"] = "major_change_evaluated"
+            lint_result["chain"] = chain
+            lint_result["resolved_from"] = resolved_from
+            return _with_next_steps("lint", lint_result)
+    except RemoteResolveError as e:
+        out = e.to_dict()
+        out["old_spec"] = old_spec
+        out["new_spec"] = new_spec
+        return out
 
 
 @mcp.tool()
@@ -2095,6 +2127,7 @@ def delimit_memory_store(
     content: str,
     tags: Optional[Union[str, List[str]]] = None,
     context: Optional[str] = None,
+    hot_load: bool = False,
 ) -> Dict[str, Any]:
     """Store a memory entry for future retrieval.
 
@@ -2105,6 +2138,12 @@ def delimit_memory_store(
         content: The content to remember.
         tags: Optional categorization tags.
         context: Optional context about when/why this was stored.
+        hot_load: LED-1165 Phase 2 #5: when True, mark the entry for
+            one-way projection into the Claude Code auto-memory
+            `MEMORY.md` hot-load index. Existing entries default to False
+            (durable in delimit_memory, not projected). The projection
+            writer that consumes this flag is shipped separately as PR-B;
+            this PR only persists the flag.
     """
     # LED-193: memory_store is now free (basic store)
     try:
@@ -2112,7 +2151,10 @@ def delimit_memory_store(
     except ValueError as e:
         return _with_next_steps("memory_store", {"error": str(e)})
     from backends.memory_bridge import store
-    return _with_next_steps("memory_store", _safe_call(store, content=content, tags=tags, context=context))
+    return _with_next_steps(
+        "memory_store",
+        _safe_call(store, content=content, tags=tags, context=context, hot_load=hot_load),
+    )
 
 
 @mcp.tool()
@@ -2127,6 +2169,50 @@ def delimit_memory_recent(limit: int = 5) -> Dict[str, Any]:
     # LED-193: memory_recent is now free (basic retrieval)
     from backends.memory_bridge import get_recent
     return _with_next_steps("memory_recent", _safe_call(get_recent, limit=limit))
+
+
+@mcp.tool()
+def delimit_memory_index(
+    target_path: str = "",
+    dry_run: bool = False,
+    limit: int = 200,
+) -> Dict[str, Any]:
+    """Project delimit_memory hot entries into Claude Code's MEMORY.md.
+
+    LED-1165 Phase 2 #5 PR-B. One-way projection of all delimit_memory
+    entries flagged `hot_load=True` into a managed section of the
+    target Markdown file. Lets Claude Code see hot entries on session
+    start without making delimit_memory dependent on Anthropic's
+    auto-memory format.
+
+    Behavior:
+      - If target_path's file has `<!-- delimit:start -->` /
+        `<!-- delimit:end -->` markers, ONLY the content between them
+        is replaced. Anything outside the markers is preserved.
+      - If markers are missing, the managed section is APPENDED to the
+        end of the file (existing content is never touched).
+      - If the file doesn't exist, it's created with just the section.
+      - **One-way projection only.** Reading MEMORY.md back into
+        delimit_memory is explicitly out of scope (Anthropic owns the
+        auto-memory format; format-drift risk).
+
+    Args:
+        target_path: file to write. Empty = default
+            ~/.claude/projects/-root/memory/MEMORY.md.
+        dry_run: True returns the rendered content size without writing.
+        limit: cap on entries projected. Default 200.
+
+    Returns:
+        {target, dry_run, entries, wrote_chars or would_write_chars,
+         had_existing_block, had_existing_file, preserved_user_content}
+    """
+    from backends.memory_bridge import project_to_memory_md
+    from pathlib import Path
+    target = Path(target_path) if target_path else None
+    return _with_next_steps(
+        "memory_index",
+        _safe_call(project_to_memory_md, target_path=target, dry_run=dry_run, limit=limit),
+    )
 
 
 # ─── Vault ──────────────────────────────────────────────────────────────
@@ -2857,49 +2943,79 @@ def delimit_repo_diagnose(target: str = ".") -> Dict[str, Any]:
     return _safe_call(diagnose, target=target)
 
 
+def _run_repo_tool_with_remote(
+    target: str,
+    backend_fn,
+    pro_capability: str,
+) -> Dict[str, Any]:
+    """Shared wrapper for repo-bridge tools with remote-input support (LED-1237).
+
+    Resolves ``target`` (local path, ``owner/repo`` shorthand, or
+    GitHub URL) into a local path, calls the backend, and merges the
+    resolution metadata into the response so panel members can see
+    what got cloned.
+    """
+    from ai.license import require_premium
+    gate = require_premium(pro_capability)
+    if gate:
+        return gate
+
+    from ai.remote_resolve import RemoteResolveError, resolve_repo_target
+
+    try:
+        with resolve_repo_target(target) as (resolved_path, meta):
+            result = _safe_call(backend_fn, target=resolved_path)
+            if isinstance(result, dict):
+                # Don't clobber a backend-supplied resolved_from field.
+                for k, v in meta.items():
+                    result.setdefault(k, v)
+            return result
+    except RemoteResolveError as e:
+        out = e.to_dict()
+        # Preserve the user's original input for debuggability.
+        out["target"] = target
+        return out
+
+
 @mcp.tool()
 def delimit_repo_analyze(target: str = ".") -> Dict[str, Any]:
     """Analyze repository structure and quality (experimental) (Pro).
 
+    Accepts a local path, an ``owner/repo`` shorthand
+    (e.g. ``calcom/cal.com``), or a full GitHub URL. Remote inputs
+    are shallow-cloned into a tempdir for the duration of the call.
+
     Args:
-        target: Repository path.
+        target: Repository path, owner/repo, or GitHub URL.
     """
-    from ai.license import require_premium
-    gate = require_premium("repo_analyze")
-    if gate:
-        return gate
     from backends.repo_bridge import analyze
-    return _safe_call(analyze, target=target)
+    return _run_repo_tool_with_remote(target, analyze, "repo_analyze")
 
 
 @mcp.tool()
 def delimit_repo_config_validate(target: str = ".") -> Dict[str, Any]:
     """Validate configuration files (experimental) (Pro).
 
+    Accepts a local path, ``owner/repo`` shorthand, or a GitHub URL.
+
     Args:
-        target: Repository or config path.
+        target: Repository or config path, owner/repo, or GitHub URL.
     """
-    from ai.license import require_premium
-    gate = require_premium("repo_config_validate")
-    if gate:
-        return gate
     from backends.repo_bridge import config_validate
-    return _safe_call(config_validate, target=target)
+    return _run_repo_tool_with_remote(target, config_validate, "repo_config_validate")
 
 
 @mcp.tool()
 def delimit_repo_config_audit(target: str = ".") -> Dict[str, Any]:
     """Audit configuration compliance (experimental) (Pro).
 
+    Accepts a local path, ``owner/repo`` shorthand, or a GitHub URL.
+
     Args:
-        target: Repository or config path.
+        target: Repository or config path, owner/repo, or GitHub URL.
     """
-    from ai.license import require_premium
-    gate = require_premium("repo_config_audit")
-    if gate:
-        return gate
     from backends.repo_bridge import config_audit
-    return _safe_call(config_audit, target=target)
+    return _run_repo_tool_with_remote(target, config_audit, "repo_config_audit")
 
 
 # ─── Security ───────────────────────────────────────────────────────────
@@ -5464,25 +5580,308 @@ def delimit_ledger_done(item_id: str, note: str = "", venture: str = "") -> Dict
 
 
 @mcp.tool()
+def delimit_ledger_bulk(
+    item_ids: str,
+    action: str,
+    dry_run: bool = True,
+    note: str = "",
+    new_status: str = "",
+    new_priority: str = "",
+    tag: str = "",
+    venture: str = "",
+) -> Dict[str, Any]:
+    """Apply one action to many ledger items in a single call.
+
+    LED-1145 Phase 1 PR-B. Default `dry_run=True` returns what would change
+    without writing — callers must explicitly pass `dry_run=False` to apply.
+    Per-item failures don't block other items in the batch.
+
+    Allowed actions:
+      - archive         -> sets status="archived" (soft, replay-preserving)
+      - mark_done       -> sets status="done"
+      - cancel          -> sets status="cancelled"
+      - set_status      -> sets status to `new_status`
+                           (one of open/in_progress/blocked/done/cancelled/archived/completed)
+      - set_priority    -> sets priority to `new_priority`
+                           (one of P0/P1/P2/P3)
+      - add_tag         -> appends `tag` if not already present (idempotent)
+
+    NO hard delete. Items remain in the append-only JSONL forever; archive is
+    a status transition that can be reversed via set_status.
+
+    Args:
+        item_ids: comma-separated LED ids (e.g. "LED-915,LED-916,LED-918")
+            or a JSON array of strings.
+        action: one of the actions above.
+        dry_run: True (default) returns `would_change`; False applies and
+            returns `changed`.
+        note: optional note attached to every successful update event.
+        new_status: required when action="set_status".
+        new_priority: required when action="set_priority".
+        tag: required when action="add_tag".
+        venture: project name or path. Auto-detects if empty.
+    """
+    from ai.ledger_manager import bulk_action
+    project = _resolve_venture(venture)
+    result = bulk_action(
+        item_ids=item_ids,
+        action=action,
+        dry_run=dry_run,
+        note=note or None,
+        new_status=new_status or None,
+        new_priority=new_priority or None,
+        tag=tag or None,
+        project_path=project,
+    )
+    return _with_next_steps("ledger_bulk", result)
+
+
+@mcp.tool()
+def delimit_ledger_auto_close_external(
+    venture: str = "",
+    dry_run: bool = True,
+    max_items: int = 200,
+) -> Dict[str, Any]:
+    """Walk open ledger items, find ones linked to a GitHub issue/PR, and
+    close LEDs whose external counterpart already resolved.
+
+    LED-1145 Phase 2 #1. Fixes the "ledger drifts from external reality"
+    problem (e.g., LED-1023 stayed open even though goharbor/harbor#23089
+    merged 16 days earlier).
+
+    Detection scans description / context / last_note / tags for:
+      - https://github.com/<owner>/<repo>/(issues|pull)/<num>
+      - <owner>/<repo>#<num>  (short form)
+      - gh:<owner>/<repo>/<num>  (explicit tag form)
+
+    Action map (per LED-1146 deliberation):
+      - PR with merged=true → mark_done with merge SHA in note
+      - issue/PR closed with state_reason="completed" → mark_done with closed_at
+      - issue/PR closed with state_reason="not_planned" or no reason → archive
+      - state="open" → leave alone
+      - gh API error / 404 → leave alone, recorded in `errors`
+
+    Implementation re-uses bulk_action() under the hood; nothing new on the
+    write path. dry_run=True (default) returns a plan; dry_run=False applies.
+
+    Args:
+        venture: project name or path. Auto-detects if empty.
+        dry_run: True (default) returns a plan without writing.
+        max_items: hard cap on items processed in one call (default 200).
+            When the candidate set exceeds this, the response is `truncated=True`.
+    """
+    from ai.ledger_manager import auto_close_linked_external
+    project = _resolve_venture(venture)
+    result = auto_close_linked_external(
+        project_path=project,
+        dry_run=dry_run,
+        max_items=max_items,
+    )
+    return _with_next_steps("ledger_auto_close_external", result)
+
+
+@mcp.tool()
+def delimit_ledger_groom(
+    venture: str = "",
+    stale_days: int = 30,
+    dup_min_count: int = 3,
+    max_per_category: int = 50,
+) -> Dict[str, Any]:
+    """Read-only grooming proposal: surfaces stale, duplicate, and
+    garbage-venture items for the founder to review.
+
+    LED-1145 Phase 2 #2. Risky operations (mass-cancellation, dedup-merge)
+    must NOT be a single atomic action — this tool only PROPOSES; the
+    founder applies via `delimit_ledger_bulk` after review. Each proposal
+    in the response includes a copy-pasteable `ready_to_apply` invocation.
+
+    Categories detected:
+      - stale_open: status open|in_progress|blocked AND updated_at older
+        than `stale_days`. Suggested action: archive.
+      - duplicate_titles: groups of >= `dup_min_count` items sharing the
+        same normalised title prefix (50 chars, [BRACKETED] prefixes
+        stripped, lowercased). Suggested: keep the most-recent item;
+        archive the others.
+      - garbage_venture: items in tmp* / test_* / venture_<letter> /
+        custom-venture buckets. Suggested action: archive.
+
+    Categories NOT detected here (separate tools / future PRs):
+      - linked-external resolved → use `delimit_ledger_auto_close_external`
+      - P0 inflation review
+      - cross-venture orphan cleanup
+
+    Args:
+        venture: project name or path. Auto-detects if empty.
+        stale_days: threshold for stale_open detector (default 30).
+        dup_min_count: minimum group size for duplicate_titles (default 3).
+        max_per_category: cap per category in the response (default 50).
+    """
+    from ai.ledger_manager import groom_proposal
+    project = _resolve_venture(venture)
+    result = groom_proposal(
+        project_path=project,
+        stale_days=stale_days,
+        dup_min_count=dup_min_count,
+        max_per_category=max_per_category,
+    )
+    return _with_next_steps("ledger_groom", result)
+
+
+@mcp.tool()
+def delimit_ledger_auto_cancel_stale(
+    venture: str = "",
+    threshold_days: int = 0,
+    dry_run: bool = True,
+    max_items: int = 200,
+) -> Dict[str, Any]:
+    """Auto-archive open ledger items dormant past the stale-TTL threshold.
+
+    LED-1145 Phase 2 #4. Composes the stale-detector logic with
+    `bulk_action(action="archive")` from Phase 1 PR-B. Same dry_run-default
+    safety pattern as `delimit_ledger_auto_close_external` — caller passes
+    `dry_run=False` to apply.
+
+    Distinct from `delimit_ledger_groom`'s stale_open category:
+      - The threshold is stricter (default 60 days vs groom's 30)
+      - It auto-applies on dry_run=False (groom is purely propose)
+      - Intended for nightly automation / scripted cleanup
+
+    Items go through bulk_action(archive) so the no-hard-delete invariant
+    is preserved — the JSONL append-only log keeps the full record.
+
+    Args:
+        venture: Project name or path. Auto-detects if empty.
+        threshold_days: dormancy threshold in days. 0 = read default
+            (60 from STALE_TTL_DEFAULT_DAYS or DELIMIT_STALE_TTL_DAYS env).
+            Pass an int to override.
+        dry_run: True (default) returns the plan; False applies via
+            bulk_action(archive).
+        max_items: cap items processed per call. When the candidate list
+            exceeds this, response includes truncated=True so the caller
+            can run again to drain.
+    """
+    from ai.ledger_manager import auto_cancel_stale
+    project = _resolve_venture(venture)
+    threshold = threshold_days if threshold_days > 0 else None
+    result = auto_cancel_stale(
+        project_path=project,
+        threshold_days=threshold,
+        dry_run=dry_run,
+        max_items=max_items,
+    )
+    return _with_next_steps("ledger_auto_cancel_stale", result)
+
+
+@mcp.tool()
+def delimit_ledger_health(
+    venture: str = "",
+    stale_days: int = 30,
+    dup_min_count: int = 3,
+) -> Dict[str, Any]:
+    """One-shot ledger health check — composes list_items + groom_proposal
+    + the P0 quota helper into a single traffic-light verdict and a list
+    of concrete next actions.
+
+    LED-1145 capstone — closes the loop on the entire ledger-tooling
+    refactor. Designed for nightly/weekly review or session-start status
+    snapshot. Returns:
+      - totals (unresolved / open / in_progress / blocked)
+      - p0 (count vs quota + health)
+      - stale (count >stale_days + health)
+      - duplicates (group count + total items + health)
+      - garbage_venture (count + health)
+      - overall_health (worst-of: green / yellow / red)
+      - next_actions: pre-formatted list of {reason, tool, args, follow_up}
+
+    All Phase 1+2 tools are referenced in the suggested actions, so the
+    response is self-contained for an AI agent that wants to act on it.
+
+    Args:
+        venture: project name or path. Auto-detects if empty.
+        stale_days: stale-detector threshold passed to groom_proposal.
+        dup_min_count: duplicate-detector threshold passed to groom_proposal.
+    """
+    from ai.ledger_manager import health_summary
+    project = _resolve_venture(venture)
+    result = health_summary(
+        project_path=project,
+        stale_days=stale_days,
+        dup_min_count=dup_min_count,
+    )
+    return _with_next_steps("ledger_health", result)
+
+
+@mcp.tool()
 def delimit_ledger_list(
     venture: str = "",
     ledger: str = "both",
     status: str = "",
     priority: str = "",
+    status_in: str = "",
+    priority_in: str = "",
+    tags_contains_all: str = "",
+    text: str = "",
+    linked_external_id: str = "",
+    created_before: str = "",
+    created_after: str = "",
+    updated_before: str = "",
+    updated_after: str = "",
+    sort: str = "updated_at",
+    order: str = "desc",
+    fields: str = "",
     limit: int = 20,
+    cursor: str = "",
 ) -> Dict[str, Any]:
     """List ledger items for a venture/project.
 
+    LED-1145 Phase 1 PR-A: extended with multi-value filters, sort + projection,
+    and cursor pagination. Single-value `status` / `priority` remain for
+    backward compatibility — old callers continue to work unchanged.
+
     Args:
         venture: Project name or path. Auto-detects if empty.
-        ledger: "ops", "strategy", or "both".
-        status: Filter by status - "open", "done", "in_progress", or empty for all.
-        priority: Filter by priority - "P0", "P1", "P2", or empty for all.
-        limit: Max items to return.
+        ledger: "ops" | "strategy" | "both".
+        status: single-value status filter (back-compat).
+        priority: single-value priority filter (back-compat).
+        status_in: comma-separated statuses (e.g. "open,blocked,in_progress").
+        priority_in: comma-separated priorities (e.g. "P0,P1").
+        tags_contains_all: comma-separated tags; item must contain ALL.
+        text: case-insensitive substring match against title + description.
+        linked_external_id: substring match in description / tags / context
+            (e.g. a github URL, a Linear ticket id, a Discord thread).
+        created_before / created_after / updated_before / updated_after:
+            ISO-8601 timestamp boundaries (e.g. "2026-04-01T00:00:00Z").
+        sort: "updated_at" | "created_at" | "priority". Default updated_at.
+        order: "asc" | "desc". Default desc.
+        fields: response projection. "" or "*" = full (default, back-compat).
+            "slim" = id+title+status+priority+type+venture+updated_at only.
+            CSV of field names = those only. Unknown field names → ERROR.
+        limit: page size (default 20).
+        cursor: opaque pagination token from a prior call's `next_cursor`.
+            Cursor is invalidated when filters change between calls.
     """
     from ai.ledger_manager import list_items
     project = _resolve_venture(venture)
-    result = list_items(ledger=ledger, status=status or None, priority=priority or None, limit=limit, project_path=project)
+    result = list_items(
+        ledger=ledger,
+        status=status or None,
+        priority=priority or None,
+        status__in=status_in or None,
+        priority__in=priority_in or None,
+        tags__contains_all=tags_contains_all or None,
+        text=text or None,
+        linked_external_id=linked_external_id or None,
+        created_before=created_before or None,
+        created_after=created_after or None,
+        updated_before=updated_before or None,
+        updated_after=updated_after or None,
+        sort=sort,
+        order=order,
+        fields=fields or None,
+        limit=limit,
+        cursor=cursor or None,
+        project_path=project,
+    )
     return _with_next_steps("ledger_list", result)
 
 
@@ -6965,7 +7364,8 @@ def delimit_social_post(text: str = "", category: str = "", platform: str = "twi
     Categories: tip, changelog, insight, engagement.
     Leave text empty to auto-generate from templates.
     Every post provides value - tips, insights, governance wisdom.
-    Max 2 posts per day to stay authentic.
+    Rate cap: 2 original posts per hour, 24 per day (founder-approved
+    2026-04-30). Override via DELIMIT_HOURLY_TWEETS / DELIMIT_DAILY_TWEETS.
 
     IMPORTANT - Platform tone rules (these are DIFFERENT per platform):
     - Twitter: confident technical brand. Direct, professional, ALWAYS POSITIVE.
@@ -6986,10 +7386,10 @@ def delimit_social_post(text: str = "", category: str = "", platform: str = "twi
         draft: If True, save as draft for approval instead of posting immediately.
         context: WHY this post should be made. Strategic reasoning shown in the approval email.
     """
-    from ai.social import generate_post, post_tweet, should_post_today, save_draft
+    from ai.social import generate_post, post_tweet, should_post_now, save_draft
 
-    if not draft and not should_post_today():
-        return {"status": "skipped", "reason": "Already posted twice today. Authenticity > volume."}
+    if not draft and not should_post_now():
+        return {"status": "skipped", "reason": "Rate cap hit (2/hr or 24/day). Wait or pass draft=True for email-approval flow."}
 
     post = generate_post(category, text)
 
@@ -7106,9 +7506,16 @@ def delimit_social_post(text: str = "", category: str = "", platform: str = "twi
                 _lines.append("Reply APPROVED to approve, CANCEL to reject.")
 
                 _handle = f"u/{_acct}"
+                # LED-1129 Phase 2 — append [draft_id:<8>] token to subject so
+                # the inbox daemon's draft_id fallback can match the approval
+                # reply even when no LED/STR token is present.
+                _reddit_subject = f"[Reddit Post] {_handle}: {_reddit_title[:60]}..."
+                _reg_id = entry.get("registry_draft_id")
+                if _reg_id:
+                    _reddit_subject = f"{_reddit_subject} [draft_id:{_reg_id[:8]}]"
                 email_result = send_email(
                     message="\n".join(_lines),
-                    subject=f"[Reddit Post] {_handle}: {_reddit_title[:60]}...",
+                    subject=_reddit_subject,
                     event_type="social_draft",
                 )
                 if email_result.get("delivered") and email_result.get("message_id"):
@@ -7150,9 +7557,16 @@ def delimit_social_post(text: str = "", category: str = "", platform: str = "twi
             _subject_type = "Tweet"
 
         _handle = f"u/{_acct}" if platform == "reddit" else f"@{_acct}"
+        # LED-1129 Phase 2 — append [draft_id:<8>] token to subject so the
+        # inbox daemon's draft_id fallback can match the approval reply even
+        # when no LED/STR token is present.
+        _social_subject = f"[{_subject_type}] {_handle}: {post['text'][:60]}..."
+        _reg_id = entry.get("registry_draft_id")
+        if _reg_id:
+            _social_subject = f"{_social_subject} [draft_id:{_reg_id[:8]}]"
         email_result = send_email(
             message="\n".join(_lines),
-            subject=f"[{_subject_type}] {_handle}: {post['text'][:60]}...",
+            subject=_social_subject,
             event_type="social_draft",
         )
         # Store the outbound Message-ID on the draft record so the
@@ -7190,6 +7604,55 @@ def delimit_social_accounts() -> Dict[str, Any]:
 
     accounts = list_twitter_accounts()
     return _with_next_steps("social_accounts", {"accounts": accounts, "count": len(accounts)})
+
+
+@mcp.tool()
+def delimit_x_fetch(id_or_url: str = "", ids: str = "") -> Dict[str, Any]:
+    """LED-825: fetch tweets from X by id or URL via twttr241 (RapidAPI).
+
+    Inherits the LRU + SQLite cache + budget gate already wired for the
+    social-target scanner, so repeated reads of the same tweet are free.
+
+    Args:
+        id_or_url: A single status id ("2048825010371039648") OR a full
+            x.com / twitter.com URL — the id is extracted automatically.
+            Mutually exclusive with `ids`.
+        ids: Comma-separated list of status ids OR URLs for a batch fetch.
+            Each is normalized to a status id and fetched independently.
+
+    Returns:
+        Single-fetch shape: {id, text, author, author_name, created_at,
+            metrics: {favorite_count, retweet_count, reply_count,
+            quote_count, bookmark_count, view_count}, url, from_cache}
+        Batch shape: {tweets: [<single-shape>, ...], count}
+        Errors: {error: <reason>}
+
+    Why this exists: WebFetch hits 402 on x.com (auth-walled), and going
+    around to tweepy + the X API direct creds skips the cache + budget
+    gate. This tool is the cheap, cached, governable read path.
+    """
+    from ai.social_target import fetch_tweet_by_id, fetch_tweets_by_ids, extract_status_id
+
+    if ids:
+        # Batch mode — accept commas, newlines, or whitespace as separators
+        raw = [r.strip() for r in ids.replace("\n", ",").split(",") if r.strip()]
+        normalized: List[str] = []
+        for item in raw:
+            sid = extract_status_id(item)
+            if sid:
+                normalized.append(sid)
+        if not normalized:
+            return _with_next_steps("x_fetch", {"error": "no valid ids/URLs in `ids`"})
+        results = fetch_tweets_by_ids(normalized)
+        return _with_next_steps("x_fetch", {"tweets": results, "count": len(results)})
+
+    if not id_or_url:
+        return _with_next_steps("x_fetch", {"error": "provide either id_or_url or ids"})
+
+    sid = extract_status_id(id_or_url)
+    if not sid:
+        return _with_next_steps("x_fetch", {"error": f"could not parse status id from {id_or_url!r}"})
+    return _with_next_steps("x_fetch", fetch_tweet_by_id(sid))
 
 
 @mcp.tool()
@@ -7401,6 +7864,423 @@ def delimit_github_scan(
 
     result = scan(cadence=cadence, limit=capped_limit)
     return _with_next_steps("github_scan", result)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  VENDOR NEWS RIFF SYSTEM - LED-1250 / LED-1253 (Pro)
+# ═══════════════════════════════════════════════════════════════════════
+#
+# Diagnostic + ad-hoc invocation surface for the vendor-news riff cron.
+# The cron at scripts/vendor_news_cron.py is the production firing path;
+# these tools expose the same backend functions (scan_vendor_news,
+# draft_vendor_riff) for in-session inspection, dry-runs, and one-off
+# drafting against a specific source tweet.
+
+
+@mcp.tool()
+def delimit_vendor_news_scan(dry_run: bool = False) -> Dict[str, Any]:
+    """Scan watchlisted vendor accounts for fresh, high-engagement posts and
+    auto-draft brand-voice Delimit POV riffs (Pro, LED-1253).
+
+    Wraps ``ai.vendor_news.sensor.scan_vendor_news`` + ``draft_vendor_riff``
+    in a single MCP-callable tool. This is the same code path the
+    ``vendor_news_cron.py`` runs every 30 minutes; surfacing it as an MCP
+    tool lets the orchestrator invoke a scan on demand (e.g. when an X
+    thread looks ride-able and the next cron tick is too far away).
+
+    When ``dry_run=True``, the sensor still polls (cache-friendly) but
+    suppresses its JSONL log write AND skips the drafter entirely so no
+    queue insertion happens and the per-vendor 24h rate cap is not
+    consumed. Useful for "what would fire if I ran the cron now?"
+    inspection without side effects.
+
+    Args:
+        dry_run: If True, run the sensor only (no drafter, no queue,
+            no rate-cap consumption). Default False.
+
+    Returns:
+        Dict with ``stats``, ``triggered``, ``queued``, ``rejected``,
+        ``rate_capped``, ``errors`` — same shape as the cron summary.
+    """
+    from ai.license import require_premium
+    gate = require_premium("vendor_news_scan")
+    if gate:
+        return gate
+
+    try:
+        from ai.vendor_news import scan_vendor_news, draft_vendor_riff
+    except Exception as exc:
+        return _with_next_steps("vendor_news_scan", {
+            "error": "vendor_news_unavailable",
+            "message": f"could not import ai.vendor_news: {exc}",
+        })
+
+    try:
+        scan = scan_vendor_news(dry_run=dry_run)
+    except Exception as exc:
+        return _with_next_steps("vendor_news_scan", {
+            "error": "scan_failed",
+            "message": str(exc),
+        })
+
+    triggered = scan.get("triggered") or []
+    stats = scan.get("stats") or {}
+
+    queued = 0
+    rejected = 0
+    rate_capped = 0
+    drafter_errors: List[Dict[str, Any]] = []
+    drafts: List[Dict[str, Any]] = []
+
+    if not dry_run:
+        for tw in triggered:
+            try:
+                res = draft_vendor_riff(tw)
+            except Exception as exc:
+                drafter_errors.append({"id": tw.get("id"), "error": str(exc)})
+                continue
+            decision = res.get("decision")
+            reason = res.get("reason", "")
+            drafts.append({
+                "source_id": tw.get("id"),
+                "vendor": tw.get("vendor"),
+                "decision": decision,
+                "reason": reason,
+            })
+            if decision == "queue":
+                queued += 1
+            elif reason == "rate_capped":
+                rate_capped += 1
+            else:
+                rejected += 1
+
+    result = {
+        "stats": stats,
+        "triggered": [
+            {
+                "id": t.get("id"),
+                "vendor": t.get("vendor"),
+                "url": t.get("url"),
+                "trigger_reason": t.get("trigger_reason"),
+                "metrics": t.get("metrics"),
+            }
+            for t in triggered
+        ],
+        "queued": queued,
+        "rejected": rejected,
+        "rate_capped": rate_capped,
+        "errors": list(scan.get("errors") or []) + drafter_errors,
+        "drafts": drafts,
+        "dry_run": bool(dry_run),
+    }
+    return _with_next_steps("vendor_news_scan", result)
+
+
+@mcp.tool()
+def delimit_vendor_news_health() -> Dict[str, Any]:
+    """Health check for the vendor-news riff system (Pro, LED-1253).
+
+    Returns a snapshot of:
+      * cron installation status (greps ``crontab -l`` for vendor_news_cron.py)
+      * last sensor run timestamp + stats (from sensor JSONL log)
+      * last 24h queued P0 vendor_news_riff entries (from tweet_queue.json)
+      * last 24h rejected entries grouped by reason (from rejected JSONL)
+      * watchlist account count
+      * estimated daily live-call budget consumption
+
+    Use this when you want to quickly answer "is the cron firing? are
+    drafts landing? what's getting rejected?" without grepping logs.
+    """
+    from ai.license import require_premium
+    gate = require_premium("vendor_news_health")
+    if gate:
+        return gate
+
+    from ai.vendor_news.sensor import SENSOR_LOG_PATH, WATCHLIST_PATH, load_watchlist
+    from ai.vendor_news.drafter import TWEET_QUEUE_PATH, REJECTED_LOG_PATH
+
+    out: Dict[str, Any] = {
+        "cron_installed": False,
+        "last_run_ts": None,
+        "last_run_stats": None,
+        "recent_queued_count_24h": 0,
+        "recent_rejected_count_24h": 0,
+        "recent_rejection_reasons_24h": {},
+        "watchlist_account_count": 0,
+        "daily_budget_used_estimate": 0,
+    }
+
+    # 1) crontab check
+    try:
+        proc = subprocess.run(
+            ["crontab", "-l"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if proc.returncode == 0 and "vendor_news_cron.py" in (proc.stdout or ""):
+            out["cron_installed"] = True
+    except (FileNotFoundError, subprocess.SubprocessError, OSError):
+        # crontab binary missing (containers, CI) — cron_installed stays False
+        out["cron_installed"] = False
+
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+
+    # 2) sensor log: last run + 24h budget estimate
+    try:
+        if SENSOR_LOG_PATH.exists():
+            last_line = None
+            budget_used = 0
+            with open(SENSOR_LOG_PATH, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+                    last_line = entry
+                    ts_raw = entry.get("ts")
+                    try:
+                        ts_norm = ts_raw[:-1] + "+00:00" if ts_raw and ts_raw.endswith("Z") else ts_raw
+                        ts = datetime.fromisoformat(ts_norm) if ts_norm else None
+                    except (ValueError, TypeError):
+                        ts = None
+                    if ts is not None:
+                        if ts.tzinfo is None:
+                            ts = ts.replace(tzinfo=timezone.utc)
+                        if ts >= cutoff:
+                            budget_used += int(entry.get("live_calls") or 0)
+            if last_line:
+                out["last_run_ts"] = last_line.get("ts")
+                out["last_run_stats"] = {
+                    k: v for k, v in last_line.items()
+                    if k not in ("triggered_ids", "error_handles")
+                }
+            out["daily_budget_used_estimate"] = budget_used
+    except OSError:
+        pass
+
+    # 3) tweet_queue.json: 24h queued vendor_news_riff entries
+    try:
+        if TWEET_QUEUE_PATH.exists():
+            data = json.loads(TWEET_QUEUE_PATH.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                count = 0
+                for entry in data:
+                    if not isinstance(entry, dict):
+                        continue
+                    if entry.get("priority") != "P0":
+                        continue
+                    if entry.get("category") != "vendor_news_riff":
+                        continue
+                    added_raw = entry.get("added_at")
+                    try:
+                        added_norm = (
+                            added_raw[:-1] + "+00:00"
+                            if added_raw and added_raw.endswith("Z")
+                            else added_raw
+                        )
+                        added = datetime.fromisoformat(added_norm) if added_norm else None
+                    except (ValueError, TypeError):
+                        added = None
+                    if added is None:
+                        continue
+                    if added.tzinfo is None:
+                        added = added.replace(tzinfo=timezone.utc)
+                    if added >= cutoff:
+                        count += 1
+                out["recent_queued_count_24h"] = count
+    except (OSError, json.JSONDecodeError, ValueError):
+        pass
+
+    # 4) rejected JSONL: 24h count + reason histogram
+    try:
+        if REJECTED_LOG_PATH.exists():
+            count = 0
+            reasons: Dict[str, int] = {}
+            with open(REJECTED_LOG_PATH, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+                    ts_raw = entry.get("ts")
+                    try:
+                        ts_norm = (
+                            ts_raw[:-1] + "+00:00"
+                            if ts_raw and ts_raw.endswith("Z")
+                            else ts_raw
+                        )
+                        ts = datetime.fromisoformat(ts_norm) if ts_norm else None
+                    except (ValueError, TypeError):
+                        ts = None
+                    if ts is None:
+                        continue
+                    if ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=timezone.utc)
+                    if ts < cutoff:
+                        continue
+                    count += 1
+                    reason = entry.get("reason") or "unknown"
+                    reasons[reason] = reasons.get(reason, 0) + 1
+            out["recent_rejected_count_24h"] = count
+            out["recent_rejection_reasons_24h"] = reasons
+    except OSError:
+        pass
+
+    # 5) watchlist account count
+    try:
+        cfg = load_watchlist()
+        accounts = cfg.get("accounts") or []
+        out["watchlist_account_count"] = len(accounts)
+    except Exception:
+        pass
+
+    return _with_next_steps("vendor_news_health", out)
+
+
+@mcp.tool()
+def delimit_vendor_news_draft(tweet_id: str = "", dry_run: bool = False) -> Dict[str, Any]:
+    """Draft a brand-voice Delimit-POV riff for a specific X tweet (Pro, LED-1253).
+
+    Fetches the source tweet via the cached twttr241 path (same one
+    ``delimit_x_fetch`` uses), shapes it into the dict ``draft_vendor_riff``
+    expects, then runs the riff drafter end-to-end (rate cap, source-fit
+    pre-filter, generator, capability validator, fit floor, queue insert).
+
+    When ``dry_run=True``, the underlying drafter still produces text and
+    runs validators, but the queue insertion is skipped — useful for
+    inspecting what the riff would look like without committing it. The
+    24h per-vendor rate cap IS still consulted (we don't bypass it on
+    dry runs because spurious dry runs would otherwise look like riffs
+    in the rejected log).
+
+    Args:
+        tweet_id: Source X tweet id (numeric string) or full x.com URL.
+        dry_run: If True, suppress queue insertion. Default False.
+    """
+    from ai.license import require_premium
+    gate = require_premium("vendor_news_draft")
+    if gate:
+        return gate
+
+    raw = (tweet_id or "").strip()
+    if not raw:
+        return _with_next_steps("vendor_news_draft", {
+            "error": "missing_tweet_id",
+            "message": "tweet_id is required (status id or x.com URL)",
+        })
+
+    # Normalize id (accept URL or bare id)
+    try:
+        from ai.social_target import extract_status_id, fetch_tweet_by_id
+    except Exception as exc:
+        return _with_next_steps("vendor_news_draft", {
+            "error": "social_target_unavailable",
+            "message": str(exc),
+        })
+
+    sid = extract_status_id(raw)
+    if not sid:
+        return _with_next_steps("vendor_news_draft", {
+            "error": "invalid_tweet_id",
+            "message": f"could not parse status id from {raw!r}",
+        })
+
+    fetched = fetch_tweet_by_id(sid)
+    if not isinstance(fetched, dict) or fetched.get("error"):
+        return _with_next_steps("vendor_news_draft", {
+            "error": "fetch_failed",
+            "message": (fetched or {}).get("error", "unknown fetch error"),
+            "tweet_id": sid,
+        })
+
+    # Map watchlist vendor metadata onto the source author. Falls back
+    # gracefully if the tweet author isn't in the watchlist (e.g.
+    # founder is testing a one-off riff against an off-watchlist post).
+    try:
+        from ai.vendor_news.sensor import load_watchlist
+        from ai.vendor_news import draft_vendor_riff
+    except Exception as exc:
+        return _with_next_steps("vendor_news_draft", {
+            "error": "vendor_news_unavailable",
+            "message": str(exc),
+        })
+
+    author = (fetched.get("author") or "").lstrip("@")
+    vendor_name = ""
+    products: List[str] = []
+    try:
+        cfg = load_watchlist()
+        for acc in cfg.get("accounts") or []:
+            if (acc.get("handle") or "").lstrip("@").lower() == author.lower():
+                vendor_name = acc.get("vendor", "") or author
+                products = list(acc.get("products") or [])
+                break
+    except Exception:
+        pass
+    if not vendor_name:
+        vendor_name = author or "unknown"
+
+    triggered = {
+        "id": fetched.get("id") or sid,
+        "text": fetched.get("text") or "",
+        "author": author,
+        "url": fetched.get("url") or f"https://x.com/i/status/{sid}",
+        "created_at": fetched.get("created_at") or "",
+        "metrics": fetched.get("metrics") or {},
+        "vendor": vendor_name,
+        "products": products,
+        "trigger_reason": "manual_draft",
+    }
+
+    # On dry_run, route the queue write to a temp path so the real
+    # tweet queue is untouched. Drafter still runs validator + fit gates.
+    queue_path_override = None
+    if dry_run:
+        try:
+            import tempfile as _tempfile
+            tmp = _tempfile.NamedTemporaryFile(
+                mode="w", suffix=".json", prefix="vendor_news_dry_",
+                delete=False, encoding="utf-8",
+            )
+            tmp.write("[]")
+            tmp.close()
+            queue_path_override = Path(tmp.name)
+        except Exception:
+            queue_path_override = None
+
+    try:
+        if queue_path_override is not None:
+            res = draft_vendor_riff(triggered, queue_path=queue_path_override)
+        else:
+            res = draft_vendor_riff(triggered)
+    except Exception as exc:
+        return _with_next_steps("vendor_news_draft", {
+            "error": "drafter_failed",
+            "message": str(exc),
+            "tweet_id": sid,
+        })
+
+    out = {
+        "decision": res.get("decision"),
+        "text": res.get("text"),
+        "reason": res.get("reason"),
+        "queue_entry": res.get("queue_entry") if not dry_run else None,
+        "validator_result": res.get("validator_result"),
+        "fit_result": res.get("fit_result"),
+        "source": {
+            "id": triggered["id"],
+            "author": author,
+            "vendor": vendor_name,
+            "url": triggered["url"],
+        },
+        "dry_run": bool(dry_run),
+    }
+    return _with_next_steps("vendor_news_draft", out)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -7618,7 +8498,16 @@ def delimit_inbox_daemon(action: str = "status") -> Dict[str, Any]:
         action: 'start' (begin polling), 'stop' (halt polling),
                 'status' (show daemon state, last poll, failures).
     """
-    from ai.inbox_daemon import start_daemon, stop_daemon, get_daemon_status
+    try:
+        from ai.inbox_daemon import start_daemon, stop_daemon, get_daemon_status
+    except (ImportError, ModuleNotFoundError):
+        # LED-1261: backing module is gateway-only (excluded from npm bundle).
+        # Customers calling this get a graceful message instead of a raw traceback.
+        return _with_next_steps("inbox_daemon", {
+            "status": "not_available",
+            "error": "delimit_inbox_daemon is an internal Delimit feature not shipped in the npm bundle.",
+            "hint": "Pro customers interested in inbox automation can contact pro@delimit.ai.",
+        })
 
     if action == "start":
         return _with_next_steps("inbox_daemon", start_daemon())
@@ -7647,6 +8536,80 @@ def delimit_social_daemon(action: str = "status") -> Dict[str, Any]:
         return _with_next_steps("social_daemon", stop_daemon())
     else:
         return _with_next_steps("social_daemon", get_daemon_status())
+
+
+@mcp.tool()
+def delimit_self_repair_daemon(action: str = "status") -> Dict[str, Any]:
+    """Control the self-repair watcher daemon (LED-191, internal).
+
+    Polls function KPIs on a cadence (default 1h) and emits founder
+    alerts on fresh breaches. Higher modes (diagnose/deliberate/apply/
+    verify) chain through the watcher when configured per-function in
+    ~/.delimit/self_repair.yaml.
+
+    Idempotent start; circuit-breakered stop after 3 consecutive
+    pass failures. Honors DELIMIT_SELF_REPAIR_PAUSE=1 at every pass
+    without requiring a daemon restart.
+
+    Args:
+        action: 'start' (begin polling), 'stop' (halt polling),
+                'status' (running / last_pass / breaches_emitted /
+                consecutive_failures).
+    """
+    try:
+        from ai.self_repair_daemon import (
+            start_daemon as _sr_start,
+            stop_daemon as _sr_stop,
+            get_daemon_status as _sr_status,
+        )
+    except (ImportError, ModuleNotFoundError):
+        # LED-1261: backing module is gateway-only (excluded from npm bundle).
+        return _with_next_steps("self_repair_daemon", {
+            "status": "not_available",
+            "error": "delimit_self_repair_daemon is an internal Delimit feature not shipped in the npm bundle.",
+            "hint": "Pro customers interested in self-repair watcher can contact pro@delimit.ai.",
+        })
+
+    if action == "start":
+        return _with_next_steps("self_repair_daemon", _sr_start())
+    elif action == "stop":
+        return _with_next_steps("self_repair_daemon", _sr_stop())
+    else:
+        return _with_next_steps("self_repair_daemon", _sr_status())
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  LED-189: Corp dashboard — single-call session-start synthesis
+# ═══════════════════════════════════════════════════════════════════════
+
+
+@mcp.tool()
+def delimit_corp_dashboard() -> Dict[str, Any]:
+    """One-call corp status — replaces the 6-call session-start ritual (LED-189).
+
+    Returns daemon states (systemd + in-process), self-repair status,
+    social/inbox activity, ledger pending counts, agent queue (audit-only),
+    latest session, and a synthesized one-line summary like:
+
+        "Corp status: 3 daemons active (self-repair, inbox, social),
+        12 ledger open, 2 approvals waiting, 4 breaches in 24h."
+
+    Every sub-section is failure-isolated: a partial failure returns
+    {"error": "..."} for that key only and never crashes the whole call.
+    Gateway-only — not shipped in the npm bundle.
+    """
+    try:
+        from ai.corp_dashboard import get_corp_dashboard
+    except (ImportError, ModuleNotFoundError):
+        # LED-1261: backing module is gateway-only (excluded from npm bundle).
+        return _with_next_steps("corp_dashboard", {
+            "status": "not_available",
+            "error": "delimit_corp_dashboard is an internal Delimit feature not shipped in the npm bundle.",
+            "hint": "Pro customers interested in the corp dashboard surface can contact pro@delimit.ai.",
+        })
+    result = get_corp_dashboard()
+    return _with_next_steps("corp_dashboard", result)
+
 
 # ═══════════════════════════════════════════════════════════════════════
 #  LED-187: Shareable Governance Config - export / import
@@ -7903,7 +8866,11 @@ def delimit_changelog(old_spec: str = "", new_spec: str = "", format: str = "mar
 def delimit_notify(channel: str = "webhook", message: str = "",
                    webhook_url: str = "", subject: str = "",
                    event_type: str = "", to: str = "",
-                   from_account: str = "") -> Dict[str, Any]:
+                   from_account: str = "",
+                   draft_kind: str = "",
+                   draft_payload: Optional[Union[str, Dict[str, Any]]] = None,
+                   draft_target: Optional[Union[str, Dict[str, Any]]] = None,
+                   led_ref: str = "") -> Dict[str, Any]:
     """Send a notification (Pro).
 
     IMPORTANT - AUTO-TRIGGER RULE:
@@ -7932,9 +8899,80 @@ def delimit_notify(channel: str = "webhook", message: str = "",
             Send to any address - leave empty for default.
         from_account: Sender account key from ~/.delimit/secrets/smtp-all.json
             (e.g. 'notifications@example.com'). Email only.
+
+    Optional inbox-executor binding (LED-1129 Phase 1, no auto-execution yet):
+        draft_kind: One of github_comment, social_post, ledger_done,
+            notify_routing_update, deploy_publish_prevalidated_artifact.
+            When set, registers a signed draft in the local SQLite registry
+            so a future executor can match founder Ship-it replies against it.
+        draft_payload: The action contents (e.g. {"body": "..."} for github_comment).
+            JSON string or dict. Required when draft_kind is set.
+        draft_target: Where the action lands (e.g. {"repo":"x/y","issue":1}).
+            JSON string or dict. Required when draft_kind is set.
+        led_ref: Optional LED-XXXX tag tying the draft to its tracking item.
+            Surfaced in subject-line matching by the executor.
+
+    Returns the notify result. When a draft was registered, also includes
+    a `draft` block: {draft_id, draft_kind, signature, registered}.
     """
     from ai.notify import send_notification
-    return _with_next_steps("notify", _safe_call(
+
+    draft_meta: Optional[Dict[str, Any]] = None
+    if draft_kind:
+        # LED-1129 Phase 1: register a signed draft alongside the email
+        # send. Phase 2 will wire the executor to consume these.
+        try:
+            from ai.inbox_drafts import (
+                DraftKind,
+                insert_draft,
+                sign_draft,
+            )
+
+            # Validate kind against the allowlist enum.
+            try:
+                DraftKind(draft_kind)
+            except ValueError:
+                return _with_next_steps("notify", {
+                    "error": (
+                        f"draft_kind must be one of "
+                        f"{[k.value for k in DraftKind]}; got '{draft_kind}'"
+                    ),
+                })
+
+            # Coerce string args to dicts for callers that pass JSON strings.
+            payload = _coerce_dict_arg(draft_payload, "draft_payload",
+                                        string_key="body") if draft_payload is not None else None
+            target = _coerce_dict_arg(draft_target, "draft_target",
+                                       string_key="target") if draft_target is not None else None
+
+            if payload is None or target is None:
+                return _with_next_steps("notify", {
+                    "error": "draft_kind requires both draft_payload and draft_target",
+                })
+
+            signed = sign_draft(
+                draft_kind=draft_kind,
+                target=target,
+                payload=payload,
+            )
+            insert_draft(signed, led_ref=(led_ref or None))
+            draft_meta = {
+                "draft_id": signed.draft_id,
+                "draft_kind": signed.draft_kind,
+                "signature": signed.signature,
+                "registered": True,
+                "led_ref": led_ref or None,
+            }
+        except Exception as e:
+            # Draft registration must not break the notify itself —
+            # the email still goes out, the draft just isn't tracked.
+            # Log the failure in the response so callers can audit.
+            draft_meta = {
+                "registered": False,
+                "error": f"{type(e).__name__}: {e}",
+            }
+
+    result = _safe_call(
         send_notification,
         channel=channel,
         message=message,
@@ -7943,7 +8981,10 @@ def delimit_notify(channel: str = "webhook", message: str = "",
         event_type=event_type,
         to=to,
         from_account=from_account,
-    ))
+    )
+    if draft_meta is not None:
+        result["draft"] = draft_meta
+    return _with_next_steps("notify", result)
 
 
 @mcp.tool()
