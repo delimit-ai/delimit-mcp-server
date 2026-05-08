@@ -28,7 +28,21 @@ try:
         "delimit_loop_status", "delimit_loop_config",
     })
 except ImportError:
-    # license_core not available (development mode or missing binary)
+    # license_core not available — three known cases:
+    #   1. Development mode (running from gateway source, no compiled .so)
+    #   2. Customer on a non-Linux platform (mac/windows) — first ship is
+    #      Linux-only; cross-platform binaries land in a follow-up.
+    #   3. Bundle integrity issue (.so missing or corrupt).
+    # Fail-closed: do not crash. Fall back to a Python-only implementation
+    # so the CLI keeps working; Pro features that depend on the compiled
+    # core may be downgraded.
+    import sys as _sys
+    print(
+        "delimit: license_core native module not loadable on this platform; "
+        "falling back to Python implementation. Pro features may be downgraded — "
+        "contact pro@delimit.ai if you need cross-platform Pro support.",
+        file=_sys.stderr,
+    )
     import json
     import os
     import time

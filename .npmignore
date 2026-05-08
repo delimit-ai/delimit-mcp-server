@@ -3,6 +3,13 @@
 **/*.pyc
 **/*.bak
 
+# LED-1259: license_core.py is compiled to a native .so before publish.
+# Plaintext source must NEVER ship — customers would be able to grep it
+# for license-validation bypass identifiers. The .so is included via the
+# package.json files array.
+gateway/ai/license_core.py
+gateway/ai/license_core.build/
+
 # Development
 .github/
 tests/
