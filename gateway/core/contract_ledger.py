@@ -3,7 +3,7 @@ Delimit Contract Ledger
 Reads, validates, and queries the append-only JSONL event ledger.
 Optional SQLite index for fast lookups (never required for CI).
 
-Per Jamsons Doctrine:
+Per Delimit governance principles:
 - Deterministic outputs
 - Append-only artifacts
 - SQLite index is optional, not required for CI

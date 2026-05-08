@@ -219,7 +219,7 @@ Real-world specs can ship malformed shapes. The diff engine now defends against 
 
 ### Fixed
 - **Exit-shim counter undercounting** — previously missed commits outside `SESSION_CWD` and dropped Z-suffixed timestamps; both now captured.
-- **Proprietary path leaks** — sync-gateway.sh EXCLUDE list hardened to keep Jamsons-portfolio-specific files (social.py, social_target.py, inbox_daemon.py, founding_users.py, deliberation.py) out of the npm bundle.
+- **Proprietary path leaks** — sync-gateway.sh EXCLUDE list hardened to keep portfolio-specific files (social.py, social_target.py, inbox_daemon.py, founding_users.py, deliberation.py) out of the npm bundle.
 
 ### Tests
 - Gateway: 163/163 passing on changed-file tests (social.py, social_target.py, supabase_sync).
@@ -610,8 +610,8 @@ Real-world specs can ship malformed shapes. The diff engine now defends against 
 - Wire local API server into setup flow (STR-057) (223a647d)
 - release: v3.11.4 — CLAUDE.md auto-update with versioned markers (66db96dd)
 - security: remove infect.js, hardcoded paths, stale shell scripts (ddb2b1a8)
-- security: remove all Jamsons Doctrine references from gateway stubs (1d802a2b)
-- security: remove jamsons adapters from public repo (c976fa8a)
+- security: remove all internal doctrine references from gateway stubs (1d802a2b)
+- security: remove holdco adapters from public repo (c976fa8a)
 - release: v3.11.1 — MCP/AI keywords for npm discoverability (ba984f17)
 - release: v3.11.0 — agent identity, secrets broker, approval gates (78557ea8)
 - update: CLI description to match brand positioning (75ff6842)
@@ -623,7 +623,7 @@ Real-world specs can ship malformed shapes. The diff engine now defends against 
 - v3.9.1: download Pro modules from delimit.ai CDN (public URL, no auth needed) (b1462fd4)
 - v3.9.0: Pro source removed from public package — compiled modules download at install (e4fe7baf)
 - v3.8.2: Gemini governance trigger + history scrub (116ffb1a)
-- security: remove node_modules and jamsons adapters from public repo (f67f3b92)
+- security: remove node_modules and holdco adapters from public repo (f67f3b92)
 - v3.8.1: governance trigger in all instruction files + MCP server description (7c525231)
 - v3.7.1: CLI-first deliberation + gateway sync + path cleanup (1555691d)
 - v3.7.0: cross-model positioning + models configure + release sync (4c9cbcb7)
@@ -698,7 +698,7 @@ Real-world specs can ship malformed shapes. The diff engine now defends against 
 - **LED-061**: [P0] DomainVested: Consistency audit — verdict/flip/action must agree
 - **LED-062**: [P1] Brand: Add SVG logo to site, favicon, GitHub org avatar, npm
 - **LED-063**: [P0] Governance trigger shipped in npm — instruction files + MCP description
-- **LED-064**: [P0] Security: removed jamsons adapters + node_modules from public repo
+- **LED-064**: [P0] Security: removed holdco adapters + node_modules from public repo
 - **LED-065**: [P0] ChatOps: Build app.delimit.ai into a unified project management interface
 - **LED-066**: [P0] Split repos: free tools public, Pro tools private, npm bundles both
 - **LED-067**: [P0] License: add periodic re-validation (30 day) with 7 day grace period
@@ -1064,7 +1064,7 @@ Real-world specs can ship malformed shapes. The diff engine now defends against 
 - GitHub Action smoke test workflow
 
 ### Fixed
-- Gemini deliberation HTTP 400 (ADC credentials + jamsons project)
+- Gemini deliberation HTTP 400 (ADC credentials + project mismatch)
 - Deliberation timeout: parallelized round 1 (46% faster)
 - Sensor dedup: titles include repo/issue to prevent duplicates
 - Test-mode guard prevents ledger pollution from tests

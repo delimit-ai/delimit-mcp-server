@@ -3,7 +3,7 @@ Delimit Event Backbone
 Constructs ledger events, generates SHA-256 hashes, links hash chains,
 and appends to the append-only JSONL ledger.
 
-Per Jamsons Doctrine:
+Per Delimit governance principles:
 - Deterministic outputs
 - Append-only artifacts
 - Fail-closed CI behavior (ledger failures never affect CI)
@@ -199,7 +199,7 @@ class EventBackbone:
         This is the primary API for event generation. It is best-effort:
         if the ledger write fails, the event is still returned but not persisted.
 
-        CRITICAL: This method NEVER raises exceptions. Per Jamsons Doctrine,
+        CRITICAL: This method NEVER raises exceptions. Per Delimit doctrine,
         ledger failures must not affect CI pass/fail outcome.
 
         Returns:
