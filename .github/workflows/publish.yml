@@ -53,6 +53,21 @@ jobs:
           # In CI we override via env var or symlink.
           GATEWAY_OVERRIDE="${{ github.workspace }}/delimit-gateway" npm run sync-gateway
 
+      - name: Set up Python (LED-1259 compile)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Test license_core .so (LED-1259)
+        working-directory: npm-delimit
+        run: bash scripts/test-license-core-so.sh
+        env:
+          GATEWAY_OVERRIDE: ${{ github.workspace }}/delimit-gateway
+
+      - name: Compile license_core to native .so (LED-1259)
+        working-directory: npm-delimit
+        run: bash scripts/build-license-core.sh
+
       - name: Run tests
         working-directory: npm-delimit
         run: npm test
@@ -126,6 +141,15 @@ jobs:
             sed -i "s|/home/delimit/delimit-gateway|${{ github.workspace }}/delimit-gateway|g" scripts/sync-gateway.sh
           fi
           npm run sync-gateway
+
+      - name: Set up Python (LED-1259 compile)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Compile license_core to native .so (LED-1259)
+        working-directory: npm-delimit
+        run: bash scripts/build-license-core.sh
 
       - name: Publish (dry run)
         if: github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run == 'true'
