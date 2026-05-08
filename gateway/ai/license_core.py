@@ -86,9 +86,8 @@ def revalidate_license(data: dict) -> dict:
         Also includes 'updated_data' with the (possibly modified) license data.
     """
     key = data.get("key", "")
-    # Empty key (dev environments) or internal license override (env-var-driven)
-    _internal = os.environ.get("DELIMIT_INTERNAL_LICENSE_KEY", "")
-    if not key or (_internal and key == _internal):
+    # Empty key passes (dev environments without a license file)
+    if not key:
         data["last_validated_at"] = time.time()
         data["validation_status"] = "current"
         _write_license(data)
@@ -152,11 +151,6 @@ def is_license_valid(data: dict) -> bool:
         return False
     if not data.get("valid", False):
         return False
-    # Internal license override (env-var-driven; empty for customers)
-    key = data.get("key", "")
-    _internal = os.environ.get("DELIMIT_INTERNAL_LICENSE_KEY", "")
-    if _internal and key == _internal:
-        return True
     last_validated = data.get("last_validated_at", data.get("activated_at", 0))
     if last_validated == 0:
         return True  # Legacy — allow access but needs_revalidation will trigger check

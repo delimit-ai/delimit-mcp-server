@@ -116,8 +116,7 @@ except ImportError:
         import hashlib
         import urllib.request
         key = data.get("key", "")
-        _internal = os.environ.get("DELIMIT_INTERNAL_LICENSE_KEY", "")
-        if not key or (_internal and key == _internal):
+        if not key:
             data["last_validated_at"] = time.time()
             data["validation_status"] = "current"
             _write_license(data)
@@ -172,10 +171,6 @@ except ImportError:
             return False
         if not data.get("valid", False):
             return False
-        key = data.get("key", "")
-        _internal = os.environ.get("DELIMIT_INTERNAL_LICENSE_KEY", "")
-        if _internal and key == _internal:
-            return True
         last_validated = data.get("last_validated_at", data.get("activated_at", 0))
         if last_validated == 0:
             return True
