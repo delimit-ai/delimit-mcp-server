@@ -69,7 +69,7 @@ function normalizeNaturalLanguageArgs(argv) {
     const explicitCommands = new Set([
         'install', 'mode', 'status', 'session', 'build', 'ask', 'policy', 'auth', 'audit',
         'explain-decision', 'uninstall', 'proxy', 'hook', 'version', 'vault', 'deliberate',
-        'remember', 'recall', 'forget', 'report', 'signin', 'activate'
+        'remember', 'recall', 'forget', 'report', 'signin', 'signout', 'activate'
     ]);
     if (explicitCommands.has((raw[0] || '').toLowerCase())) {
         return raw;
@@ -5737,10 +5737,52 @@ program
             if (result.merged) {
                 console.log(chalk.dim('  Existing auth.json keys preserved.'));
             }
-            console.log(chalk.dim('  To sign out: rm ' + result.path));
+            console.log(chalk.dim('  To sign out: delimit signout'));
             console.log('');
         } catch (err) {
             console.error(chalk.red(`  Sign-in failed: ${err.message}`));
+            process.exit(1);
+        }
+    });
+
+// ---------------------------------------------------------------------------
+// LED-2106: `delimit signout` — remove the OAuth bearer token written by
+// `delimit signin` (LED-2100) without clobbering the legacy bookkeeping
+// keys (configured / timestamp / tools) written by `delimit auth`. Today
+// users sign out via `rm ~/.delimit/auth.json` which wipes everything;
+// this command scrubs only the OAuth-related keys.
+//
+// Surface contract:
+//   - Removes ONLY: delimit_token, access_token, signed_in_at, email
+//   - Preserves: every other key (e.g. configured, timestamp, tools)
+//   - Deletes auth.json entirely if it has no remaining keys after scrub
+//   - Idempotent: safe to run when not signed in (prints "Not signed in.")
+// ---------------------------------------------------------------------------
+program
+    .command('signout')
+    .description('Sign out of delimit.ai (removes the hosted-deliberation token)')
+    .action(async () => {
+        const { removeAuthToken } = require('../lib/auth-signout');
+        try {
+            const result = removeAuthToken();
+            if (!result.changed) {
+                console.log(chalk.yellow('  Not signed in.'));
+                return;
+            }
+            console.log('');
+            if (result.email) {
+                console.log(chalk.green(`  Signed out (${result.email}).`));
+            } else {
+                console.log(chalk.green('  Signed out.'));
+            }
+            if (result.deleted) {
+                console.log(chalk.dim(`  Removed: ${result.path}`));
+            } else {
+                console.log(chalk.dim(`  Auth file: ${result.path} (other keys preserved)`));
+            }
+            console.log('');
+        } catch (err) {
+            console.error(chalk.red(`  Sign-out failed: ${err.message}`));
             process.exit(1);
         }
     });
@@ -5934,6 +5976,21 @@ program
     .option('--mode <mode>', 'Deliberation mode: quick | dialogue | debate', 'dialogue')
     .option('--question <q>', 'Question to deliberate (alternative to positional arg)')
     .action(async (questionParts, options) => {
+        // LED-2095: one-time migration banner for Free + BYOK users to
+        // surface the LED-2092 / LED-2093 ephemeral-Free-tier change.
+        // This fires on the first deliberation-adjacent call after the
+        // upgrade and never again on this machine.
+        try {
+            const { maybeShowMigrationBanner } = require('../lib/migration-2092-banner');
+            const banner = maybeShowMigrationBanner();
+            if (banner.shown) {
+                console.log(chalk.yellow(banner.text));
+            }
+        } catch {
+            // Banner is purely informational; never block deliberation
+            // because of a flag-file write or models.json read error.
+        }
+
         const question = options.question || (questionParts.length > 0 ? questionParts.join(' ') : null);
 
         if (options.list) {
@@ -6150,6 +6207,18 @@ program
     .description('Configure deliberation model API keys (BYOK)')
     .option('--status', 'Show current model configuration (non-interactive)')
     .action(async (options) => {
+        // LED-2095: deliberation-adjacent surface — also a valid trigger
+        // point for the one-time migration banner. See lib/migration-2092-banner.js.
+        try {
+            const { maybeShowMigrationBanner } = require('../lib/migration-2092-banner');
+            const banner = maybeShowMigrationBanner();
+            if (banner.shown) {
+                console.log(chalk.yellow(banner.text));
+            }
+        } catch {
+            // Banner is informational; never block the command on banner errors.
+        }
+
         const config = loadModelsConfig();
 
         // --status: non-interactive output
