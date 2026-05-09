@@ -69,7 +69,7 @@ function normalizeNaturalLanguageArgs(argv) {
     const explicitCommands = new Set([
         'install', 'mode', 'status', 'session', 'build', 'ask', 'policy', 'auth', 'audit',
         'explain-decision', 'uninstall', 'proxy', 'hook', 'version', 'vault', 'deliberate',
-        'remember', 'recall', 'forget', 'report'
+        'remember', 'recall', 'forget', 'report', 'signin', 'activate'
     ]);
     if (explicitCommands.has((raw[0] || '').toLowerCase())) {
         return raw;
@@ -5651,6 +5651,98 @@ program
                 activated_at: new Date().toISOString(),
             }, { timeout: 5000 }).catch(() => {});
         } catch {}
+    });
+
+// ---------------------------------------------------------------------------
+// LED-2100: `delimit signin` — capture delimit.ai OAuth bearer token so the
+// hosted-deliberation tier (LED-2092) can authenticate from the CLI. The
+// token is written to ~/.delimit/auth.json (mode 0600) where the gateway
+// reads it via deliberation.py::_read_oauth_token. Existing keys in
+// auth.json (e.g. from `delimit auth`) are preserved.
+//
+// Surface contract (do not change without coordinating with the gateway):
+//   - Writes `delimit_token` and `access_token` (same value, dual-key for
+//     compatibility with the gateway resolver's preferred-then-fallback read)
+//   - Writes `signed_in_at` (ISO8601) and `email` (when supplied)
+//   - Distinct from `delimit activate <key>` which writes license.json for
+//     the Pro license-key flow. Sign-in is OAuth-bearer-token only.
+//
+// Default flow is paste-token (works in headless / SSH sessions). The
+// browser-callback flow is a follow-up once delimit.ai/account/cli ships
+// the cli-aware redirect endpoint.
+// ---------------------------------------------------------------------------
+program
+    .command('signin')
+    .description('Sign in to delimit.ai to enable hosted multi-model deliberation')
+    .option('--token <token>', 'Provide the bearer token directly (skip prompt)')
+    .option('--email <email>', 'Associate the token with an email address')
+    .option('--status', 'Print current sign-in status without changes')
+    .action(async (options) => {
+        const { writeAuthToken, readCurrentToken, authFilePath } = require('../lib/auth-signin');
+
+        if (options.status) {
+            const token = readCurrentToken();
+            if (!token) {
+                console.log(chalk.yellow('  Not signed in.'));
+                console.log(chalk.dim(`  Run: delimit signin`));
+                process.exit(1);
+            }
+            console.log(chalk.green('  Signed in.'));
+            console.log(chalk.dim(`  Auth file: ${authFilePath()}`));
+            return;
+        }
+
+        let token = (options.token || process.env.DELIMIT_AUTH_TOKEN || '').trim();
+        let email = (options.email || '').trim();
+
+        if (!token) {
+            console.log(chalk.blue.bold('\n  Delimit sign-in\n'));
+            console.log('  1. Open: ' + chalk.cyan('https://delimit.ai/account/cli'));
+            console.log('  2. Sign in and copy your CLI token');
+            console.log('  3. Paste it below\n');
+
+            const answers = await inquirer.prompt([
+                {
+                    type: 'password',
+                    name: 'token',
+                    message: 'Paste token:',
+                    mask: '*',
+                    validate: (input) => {
+                        const v = (input || '').trim();
+                        if (!v) return 'Token cannot be empty.';
+                        if (v.length < 16) return 'Token looks too short — copy the full string from delimit.ai/account/cli.';
+                        return true;
+                    },
+                },
+                {
+                    type: 'input',
+                    name: 'email',
+                    message: 'Email (optional, for display only):',
+                    default: '',
+                },
+            ]);
+            token = (answers.token || '').trim();
+            email = email || (answers.email || '').trim();
+        }
+
+        try {
+            const result = writeAuthToken({ token, email });
+            console.log('');
+            if (email) {
+                console.log(chalk.green(`  Signed in as ${email}. Hosted deliberation enabled.`));
+            } else {
+                console.log(chalk.green('  Signed in. Hosted deliberation enabled.'));
+            }
+            console.log(chalk.dim(`  Auth file: ${result.path} (mode 0600)`));
+            if (result.merged) {
+                console.log(chalk.dim('  Existing auth.json keys preserved.'));
+            }
+            console.log(chalk.dim('  To sign out: rm ' + result.path));
+            console.log('');
+        } catch (err) {
+            console.error(chalk.red(`  Sign-in failed: ${err.message}`));
+            process.exit(1);
+        }
     });
 
 // ---------------------------------------------------------------------------
