@@ -8,7 +8,7 @@ Wrap any AI coding assistant (Claude Code, Codex, Cursor, Gemini CLI) with a gov
 [![Tests](https://img.shields.io/badge/tests-1640%2B%20passing-brightgreen)](https://github.com/delimit-ai/delimit-mcp-server)
 [![GitHub Action](https://img.shields.io/badge/GitHub%20Action-latest-blue)](https://github.com/marketplace/actions/delimit-api-governance)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-[![Glama](https://glama.ai/mcp/servers/delimit-ai/delimit/badge)](https://glama.ai/mcp/servers/delimit-ai/delimit)
+[![Glama Score](https://glama.ai/mcp/servers/delimit-ai/delimit-mcp-server/badges/score.svg)](https://glama.ai/mcp/servers/delimit-ai/delimit-mcp-server/score)
 
 ```console
 $ delimit wrap -- claude "fix the flaky test in tests/api.spec.ts"
