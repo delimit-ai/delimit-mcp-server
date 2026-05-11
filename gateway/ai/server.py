@@ -1421,18 +1421,31 @@ def _with_next_steps(tool_name: str, result: Dict[str, Any]) -> Dict[str, Any]:
 @mcp.tool()
 def delimit_lint(old_spec: str, new_spec: str, policy_file: Optional[str] = None, dry_run: bool = False) -> Dict[str, Any]:
     """Lint two OpenAPI specs for breaking changes and policy violations.
-    Primary CI integration point. Combines diff + policy into pass/fail.
-    Auto-chains: semver classification, governance evaluation on breaking changes.
 
-    When dry_run=True, returns violations and semver classification without
-    recording evidence, triggering notifications, or enforcing governance.
-    Useful for CI preview comments ("what would block") without side effects.
+    When to use: as the primary CI gate before merging API spec
+    changes — combines diff + policy into a pass/fail verdict.
+    When NOT to use: for raw change data (use delimit_diff) or quality
+    scoring (delimit_spec_health).
+
+    Sibling contrast: delimit_diff returns changes only;
+    delimit_diff_report renders HTML; this enforces policy.
+
+    Side effects: writes evidence on breaking findings; auto-chains
+    semver classification and governance evaluation. dry_run=True
+    suppresses evidence, notifications, and governance — returns
+    violations + semver only.
+
+    Spec args accept local paths or http(s) URLs. URLs are fetched
+    once into a tempfile (size cap, SSRF guard).
 
     Args:
-        old_spec: Path to the old (baseline) OpenAPI spec file.
-        new_spec: Path to the new (proposed) OpenAPI spec file.
-        policy_file: Optional path to a .delimit/policies.yml file.
-        dry_run: If True, return violations without side effects (no evidence, no chains).
+        old_spec: Path or URL to the baseline spec.
+        new_spec: Path or URL to the proposed spec.
+        policy_file: Optional .delimit/policies.yml path.
+        dry_run: If True, return violations + semver without side effects.
+
+    Returns:
+        Dict with violations, semver, gates, plus next_steps.
     """
     from backends.gateway_core import run_lint, run_semver
 
@@ -1538,11 +1551,26 @@ def delimit_lint(old_spec: str, new_spec: str, policy_file: Optional[str] = None
 
 @mcp.tool()
 def delimit_diff(old_spec: str, new_spec: str) -> Dict[str, Any]:
-    """Diff two OpenAPI specs and list all changes. Pure diff, no policy.
+    """Diff two OpenAPI specs and list all changes (pure diff, no policy).
+
+    When to use: when you only need the structural change set (added /
+    removed / modified endpoints, schemas, parameters) without any
+    policy verdict.
+    When NOT to use: as a CI gate — for pass/fail use delimit_lint, for
+    a shareable HTML report use delimit_diff_report.
+
+    Sibling contrast: delimit_lint adds policy + governance; this is
+    the underlying change list. delimit_diff_report wraps both in a
+    presentable report.
+
+    Side effects: read-only. Calls backends.gateway_core.run_diff.
 
     Args:
-        old_spec: Path to the old OpenAPI spec file.
-        new_spec: Path to the new OpenAPI spec file.
+        old_spec: Path to the baseline OpenAPI spec file. Required.
+        new_spec: Path to the proposed OpenAPI spec file. Required.
+
+    Returns:
+        Dict with the change list and next_steps suggestions.
     """
     from backends.gateway_core import run_diff
     return _with_next_steps("diff", _safe_call(run_diff, old_spec=old_spec, new_spec=new_spec))
@@ -1558,20 +1586,28 @@ def delimit_diff_report(
 ) -> Dict[str, Any]:
     """Generate a shareable API diff report with full analysis.
 
-    Runs the complete pipeline (diff, policy evaluation, semver
-    classification, spec health scoring, migration guide) and produces
-    a self-contained HTML report or structured JSON. The HTML has inline
-    CSS with no external dependencies -- open it in any browser.
+    When to use: when a team needs a shareable artifact (API review,
+    PR comment, compliance record) — runs diff + policy + semver +
+    spec health + migration guide.
+    When NOT to use: for a CI gate verdict (use delimit_lint) or
+    raw diff data (delimit_diff).
 
-    Use this when teams need a shareable artifact for API review, PR
-    comments, or compliance records.
+    Sibling contrast: delimit_lint enforces; delimit_diff is raw;
+    this is the presentable composite report.
+
+    Side effects: read-only on inputs. When output_file is provided,
+    writes the rendered HTML/JSON to disk. The HTML has inline CSS —
+    no external dependencies, opens in any browser.
 
     Args:
-        old_spec: Path to the old (baseline) OpenAPI spec file.
-        new_spec: Path to the new (proposed) OpenAPI spec file.
-        output_format: "html" for a standalone HTML report, "json" for structured data.
-        output_file: Optional file path to write the report to disk.
-        policy_file: Optional path to a .delimit/policies.yml file.
+        old_spec: Baseline OpenAPI spec path.
+        new_spec: Proposed OpenAPI spec path.
+        output_format: "html" (default) or "json".
+        output_file: Optional path to write the report to disk.
+        policy_file: Optional .delimit/policies.yml path.
+
+    Returns:
+        Dict with rendered report (or path), spec health, next_steps.
     """
     from backends.gateway_core import run_diff_report
     return _with_next_steps(
@@ -1589,17 +1625,26 @@ def delimit_diff_report(
 
 @mcp.tool()
 def delimit_spec_health(spec: str) -> Dict[str, Any]:
-    """Score an OpenAPI spec on quality dimensions. Instant health grade.
+    """Score an OpenAPI spec on quality dimensions (0-100, A-F grade).
 
-    Evaluates completeness, security, consistency, documentation, and best
-    practices. Returns an overall score (0-100), letter grade (A-F),
-    per-dimension breakdowns, and specific recommendations for improvement.
+    When to use: for quick spec quality checks during onboarding or
+    review — completeness, security, consistency, documentation,
+    best practices.
+    When NOT to use: as a breaking-change gate (use delimit_lint) or
+    raw diff (delimit_diff).
 
-    Use this for quick spec quality checks during onboarding or code review.
+    Sibling contrast: delimit_lint compares two specs;
+    this scores one spec on its own merits.
+
+    Side effects: read-only. Calls backends.gateway_core.run_spec_health.
     Works on any valid OpenAPI 3.x or Swagger 2.0 spec.
 
     Args:
         spec: Path to an OpenAPI spec file (YAML or JSON).
+
+    Returns:
+        Dict with overall score, letter grade, per-dimension breakdown,
+        recommendations, next_steps.
     """
     from backends.gateway_core import run_spec_health
     return _with_next_steps("spec_health", _safe_call(run_spec_health, spec_path=spec))
@@ -1613,20 +1658,28 @@ def delimit_policy(
     old_spec: Optional[str] = None,
     new_spec: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Inspect, validate, or simulate governance policy configuration.
+    """Inspect or simulate governance policy configuration.
 
-    Actions:
-      - "inspect" (default): Show loaded rules and template.
-      - "simulate": Dry-run lint+policy across all presets (strict, default,
-        relaxed) plus optional custom policy. Shows what WOULD pass/fail
-        without enforcing anything. Requires old_spec and new_spec.
+    When to use: to inspect the active policy or dry-run lint+policy
+    against several presets to preview what would block.
+    When NOT to use: for an actual gate decision (use delimit_lint) or
+    to manage the policy file itself (delimit_gov_policy).
+
+    Sibling contrast: delimit_gov_policy reads the live policy;
+    delimit_lint enforces; this lets you simulate / inspect.
+
+    Side effects: read-only on policy + spec files. action="simulate"
+    runs lint internally without writing evidence.
 
     Args:
-        spec_files: List of spec file paths.
+        spec_files: List of spec file paths. Required.
         policy_file: Optional custom policy file path.
-        action: "inspect" or "simulate".
-        old_spec: Path to baseline spec (required for simulate).
-        new_spec: Path to proposed spec (required for simulate).
+        action: "inspect" (default) or "simulate".
+        old_spec: Baseline spec path (required for simulate).
+        new_spec: Proposed spec path (required for simulate).
+
+    Returns:
+        Dict with loaded rules / simulation matrix and next_steps.
     """
     if action == "simulate":
         if not old_spec or not new_spec:
@@ -1644,11 +1697,29 @@ def delimit_policy(
 def delimit_ledger(ledger_path: str, api_name: Optional[str] = None, repository: Optional[str] = None, validate_chain: bool = False) -> Dict[str, Any]:
     """Query the append-only contract ledger (hash-chained JSONL).
 
+    When to use: to read or audit the cryptographically-chained
+    contract ledger that records signed governance events.
+    When NOT to use: for the project work ledger (use
+    delimit_ledger_list / delimit_ledger_query) — the contract ledger
+    is a different, hash-chained store.
+
+    Sibling contrast: delimit_ledger_list reads work items;
+    delimit_audit reads audit logs; this reads the hash-chained
+    contract ledger and can verify integrity.
+
+    Side effects: read-only. Calls backends.gateway_core.query_ledger.
+
     Args:
-        ledger_path: Path to the ledger JSONL file (e.g. .delimit/ledger/operations.jsonl).
-        api_name: Filter events by API name.
-        repository: Filter events by repository.
-        validate_chain: Validate hash chain integrity.
+        ledger_path: Path to the ledger JSONL file (e.g.
+            .delimit/ledger/operations.jsonl). Required.
+        api_name: Optional filter by API name.
+        repository: Optional filter by repository.
+        validate_chain: If True, verify the hash chain integrity in
+            addition to filtering. Default False.
+
+    Returns:
+        Dict with filtered events, optional chain-integrity verdict,
+        and next_steps.
     """
     from backends.gateway_core import query_ledger
     return _with_next_steps("ledger", _safe_call(query_ledger, ledger_path=ledger_path, api_name=api_name, repository=repository, validate_chain=validate_chain))
@@ -1656,11 +1727,26 @@ def delimit_ledger(ledger_path: str, api_name: Optional[str] = None, repository:
 
 @mcp.tool()
 def delimit_impact(api_name: str, dependency_file: Optional[str] = None) -> Dict[str, Any]:
-    """Analyze downstream impact of an API change. Informational only.
+    """Analyze downstream impact of an API change (informational only).
+
+    When to use: when assessing blast radius for a planned API change,
+    by inspecting a dependency manifest for callers of the named API.
+    When NOT to use: to make a gate decision (use delimit_lint or
+    delimit_gov_evaluate for pass/fail) — this returns information.
+
+    Sibling contrast: delimit_lint returns pass/fail; this returns a
+    blast-radius report.
+
+    Side effects: read-only. Calls backends.gateway_core.run_impact.
 
     Args:
-        api_name: The API that changed.
-        dependency_file: Optional path to dependency manifest.
+        api_name: The API name that changed. Required.
+        dependency_file: Optional path to a dependency manifest file
+            (package.json, requirements.txt, go.mod) to scan for
+            callers. Default None = backend default path.
+
+    Returns:
+        Dict with downstream caller list and next_steps.
     """
     from backends.gateway_core import run_impact
     return _with_next_steps("impact", _safe_call(run_impact, api_name=api_name, dependency_file=dependency_file))
@@ -1668,15 +1754,28 @@ def delimit_impact(api_name: str, dependency_file: Optional[str] = None) -> Dict
 
 @mcp.tool()
 def delimit_semver(old_spec: str, new_spec: str, current_version: Optional[str] = None) -> Dict[str, Any]:
-    """Classify the semver bump for a spec change (MAJOR/MINOR/PATCH/NONE).
+    """Classify a spec change's semver bump (MAJOR/MINOR/PATCH/NONE).
 
-    Deterministic classification based on diff engine output.
-    Optionally computes the next version string.
+    When to use: to deterministically pick the version bump for an API
+    spec change, optionally computing the next version string.
+    When NOT to use: for full lint with policy (use delimit_lint) or
+    a plain change list (delimit_diff).
+
+    Sibling contrast: delimit_diff lists changes; delimit_lint adds
+    policy; this maps the diff to a semver verdict only.
+
+    Side effects: read-only. Calls backends.gateway_core.run_semver
+    (deterministic classification on top of the diff engine output).
 
     Args:
-        old_spec: Path to the old OpenAPI spec file.
-        new_spec: Path to the new OpenAPI spec file.
-        current_version: Optional current version (e.g. "1.2.3") to compute next version.
+        old_spec: Path to the baseline OpenAPI spec file. Required.
+        new_spec: Path to the proposed OpenAPI spec file. Required.
+        current_version: Optional version string (e.g. "1.2.3") to
+            compute the next version. Default None = no next computed.
+
+    Returns:
+        Dict with classification (MAJOR/MINOR/PATCH/NONE), next version
+        if current_version was given, and next_steps.
     """
     from backends.gateway_core import run_semver
     return _with_next_steps("semver", _safe_call(run_semver, old_spec=old_spec, new_spec=new_spec, current_version=current_version))
@@ -1691,17 +1790,30 @@ def delimit_explain(
     new_version: Optional[str] = None,
     api_name: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Generate a human-readable explanation of API changes.
+    """Render a human-readable explanation of API changes (7 templates).
 
-    7 templates: developer, team_lead, product, migration, changelog, pr_comment, slack.
+    When to use: to produce migration notes, PR comments, changelog
+    entries, or Slack-friendly summaries from a spec diff.
+    When NOT to use: for raw change data (use delimit_diff) or a
+    shareable HTML report (delimit_diff_report).
+
+    Sibling contrast: delimit_diff returns structured change data;
+    delimit_diff_report renders an HTML report; this renders a
+    template-driven text explanation.
+
+    Side effects: read-only. Calls backends.gateway_core.run_explain.
 
     Args:
-        old_spec: Path to the old OpenAPI spec file.
-        new_spec: Path to the new OpenAPI spec file.
-        template: Template name (default: developer).
-        old_version: Previous version string.
-        new_version: New version string.
+        old_spec: Path to the baseline OpenAPI spec file. Required.
+        new_spec: Path to the proposed OpenAPI spec file. Required.
+        template: One of "developer" (default), "team_lead", "product",
+            "migration", "changelog", "pr_comment", "slack".
+        old_version: Previous version string for context.
+        new_version: New version string for context.
         api_name: API/service name for context.
+
+    Returns:
+        Dict with the rendered explanation text and next_steps.
     """
     from backends.gateway_core import run_explain
     return _with_next_steps("explain", _safe_call(run_explain, old_spec=old_spec, new_spec=new_spec, template=template, old_version=old_version, new_version=new_version, api_name=api_name))
@@ -1714,13 +1826,26 @@ def delimit_zero_spec(
 ) -> Dict[str, Any]:
     """Extract OpenAPI spec from framework source code (no spec file needed).
 
-    Detects the API framework (FastAPI, Express, NestJS) and extracts a
-    complete OpenAPI specification directly from the source code.
-    Currently supports FastAPI with full fidelity.
+    When to use: when a project has no checked-in OpenAPI spec but
+    uses a framework Delimit can introspect (FastAPI today; Express,
+    NestJS planned).
+    When NOT to use: when a spec file already exists — pass it
+    directly to delimit_lint or delimit_diff.
+
+    Sibling contrast: delimit_lint operates on existing spec files;
+    this generates one from source.
+
+    Side effects: read-only on the project source. Calls
+    backends.gateway_core.run_zero_spec which may invoke a Python
+    subprocess to introspect FastAPI routes.
 
     Args:
-        project_dir: Path to the project root directory.
-        python_bin: Optional Python binary path (auto-detected if omitted).
+        project_dir: Project root directory. Default "." (cwd).
+        python_bin: Optional Python binary path. Empty = auto-detect.
+
+    Returns:
+        Dict with the extracted OpenAPI spec, framework detected, and
+        next_steps.
     """
     from backends.gateway_core import run_zero_spec
     return _with_next_steps("zero_spec", _safe_call(run_zero_spec, project_dir=project_dir, python_bin=python_bin))
@@ -1734,17 +1859,32 @@ def delimit_init(
     preset: str = "default",
     no_permissions: bool = False,
 ) -> Dict[str, Any]:
-    """Initialize Delimit governance for a project. Creates .delimit/policies.yml and ledger directory.
+    """Initialize Delimit governance scaffolding for a project.
 
-    Also auto-configures filesystem permissions: chmod 755 on .delimit/,
-    chmod 600 on any .delimit/secrets/* files, and creates a project-local
-    .claude/settings.json with a reasonable Edit/Write/Bash allowlist if one
-    does not already exist. Pass no_permissions=True to skip permission setup.
+    When to use: once per project, the first time you adopt Delimit —
+    creates .delimit/policies.yml, ledger directory, and (optionally)
+    a project .claude/settings.json with a reasonable allowlist.
+    When NOT to use: to load an existing config (use
+    delimit_project_config action="load") or to discover Delimit's
+    capabilities for a project (delimit_scan).
+
+    Sibling contrast: delimit_project_config manages the config after
+    init; delimit_scan inspects what could be governed; this is the
+    one-time initializer.
+
+    Side effects: creates .delimit/policies.yml + ledger dir; chmod
+    755 on .delimit/, chmod 600 on .delimit/secrets/*; writes a
+    project .claude/settings.json with an Edit/Write/Bash allowlist
+    if missing. Pass no_permissions=True to skip the permission step.
 
     Args:
-        project_path: Project root directory.
-        preset: Policy preset - strict, default, or relaxed.
-        no_permissions: Skip the filesystem permission auto-config (LED-269).
+        project_path: Project root directory. Default "." (cwd).
+        preset: Policy preset — "strict", "default", "relaxed".
+        no_permissions: Skip filesystem permission auto-config (LED-269).
+
+    Returns:
+        Dict with init result, files created, plus next_steps.
+        Returns {error: ...} for invalid preset.
     """
     VALID_PRESETS = ("strict", "default", "relaxed")
     if preset not in VALID_PRESETS:
@@ -1859,13 +1999,28 @@ def delimit_os_plan(
     parameters: Optional[Union[str, Dict[str, Any]]] = None,
     require_approval: bool = True,
 ) -> Dict[str, Any]:
-    """Create a governed execution plan (Pro).
+    """Create a governed execution plan against a target (Pro).
+
+    When to use: to draft an OS plan (deploy, migrate, etc.) that the
+    governance kernel can later inspect via delimit_os_gates.
+    When NOT to use: for the OS-wide status (use delimit_os_status) or
+    actual deploy execution (delimit_deploy_*).
+
+    Sibling contrast: delimit_os_gates checks gates on a plan;
+    delimit_os_status reports counts; this creates a new plan.
+
+    Side effects: gated by require_premium. Writes a new plan record
+    via the OS bridge.
 
     Args:
-        operation: Operation to plan (e.g. "deploy", "migrate").
-        target: Target component or service.
-        parameters: Operation parameters.
-        require_approval: Whether to require approval before execution.
+        operation: Operation to plan (e.g. "deploy", "migrate"). Required.
+        target: Target component or service. Required.
+        parameters: Optional operation parameters as dict or JSON string.
+        require_approval: If True (default), the plan requires approval
+            before execution.
+
+    Returns:
+        Dict with the new plan id, status, and next_steps.
     """
     from ai.license import require_premium
     gate = require_premium("os_plan")
@@ -1881,7 +2036,26 @@ def delimit_os_plan(
 
 @mcp.tool()
 def delimit_os_status() -> Dict[str, Any]:
-    """Get current Delimit OS status with plan/task/token counts (Pro)."""
+    """Report Delimit OS overall status (plans, tasks, tokens) (Pro).
+
+    When to use: at session start or in a status dashboard, to read
+    aggregate OS-level counts and active plan IDs.
+    When NOT to use: for governance health (use delimit_gov_health) or
+    per-plan gates (use delimit_os_gates).
+
+    Sibling contrast: delimit_gov_health reports governance engine;
+    delimit_os_gates reports a specific plan's gate state; this reports
+    overall OS counts.
+
+    Side effects: read-only on the OS backend; gated by require_premium.
+    Calls backends.os_bridge.get_status.
+
+    Args:
+        None.
+
+    Returns:
+        Dict with plan/task/token counts and next_steps.
+    """
     from ai.license import require_premium
     gate = require_premium("os_status")
     if gate:
@@ -1892,10 +2066,25 @@ def delimit_os_status() -> Dict[str, Any]:
 
 @mcp.tool()
 def delimit_os_gates(plan_id: str) -> Dict[str, Any]:
-    """Check governance gates for a plan (Pro).
+    """Check governance gates for an OS plan (Pro).
+
+    When to use: to check whether a specific plan is currently blocked
+    by a governance gate before proceeding.
+    When NOT to use: for general OS counts (use delimit_os_status) or
+    governance engine health (delimit_gov_health).
+
+    Sibling contrast: delimit_os_status returns aggregate counts;
+    delimit_gov_health reports the engine; this returns gate state for
+    one plan.
+
+    Side effects: read-only on the OS backend; gated by require_premium.
+    Calls backends.os_bridge.check_gates.
 
     Args:
-        plan_id: The plan ID (e.g. "PLAN-A1B2C3D4").
+        plan_id: Plan identifier, e.g. "PLAN-A1B2C3D4". Required.
+
+    Returns:
+        Dict with per-gate status and next_steps.
     """
     from ai.license import require_premium
     gate = require_premium("os_gates")
@@ -2001,19 +2190,72 @@ delimit_gov = mcp.tool()(_delimit_gov_impl)
 
 @mcp.tool()
 def delimit_gov_health(repo: str = ".") -> Dict[str, Any]:
-    """Check governance system health."""
+    """Report governance subsystem health for a repository.
+
+    When to use: at session start or as a CI smoke check to confirm the
+    governance backend is reachable and the policy kernel is loaded.
+    When NOT to use: to evaluate whether a specific action requires
+    gating — use delimit_gov_evaluate instead.
+
+    Sibling contrast: delimit_gov_status reports per-repo task state;
+    this reports the engine itself (kernel, policy, integration).
+
+    Side effects: read-only. Calls backends.governance_bridge.health and
+    routes the response through _with_next_steps (no ledger write).
+
+    Args:
+        repo: Filesystem path to the repository. Default "." (cwd).
+
+    Returns:
+        Dict with backend health status plus next_steps suggestions.
+    """
     return _delimit_gov_impl(action="health", repo=repo)
 
 
 @mcp.tool()
 def delimit_gov_status(repo: str = ".") -> Dict[str, Any]:
-    """Get current governance status for a repository."""
+    """Report governance state (open tasks, decisions) for a repo.
+
+    When to use: when you need a snapshot of governance activity for a
+    given repo — what tasks are open, what was recently decided.
+    When NOT to use: for engine-level health (use delimit_gov_health) or
+    to evaluate a new action (use delimit_gov_evaluate).
+
+    Sibling contrast: delimit_gov_health reports the engine; this reports
+    the workload (per-repo task and decision state).
+
+    Side effects: read-only. Calls backends.governance_bridge.status.
+
+    Args:
+        repo: Filesystem path to the repository. Default "." (cwd).
+
+    Returns:
+        Dict with status payload from the backend, plus next_steps.
+    """
     return _delimit_gov_impl(action="status", repo=repo)
 
 
 @mcp.tool()
 def delimit_gov_policy(repo: str = ".") -> Dict[str, Any]:
-    """Get governance policy for a repository (Pro)."""
+    """Read the active governance policy for a repository (Pro).
+
+    When to use: when an agent or operator needs to inspect the live
+    policy rules being enforced for a repo (risk thresholds, gates).
+    When NOT to use: to mutate policy — this tool is read-only.
+
+    Sibling contrast: delimit_gov_evaluate runs an action against the
+    policy; this returns the policy itself.
+
+    Side effects: read-only on policy storage; gated by require_premium
+    (returns a license payload if the caller is unlicensed).
+
+    Args:
+        repo: Filesystem path to the repository. Default "." (cwd).
+
+    Returns:
+        Dict with policy rules from backends.governance_bridge.policy,
+        or a license-gate response if the caller lacks Premium.
+    """
     return _delimit_gov_impl(action="policy", repo=repo)
 
 
@@ -2023,25 +2265,116 @@ def delimit_gov_evaluate(
     context: Optional[Union[str, Dict[str, Any]]] = None,
     repo: str = ".",
 ) -> Dict[str, Any]:
-    """Evaluate if governance is required for an action (Pro)."""
+    """Evaluate whether a proposed action triggers governance (Pro).
+
+    When to use: BEFORE performing an action that may require gating
+    (deploy, external PR, schema change). The orchestrator and CI hooks
+    call this as their canonical pre-action check.
+    When NOT to use: to read the policy itself (use delimit_gov_policy)
+    or to create a tracked task (use delimit_gov_new_task).
+
+    Sibling contrast: delimit_gov_policy returns rules; this evaluates
+    a candidate action against those rules.
+
+    Side effects: read-only on policy storage; gated by require_premium.
+    Calls backends.governance_bridge.evaluate_trigger. Does not create
+    a task — only returns the verdict.
+
+    Args:
+        action: Proposed action name to evaluate (e.g. "external_pr",
+            "deploy"). Empty string returns an error.
+        context: Optional dict with action-specific context (e.g. target
+            repo, author). Strings are auto-coerced to {"text": ...} via
+            _coerce_dict_arg.
+        repo: Filesystem path to the repository. Default "." (cwd).
+
+    Returns:
+        Dict with policy verdict plus next_steps suggestions. Returns
+        {error: "..."} if context cannot be coerced to a dict.
+    """
     return _delimit_gov_impl(action="evaluate", eval_action=action, context=context, repo=repo)
 
 
 @mcp.tool()
 def delimit_gov_new_task(title: str = "", scope: str = "", risk_level: str = "medium", repo: str = ".") -> Dict[str, Any]:
-    """Create a new governance task (Pro)."""
+    """Create a governance task for a planned change (Pro).
+
+    When to use: when delimit_gov_evaluate returns "gating required" and
+    you need to open a tracked task that delimit_gov_run will execute
+    against and delimit_gov_verify will close out.
+    When NOT to use: for free-form ledger entries (use delimit_ledger_add)
+    or to actually perform the work (use delimit_gov_run).
+
+    Sibling contrast: delimit_ledger_add tracks general work; this
+    creates a governance-classed task with risk level and scope, which
+    delimit_gov_run/verify operate on.
+
+    Side effects: writes a new task record via
+    backends.governance_bridge.new_task; gated by require_premium.
+
+    Args:
+        title: Short task title. Required (empty string is rejected).
+        scope: Description of what the task covers. Required.
+        risk_level: One of "low", "medium", "high", "critical". Default
+            "medium". Drives later approval requirements.
+        repo: Filesystem path to the repository. Default "." (cwd).
+
+    Returns:
+        Dict with the created task id and metadata, plus next_steps.
+    """
     return _delimit_gov_impl(action="new_task", title=title, scope=scope, risk_level=risk_level, repo=repo)
 
 
 @mcp.tool()
 def delimit_gov_run(task_id: str = "", repo: str = ".") -> Dict[str, Any]:
-    """Run a governance task (Pro)."""
+    """Execute a previously created governance task (Pro).
+
+    When to use: after delimit_gov_new_task has created a task record
+    and you are ready to perform the gated work under the policy
+    engine's supervision.
+    When NOT to use: to evaluate a candidate action (use
+    delimit_gov_evaluate) or close out a completed task (use
+    delimit_gov_verify).
+
+    Sibling contrast: delimit_gov_new_task creates the task; this runs
+    it; delimit_gov_verify validates the run output.
+
+    Side effects: invokes backends.governance_bridge.run_task which
+    records the execution against the task_id; gated by require_premium.
+
+    Args:
+        task_id: Identifier returned by delimit_gov_new_task. Required.
+        repo: Filesystem path to the repository. Default "." (cwd).
+
+    Returns:
+        Dict with run status and next_steps.
+    """
     return _delimit_gov_impl(action="run", task_id=task_id, repo=repo)
 
 
 @mcp.tool()
 def delimit_gov_verify(task_id: str = "", repo: str = ".") -> Dict[str, Any]:
-    """Verify a governance task (Pro)."""
+    """Verify a governance task ran to completion under policy (Pro).
+
+    When to use: as the final gate after delimit_gov_run, to confirm
+    the task's outputs satisfy the policy and close it out.
+    When NOT to use: to start or run a task (delimit_gov_new_task /
+    delimit_gov_run) — verify is the closing step only.
+
+    Sibling contrast: delimit_gov_run executes; this attests the run.
+    Together they form new_task -> run -> verify.
+
+    Side effects: writes a verification record against the task via
+    backends.governance_bridge.verify; gated by require_premium.
+
+    Args:
+        task_id: Identifier from delimit_gov_new_task / delimit_gov_run.
+            Required.
+        repo: Filesystem path to the repository. Default "." (cwd).
+
+    Returns:
+        Dict with verification verdict and next_steps.
+    """
     return _delimit_gov_impl(action="verify", task_id=task_id, repo=repo)
 
 
@@ -2051,17 +2384,29 @@ def delimit_external_pr_check(
     author: str = "",
     state: str = "all",
 ) -> Dict[str, Any]:
-    """Pre-PR duplicate guard for external repos. Run BEFORE drafting.
+    """Pre-PR duplicate guard for external repos — call BEFORE drafting.
 
-    Lists existing PRs from `author` against `repo` via gh CLI. Returns
-    fail-closed verdict — any open PR or PR merged in the last 30 days
-    yields verdict='duplicate' so the caller stops drafting before any
-    deliberation or submission work.
+    When to use: as the first step before drafting any PR against a
+    repo you don't own. Fail-closed by design.
+    When NOT to use: for internal repos or to evaluate a non-PR action
+    (use delimit_gov_evaluate).
+
+    Sibling contrast: delimit_gov_evaluate(action="external_pr") wraps
+    this with policy evaluation; this is the underlying duplicate
+    check.
+
+    Side effects: read-only network call. Calls
+    backends.governance_bridge.external_pr_check which shells out to
+    gh CLI. Any open PR or PR merged in the last 30 days yields
+    verdict="duplicate" — caller stops drafting.
 
     Args:
-        repo: External GitHub repo, e.g. "goharbor/harbor".
+        repo: External GitHub repo, e.g. "goharbor/harbor". Required.
         author: GitHub username to filter by (recommended). Empty = all.
-        state: "open" | "closed" | "merged" | "all". Default "all".
+        state: "open", "closed", "merged", or "all" (default).
+
+    Returns:
+        Dict with verdict (clean / duplicate), matching PRs, hint.
     """
     from backends.governance_bridge import external_pr_check
     return _safe_call(
@@ -2078,9 +2423,24 @@ def delimit_external_pr_check(
 def delimit_memory_search(query: str, limit: int = 10) -> Dict[str, Any]:
     """Search conversation memory semantically (Pro).
 
+    When to use: to recall prior context by meaning rather than recency
+    — e.g. "what did we decide about deploys?" finds relevant entries
+    across sessions.
+    When NOT to use: for the chronological tail (use
+    delimit_memory_recent) or to write a memory (delimit_memory_store).
+
+    Sibling contrast: delimit_memory_recent is the free chronological
+    tail; this is the Pro semantic search.
+
+    Side effects: read-only on the memory backend; gated by
+    require_premium. Calls backends.memory_bridge.search.
+
     Args:
-        query: Natural language search query.
-        limit: Maximum results to return.
+        query: Natural-language search query. Required.
+        limit: Maximum number of matching entries to return. Default 10.
+
+    Returns:
+        Dict with matching memory entries and next_steps.
     """
     from ai.license import require_premium
     gate = require_premium("memory_search")
@@ -2096,15 +2456,34 @@ def delimit_memory_store(
     tags: Optional[Union[str, List[str]]] = None,
     context: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Store a memory entry for future retrieval.
+    """Store a memory entry for future cross-session retrieval (Free tier).
 
-    Free: basic store and recent retrieval.
-    Pro: structured search across all memories.
+    When to use: per the orchestrator's memory rules — to capture
+    failed approaches, architecture decisions, key context, or
+    setup gotchas that git would not surface.
+    When NOT to use: for routine code changes (git is the source of
+    truth) or for venture-scoped artifacts (use
+    delimit_context_write).
+
+    Sibling contrast: delimit_memory_search retrieves;
+    delimit_memory_recent reads the tail; this writes.
+
+    Side effects: writes a memory entry via
+    backends.memory_bridge.store. Free tier — no license gate.
+    hot_load=True marks the entry for projection into the Claude Code
+    auto-memory MEMORY.md hot-load index (PR-B writer projects on
+    next sync).
 
     Args:
-        content: The content to remember.
-        tags: Optional categorization tags.
+        content: The content to remember. Required.
+        tags: Optional categorization tags as comma string or list.
         context: Optional context about when/why this was stored.
+        hot_load: When True, mark for one-way projection into the
+            Claude Code MEMORY.md hot-load index (LED-1165 Phase 2).
+            Default False = durable but not projected.
+
+    Returns:
+        Dict with the stored entry id and next_steps.
     """
     # LED-193: memory_store is now free (basic store)
     try:
@@ -2117,12 +2496,24 @@ def delimit_memory_store(
 
 @mcp.tool()
 def delimit_memory_recent(limit: int = 5) -> Dict[str, Any]:
-    """Get recent work summary from memory.
+    """Return the most recent memory entries (Free tier).
 
-    Free: retrieve recent entries. Pro: structured search.
+    When to use: at session start to recall what the previous session
+    was working on, or to scan for the last N memory captures.
+    When NOT to use: for semantic / structured search (use
+    delimit_memory_search) or to write a memory (delimit_memory_store).
+
+    Sibling contrast: delimit_memory_search does Pro semantic search;
+    this is the free chronological tail.
+
+    Side effects: read-only. Calls backends.memory_bridge.get_recent.
+    Free tier — no license gate.
 
     Args:
-        limit: Number of recent entries to return.
+        limit: Number of most-recent entries to return. Default 5.
+
+    Returns:
+        Dict with the recent memory entries and next_steps.
     """
     # LED-193: memory_recent is now free (basic retrieval)
     from backends.memory_bridge import get_recent
@@ -2133,10 +2524,25 @@ def delimit_memory_recent(limit: int = 5) -> Dict[str, Any]:
 
 @mcp.tool()
 def delimit_vault_search(query: str) -> Dict[str, Any]:
-    """Search vault entries (Pro).
+    """Search vault entries by query string (Pro).
+
+    When to use: to retrieve stored vault content matching a search
+    string. The vault holds long-lived knowledge artifacts.
+    When NOT to use: for conversation memory (use delimit_memory_search)
+    or to capture state (delimit_vault_snapshot).
+
+    Sibling contrast: delimit_memory_search hits the conversation
+    memory store; this hits the vault — different storage, different
+    semantics.
+
+    Side effects: read-only on the vault backend; gated by
+    require_premium. Calls backends.vault_bridge.search.
 
     Args:
-        query: Search query for vault entries.
+        query: Search query string. Required.
+
+    Returns:
+        Dict with matching vault entries and next_steps.
     """
     from ai.license import require_premium
     gate = require_premium("vault_search")
@@ -2148,7 +2554,26 @@ def delimit_vault_search(query: str) -> Dict[str, Any]:
 
 @mcp.tool()
 def delimit_vault_health() -> Dict[str, Any]:
-    """Check vault health status (Pro)."""
+    """Report vault subsystem health (Pro).
+
+    When to use: at session start or as a CI smoke test to confirm the
+    vault backend is reachable and indexes are intact.
+    When NOT to use: to query content (use delimit_vault_search) or to
+    capture state (delimit_vault_snapshot).
+
+    Sibling contrast: delimit_vault_search reads content;
+    delimit_vault_snapshot captures state; this reports the engine's
+    own health.
+
+    Side effects: read-only on the vault backend; gated by
+    require_premium. Calls backends.vault_bridge.health.
+
+    Args:
+        None.
+
+    Returns:
+        Dict with health status and next_steps.
+    """
     from ai.license import require_premium
     gate = require_premium("vault_health")
     if gate:
@@ -2159,7 +2584,26 @@ def delimit_vault_health() -> Dict[str, Any]:
 
 @mcp.tool()
 def delimit_vault_snapshot() -> Dict[str, Any]:
-    """Get a vault state snapshot (Pro)."""
+    """Capture a snapshot of vault state (Pro).
+
+    When to use: before a risky vault edit, to have a rollback point
+    for content recovery.
+    When NOT to use: for searching content (use delimit_vault_search)
+    or checking health only (delimit_vault_health).
+
+    Sibling contrast: delimit_vault_health reports up/down only;
+    this returns a structured snapshot of state.
+
+    Side effects: gated by require_premium. Calls
+    backends.vault_bridge.snapshot, which writes a snapshot record on
+    the vault backend.
+
+    Args:
+        None.
+
+    Returns:
+        Dict with snapshot data and next_steps.
+    """
     from ai.license import require_premium
     gate = require_premium("vault_snapshot")
     if gate:
@@ -2357,40 +2801,165 @@ def _deploy_plan_chain(app: str = "", env: str = "", git_ref: Optional[str] = No
 
 @mcp.tool()
 def delimit_deploy_plan(app: str = "", env: str = "", git_ref: Optional[str] = None) -> Dict[str, Any]:
-    """Plan deployment with build steps (Pro).
-    Auto-chains: security audit preflight, governance evaluation.
-    Halts on critical security findings.
+    """Generate a deploy plan with security preflight (Pro).
+
+    When to use: as the first step in the deploy chain. The plan
+    enumerates build steps and bakes in a security audit + governance
+    evaluation before any artifact is produced.
+    When NOT to use: to actually build images (use delimit_deploy_build)
+    or to ship code (use delimit_deploy_publish).
+
+    Sibling contrast: this is the planning gate; delimit_deploy_build
+    and delimit_deploy_publish are the execution steps that follow.
+
+    Side effects: auto-chains delimit_security_audit (fail-closed on
+    critical findings), then delimit_gov_evaluate, then the underlying
+    deploy_plan handler. Halts and returns status="blocked" on any
+    critical security finding without producing a plan.
+
+    Args:
+        app: Application name (project key in the deploy backend). Required.
+        env: Target environment, typically "staging" or "production".
+        git_ref: Git ref (branch/tag/SHA). Optional; defaults to the
+            backend's notion of HEAD when omitted.
+
+    Returns:
+        Dict with the plan, security_audit_summary, gov_evaluate result,
+        a "chain" trace, and next_steps. status="blocked" with a reason
+        when the security gate fails.
     """
     return _deploy_plan_chain(app=app, env=env, git_ref=git_ref)
 
 
 @mcp.tool()
 def delimit_deploy_build(app: str = "", git_ref: Optional[str] = None) -> Dict[str, Any]:
-    """Build Docker images with SHA tags (Pro)."""
+    """Build Docker images for an app at a git ref (Pro).
+
+    When to use: after delimit_deploy_plan succeeds, to produce SHA-tagged
+    images that delimit_deploy_publish will later push to the registry.
+    When NOT to use: to push images (delimit_deploy_publish) or run the
+    full deploy chain (delimit_deploy_plan).
+
+    Sibling contrast: deploy_plan plans, this builds, deploy_publish
+    pushes, deploy_verify checks rollout health, deploy_rollback reverts.
+
+    Side effects: gated by require_premium. Calls
+    backends.deploy_bridge.build, which invokes the local container
+    builder (writes images to local Docker storage).
+
+    Args:
+        app: Application name (project key in the deploy backend).
+        git_ref: Git ref (branch/tag/SHA). Default None = backend HEAD.
+
+    Returns:
+        Dict with build status, image tags produced, plus next_steps.
+    """
     return _delimit_deploy_impl(action="build", app=app, git_ref=git_ref)
 
 
 @mcp.tool()
 def delimit_deploy_publish(app: str = "", git_ref: Optional[str] = None) -> Dict[str, Any]:
-    """Publish images to registry (Pro)."""
+    """Publish previously built images to the registry (Pro).
+
+    When to use: after delimit_deploy_build has produced images locally.
+    When NOT to use: to build images (delimit_deploy_build) or to start
+    the deploy chain (delimit_deploy_plan).
+
+    Sibling contrast: deploy_build produces local images; this pushes
+    them to the registry; deploy_verify confirms rollout health.
+
+    Side effects: gated by require_premium. Calls
+    backends.deploy_bridge.publish, which performs network writes to
+    the configured container registry.
+
+    Args:
+        app: Application name (project key in the deploy backend).
+        git_ref: Git ref the images were built at. Default None.
+
+    Returns:
+        Dict with publish status, registry refs, plus next_steps.
+    """
     return _delimit_deploy_impl(action="publish", app=app, git_ref=git_ref)
 
 
 @mcp.tool()
 def delimit_deploy_verify(app: str = "", env: str = "", git_ref: Optional[str] = None) -> Dict[str, Any]:
-    """Verify deployment health (experimental) (Pro)."""
+    """Verify post-deploy health for an app/env (experimental) (Pro).
+
+    When to use: immediately after a publish/rollout, to confirm the
+    new revision is healthy before closing out the deploy chain.
+    When NOT to use: for ongoing observability — use delimit_obs_status
+    or delimit_obs_metrics for steady-state checks.
+
+    Sibling contrast: delimit_deploy_status reports the rollout state;
+    this exercises health checks against the running deployment.
+
+    Side effects: gated by require_premium. Calls
+    backends.deploy_bridge.verify, which performs network checks
+    against the deployed app. Marked experimental — health logic may
+    return partial results on backends without health endpoints.
+
+    Args:
+        app: Application name.
+        env: Target environment ("staging" or "production").
+        git_ref: Optional git ref the deploy targets.
+
+    Returns:
+        Dict with verification verdict, per-check results, raw payload.
+    """
     return _delimit_deploy_impl(action="verify", app=app, env=env, git_ref=git_ref)
 
 
 @mcp.tool()
 def delimit_deploy_rollback(app: str = "", env: str = "", to_sha: Optional[str] = None) -> Dict[str, Any]:
-    """Rollback to previous SHA (Pro)."""
+    """Roll back an environment to a previous SHA (Pro).
+
+    When to use: when delimit_deploy_verify shows a regression and you
+    need to revert the running deployment to a known-good revision.
+    When NOT to use: to deploy a new version forward (delimit_deploy_plan
+    -> _build -> _publish) — rollback is reversal-only.
+
+    Sibling contrast: delimit_deploy_publish moves an env forward; this
+    moves it back to a prior to_sha.
+
+    Side effects: gated by require_premium. Calls
+    backends.deploy_bridge.rollback which mutates the running
+    environment to point at to_sha.
+
+    Args:
+        app: Application name.
+        env: Target environment.
+        to_sha: Target SHA to roll back to. If None, the backend selects
+            the previous deployed SHA.
+
+    Returns:
+        Dict with rollback status and next_steps.
+    """
     return _delimit_deploy_impl(action="rollback", app=app, env=env, to_sha=to_sha)
 
 
 @mcp.tool()
 def delimit_deploy_status(app: str = "", env: str = "") -> Dict[str, Any]:
-    """Get deployment status (Pro)."""
+    """Report current rollout status for an app/env (Pro).
+
+    When to use: to inspect the currently deployed SHA and rollout
+    state without executing any health probe.
+    When NOT to use: for runtime health checks (use delimit_deploy_verify)
+    or to deploy a change (delimit_deploy_plan).
+
+    Sibling contrast: delimit_deploy_verify probes the running app;
+    this reads deploy-system metadata only.
+
+    Side effects: read-only against the deploy backend. Gated by
+    require_premium. Calls backends.deploy_bridge.status.
+
+    Args:
+        app: Application name.
+        env: Target environment.
+
+    Returns:
+        Dict with the current SHA, rollout state, and next_steps.
+    """
     return _delimit_deploy_impl(action="status", app=app, env=env)
 
 
@@ -2404,10 +2973,26 @@ def delimit_intel_dataset_register(
 ) -> Dict[str, Any]:
     """Register a new dataset in the file-based intel registry.
 
+    When to use: at the start of an intel collection effort, to declare
+    a named dataset that future ingest calls will write to.
+    When NOT to use: to write data into an existing dataset (use
+    delimit_intel_snapshot_ingest) or to inventory datasets
+    (delimit_intel_dataset_list).
+
+    Sibling contrast: delimit_intel_dataset_list inventories;
+    delimit_intel_dataset_freeze locks; this creates.
+
+    Side effects: writes a registry entry via
+    backends.tools_data.intel_dataset_register. Coerces schema
+    from a JSON string to a dict via _coerce_dict_arg.
+
     Args:
-        name: Dataset name.
-        schema: Optional JSON schema for the dataset.
-        description: Human-readable description.
+        name: Dataset name (key). Required.
+        schema: Optional JSON schema as dict or JSON string.
+        description: Human-readable description for the registry.
+
+    Returns:
+        Dict with the registered dataset id and metadata.
     """
     try:
         schema = _coerce_dict_arg(schema, "schema")
@@ -2419,17 +3004,51 @@ def delimit_intel_dataset_register(
 
 @mcp.tool()
 def delimit_intel_dataset_list() -> Dict[str, Any]:
-    """List all registered datasets from the intel registry."""
+    """List all datasets in the intel registry.
+
+    When to use: to inventory datasets currently registered for intel
+    queries.
+    When NOT to use: to register a new dataset (use
+    delimit_intel_dataset_register) or to freeze one
+    (delimit_intel_dataset_freeze).
+
+    Sibling contrast: delimit_intel_dataset_register writes;
+    delimit_intel_dataset_freeze locks; this reads metadata.
+
+    Side effects: read-only. Calls backends.tools_data.intel_dataset_list.
+
+    Args:
+        None.
+
+    Returns:
+        Dict with the dataset registry and next_steps.
+    """
     from backends.tools_data import intel_dataset_list
     return _with_next_steps("intel_dataset_list", _safe_call(intel_dataset_list))
 
 
 @mcp.tool()
 def delimit_intel_dataset_freeze(dataset_id: str) -> Dict[str, Any]:
-    """Mark a dataset as immutable (frozen). Prevents further modifications.
+    """Freeze a dataset to make it immutable for replay integrity.
+
+    When to use: when a dataset is about to be referenced as evidence
+    or signed attestation, and you want to lock its content forever.
+    When NOT to use: to delete a dataset (the registry is append-only)
+    or to inspect what's frozen (use delimit_intel_dataset_list).
+
+    Sibling contrast: delimit_intel_dataset_list inventories;
+    delimit_intel_dataset_register writes; this locks against further
+    writes.
+
+    Side effects: writes a frozen marker to the registry via
+    backends.tools_data.intel_dataset_freeze. Subsequent writes to
+    this dataset id will be rejected.
 
     Args:
-        dataset_id: Dataset identifier.
+        dataset_id: Dataset identifier from the registry. Required.
+
+    Returns:
+        Dict with the freeze result and next_steps.
     """
     from backends.tools_data import intel_dataset_freeze
     return _with_next_steps("intel_dataset_freeze", _safe_call(intel_dataset_freeze, dataset_id=dataset_id))
@@ -2440,11 +3059,28 @@ def delimit_intel_snapshot_ingest(
     data: Union[str, Dict[str, Any]],
     provenance: Optional[Union[str, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    """Store a research snapshot with provenance metadata in the local intel store.
+    """Store a research snapshot with provenance in the intel store.
+
+    When to use: to ingest research / signal data with provenance
+    (source, author) for later replay or attestation.
+    When NOT to use: to register a dataset (use
+    delimit_intel_dataset_register) or query existing snapshots
+    (delimit_intel_query).
+
+    Sibling contrast: delimit_intel_dataset_register declares;
+    delimit_intel_query reads; this writes new snapshots.
+
+    Side effects: writes a snapshot record via
+    backends.tools_data.intel_snapshot_ingest. Coerces data and
+    provenance from JSON strings to dicts via _coerce_dict_arg.
 
     Args:
-        data: Snapshot data (any JSON-serializable dict).
+        data: Snapshot data (JSON-serializable dict or JSON string).
+            Required.
         provenance: Optional provenance metadata (source, author, etc.).
+
+    Returns:
+        Dict with the stored snapshot id and next_steps.
     """
     try:
         data = _coerce_dict_arg(data, "data")
@@ -2463,10 +3099,26 @@ def delimit_intel_query(
 ) -> Dict[str, Any]:
     """Search saved intel snapshots by keyword, date, or dataset.
 
+    When to use: to surface ingested intel matching a query, optionally
+    scoped to one dataset.
+    When NOT to use: to ingest new data (use
+    delimit_intel_snapshot_ingest) or list datasets
+    (delimit_intel_dataset_list).
+
+    Sibling contrast: delimit_intel_snapshot_ingest writes;
+    this reads back filtered snapshots.
+
+    Side effects: read-only. Calls backends.tools_data.intel_query.
+    Coerces parameters from JSON string to dict via _coerce_dict_arg.
+
     Args:
-        dataset_id: Optional dataset to filter by.
-        query: Keyword search string.
-        parameters: Optional params (date_from, date_to, limit).
+        dataset_id: Optional dataset to scope the query to.
+        query: Keyword search string. Empty = all.
+        parameters: Optional dict with date_from, date_to, limit.
+            Accepted as JSON string and coerced.
+
+    Returns:
+        Dict with matching snapshots and next_steps.
     """
     try:
         parameters = _coerce_dict_arg(parameters, "parameters")
@@ -2485,26 +3137,41 @@ def delimit_digest(
     send_email: bool = False,
     to: str = "",
 ) -> Dict[str, Any]:
-    """Generate a daily digest of loop activity (LED-966).
+    """Generate a structured daily digest of loop activity (LED-966).
 
-    Produces a structured summary of the last window_hours:
+    When to use: for the founder daily summary — signals, deliberations,
+    ledger movement, swarm dispatch, health.
+    When NOT to use: for raw notifications (use delimit_notify) or
+    inbox routing (delimit_notify_inbox).
+
+    Sibling contrast: delimit_notify is per-event;
+    this is a windowed rollup digest.
+
+    Side effects: action="run" always writes markdown + json to
+    ~/.delimit/digest/ (the founder can read directly, no email
+    dependency). When send_email=True, emails via the notify pipeline,
+    BUT delivery requires DELIMIT_DIGEST_EMAIL=true in the env (pipeline
+    gate). action="latest" is read-only.
+
+    Window summary covers:
       - signals ingested by platform
       - deliberations held + consensus rate
-      - ledger items opened/completed
+      - ledger items opened / completed
       - swarm dispatches + stuck-task count
       - health (pause file, guard hits)
 
-    Always writes markdown + json artifacts to ~/.delimit/digest/
-    so the founder can inspect without relying on email delivery.
-    Optionally emails the digest via the notify pipeline.
-
     Args:
-        action: 'run' to build and write, 'latest' to return existing file paths.
-        window_hours: lookback window. Default 24.
-        send_email: if True, attempt to email the digest to `to` or
-                    DELIMIT_SMTP_TO. Requires DELIMIT_DIGEST_EMAIL=true
-                    in the env to actually send (pipeline gate).
-        to: recipient email. Defaults to DELIMIT_SMTP_TO.
+        action: "run" (default) or "latest".
+        window_hours: Lookback window. Default 24.
+        send_email: If True, attempt to email the digest. Requires
+            DELIMIT_DIGEST_EMAIL=true env to actually send.
+        to: Email recipient. Empty = DELIMIT_SMTP_TO.
+
+    Returns:
+        Dict with the digest payload (signals/deliberations/ledger/swarm
+        summary), markdown and json file paths under ~/.delimit/digest/,
+        email-send result when send_email=True, plus next_steps. For
+        action="latest", returns the most recent digest file metadata.
     """
     from ai.daily_digest import write_digest, send_digest_email, DIGEST_DIR
 
@@ -2546,15 +3213,27 @@ def delimit_work_orders(
 ) -> Dict[str, Any]:
     """Manage work orders — structured task artifacts for the founder (STR-177).
 
-    Work orders bridge strategy deliberations and interactive execution.
-    Each is a copy-pasteable markdown file the founder can hand to a
-    Claude Code session.
+    When to use: to list, read, or close work orders that bridge
+    strategy deliberations and interactive execution.
+    When NOT to use: for ledger items (use delimit_ledger_*) or
+    governance tasks (delimit_gov_new_task / run / verify).
+
+    Sibling contrast: delimit_ledger_add tracks general work;
+    delimit_gov_new_task is governance-classed; this is the founder
+    work-order surface — copy-pasteable markdown artifacts.
+
+    Side effects: action="list" / "show" are read-only. action="complete"
+    writes to the work-order store via ai.work_order.complete_work_order.
 
     Args:
-        action: 'list' (show pending), 'show' (read one), 'complete' (mark done).
-        status: Filter for list: 'pending', 'completed', 'all'.
-        wo_id: Work order ID for 'show' and 'complete'.
-        note: Completion note for 'complete'.
+        action: One of "list" (default), "show", "complete".
+        status: Filter for list — "pending" (default), "completed",
+            "all".
+        wo_id: Work order id (required for "show" / "complete").
+        note: Completion note (used by "complete").
+
+    Returns:
+        Dict with the action result (list / markdown body / completion).
     """
     from ai.work_order import list_work_orders, complete_work_order, WORK_ORDERS_DIR
 
@@ -2600,24 +3279,35 @@ def delimit_executor(
     live: bool = False,
     executed_by: str = "",
 ) -> Dict[str, Any]:
-    """Run approved work orders from the dashboard inbox (Pro, Worker Pool v2).
+    """Run approved work orders from the dashboard inbox (Pro) (Worker Pool v2).
 
-    Execution is bounded to a narrow whitelist of state-changing actions
-    (gh_issue_create, gh_pr_comment, gh_issue_comment). Every invocation
-    is logged to ~/.delimit/workers/audit/executor.jsonl. Dry-run is the
-    default — pass live=True to actually fire the actions.
+    When to use: as the autonomous executor for human-approved work
+    orders, or to inspect/pause the executor.
+    When NOT to use: to dispatch new agent work (use
+    delimit_agent_dispatch) or close out a work order
+    (delimit_work_orders complete).
 
-    The dashboard Approve button flips a work order to status=approved.
-    The poller (or a one-shot call with action=poll) then runs the
-    typed executable_actions list. Touch ~/.delimit/pause_executor to
-    stop the autonomous path at the next tick.
+    Sibling contrast: delimit_work_orders reads/closes the work order
+    artifact; this is the run surface that turns approved orders into
+    real GitHub side effects.
+
+    Side effects: action="run" / "poll" with live=True fire whitelisted
+    state-changing actions: gh_issue_create, gh_pr_comment,
+    gh_issue_comment. Every invocation is logged to
+    ~/.delimit/workers/audit/executor.jsonl. Touch ~/.delimit/pause_executor
+    to halt the autonomous path at the next tick.
 
     Args:
-        action: 'run' (one work order), 'poll' (scan + run all approved),
-            'status' (return paused + pending count), 'pause'/'resume'.
-        wo_id: Required for action='run'.
-        live: When False (default), dry-run — describes what would happen.
-        executed_by: Identifier for the audit log (e.g. 'dashboard', 'cron').
+        action: "run" (one), "poll" (scan + run all approved), "status"
+            (default), "pause", "resume".
+        wo_id: Work order id. Required for action="run".
+        live: When False (default), dry-run — describe what would happen
+            without firing.
+        executed_by: Identifier for the audit log (e.g. "dashboard",
+            "cron").
+
+    Returns:
+        Dict with run / poll / status outcome and audit trail.
     """
     from ai.license import require_premium
     gate = require_premium("executor")
@@ -2691,25 +3381,36 @@ def delimit_sense(
 ) -> Dict[str, Any]:
     """Review and manage the signal corpus (LED-877).
 
-    Signals are sensed observations stored at ~/.delimit/intel/signals/,
-    physically separated from the ledger. Use this tool to inspect,
-    cluster, or explicitly promote a signal to a ledger item.
+    When to use: to inspect, cluster, or explicitly promote sensed
+    signals into ledger items. Signals live separately from the ledger
+    so noise doesn't pollute it.
+    When NOT to use: to fetch new signals (use the platform-specific
+    sensors like delimit_reddit_scan / delimit_github_scan) or write
+    ledger items directly (delimit_ledger_add).
+
+    Sibling contrast: platform sensors capture; this manages the
+    captured corpus and bridges it into the ledger.
+
+    Side effects: "promote" writes a new ledger item (via the ledger
+    manager). "freeze" cold-archives a month of signals. "query",
+    "digest", "show", "status" are read-only against
+    ~/.delimit/intel/signals/.
 
     Args:
-        action: One of 'query', 'digest', 'show', 'promote', 'freeze', 'status'.
-        since_days: Lookback window in days (query/digest). Default 1 = last 24h.
-        platform: Filter by source platform (reddit, x, github, hn). Empty = all.
-        limit: Max rows to return (query). Default 50.
-        signal_id: Signal id (SIG-XXXX) for 'show' and 'promote'.
-        ledger: Target ledger for 'promote' (ops or strategy).
-        priority: Priority for the promoted ledger item (P0/P1/P2).
-        month: YYYY-MM for 'freeze' action (cold archive).
+        action: One of "query" (default), "digest", "show", "promote",
+            "freeze", "status".
+        since_days: Lookback window in days (query/digest). Default 1.
+        platform: Filter source platform — "reddit", "x", "github",
+            "hn". Empty = all.
+        limit: Max rows for query. Default 50.
+        signal_id: SIG-XXXX id for "show" / "promote".
+        ledger: Target ledger for promote — "ops" (default) or "strategy".
+        priority: Priority for promoted item — "P0", "P1", "P2".
+        month: YYYY-MM string for "freeze".
 
-    Examples:
-        delimit_sense()                        # last 24h of signals
-        delimit_sense(action="digest", since_days=7)  # 7-day clusters
-        delimit_sense(action="show", signal_id="SIG-ABC123")
-        delimit_sense(action="promote", signal_id="SIG-ABC123", priority="P1")
+    Returns:
+        Dict with the action result (signals list, digest clusters,
+        single signal, or promote/freeze receipt).
     """
     try:
         from ai.sensing import signal_store
@@ -2801,14 +3502,32 @@ def delimit_generate_template(
     features: Optional[Union[str, List[str]]] = None,
     target: str = ".",
 ) -> Dict[str, Any]:
-    """Generate code template.
+    """Generate a single code-template file (component / page / api / etc.).
+
+    When to use: to scaffold one file from a chosen template into an
+    existing project directory.
+    When NOT to use: to scaffold a whole new project (use
+    delimit_generate_scaffold) or design a UI component skeleton
+    (delimit_design_generate_component).
+
+    Sibling contrast: delimit_generate_scaffold lays out a full project;
+    this writes a single file from a template.
+
+    Side effects: writes the generated file under target/ via
+    backends.generate_bridge.template. Sanitizes target via
+    _sanitize_path; coerces features from a comma string to a list.
 
     Args:
-        template_type: Template type (component, page, api, etc.).
-        name: Name for the generated code.
-        framework: Target framework.
-        features: Optional feature flags.
-        target: Directory to write the generated file into. Defaults to current directory.
+        template_type: Template flavour, e.g. "component", "page", "api".
+            Required.
+        name: Name for the generated code (file stem). Required.
+        framework: Target framework key, e.g. "react", "nextjs", "fastapi".
+        features: Optional feature flags as a comma string or list.
+        target: Output directory. Default "." (cwd). Sanitized to remain
+            inside the workspace.
+
+    Returns:
+        Dict with the file path written and next_steps.
     """
     try:
         _sanitize_path(target, "target")
@@ -2825,12 +3544,28 @@ def delimit_generate_scaffold(
     name: str,
     packages: Optional[Union[str, List[str]]] = None,
 ) -> Dict[str, Any]:
-    """Scaffold new project structure.
+    """Scaffold a new project skeleton with chosen packages.
+
+    When to use: at the start of a new project to lay down a
+    framework-conformant directory tree (Next.js app, API service, etc.).
+    When NOT to use: to add to an existing project — that needs
+    delimit_generate_template for individual file scaffolds.
+
+    Sibling contrast: delimit_generate_template generates a single file;
+    this generates a whole project tree.
+
+    Side effects: writes new files/directories under name/ via
+    backends.generate_bridge.scaffold. Coerces packages from a comma
+    string to a list.
 
     Args:
-        project_type: Project type (nextjs, api, library, etc.).
-        name: Project name.
-        packages: Packages to include.
+        project_type: Project flavour, e.g. "nextjs", "api", "library".
+            Required.
+        name: Project name (becomes the root directory). Required.
+        packages: Packages to include — either a comma string or list.
+
+    Returns:
+        Dict with scaffold result, files created, next_steps.
     """
     try:
         packages = _coerce_list_arg(packages, "packages")
@@ -2846,8 +3581,23 @@ def delimit_generate_scaffold(
 def delimit_repo_diagnose(target: str = ".") -> Dict[str, Any]:
     """Diagnose repository health issues (experimental) (Pro).
 
+    When to use: before a commit or push to surface common repo
+    problems — broken hooks, missing config, dirty working tree.
+    When NOT to use: for full quality analysis (use delimit_repo_analyze)
+    or per-file config validation (delimit_repo_config_validate).
+
+    Sibling contrast: delimit_repo_analyze is a deeper structural
+    audit; this is a quick health-check pass.
+
+    Side effects: read-only on the repo; gated by require_premium.
+    Calls backends.repo_bridge.diagnose. Marked experimental — output
+    schema may evolve.
+
     Args:
-        target: Repository path.
+        target: Repository path. Default "." (cwd).
+
+    Returns:
+        Dict with diagnostics (issues, severity, hints).
     """
     from ai.license import require_premium
     gate = require_premium("repo_diagnose")
@@ -2861,8 +3611,26 @@ def delimit_repo_diagnose(target: str = ".") -> Dict[str, Any]:
 def delimit_repo_analyze(target: str = ".") -> Dict[str, Any]:
     """Analyze repository structure and quality (experimental) (Pro).
 
+    When to use: for a deep audit of a repo (local or remote) — code
+    structure, language mix, quality signals.
+    When NOT to use: for a fast health pass (use delimit_repo_diagnose)
+    or config-only audit (delimit_repo_config_audit).
+
+    Sibling contrast: delimit_repo_diagnose is a quick smoke test;
+    this is the deeper structural audit.
+
+    Side effects: read-only on the resolved local path. Accepts local
+    path, "owner/repo" shorthand, or GitHub URL — remote inputs are
+    shallow-cloned into a tempdir for the call. Calls
+    backends.repo_bridge.analyze through _run_repo_tool_with_remote.
+
     Args:
-        target: Repository path.
+        target: Repository path, "owner/repo", or GitHub URL.
+            Default "." (cwd).
+
+    Returns:
+        Dict with structure / quality findings, "target", and the
+        resolved local path metadata when target was remote.
     """
     from ai.license import require_premium
     gate = require_premium("repo_analyze")
@@ -2874,10 +3642,28 @@ def delimit_repo_analyze(target: str = ".") -> Dict[str, Any]:
 
 @mcp.tool()
 def delimit_repo_config_validate(target: str = ".") -> Dict[str, Any]:
-    """Validate configuration files (experimental) (Pro).
+    """Validate repository configuration files (experimental) (Pro).
+
+    When to use: as a pre-merge check that .github/, package.json,
+    pyproject.toml, etc. are well-formed and self-consistent.
+    When NOT to use: for compliance vs an external standard (use
+    delimit_repo_config_audit) or full repo analysis
+    (delimit_repo_analyze).
+
+    Sibling contrast: delimit_repo_config_audit reports policy
+    compliance; this checks structural validity.
+
+    Side effects: read-only on the resolved local path. Accepts local
+    path, "owner/repo" shorthand, or GitHub URL — remote inputs are
+    shallow-cloned into a tempdir. Calls
+    backends.repo_bridge.config_validate via _run_repo_tool_with_remote.
 
     Args:
-        target: Repository or config path.
+        target: Repository or config path, "owner/repo", or GitHub URL.
+            Default "." (cwd).
+
+    Returns:
+        Dict with per-file validation outcomes and resolution metadata.
     """
     from ai.license import require_premium
     gate = require_premium("repo_config_validate")
@@ -2889,10 +3675,28 @@ def delimit_repo_config_validate(target: str = ".") -> Dict[str, Any]:
 
 @mcp.tool()
 def delimit_repo_config_audit(target: str = ".") -> Dict[str, Any]:
-    """Audit configuration compliance (experimental) (Pro).
+    """Audit repository configuration for compliance (experimental) (Pro).
+
+    When to use: when checking a repo's config against a compliance
+    standard — required files, branch protection, license header.
+    When NOT to use: for structural validity (use
+    delimit_repo_config_validate) or full quality analysis
+    (delimit_repo_analyze).
+
+    Sibling contrast: delimit_repo_config_validate checks well-formedness;
+    this checks compliance.
+
+    Side effects: read-only on the resolved local path. Accepts local
+    path, "owner/repo" shorthand, or GitHub URL — remote inputs are
+    shallow-cloned. Calls backends.repo_bridge.config_audit via
+    _run_repo_tool_with_remote.
 
     Args:
-        target: Repository or config path.
+        target: Repository or config path, "owner/repo", or GitHub URL.
+            Default "." (cwd).
+
+    Returns:
+        Dict with per-rule compliance verdict and resolution metadata.
     """
     from ai.license import require_premium
     gate = require_premium("repo_config_audit")
@@ -2906,10 +3710,26 @@ def delimit_repo_config_audit(target: str = ".") -> Dict[str, Any]:
 
 @mcp.tool()
 def delimit_security_scan(target: str = ".") -> Dict[str, Any]:
-    """Scan for security vulnerabilities.
+    """Scan a repository for security vulnerabilities.
+
+    When to use: as a baseline security pass over a repo, before a
+    deploy or a release.
+    When NOT to use: to ingest external scan results (use
+    delimit_security_ingest) or to triage findings
+    (delimit_security_deliberate).
+
+    Sibling contrast: delimit_security_ingest accepts external scanner
+    output; delimit_security_deliberate triages findings; this is the
+    built-in scan.
+
+    Side effects: read-only on the target. Calls
+    backends.repo_bridge.security_scan.
 
     Args:
-        target: Repository or file path.
+        target: Repository or file path. Default "." (cwd).
+
+    Returns:
+        Dict with detected findings (severity, location) and next_steps.
     """
     from backends.repo_bridge import security_scan
     return _with_next_steps("security_scan", _safe_call(security_scan, target=target))
@@ -2922,20 +3742,34 @@ def delimit_security_ingest(
     repo: str = "",
     commit_sha: str = "",
 ) -> Dict[str, Any]:
-    """Ingest security scan results from external tools (Pro).
+    """Ingest external security scan output and normalize into ledger findings (Pro).
 
-    Accepts JSON output from Trivy, Semgrep, npm audit, pip-audit, Snyk,
-    or CodeQL. Normalizes findings into a canonical schema, tracks in the
-    ledger, and enables deploy gating on unresolved criticals.
+    When to use: after running a scanner externally — Trivy, Semgrep,
+    npm-audit, pip-audit, Snyk, CodeQL — to feed its JSON output into
+    Delimit's canonical schema and gate deploys on unresolved criticals.
+    When NOT to use: to run a scan from scratch (use
+    delimit_security_scan) or to triage findings
+    (delimit_security_deliberate).
 
-    This is the orchestrator model - Delimit doesn't run the scanner,
-    it adds intelligence on top of results you already have.
+    Sibling contrast: delimit_security_scan runs the built-in scan;
+    delimit_security_deliberate triages findings; this is the bridge
+    that pulls external scanner output into the same ledger.
+
+    Side effects: gated by require_premium. Writes findings to the
+    ledger (creates new items, optionally closes resolved ones).
+    Computes a stable fingerprint per finding to enable diffing.
 
     Args:
-        tool: Scanner name (trivy, semgrep, npm-audit, pip-audit, snyk, codeql).
-        results: JSON string of scan results, or path to a JSON results file.
-        repo: Repository identifier (e.g. "my-org/my-repo"). Auto-detects if empty.
-        commit_sha: Git commit SHA the scan was run against. Auto-detects if empty.
+        tool: Scanner name — one of "trivy", "semgrep", "npm-audit",
+            "pip-audit", "snyk", "codeql". Required.
+        results: JSON string of scan results, or path to a JSON file.
+            Required.
+        repo: "owner/repo" identifier. Empty = auto-detect.
+        commit_sha: Git SHA the scan ran against. Empty = auto-detect.
+
+    Returns:
+        Dict with normalized findings count, severity breakdown, ledger
+        items created/closed, and a summary message.
     """
     from ai.license import require_premium
     gate = require_premium("security_ingest")
@@ -3164,15 +3998,28 @@ def delimit_security_deliberate(
 ) -> Dict[str, Any]:
     """Multi-model triage of security findings (Pro).
 
-    Runs deliberation on ingested security findings to classify each as:
-    real risk, false positive, accepted risk, or needs immediate action.
+    When to use: after delimit_security_ingest has loaded findings,
+    to classify each as real risk / false positive / accepted risk /
+    needs immediate action.
+    When NOT to use: to ingest the findings (use
+    delimit_security_ingest) or to scan from scratch
+    (delimit_security_scan).
 
-    Can work on findings from the ledger (auto) or from a JSON string.
+    Sibling contrast: delimit_deliberate is general-purpose multi-model
+    consensus; this is the security-class variant scoped to findings.
+
+    Side effects: gated by require_premium. Calls multiple models via
+    the deliberation panel. Updates ledger items with triage verdicts.
 
     Args:
-        findings: JSON string of findings to triage, or empty to pull from ledger.
+        findings: JSON string of findings to triage. Empty = pull from
+            the ledger automatically.
         repo: Repository context for the triage.
-        focus: Which findings to triage - "critical", "high", "all". Default: critical.
+        focus: Which findings to triage — "critical" (default), "high",
+            "all".
+
+    Returns:
+        Dict with per-finding verdicts and the panel's reasoning.
     """
     from ai.license import require_premium
     gate = require_premium("security_deliberate")
@@ -3284,20 +4131,30 @@ def delimit_security_deliberate(
 def delimit_siem(action: str = "status", integration: str = "",
                   settings: str = "", enabled: str = "",
                   event: str = "") -> Dict[str, Any]:
-    """Manage SIEM streaming - forward audit events to Splunk, Datadog, EventBridge, or webhooks.
+    """Manage SIEM streaming for audit-event forwarding (Splunk/Datadog/etc.).
 
-    Actions:
-      status: Show all SIEM integrations and delivery stats
-      configure: Update integration settings (pass integration name + settings JSON)
-      test: Send a test event to all enabled integrations
-      forward: Forward a specific event (used internally by audit trail)
+    When to use: to inspect or configure where Delimit's audit events
+    stream — Splunk, Datadog, EventBridge, generic webhooks.
+    When NOT to use: for one-shot notifications (use delimit_notify) or
+    inbox handling (delimit_notify_inbox).
+
+    Sibling contrast: delimit_notify sends to humans;
+    this configures structured-log streaming to SIEM endpoints.
+
+    Side effects: action="configure" / "forward" / "test" write to the
+    configured SIEM endpoints (network calls). action="status" is
+    read-only.
 
     Args:
-        action: status, configure, test, or forward
-        integration: splunk, datadog, eventbridge, or webhook (for configure)
-        settings: JSON string of settings to update (for configure)
-        enabled: "true" or "false" to enable/disable (for configure)
-        event: JSON string of event to forward (for forward/test)
+        action: One of "status" (default), "configure", "test", "forward".
+        integration: One of "splunk", "datadog", "eventbridge", "webhook"
+            (for configure).
+        settings: JSON string of settings (for configure).
+        enabled: "true" or "false" (for configure).
+        event: JSON string of an event (for forward / test).
+
+    Returns:
+        Dict with integration status, delivery stats, or test result.
     """
     from ai.siem_streaming import configure, get_status, forward_event
 
@@ -3331,19 +4188,36 @@ def delimit_siem(action: str = "status", integration: str = "",
 
 @mcp.tool()
 def delimit_security_audit(target: str = ".") -> Dict[str, Any]:
-    """Audit security: dependency vulnerabilities, anti-patterns, and secret detection.
-    Auto-chains: evidence collection on all findings, governance task + notification on critical findings.
+    """Audit security and auto-chain evidence + governance on critical findings.
 
-    Scans for:
-    - Dependency vulnerabilities (pip-audit, npm audit)
-    - Hardcoded secrets (API keys, tokens, passwords)
-    - Dangerous patterns (eval, exec, SQL injection, XSS)
-    - .env files tracked in git
+    When to use: as the deploy gate / pre-release security check —
+    combines dependency vulnerability scanning, hardcoded-secret detection,
+    dangerous-pattern checks, and .env-tracked-in-git checks, AND
+    automatically opens a governance task + sends a notification when
+    critical findings are present.
+    When NOT to use: for a baseline scanner pass without auto-chained
+    side effects (use delimit_security_scan), to ingest an external
+    scanner's output (delimit_security_ingest), or to triage existing
+    findings (delimit_security_deliberate).
 
-    Optional: Set SNYK_TOKEN or install Trivy for enhanced scanning.
+    Sibling contrast: delimit_security_scan is the read-only baseline
+    scanner; delimit_security_ingest accepts external tool output;
+    delimit_security_deliberate triages findings via multi-model panel;
+    this one runs the audit AND auto-chains evidence collection,
+    governance task creation, and notification on criticals.
+
+    Side effects: writes an evidence bundle (always, best-effort).
+    On critical findings, creates a governance task via the governance
+    engine and sends a webhook notification. Optional: SNYK_TOKEN or
+    Trivy in the environment enable enhanced scanning.
 
     Args:
-        target: Repository or file path to audit.
+        target: Repository or file path to audit. Default "." (cwd).
+
+    Returns:
+        Dict with audit findings, attached evidence bundle, chain step
+        log (with steps: security_audit, evidence_collect, optional
+        gov_new_task + notify), optional gov_task payload, and next_steps.
     """
     from backends.tools_infra import security_audit
 
@@ -3402,9 +4276,26 @@ def delimit_security_audit(target: str = ".") -> Dict[str, Any]:
 def delimit_evidence_collect(target: str = ".", evidence_type: str = "") -> Dict[str, Any]:
     """Collect evidence artifacts for governance (Pro).
 
+    When to use: after a deploy, security audit, test run, or other
+    gate event — to capture an evidence bundle that delimit_evidence_verify
+    can later attest.
+    When NOT to use: to verify an existing bundle (use
+    delimit_evidence_verify) or query the contract ledger
+    (delimit_ledger).
+
+    Sibling contrast: delimit_evidence_verify verifies;
+    delimit_ledger queries the chain; this collects new evidence.
+
+    Side effects: gated by require_premium. Writes a new evidence
+    bundle via backends.repo_bridge.evidence_collect.
+
     Args:
-        target: Repository or task path.
-        evidence_type: Type of evidence (e.g. "deploy", "security", "test", "audit"). Stored in bundle metadata.
+        target: Repository or task path. Default "." (cwd).
+        evidence_type: Type of evidence — e.g. "deploy", "security",
+            "test", "audit". Stored in bundle metadata. Empty = generic.
+
+    Returns:
+        Dict with the evidence bundle id, contents summary, next_steps.
     """
     from ai.license import require_premium
     gate = require_premium("evidence_collect")
@@ -3419,11 +4310,28 @@ def delimit_evidence_collect(target: str = ".", evidence_type: str = "") -> Dict
 
 @mcp.tool()
 def delimit_evidence_verify(bundle_id: Optional[str] = None, bundle_path: Optional[str] = None) -> Dict[str, Any]:
-    """Verify evidence bundle integrity (Pro).
+    """Verify the integrity of an evidence bundle (Pro).
+
+    When to use: to attest that a previously-collected evidence bundle
+    has not been tampered with — typical use is during replay or audit.
+    When NOT to use: to capture new evidence (use
+    delimit_evidence_collect) or to query the contract ledger
+    (delimit_ledger).
+
+    Sibling contrast: delimit_evidence_collect captures; this verifies
+    a captured bundle's hash chain integrity.
+
+    Side effects: read-only on the evidence store; gated by
+    require_premium. Calls backends.repo_bridge.evidence_verify.
 
     Args:
-        bundle_id: Evidence bundle ID to verify.
-        bundle_path: Path to evidence bundle file.
+        bundle_id: Evidence bundle id. Either this or bundle_path must
+            be provided.
+        bundle_path: Path to a bundle file on disk. Either this or
+            bundle_id must be provided.
+
+    Returns:
+        Dict with verification verdict, hash check details, next_steps.
     """
     from ai.license import require_premium
     gate = require_premium("evidence_verify")
@@ -3520,7 +4428,31 @@ delimit_release = mcp.tool()(_delimit_release_impl)
 
 @mcp.tool()
 def delimit_release_plan(environment: str = "production", version: str = "", repository: str = ".", services: Optional[List[str]] = None) -> Dict[str, Any]:
-    """Generate a release plan from git history (Pro)."""
+    """Generate a release plan from git history (Pro).
+
+    When to use: ahead of cutting a release, to enumerate the services
+    and changes that will ship and surface the version to bump.
+    When NOT to use: to validate readiness (use delimit_release_validate)
+    or to ship code (use delimit_deploy_publish).
+
+    Sibling contrast: delimit_deploy_plan plans a deploy of one app;
+    this plans a multi-service release across an environment.
+
+    Side effects: read-only on git/repo state; gated by require_premium.
+    Calls backends.tools_infra.release_plan.
+
+    Args:
+        environment: Target environment, "production" or "staging".
+            Default "production".
+        version: Release version. Auto-detected from git tags if empty.
+        repository: Repository path. Default "." (cwd).
+        services: Optional list of service names to scope the plan;
+            None = all services in the repo manifest.
+
+    Returns:
+        Dict with plan details (services, version, change set) and
+        next_steps suggestions.
+    """
     return _delimit_release_impl(action="plan", environment=environment, version=version, repository=repository, services=services)
 
 
@@ -3581,19 +4513,78 @@ def delimit_release_validate(environment: str, version: str) -> Dict[str, Any]:
 
 @mcp.tool()
 def delimit_release_status(environment: str = "production") -> Dict[str, Any]:
-    """Check release/deploy status (Pro)."""
+    """Report current release / deploy state for an environment (Pro).
+
+    When to use: to inspect the active release version and rollout
+    state for an environment.
+    When NOT to use: for app-level deploy state (use delimit_deploy_status)
+    or for past releases (use delimit_release_history).
+
+    Sibling contrast: delimit_deploy_status reports a single app's
+    rollout; this reports the environment's release version overall.
+
+    Side effects: read-only against the ops backend; gated by
+    require_premium. Calls backends.tools_infra.release_status.
+
+    Args:
+        environment: Target environment. Default "production".
+
+    Returns:
+        Dict with current release version, rollout state, next_steps.
+    """
     return _delimit_release_impl(action="status", environment=environment)
 
 
 @mcp.tool()
 def delimit_release_rollback(environment: str, version: str, to_version: str) -> Dict[str, Any]:
-    """Rollback deployment to previous version (experimental)."""
+    """Roll an environment back to a prior release version (experimental).
+
+    When to use: when delimit_release_validate or delimit_obs_alerts
+    indicate a regression and you need to revert the whole environment.
+    When NOT to use: to roll back a single app (use delimit_deploy_rollback).
+
+    Sibling contrast: delimit_deploy_rollback reverts one app at the
+    SHA level; this reverts a release version across services.
+
+    Side effects: calls backends.ops_bridge.release_rollback which
+    mutates the live environment. Marked experimental — handler may
+    return partial results on backends without rollback automation.
+
+    Args:
+        environment: Target environment. Required.
+        version: Current release version that is failing. Required.
+        to_version: Prior release version to roll back to. Required.
+
+    Returns:
+        Dict with rollback result from the ops backend.
+    """
     return _delimit_release_impl(action="rollback", environment=environment, version=version, to_version=to_version)
 
 
 @mcp.tool()
 def delimit_release_history(environment: str, limit: int = 10) -> Dict[str, Any]:
-    """Show release history (experimental)."""
+    """List recent release versions for an environment (experimental).
+
+    When to use: when investigating an incident and you need the
+    timeline of what shipped, or when picking a target for
+    delimit_release_rollback's to_version.
+    When NOT to use: to inspect the current release (use
+    delimit_release_status) or per-app deploy timeline
+    (delimit_deploy_status).
+
+    Sibling contrast: delimit_release_status returns the current state;
+    this returns a history list.
+
+    Side effects: read-only. Calls backends.ops_bridge.release_history.
+    Marked experimental — output schema may evolve.
+
+    Args:
+        environment: Target environment. Required.
+        limit: Maximum number of releases to return. Default 10.
+
+    Returns:
+        Dict with a list of past releases (version, time, status).
+    """
     return _delimit_release_impl(action="history", environment=environment, limit=limit)
 
 
@@ -3601,11 +4592,26 @@ def delimit_release_history(environment: str, limit: int = 10) -> Dict[str, Any]
 
 @mcp.tool()
 def delimit_cost_analyze(target: str = ".") -> Dict[str, Any]:
-    """ (Pro).
-        Analyze project costs by scanning Dockerfiles, dependencies, and cloud configs.
+    """Analyze a project for cost drivers (Dockerfile, deps, cloud) (Pro).
+
+    When to use: when investigating spend on a project — scans
+    Dockerfile, dependency manifests, and cloud configs for cost
+    signals.
+    When NOT to use: to enact cost reductions (use delimit_cost_optimize)
+    or to manage alert rules (delimit_cost_alert).
+
+    Sibling contrast: delimit_cost_optimize finds reduction
+    opportunities; this surfaces drivers (where the cost is).
+
+    Side effects: read-only on the target. Gated by require_premium.
+    Calls backends.tools_data.cost_analyze.
 
     Args:
-        target: Project or infrastructure path to analyze.
+        target: Project or infrastructure path to analyze. Default "."
+            (cwd).
+
+    Returns:
+        Dict with cost drivers and next_steps.
     """
     from ai.license import require_premium
     gate = require_premium("cost_analyze")
@@ -3617,11 +4623,26 @@ def delimit_cost_analyze(target: str = ".") -> Dict[str, Any]:
 
 @mcp.tool()
 def delimit_cost_optimize(target: str = ".") -> Dict[str, Any]:
-    """ (Pro).
-        Find cost optimization opportunities: unused deps, oversized images, uncompressed assets.
+    """Find cost optimization opportunities in a project (Pro).
+
+    When to use: after delimit_cost_analyze surfaces drivers, to get
+    concrete suggestions: unused deps, oversized images, uncompressed
+    assets.
+    When NOT to use: to inventory current spend (delimit_cost_analyze)
+    or manage threshold alerts (delimit_cost_alert).
+
+    Sibling contrast: delimit_cost_analyze identifies sources of cost;
+    this proposes reductions.
+
+    Side effects: read-only on the target. Gated by require_premium.
+    Calls backends.tools_data.cost_optimize.
 
     Args:
-        target: Project or infrastructure path to analyze.
+        target: Project or infrastructure path to analyze. Default "."
+            (cwd).
+
+    Returns:
+        Dict with optimization suggestions and next_steps.
     """
     from ai.license import require_premium
     gate = require_premium("cost_optimize")
@@ -3634,14 +4655,28 @@ def delimit_cost_optimize(target: str = ".") -> Dict[str, Any]:
 @mcp.tool()
 def delimit_cost_alert(action: str = "list", name: Optional[str] = None,
                        threshold: Optional[float] = None, alert_id: Optional[str] = None) -> Dict[str, Any]:
-    """ (Pro).
-        Manage cost alerts (file-based). CRUD operations on spending thresholds.
+    """Manage cost alert rules (CRUD on spending thresholds) (Pro).
+
+    When to use: to configure ongoing spend thresholds and notifications
+    that fire when costs exceed a configured ceiling.
+    When NOT to use: for one-shot cost analysis (use delimit_cost_analyze)
+    or finding optimisations (delimit_cost_optimize).
+
+    Sibling contrast: delimit_cost_analyze finds drivers;
+    delimit_cost_optimize finds reductions; this manages the alerting
+    layer.
+
+    Side effects: action="create"/"delete"/"toggle" write to the
+    file-based alert store. action="list" is read-only.
 
     Args:
-        action: Action (list/create/delete/toggle).
-        name: Alert name (required for create).
-        threshold: Cost threshold in USD (required for create).
-        alert_id: Alert ID (required for delete/toggle).
+        action: One of "list" (default), "create", "delete", "toggle".
+        name: Alert name. Required for create.
+        threshold: Cost threshold in USD. Required for create.
+        alert_id: Existing alert id. Required for delete/toggle.
+
+    Returns:
+        Dict with the action result.
     """
     from ai.license import require_premium
     gate = require_premium("cost_alert")
@@ -3675,14 +4710,25 @@ def delimit_cost_controls(
 ) -> Dict[str, Any]:
     """Manage MCP rate limits and session cost controls.
 
-    View current usage, check quota for a specific tool, adjust per-tool
-    rate limits, set the session cost cap, or reset all tracking.
+    When to use: to inspect or adjust per-tool hourly rate limits and
+    the session cost cap that throttle Delimit's call surface.
+    When NOT to use: for project-cost analysis (use delimit_cost_analyze)
+    or alert configuration (delimit_cost_alert).
+
+    Sibling contrast: delimit_cost_analyze inspects spend in your
+    project; this manages our own per-session call quotas.
+
+    Side effects: action="set" / "reset" mutate the rate-limiter state.
+    action="status" / "quota" are read-only.
 
     Args:
-        action: One of 'status', 'quota', 'set', or 'reset'.
-        tool_name: Tool name (required for 'quota' and 'set' with limit).
-        limit: New hourly call limit for the tool (used with action='set').
-        cost_cap: New session cost cap in USD (used with action='set').
+        action: One of "status" (default), "quota", "set", "reset".
+        tool_name: Tool name. Required for "quota" and "set" with limit.
+        limit: New hourly call limit (used with action="set").
+        cost_cap: New session cost cap in USD (used with action="set").
+
+    Returns:
+        Dict with usage stats / quota / mutation result.
     """
     return create_cost_controls_response(
         action=action,
@@ -3696,10 +4742,25 @@ def delimit_cost_controls(
 
 @mcp.tool()
 def delimit_data_validate(target: str = ".") -> Dict[str, Any]:
-    """Validate data files: JSON parse, CSV structure, SQLite integrity check.
+    """Validate data files: JSON parse, CSV shape, SQLite integrity.
+
+    When to use: as a smoke check before relying on data files (CI
+    pipelines, before migrations) to catch corruption early.
+    When NOT to use: for migration status (use delimit_data_migrate) or
+    backups (delimit_data_backup).
+
+    Sibling contrast: delimit_data_migrate inspects migration files;
+    this exercises the data files themselves.
+
+    Side effects: read-only on the target. Calls
+    backends.tools_data.data_validate.
 
     Args:
-        target: Directory or file path containing data files.
+        target: Directory or file path with data files. Default "."
+            (cwd).
+
+    Returns:
+        Dict with per-file validation outcomes and next_steps.
     """
     from backends.tools_data import data_validate
     return _with_next_steps("data_validate", _safe_call(data_validate, target=target))
@@ -3707,10 +4768,27 @@ def delimit_data_validate(target: str = ".") -> Dict[str, Any]:
 
 @mcp.tool()
 def delimit_data_migrate(target: str = ".") -> Dict[str, Any]:
-    """Check for migration files (alembic, Django, Prisma, Knex) and report status.
+    """Inspect migration files (alembic / Django / Prisma / Knex) for status.
+
+    When to use: to audit pending and applied migrations before a
+    deploy, or as a CI gate.
+    When NOT to use: to actually apply migrations (this tool only
+    inspects status) or back up data first (delimit_data_backup).
+
+    Sibling contrast: delimit_data_validate exercises data files;
+    delimit_data_backup captures restore points; this reads migration
+    status only.
+
+    Side effects: read-only inspection. Calls
+    backends.tools_data.data_migrate.
 
     Args:
-        target: Project path to scan for migration files.
+        target: Project path to scan for migration files. Default "."
+            (cwd).
+
+    Returns:
+        Dict with detected migration framework, pending/applied count,
+        and next_steps.
     """
     from backends.tools_data import data_migrate
     return _with_next_steps("data_migrate", _safe_call(data_migrate, target=target))
@@ -3718,10 +4796,24 @@ def delimit_data_migrate(target: str = ".") -> Dict[str, Any]:
 
 @mcp.tool()
 def delimit_data_backup(target: str = ".") -> Dict[str, Any]:
-    """Back up SQLite and JSON data files to ~/.delimit/backups/ with timestamp.
+    """Back up SQLite and JSON data files to ~/.delimit/backups/.
+
+    When to use: before a risky migration or refactor that touches
+    SQLite or JSON data, to capture a timestamped restore point.
+    When NOT to use: to validate data integrity (use
+    delimit_data_validate) or apply migrations (delimit_data_migrate).
+
+    Sibling contrast: delimit_data_validate inspects integrity;
+    delimit_data_migrate runs migrations; this captures a backup.
+
+    Side effects: writes timestamped copies of SQLite + JSON files
+    under ~/.delimit/backups/ via backends.tools_data.data_backup.
 
     Args:
-        target: Directory or file to back up.
+        target: Directory or file to back up. Default "." (cwd).
+
+    Returns:
+        Dict with backup paths and next_steps.
     """
     from backends.tools_data import data_backup
     return _with_next_steps("data_backup", _safe_call(data_backup, target=target))
@@ -3796,25 +4888,109 @@ delimit_obs = mcp.tool()(_delimit_obs_impl)
 
 @mcp.tool()
 def delimit_obs_metrics(query: str = "system", time_range: str = "1h", source: Optional[str] = None) -> Dict[str, Any]:
-    """Query live system metrics (Pro)."""
+    """Query live system metrics from the observability backend (Pro).
+
+    When to use: for runtime health investigation — CPU, memory, request
+    rate, error rate over a window.
+    When NOT to use: for log search (use delimit_obs_logs) or for one-shot
+    health check (use delimit_obs_status).
+
+    Sibling contrast: delimit_obs_logs searches text; this returns
+    numeric series. delimit_obs_status is a high-level rollup.
+
+    Side effects: read-only on the metrics backend; gated by
+    require_premium. Calls backends.tools_infra.obs_metrics.
+
+    Args:
+        query: Metric query name. Default "system" (general system
+            metrics). Backend-specific values supported.
+        time_range: Window like "1h", "24h", "7d". Default "1h".
+        source: Optional data source override. Default None = backend
+            default source.
+
+    Returns:
+        Dict with metric series and next_steps.
+    """
     return _delimit_obs_impl(action="metrics", query=query, time_range=time_range, source=source)
 
 
 @mcp.tool()
 def delimit_obs_logs(query: str, time_range: str = "1h", source: Optional[str] = None) -> Dict[str, Any]:
-    """Search system and application logs (Pro)."""
+    """Search system and application logs (Pro).
+
+    When to use: for incident investigation — find error messages,
+    trace IDs, or specific events across the configured log sources.
+    When NOT to use: for numeric metric data (use delimit_obs_metrics)
+    or to manage alerts (use delimit_obs_alerts).
+
+    Sibling contrast: delimit_obs_metrics is for numeric series; this
+    is for text search.
+
+    Side effects: read-only on the log backend; gated by require_premium.
+    Calls backends.tools_infra.obs_logs.
+
+    Args:
+        query: Search string (backend-specific syntax). Required.
+        time_range: Window like "1h", "24h", "7d". Default "1h".
+        source: Optional log source override. Default None.
+
+    Returns:
+        Dict with matching log entries and next_steps.
+    """
     return _delimit_obs_impl(action="logs", query=query, time_range=time_range, source=source)
 
 
 @mcp.tool()
 def delimit_obs_alerts(action: str, alert_rule: Optional[Dict[str, Any]] = None, rule_id: Optional[str] = None) -> Dict[str, Any]:
-    """Manage alerting rules (experimental)."""
+    """Manage alerting rules (list/create/update/delete) (experimental).
+
+    When to use: to configure ongoing alerts for production thresholds
+    (latency, error rate, saturation).
+    When NOT to use: for one-shot metric queries (use delimit_obs_metrics)
+    or status snapshots (delimit_obs_status).
+
+    Sibling contrast: delimit_obs_metrics queries data; this configures
+    automated thresholds against that data.
+
+    Side effects: writes to the alert configuration on the ops backend.
+    Calls backends.ops_bridge.obs_alerts. Marked experimental — schema
+    for alert_rule may evolve.
+
+    Args:
+        action: Alert sub-action. One of "list", "create", "update",
+            "delete". Required.
+        alert_rule: Rule definition dict (required for create/update).
+            Backend-specific schema.
+        rule_id: Identifier for an existing rule (required for
+            delete/update).
+
+    Returns:
+        Dict with the action's result from the ops backend.
+    """
     return _delimit_obs_impl(action="alerts", alert_action=action, alert_rule=alert_rule, rule_id=rule_id)
 
 
 @mcp.tool()
 def delimit_obs_status() -> Dict[str, Any]:
-    """System health check (Pro)."""
+    """High-level system health rollup (Pro).
+
+    When to use: for a quick "are we green?" signal at session start or
+    in a status dashboard.
+    When NOT to use: for detailed metric series (delimit_obs_metrics) or
+    log investigation (delimit_obs_logs).
+
+    Sibling contrast: delimit_obs_metrics returns numeric series; this
+    returns a health rollup suitable for an at-a-glance summary.
+
+    Side effects: read-only on the observability backend; gated by
+    require_premium. Calls backends.tools_infra.obs_status.
+
+    Args:
+        None.
+
+    Returns:
+        Dict with overall health summary and next_steps.
+    """
     return _delimit_obs_impl(action="status")
 
 
@@ -3826,16 +5002,33 @@ def delimit_design_extract_tokens(
     token_types: Optional[Union[str, List[str]]] = None,
     project_path: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Extract design tokens from project CSS/SCSS/Tailwind config.
+    """Extract design tokens from a project's CSS/SCSS/Tailwind config.
 
-    Works without any API keys (scans local CSS/Tailwind). Figma integration
-    auto-activates when a token is found in: FIGMA_TOKEN env var, or
-    ~/.delimit/secrets/figma.json, or via delimit_secret_store.
+    When to use: to inventory or generate design tokens before
+    creating a Tailwind config or component scaffold.
+    When NOT to use: to scaffold a component (use
+    delimit_design_generate_component) or generate tailwind config
+    (delimit_design_generate_tailwind).
+
+    Sibling contrast: delimit_design_generate_tailwind builds a config
+    from these tokens; this extracts them.
+
+    Side effects: read-only scan of local CSS/Tailwind. Figma API
+    integration auto-activates when a Figma token is found in
+    FIGMA_TOKEN env var, ~/.delimit/secrets/figma.json, or via
+    delimit_secret_store. Calls
+    backends.ui_bridge.design_extract_tokens. Coerces token_types
+    via _coerce_list_arg.
 
     Args:
-        figma_file_key: Optional Figma file key (auto-uses Figma API if a token is available).
-        token_types: Token types to extract (colors, typography, spacing, breakpoints).
-        project_path: Project directory to scan. Defaults to cwd.
+        figma_file_key: Optional Figma file key (uses Figma API if a
+            token is available).
+        token_types: Token types — "colors", "typography", "spacing",
+            "breakpoints". Comma string or list. None = all.
+        project_path: Project directory to scan. Default = cwd.
+
+    Returns:
+        Dict with extracted tokens grouped by type, plus next_steps.
     """
     try:
         token_types = _coerce_list_arg(token_types, "token_types")
@@ -3847,13 +5040,30 @@ def delimit_design_extract_tokens(
 
 @mcp.tool()
 def delimit_design_generate_component(component_name: str, figma_node_id: Optional[str] = None, output_path: Optional[str] = None, project_path: Optional[str] = None) -> Dict[str, Any]:
-    """Generate a React/Next.js component skeleton with props interface and Tailwind support.
+    """Generate a React/Next.js component skeleton with Tailwind support.
+
+    When to use: to scaffold a new component (.tsx) with props
+    interface and Tailwind class structure.
+    When NOT to use: to generate stories for an existing component
+    (use delimit_story_generate) or extract design tokens
+    (delimit_design_extract_tokens).
+
+    Sibling contrast: delimit_story_generate adds stories to a
+    component; this creates the component itself.
+
+    Side effects: writes a new component file (.tsx) under output_path
+    or components/<Name>/<Name>.tsx via
+    backends.ui_bridge.design_generate_component. Detects Tailwind
+    config inside project_path.
 
     Args:
-        component_name: Component name (PascalCase).
+        component_name: Component name (PascalCase). Required.
         figma_node_id: Optional Figma node ID (reserved for future use).
-        output_path: Output file path. Defaults to components/<Name>/<Name>.tsx.
+        output_path: Output file path. Default = components/<Name>/<Name>.tsx.
         project_path: Project root for Tailwind detection.
+
+    Returns:
+        Dict with the generated component file path and next_steps.
     """
     from backends.ui_bridge import design_generate_component
     return _with_next_steps("design_generate_component", _safe_call(design_generate_component, component_name=component_name, figma_node_id=figma_node_id, output_path=output_path, project_path=project_path))
@@ -3861,12 +5071,30 @@ def delimit_design_generate_component(component_name: str, figma_node_id: Option
 
 @mcp.tool()
 def delimit_design_generate_tailwind(figma_file_key: Optional[str] = None, output_path: Optional[str] = None, project_path: Optional[str] = None) -> Dict[str, Any]:
-    """Read existing tailwind.config or generate one from detected CSS tokens.
+    """Read an existing tailwind.config or generate one from detected CSS tokens.
+
+    When to use: to bootstrap a Tailwind config from existing CSS
+    tokens, or to inspect an existing config in a project.
+    When NOT to use: to extract general design tokens (use
+    delimit_design_extract_tokens) or generate a component
+    (delimit_design_generate_component).
+
+    Sibling contrast: delimit_design_extract_tokens scans CSS;
+    this writes a tailwind config from those tokens.
+
+    Side effects: writes tailwind.config.js if missing, otherwise
+    reads the existing one. Calls
+    backends.ui_bridge.design_generate_tailwind.
 
     Args:
         figma_file_key: Optional Figma file key (reserved for future use).
         output_path: Output file path for generated config.
         project_path: Project root to scan for existing config or CSS tokens.
+
+    Returns:
+        Dict with the generated config path, generated content summary
+        (color/spacing/typography token counts), and next_steps. When an
+        existing config is found, returns its parsed structure instead.
     """
     from backends.ui_bridge import design_generate_tailwind
     return _with_next_steps("design_generate_tailwind", _safe_call(design_generate_tailwind, figma_file_key=figma_file_key, output_path=output_path, project_path=project_path))
@@ -3879,11 +5107,26 @@ def delimit_design_validate_responsive(
 ) -> Dict[str, Any]:
     """Validate responsive design patterns via static CSS analysis.
 
-    Scans for media queries, viewport meta, mobile-first patterns, fixed widths.
+    When to use: as a CI check after editing UI/CSS, to flag missing
+    media queries, fixed widths, or non-mobile-first patterns.
+    When NOT to use: for accessibility audits (use
+    delimit_story_accessibility) or component scaffolding
+    (delimit_design_generate_component).
+
+    Sibling contrast: delimit_story_accessibility checks WCAG;
+    this checks responsive patterns.
+
+    Side effects: read-only static analysis of CSS files. Calls
+    backends.ui_bridge.design_validate_responsive. Coerces check_types
+    from comma string to list via _coerce_list_arg.
 
     Args:
-        project_path: Project path to validate.
-        check_types: Check types (breakpoints, containers, fluid-type, etc.).
+        project_path: Project path to validate. Required.
+        check_types: Specific checks ("breakpoints", "containers",
+            "fluid-type", etc.) as comma string or list. None = all.
+
+    Returns:
+        Dict with per-check findings and next_steps.
     """
     try:
         check_types = _coerce_list_arg(check_types, "check_types")
@@ -3895,11 +5138,26 @@ def delimit_design_validate_responsive(
 
 @mcp.tool()
 def delimit_design_component_library(project_path: str, output_format: str = "json") -> Dict[str, Any]:
-    """Scan for React/Vue/Svelte components and generate a component catalog.
+    """Scan a project for React/Vue/Svelte components and emit a catalog.
+
+    When to use: to inventory a project's UI components for review,
+    docs, or design-system curation.
+    When NOT to use: to generate a single component
+    (delimit_design_generate_component) or stories
+    (delimit_story_generate).
+
+    Sibling contrast: delimit_design_generate_component creates one;
+    this lists what already exists.
+
+    Side effects: read-only scan via
+    backends.ui_bridge.design_component_library. Writes nothing.
 
     Args:
-        project_path: Project path to scan.
-        output_format: Output format (json/markdown).
+        project_path: Project path to scan. Required.
+        output_format: One of "json" (default) or "markdown".
+
+    Returns:
+        Dict with the component catalog and next_steps.
     """
     from backends.ui_bridge import design_component_library
     return _with_next_steps("design_component_library", _safe_call(design_component_library, project_path=project_path, output_format=output_format))
@@ -3913,12 +5171,29 @@ def delimit_story_generate(
     story_name: Optional[str] = None,
     variants: Optional[Union[str, List[str]]] = None,
 ) -> Dict[str, Any]:
-    """Generate a .stories.tsx file for a component (no Storybook install required).
+    """Generate a .stories.tsx file for a UI component (no Storybook required).
+
+    When to use: to scaffold per-variant stories for a React/TSX
+    component without installing the full Storybook toolchain.
+    When NOT to use: for accessibility checks (use
+    delimit_story_accessibility) or component scaffolding from scratch
+    (delimit_design_generate_component).
+
+    Sibling contrast: delimit_design_generate_component creates the
+    component; this generates its stories file. Together they form a
+    component-first authoring path.
+
+    Side effects: writes a new .stories.tsx file next to the component.
+    Coerces variants from a comma string to a list via _coerce_list_arg.
 
     Args:
-        component_path: Path to the component file.
-        story_name: Custom story name. Defaults to component name.
-        variants: Variants to generate. Defaults to [Default, WithChildren].
+        component_path: Path to the component (.tsx) file. Required.
+        story_name: Custom story name. Default = component name.
+        variants: Variants to generate (e.g. "Default,WithChildren").
+            Default = ["Default", "WithChildren"].
+
+    Returns:
+        Dict with the generated story file path and next_steps.
     """
     try:
         variants = _coerce_list_arg(variants, "variants")
@@ -3930,16 +5205,29 @@ def delimit_story_generate(
 
 @mcp.tool()
 def delimit_story_visual_test(url: str, project_path: Optional[str] = None, threshold: float = 0.05) -> Dict[str, Any]:
-    """Run visual regression test -- screenshot and compare to baseline.
+    """Run visual regression test — screenshot vs stored baseline.
 
-    Works without external tools (returns guidance). Enhanced with:
-    - Playwright (recommended): full visual regression with baseline comparison
-    - Puppeteer (fallback): screenshot capture via npx
+    When to use: as a CI gate after UI changes, to catch unintended
+    visual regressions vs a stored baseline. Auto-creates the baseline
+    on first run.
+    When NOT to use: for a11y checks (use delimit_story_accessibility)
+    or one-off screenshots (delimit_screenshot).
+
+    Sibling contrast: delimit_screenshot is one image without baseline;
+    delimit_story_accessibility audits HTML;
+    this compares against a stored baseline.
+
+    Side effects: writes baseline images on first run; subsequent runs
+    are read-only against the baseline. Falls back to Puppeteer
+    (screenshot only) when Playwright is not installed.
 
     Args:
         url: URL to screenshot.
         project_path: Project path for baseline storage.
-        threshold: Diff threshold (0.0-1.0).
+        threshold: Diff threshold (0.0-1.0). Default 0.05.
+
+    Returns:
+        Dict with diff verdict, baseline status, screenshot path.
     """
     from backends.ui_bridge import story_visual_test
     return _with_next_steps("story_visual_test", _safe_call(story_visual_test, url=url, project_path=project_path, threshold=threshold))
@@ -3947,14 +5235,27 @@ def delimit_story_visual_test(url: str, project_path: Optional[str] = None, thre
 
 @mcp.tool()
 def delimit_story_build(project_path: str, output_dir: Optional[str] = None) -> Dict[str, Any]:
-    """Build Storybook static site.
+    """Build a Storybook static site (or return setup guidance).
 
-    Works without Storybook installed (returns setup guidance).
-    If Storybook is configured in the project, runs the build automatically.
+    When to use: to build the Storybook static site for an existing
+    project, e.g. for hosting on a docs site.
+    When NOT to use: to write stories (use delimit_story_generate) or
+    run a11y checks (delimit_story_accessibility).
+
+    Sibling contrast: delimit_story_generate writes stories;
+    delimit_story_accessibility audits; this builds the static site.
+
+    Side effects: when Storybook is configured, invokes the build
+    via backends.ui_bridge.story_build (subprocess writes the static
+    site under output_dir). When not configured, returns setup
+    guidance instead.
 
     Args:
-        project_path: Project path.
-        output_dir: Output directory.
+        project_path: Project path. Required.
+        output_dir: Output directory. None = Storybook default.
+
+    Returns:
+        Dict with build result / setup guidance.
     """
     from backends.ui_bridge import story_build
     return _safe_call(story_build, project_path=project_path, output_dir=output_dir)
@@ -3962,13 +5263,28 @@ def delimit_story_build(project_path: str, output_dir: Optional[str] = None) -> 
 
 @mcp.tool()
 def delimit_story_accessibility(project_path: str, standards: str = "WCAG2AA") -> Dict[str, Any]:
-    """Run WCAG accessibility checks by scanning HTML/JSX/TSX for common issues.
+    """Scan HTML/JSX/TSX for WCAG accessibility issues.
 
-    Checks: missing alt, missing labels, empty buttons, heading order, aria-hidden on focusable.
+    When to use: as a CI gate or pre-merge check on UI changes for
+    common a11y problems — missing alt, missing labels, empty buttons,
+    heading order, aria-hidden on focusable elements.
+    When NOT to use: for responsive layout (use
+    delimit_design_validate_responsive) or visual regression
+    (delimit_story_visual_test).
+
+    Sibling contrast: delimit_design_validate_responsive checks
+    layout; this checks WCAG.
+
+    Side effects: read-only static analysis. Calls
+    backends.ui_bridge.story_accessibility_test.
 
     Args:
-        project_path: Project path to scan.
-        standards: Accessibility standard (WCAG2A/WCAG2AA/WCAG2AAA).
+        project_path: Project path to scan. Required.
+        standards: WCAG standard — "WCAG2A", "WCAG2AA" (default),
+            "WCAG2AAA".
+
+    Returns:
+        Dict with per-issue findings, severity, location, next_steps.
     """
     from backends.ui_bridge import story_accessibility_test
     return _with_next_steps("story_accessibility", _safe_call(story_accessibility_test, project_path=project_path, standards=standards))
@@ -3978,15 +5294,28 @@ def delimit_story_accessibility(project_path: str, standards: str = "WCAG2AA") -
 
 @mcp.tool()
 def delimit_test_generate(project_path: str, source_files: Optional[List[str]] = None, framework: str = "jest") -> Dict[str, Any]:
-    """Generate test skeletons for source code.
+    """Generate test skeletons for source code (Jest / pytest / vitest).
 
-    Scans source files using AST parsing (Python) or regex (JS/TS),
-    extracts public function signatures, and generates test file skeletons.
+    When to use: to scaffold new test stubs for public functions when
+    starting tests on a previously-untested module.
+    When NOT to use: to measure coverage of existing tests (use
+    delimit_test_coverage) or run a smoke test (delimit_test_smoke).
+
+    Sibling contrast: delimit_test_coverage measures;
+    delimit_test_smoke runs; this writes new test scaffolds.
+
+    Side effects: writes new test files alongside the source. Uses
+    AST parsing for Python and regex for JS/TS via
+    backends.ui_bridge.test_generate.
 
     Args:
-        project_path: Project path.
-        source_files: Specific files to generate tests for.
-        framework: Test framework (jest/pytest/vitest).
+        project_path: Project path. Required.
+        source_files: Specific files to generate tests for. None =
+            all detectable public functions.
+        framework: Test framework — "jest" (default), "pytest", "vitest".
+
+    Returns:
+        Dict with paths of generated test files and next_steps.
     """
     from backends.ui_bridge import test_generate
     return _with_next_steps("test_generate", _safe_call(test_generate, project_path=project_path, source_files=source_files, framework=framework))
@@ -3994,11 +5323,27 @@ def delimit_test_generate(project_path: str, source_files: Optional[List[str]] =
 
 @mcp.tool()
 def delimit_test_coverage(project_path: str, threshold: int = 80) -> Dict[str, Any]:
-    """Analyze test coverage (experimental) (Pro).
+    """Analyze test coverage for a project (experimental) (Pro).
+
+    When to use: to surface coverage by file/folder against a threshold
+    when you need a pass/fail signal for CI.
+    When NOT to use: to scaffold new test stubs (use
+    delimit_test_generate) or run a smoke run (delimit_test_smoke).
+
+    Sibling contrast: delimit_test_smoke validates that tests run at
+    all; delimit_test_generate writes test scaffolds; this measures
+    coverage of existing tests.
+
+    Side effects: read-only inspection. Gated by require_premium.
+    Calls backends.ui_bridge.test_coverage. Marked experimental —
+    coverage runner detection is heuristic.
 
     Args:
-        project_path: Project path.
-        threshold: Coverage threshold percentage.
+        project_path: Path to the project root. Required.
+        threshold: Coverage percentage threshold for pass/fail. Default 80.
+
+    Returns:
+        Dict with coverage breakdown, threshold verdict, next_steps.
     """
     from ai.license import require_premium
     gate = require_premium("test_coverage")
@@ -4012,12 +5357,25 @@ def delimit_test_coverage(project_path: str, threshold: int = 80) -> Dict[str, A
 def delimit_test_smoke(project_path: str, test_suite: Optional[str] = None) -> Dict[str, Any]:
     """Run smoke tests for a project.
 
-    Detects the test framework (pytest/jest/vitest/mocha) from project config,
-    runs the test suite, and parses pass/fail/error counts.
+    When to use: as a pre-commit / pre-deploy gate to confirm tests
+    pass. Auto-detects framework (pytest / jest / vitest / mocha) from
+    project config.
+    When NOT to use: to scaffold new tests (use delimit_test_generate)
+    or measure coverage (delimit_test_coverage).
+
+    Sibling contrast: delimit_test_generate writes;
+    delimit_test_coverage measures; this runs and parses.
+
+    Side effects: invokes the project's test runner via
+    backends.ui_bridge.test_smoke (subprocess). Read-only on filesystem
+    apart from the test runner's own outputs.
 
     Args:
-        project_path: Project path.
-        test_suite: Specific test suite to run.
+        project_path: Project path. Required.
+        test_suite: Optional specific test suite or pattern.
+
+    Returns:
+        Dict with pass/fail/error counts, framework detected, output.
     """
     from backends.ui_bridge import test_smoke
     return _with_next_steps("test_smoke", _safe_call(test_smoke, project_path=project_path, test_suite=test_suite))
@@ -4027,13 +5385,24 @@ def delimit_test_smoke(project_path: str, test_suite: Optional[str] = None) -> D
 
 @mcp.tool()
 def delimit_docs_generate(target: str = ".") -> Dict[str, Any]:
-    """Generate API reference documentation for a project.
+    """Generate a markdown API reference from source docstrings/JSDoc.
 
-    Scans Python files for docstrings and JS/TS files for JSDoc comments.
-    Produces a markdown API reference organized by source file.
+    When to use: to produce a starter API reference doc from existing
+    in-source documentation, organized per source file.
+    When NOT to use: for doc-quality validation (use
+    delimit_docs_validate) — generation does not validate.
+
+    Sibling contrast: delimit_docs_validate inspects existing docs;
+    this writes a fresh API reference.
+
+    Side effects: writes a markdown reference file via
+    backends.ui_bridge.docs_generate.
 
     Args:
-        target: Project path.
+        target: Project path. Default "." (cwd).
+
+    Returns:
+        Dict with the generated doc path and next_steps.
     """
     from backends.ui_bridge import docs_generate
     return _with_next_steps("docs_generate", _safe_call(docs_generate, target=target))
@@ -4043,11 +5412,22 @@ def delimit_docs_generate(target: str = ".") -> Dict[str, Any]:
 def delimit_docs_validate(target: str = ".") -> Dict[str, Any]:
     """Validate documentation quality and completeness.
 
-    Checks README existence, docstring coverage on public functions,
-    and broken internal links in markdown files.
+    When to use: as a CI gate to surface missing READMEs, undocumented
+    public functions, and broken internal markdown links.
+    When NOT to use: to generate fresh API reference (use
+    delimit_docs_generate).
+
+    Sibling contrast: delimit_docs_generate writes;
+    this validates existing docs.
+
+    Side effects: read-only inspection. Calls
+    backends.ui_bridge.docs_validate.
 
     Args:
-        target: Project path.
+        target: Project path. Default "." (cwd).
+
+    Returns:
+        Dict with findings (missing docstrings, broken links, etc.).
     """
     from backends.ui_bridge import docs_validate
     return _with_next_steps("docs_validate", _safe_call(docs_validate, target=target))
@@ -4075,15 +5455,28 @@ async def delimit_sensor_github_issue(
     issue_number: int,
     since_comment_id: int = 0,
 ) -> Dict[str, Any]:
-    """Check a GitHub issue for new comments since the last check.
+    """Check a GitHub issue for new comments since the last sensor tick.
 
-    Sensor tool for monitoring outreach issues. Returns a structured signal
-    with new comments, issue state, and severity classification.
+    When to use: to monitor a specific outreach / tracking issue for
+    new activity, returning a structured signal for routing.
+    When NOT to use: for repo-wide scans (use delimit_github_scan) or
+    one-shot fetch (delimit_resource_get).
+
+    Sibling contrast: delimit_github_scan scans many repos for
+    migrations; this watches one issue for new comments.
+
+    Side effects: read-only network call via gh CLI. Validates repo
+    format with regex (defense-in-depth). Subject to the
+    confused-deputy guard (_check_repo_allowlist) before fetching.
 
     Args:
-        repo: GitHub repository in owner/repo format (e.g. "owner/repo").
-        issue_number: The issue number to monitor.
-        since_comment_id: Last seen comment ID. Pass 0 to get all comments.
+        repo: "owner/repo" GitHub repository. Required.
+        issue_number: Issue number to monitor. Must be > 0.
+        since_comment_id: Last seen comment id. 0 = all comments.
+
+    Returns:
+        Dict with new comments, issue state, severity classification,
+        next_steps. Returns {error: ...} on validation failure.
     """
     import re as _re
     # Validate inputs — defense-in-depth even though subprocess.run with
@@ -4203,16 +5596,35 @@ def delimit_sensor_github_migrations(
 ) -> Dict[str, Any]:
     """Scan GitHub issues/PRs for migration patterns across target repos.
 
-    Detects language like "migrated from X to Y", "switched to Y",
-    "replaced X with Y", "no longer using X" etc. Returns structured
-    migration signals with source/target tools, sentiment, and strength.
+    When to use: for competitive intelligence — surface where target
+    repos are migrating between tools (e.g. "switched from X to Y",
+    "replaced X with Y") so the sensing function can act on the signal.
+    When NOT to use: for general sensing/outreach research
+    (use delimit_sense), to pull single-issue intel
+    (delimit_sensor_github_issue), or for broad public-repo polling
+    (delimit_github_scan).
 
-    Useful for competitive intelligence: see what tools repos are moving
-    away from and what they are adopting.
+    Sibling contrast: delimit_sensor_github_issue tracks a specific
+    issue's state; delimit_github_scan does broad public-repo polling;
+    delimit_sense is the high-level sensing entrypoint; this one
+    detects migration-pattern language specifically.
+
+    Side effects: read-only on the target repos via GitHub API.
+    Enforces the per-repo allowlist (LED-881 confused-deputy guard) —
+    refuses non-allowlisted repos. Calls
+    ai.social_target.scan_github_migrations.
 
     Args:
-        repos: List of GitHub repos in owner/repo format (e.g. ["chatwoot/chatwoot", "cal-com/cal.com"]).
+        repos: List of GitHub repos in owner/repo format
+            (e.g. ["chatwoot/chatwoot", "cal-com/cal.com"]). Required.
         limit: Max migration signals per repo. Default 20.
+
+    Returns:
+        Dict with total_signals, errors list, individual signals
+        (source/target tool, sentiment, strength), summary breakdown
+        (migrating_from / migrating_to tool counts), and next_steps.
+        If any repo fails the allowlist guard, returns
+        {"error": "repo_not_allowlisted", "refused": [...]} instead.
     """
     # LED-881 / #40 confused-deputy guard — applied per-repo.
     refusals = []
@@ -4279,10 +5691,26 @@ def _count_registered_tools() -> int:
 
 @mcp.tool()
 def delimit_version() -> Dict[str, Any]:
-    """Return Delimit unified server version, tool count, and environment status.
+    """Return Delimit server version, tool count, and environment status.
 
-    Shows auto-detected API keys, CLIs, and security tools so users know
-    what capabilities are available without manual configuration.
+    When to use: at session start, in a dashboard, or as a diagnostic
+    when investigating capability availability.
+    When NOT to use: for governance health (use delimit_gov_health) or
+    OS status (delimit_os_status).
+
+    Sibling contrast: delimit_help describes individual tools; this
+    reports server-wide version and detected environment.
+
+    Side effects: read-only. Counts registered tools and detects API
+    keys / CLIs / security tools in the environment so callers know
+    what's available without manual config.
+
+    Args:
+        None.
+
+    Returns:
+        Dict with version, total_tools, adapter_contract, authority,
+        environment-detection results, plus next_steps.
     """
     total = _count_registered_tools()
     environment = _detect_environment()
@@ -4356,10 +5784,25 @@ def delimit_swarm(action: str = "status", venture: str = "",
                    agent_id: str = "", repo_path: str = "",
                    deploy_target: str = "", target_path: str = "",
                    access_action: str = "read") -> Dict[str, Any]:
-    """Manage the agent swarm - ventures, personas, namespace isolation.
+    """Manage the cross-venture agent swarm (personas + namespace isolation).
 
-    Each venture gets 5 AI agent roles (Architect, Senior Dev, Reviewer, QA, Ops)
-    with namespace isolation and model binding per Agent Swarm Standard v1.2.
+    When to use: to inspect or mutate the swarm — register a venture
+    with its 5 agent roles, create custom tools, hot-reload modules,
+    check namespace access.
+    When NOT to use: to dispatch a single task (use
+    delimit_agent_dispatch) or read agent state
+    (delimit_agent_status / dashboard).
+
+    Sibling contrast: delimit_agent_dispatch is per-task;
+    this manages the multi-venture / multi-persona swarm overall
+    (Agent Swarm Standard v1.2).
+
+    Side effects: action="register" / "create_tool" / "create_agent" /
+    "approve_agent" / "reload" mutate state. status / venture / agent /
+    list_* / check / approve / guide / rules are read-only.
+
+    Each venture gets 5 AI agent roles (Architect, Senior Dev,
+    Reviewer, QA, Ops) with namespace isolation and model binding.
 
     Actions:
       status: Full swarm overview (ventures, agents, health)
@@ -4385,6 +5828,15 @@ def delimit_swarm(action: str = "status", venture: str = "",
         deploy_target: Deploy target for venture registration.
         target_path: File path, tool name, or role name depending on action.
         access_action: Action name - for check: "read"/"write"/"deploy". For approve: "deploy_production"/"deploy_staging"/"social_post" etc.
+
+    Returns:
+        Dict whose shape depends on action — status returns swarm
+        overview (ventures, agents, health); register returns the new
+        venture record; venture/agent return the requested record;
+        check/approve return access/approval verdicts; metric/metrics
+        return recorded metrics; create_tool/create_agent/approve_agent
+        return mutation results; reload returns the reload report.
+        Every response also includes next_steps.
     """
     from ai.swarm import (register_venture, get_venture, get_agent,
                            check_namespace_access, get_swarm_status,
@@ -4467,17 +5919,31 @@ def delimit_review(diff: str = "", file_path: str = "",
                     context: str = "", pr_url: str = "") -> Dict[str, Any]:
     """Run a multi-model code review on a diff or file.
 
-    Sends the code change to multiple AI models and consolidates their
-    feedback into a single structured review. The output can be posted
-    as a GitHub PR comment.
+    When to use: to get cross-model feedback on a code change before
+    merging, optionally posted as a PR comment.
+    When NOT to use: for structured cross-lens audit (use delimit_audit)
+    or full multi-round debate (delimit_deliberate).
 
-    Provide either a diff string or a file path to review.
+    Sibling contrast: delimit_audit is structured (security /
+    correctness / governance lenses); delimit_deliberate is full
+    debate; this is single-prompt multi-model review.
+
+    Side effects: calls multiple models via ai.multi_review. May write
+    a saved review record. When pr_url is provided, the review can be
+    posted as a PR comment by the caller (this tool returns the comment
+    body, it does not auto-post).
 
     Args:
-        diff: Git diff or code to review. Takes priority over file_path.
-        file_path: Path to file to review (reads current content).
-        context: Additional context about the change (what it does, why).
+        diff: Git diff or code text to review. Takes priority over
+            file_path.
+        file_path: Path to file to review (reads current content if no
+            diff).
+        context: Additional context about the change.
         pr_url: GitHub PR URL for linking the review.
+
+    Returns:
+        Dict with the consolidated review, per-model raw responses,
+        and a pr_comment payload ready to post.
     """
     from ai.multi_review import generate_review_prompt, consolidate_reviews, save_review
 
@@ -4555,18 +6021,32 @@ def delimit_redact(action: str = "scan", text: str = "",
                     categories: str = "") -> Dict[str, Any]:
     """Scan or redact sensitive data (API keys, secrets, PII) from text.
 
-    Use before sending prompts to external LLMs to prevent data leakage.
-    Detects: API keys (OpenAI, xAI, Google, GitHub, npm), passwords,
-    bearer tokens, emails, phone numbers, SSNs, credit cards, IPs, DB URLs.
+    When to use: before sending text to external LLMs or publishing
+    output, to prevent leaking credentials or PII.
+    When NOT to use: to manage stored secrets (use delimit_secret_store
+    family) — this is in-memory text redaction.
 
-    Actions:
-      scan: Preview what would be redacted (non-destructive)
-      redact: Replace sensitive data with [REDACTED_TYPE_N] tokens
+    Sibling contrast: delimit_secret_* manages credentials at rest;
+    this scrubs them out of arbitrary text.
+
+    Side effects: read-only on input text — produces a sanitized copy
+    in action="redact". Calls ai.pii_redact.scan / redact.
+    Detects: API keys (OpenAI, xAI, Google, GitHub, npm), passwords,
+    bearer tokens, emails, phone numbers, SSNs, credit cards, IPs,
+    database URLs.
+
+    The internal token map is intentionally NOT exposed via MCP — it
+    stays local. action="redact" returns only the redacted text and
+    counts; the original cannot be recovered through this tool.
 
     Args:
-        action: "scan" or "redact".
-        text: Text to scan/redact.
-        categories: Comma-separated categories (api_key, secret, pii, infra). Empty = all.
+        action: "scan" (preview, default) or "redact" (replace).
+        text: Text to process.
+        categories: Comma-separated categories — "api_key", "secret",
+            "pii", "infra". Empty = all categories.
+
+    Returns:
+        Dict with detected items (scan) or redacted text + counts (redact).
     """
     from ai.pii_redact import scan as pii_scan, redact as pii_redact
 
@@ -4588,10 +6068,19 @@ def delimit_redact(action: str = "scan", text: str = "",
 def delimit_prompt_drift(action: str = "check", prompt: str = "",
                           model: str = "", result_summary: str = "",
                           success: str = "true", task_type: str = "") -> Dict[str, Any]:
-    """Detect prompt drift - when the same task behaves differently across models.
+    """Detect prompt drift across Claude / Codex / Gemini for the same task.
 
-    Track how prompts perform across Claude, Codex, and Gemini.
-    Find which model is best for each task type on YOUR codebase.
+    When to use: to track per-model prompt performance over time, or
+    to rank models for specific task categories on your codebase.
+    When NOT to use: to run a multi-model deliberation (use
+    delimit_deliberate) — drift tracks single-model behaviour.
+
+    Sibling contrast: delimit_deliberate runs cross-model on a question;
+    this tracks how a known prompt drifts per model.
+
+    Side effects: action="record" writes a result to the prompt-drift
+    store via ai.prompt_drift.record_result. "check" and "rank" are
+    read-only.
 
     Actions:
       record: Log a prompt result (model, success, duration)
@@ -4599,12 +6088,20 @@ def delimit_prompt_drift(action: str = "check", prompt: str = "",
       rank: Rank models by success rate and speed
 
     Args:
-        action: "record", "check", or "rank".
-        prompt: The prompt text (for record/check).
-        model: AI model name (for record).
+        action: "record", "check" (default), or "rank".
+        prompt: Prompt text (for record / check).
+        model: AI model name (required for record).
         result_summary: Brief description of the result (for record).
-        success: Whether the result was good ("true"/"false").
-        task_type: Task category (refactoring/testing/debugging/docs).
+        success: "true" / "false" — whether the result was good.
+        task_type: Task category — "refactoring", "testing",
+            "debugging", "docs".
+
+    Returns:
+        Dict whose shape depends on action — record returns the stored
+        record id and metadata; check returns drift signals across
+        models (per-model success rate, deltas); rank returns models
+        ordered by success rate and speed for the task_type. Every
+        response includes next_steps.
     """
     from ai.prompt_drift import record_result, check_drift, get_model_rankings
 
@@ -4627,20 +6124,28 @@ def delimit_prompt_drift(action: str = "check", prompt: str = "",
 @mcp.tool()
 def delimit_collision_check(action: str = "check", file_path: str = "",
                              model: str = "", task_id: str = "") -> Dict[str, Any]:
-    """Detect and prevent two AI models from editing the same file.
+    """Detect / prevent multi-model file edit collisions (LED-129).
 
-    Call before editing a file to check if another model is already working on it.
+    When to use: in cross-model workflows — claim a file before
+    editing, release after committing — to prevent simultaneous
+    conflicting edits between Claude / Codex / Gemini.
+    When NOT to use: for single-model sessions or general filesystem
+    locking outside the multi-model swarm.
 
-    Actions:
-      check: Show all active file locks and hotspots
-      claim: Claim a file before editing (returns collision if held)
-      release: Release a file lock after done editing
+    Sibling contrast: delimit_swarm tracks ventures and personas;
+    this tracks per-file edit ownership.
+
+    Side effects: action="claim" / "release" mutate the lock state.
+    action="check" is read-only.
 
     Args:
-        action: "check", "claim", or "release".
+        action: "check" (default), "claim", or "release".
         file_path: File to claim/release (required for claim/release).
-        model: AI model name (claude/codex/gemini).
-        task_id: Optional task ID for tracking.
+        model: AI model name — "claude", "codex", "gemini".
+        task_id: Optional task id for tracking.
+
+    Returns:
+        Dict with active locks (check), claim outcome, or release status.
     """
     from ai.collision_detect import claim_file, release_file, check_collisions
 
@@ -4659,22 +6164,33 @@ def delimit_collision_check(action: str = "check", file_path: str = "",
 def delimit_project_config(action: str = "load", project_path: str = ".",
                             mode: str = "advisory", preset: str = "default",
                             task_type: str = "") -> Dict[str, Any]:
-    """Manage delimit.yml project configuration.
+    """Manage delimit.yml project configuration (load / init / model).
 
-    A committable YAML file that defines AI governance for your repo.
-    Your teammates get the same AI setup when they clone.
+    When to use: to inspect, create, or query the project's delimit.yml
+    AI configuration.
+    When NOT to use: for governance state (use delimit_gov_status) or
+    to manage prompts (use delimit_playbook).
 
-    Actions:
-      load: Read current project config (or defaults if no delimit.yml)
-      init: Create a delimit.yml in your project root
-      model: Get recommended model for a task type
+    Sibling contrast: delimit_gov_status reports governance runtime
+    state; this manages the static config file.
+
+    Side effects: action="init" writes a new delimit.yml at
+    project_path via ai.project_config.init_project_config. "load" and
+    "model" are read-only.
 
     Args:
-        action: "load", "init", or "model".
-        project_path: Project root directory.
-        mode: Governance mode for init (advisory/guarded/enforce).
-        preset: Policy preset for init (strict/default/relaxed).
-        task_type: Task type for model lookup (refactoring/testing/docs/debugging).
+        action: "load" (default), "init", or "model".
+        project_path: Project root directory. Default "." (cwd).
+        mode: Governance mode (only for init). One of "advisory",
+            "guarded", "enforce". Default "advisory".
+        preset: Policy preset (only for init). One of "strict",
+            "default", "relaxed". Default "default".
+        task_type: Task type for model lookup (only for action="model").
+            Examples: "refactoring", "testing", "docs", "debugging".
+
+    Returns:
+        Dict with the loaded config / init result / recommended model
+        plus next_steps.
     """
     from ai.project_config import load_project_config, init_project_config, get_model_for_task
 
@@ -4695,24 +6211,39 @@ def delimit_project_config(action: str = "load", project_path: str = ".",
 def delimit_playbook(action: str = "list", name: str = "", prompt: str = "",
                       description: str = "", variables: str = "",
                       model_hint: str = "", tags: str = "") -> Dict[str, Any]:
-    """Manage reusable prompt templates - save, run, list, delete.
+    """Manage reusable prompt templates — save / run / list / delete.
 
-    Save your best prompts as named commands. Use {{variables}} for dynamic parts.
-    Works across all AI assistants through the shared MCP workspace.
+    When to use: to save your best prompts as named commands and run
+    them later with variable substitution. Shared across AI assistants.
+    When NOT to use: to manage project config (use delimit_project_config)
+    or memories (delimit_memory_store).
+
+    Sibling contrast: delimit_memory_store records info;
+    this stores executable prompt templates with {{variable}}
+    substitution.
+
+    Side effects: action="save" / "delete" mutate ~/.delimit/playbooks/.
+    action="run" calls the configured model with substituted prompt.
+    action="list" is read-only.
 
     Examples:
-      Save: delimit_playbook(action="save", name="test-gen", prompt="Generate Jest tests for {{file}}")
-      Run:  delimit_playbook(action="run", name="test-gen", variables="file=src/auth.ts")
+      Save: delimit_playbook(action="save", name="test-gen",
+        prompt="Generate Jest tests for {{file}}")
+      Run:  delimit_playbook(action="run", name="test-gen",
+        variables="file=src/auth.ts")
       List: delimit_playbook(action="list")
 
     Args:
-        action: "save", "run", "list", or "delete".
-        name: Playbook name (required for save/run/delete).
-        prompt: Prompt template with {{variable}} placeholders (save only).
-        description: Short description of what this playbook does.
-        variables: For run: comma-separated key=value pairs. For save: comma-separated variable names.
-        model_hint: Suggested model (e.g. "claude-opus" for complex tasks).
+        action: "save", "run", "list" (default), or "delete".
+        name: Playbook name. Required for save/run/delete.
+        prompt: Template with {{variable}} placeholders (save only).
+        description: Short description.
+        variables: For run, "key=value,..."; for save, "name1,name2,...".
+        model_hint: Suggested model (e.g. "claude-opus").
         tags: Comma-separated tags for organization.
+
+    Returns:
+        Dict with the action result.
     """
     from ai.playbook import save_playbook, run_playbook, list_playbooks, delete_playbook
 
@@ -4747,10 +6278,25 @@ def delimit_playbook(action: str = "list", name: str = "", prompt: str = "",
 
 @mcp.tool()
 def delimit_help(tool_name: str = "") -> Dict[str, Any]:
-    """Get help for a Delimit tool - what it does, parameters, and examples.
+    """Get help for a Delimit tool — purpose, parameters, examples.
+
+    When to use: when an agent or operator needs a quick reminder of
+    a tool's interface, or wants the workflow overview.
+    When NOT to use: for the full version/environment status (use
+    delimit_version) or governance health (delimit_gov_health).
+
+    Sibling contrast: delimit_version reports server info;
+    this returns per-tool descriptions from the TOOL_HELP table.
+
+    Side effects: read-only. Looks up an in-memory help table.
 
     Args:
-        tool_name: Tool name (e.g. 'lint', 'gov_health'). Leave empty for overview.
+        tool_name: Tool name (e.g. "lint", "gov_health"). Empty
+            returns the workflows overview.
+
+    Returns:
+        Dict with description, params, example for the tool, or a
+        workflow overview when tool_name is empty.
     """
     if not tool_name:
         total = _count_registered_tools()
@@ -4774,17 +6320,30 @@ def delimit_help(tool_name: str = "") -> Dict[str, Any]:
 
 @mcp.tool()
 def delimit_diagnose(project_path: str = ".", dry_run: bool = False, undo: bool = False) -> Dict[str, Any]:
-    """Comprehensive health check of your Delimit installation (delimit doctor).
+    """Comprehensive health check of the Delimit installation (delimit doctor).
 
-    Universal debugging tool. Runs 10 checks covering MCP connectivity,
-    dependencies, governance state, AI assistants, permissions, API keys,
-    network, version, daemons, and disk usage. Each item reports PASS, FAIL,
-    or SKIP with actionable fixes.
+    When to use: as the universal first-step diagnostic when something
+    isn't working — covers MCP connectivity, deps, governance state,
+    AI assistants, permissions, API keys, network, version, daemons,
+    disk.
+    When NOT to use: for repo-level health (use delimit_repo_diagnose)
+    or first-run discovery (delimit_quickstart).
+
+    Sibling contrast: delimit_repo_diagnose checks one repo;
+    this checks the Delimit installation as a whole.
+
+    Side effects: in normal mode, fixes some configuration drift
+    (writes a doctor-manifest.json so later --undo can revert).
+    dry_run=True is read-only and previews changes. undo=True reverts
+    changes from the last doctor run using the saved manifest.
 
     Args:
-        project_path: Project to diagnose.
-        dry_run: If True, return a preview of what doctor would create/modify without executing changes.
-        undo: If True, revert changes from the last doctor --fix run using the saved manifest.
+        project_path: Project to diagnose. Default "." (cwd).
+        dry_run: If True, preview changes without executing.
+        undo: If True, revert changes from the last run.
+
+    Returns:
+        Dict with PASS/FAIL/SKIP per check, actionable fixes, manifest.
     """
     import sys
     import hashlib
@@ -5262,15 +6821,30 @@ def delimit_diagnose(project_path: str = ".", dry_run: bool = False, undo: bool 
 def delimit_activate(license_key: str = "", project_path: str = ".", auto_permissions: bool = True) -> Dict[str, Any]:
     """Activate Delimit and run a readiness checklist.
 
-    Performs a comprehensive activation check: license validation, MCP server
-    status, governance init, test smoke, permission auto-config, and premium
-    feature availability.  Skipped checks (premium on free tier, no test
-    framework) do NOT count against the score.
+    When to use: as the post-install confirmation that everything is
+    wired up — license, MCP, governance, tests, permissions, premium.
+    When NOT to use: for diagnostic-style debugging of an already
+    activated install (use delimit_diagnose) or first-run discovery
+    (delimit_quickstart).
+
+    Sibling contrast: delimit_diagnose investigates issues;
+    delimit_quickstart is the 60-second guided first run; this is the
+    activation + readiness checklist.
+
+    Side effects: applies the license key when provided; auto-configures
+    AI-assistant permissions when auto_permissions=True (writes
+    .claude/settings.json). Skipped checks (premium on free tier, no
+    test framework) do not count against the score.
 
     Args:
-        license_key: Optional license key to activate Pro (e.g. DELIMIT-XXXX-XXXX-XXXX). Leave empty to check free-tier readiness.
-        project_path: Project directory to check.
-        auto_permissions: Auto-configure AI assistant permissions for Delimit tools (default True).
+        license_key: Optional license key (e.g. DELIMIT-XXXX-XXXX-XXXX).
+            Empty = free-tier readiness only.
+        project_path: Project directory to check. Default "." (cwd).
+        auto_permissions: Auto-configure AI assistant permissions
+            (default True).
+
+    Returns:
+        Dict with checklist results, score, license tier, next_steps.
     """
     from ai.activate_helpers import build_checklist
     result = build_checklist(license_key=license_key, project_path=project_path, auto_permissions=auto_permissions)
@@ -5279,7 +6853,24 @@ def delimit_activate(license_key: str = "", project_path: str = ".", auto_permis
 
 @mcp.tool()
 def delimit_license_status() -> Dict[str, Any]:
-    """Check current Delimit license status -- tier, validity, and expiry."""
+    """Report the current Delimit license tier, validity, and expiry.
+
+    When to use: to inspect the active license before invoking gated
+    tools, or as a diagnostic when require_premium is rejecting calls.
+    When NOT to use: to install or rotate a license — this is a read.
+
+    Sibling contrast: this reads license state; gated tools (e.g.
+    delimit_gov_evaluate, delimit_secret_get) call require_premium
+    internally.
+
+    Side effects: read-only. Calls ai.license.get_license.
+
+    Args:
+        None.
+
+    Returns:
+        Dict with tier, validity, expiry, plus next_steps.
+    """
     from ai.license import get_license
     return _with_next_steps("license_status", get_license())
 
@@ -5294,7 +6885,30 @@ def delimit_deploy_site(
     project_path: str = ".",
     message: str = "",
 ) -> Dict[str, Any]:
-    """Deploy a site - git commit, push, Vercel build, deploy (Pro)."""
+    """Deploy a static/Next.js site via git push + Vercel build (Pro).
+
+    When to use: to ship UI/site changes (commit, push, trigger Vercel
+    build, then deploy).
+    When NOT to use: for npm package publishes (use delimit_deploy_npm)
+    or container deploys (delimit_deploy_publish).
+
+    Sibling contrast: delimit_deploy_publish ships container images;
+    delimit_deploy_npm publishes packages; this is the site-flavour.
+
+    Side effects: gated by require_premium. Sanitizes project_path
+    via _sanitize_path. Performs git operations and a network deploy
+    via backends.tools_infra.deploy_site. For the delimit-ui project,
+    auto-injects ChatOps env vars from CHATOPS_AUTH_TOKEN.
+
+    Args:
+        project_path: Path to the site project. Default "." (cwd).
+            Sanitized — must not escape the workspace root.
+        message: Git commit message for the deploy commit.
+
+    Returns:
+        Dict with deploy status, build URL, next_steps. Returns
+        {error: "..."} on path sanitisation failure.
+    """
     return _delimit_deploy_impl(action="site", project_path=project_path, message=message)
 
 
@@ -5305,7 +6919,30 @@ def delimit_deploy_npm(
     tag: str = "latest",
     dry_run: bool = False,
 ) -> Dict[str, Any]:
-    """Publish an npm package (Pro)."""
+    """Publish an npm package with version bump and dist-tag (Pro).
+
+    When to use: to ship a new version of an npm-published package
+    (CLI, SDK, etc.).
+    When NOT to use: for site deploys (use delimit_deploy_site) or
+    container images (delimit_deploy_publish).
+
+    Sibling contrast: delimit_deploy_site ships UI; delimit_deploy_publish
+    ships images; this ships npm tarballs.
+
+    Side effects: gated by require_premium. Calls
+    backends.tools_infra.deploy_npm which runs the npm publish chain:
+    version bump in package.json, npm pack, npm publish to the
+    registry. dry_run=True suppresses the actual publish.
+
+    Args:
+        project_path: Path to the npm project root. Default "." (cwd).
+        bump: Semver bump — "patch" (default), "minor", or "major".
+        tag: npm dist-tag for the publish. Default "latest".
+        dry_run: If True, run the chain without publishing. Default False.
+
+    Returns:
+        Dict with publish status, new version, registry URL, next_steps.
+    """
     return _delimit_deploy_impl(action="npm", project_path=project_path, bump=bump, tag=tag, dry_run=dry_run)
 
 
@@ -5356,13 +6993,24 @@ def delimit_ledger_add(
 ) -> Dict[str, Any]:
     """Add a new item to a project's ledger.
 
-    The ledger tracks what needs to be done across sessions. Specify the venture/project
-    name or path. If empty, auto-detects from current directory.
+    When to use: to capture work that should outlive the current
+    session — tasks, bugs, features, decisions, strategy items.
+    When NOT to use: for governance-classed work (use
+    delimit_gov_new_task) or quick conversation memory
+    (delimit_memory_store).
+
+    Sibling contrast: delimit_ledger_update changes;
+    delimit_ledger_done closes; this creates.
+
+    Side effects: writes a new ledger entry via
+    ai.ledger_manager.add_item. Coerces tags / acceptance_criteria /
+    tools_needed from comma strings to lists via _coerce_list_arg.
 
     Args:
-        title: What needs to be done.
-        venture: Project name or path (e.g. "my-project", "./path/to/project"). Auto-detects if empty.
-        ledger: "ops" (tasks, bugs, features) or "strategy" (decisions, direction).
+        title: What needs to be done. Required.
+        venture: Project name or path. Empty = auto-detect from cwd.
+        ledger: "ops" (tasks, bugs, features) or "strategy"
+            (decisions, direction).
         item_type: task, fix, feat, strategy, consensus.
         priority: P0 (urgent), P1 (important), P2 (nice to have).
         description: Details.
@@ -5373,6 +7021,11 @@ def delimit_ledger_add(
         tools_needed: Delimit tools needed (e.g. "delimit_lint", "delimit_test_coverage").
         estimated_complexity: small, medium, or large.
         worked_by: Which AI model is working on this. Auto-detected if empty.
+
+    Returns:
+        Dict with the new ledger item record (id, title, ledger, type,
+        priority, status, created_at, project_path, tags, ...) plus
+        next_steps. On validation error returns {"error": str}.
     """
     try:
         tags = _coerce_list_arg(tags, "tags")
@@ -5412,25 +7065,36 @@ def delimit_ledger_update(
     blocks: str = "",
     worked_by: str = "",
 ) -> Dict[str, Any]:
-    """Update any field on a ledger item.
+    """Update any field on an existing ledger item.
 
-    Supports: status, priority, title, description, assignee, due date, labels,
-    and dependency links (blocked_by, blocks). Pass only the fields you want to change.
+    When to use: to change state on a ledger item (status, priority,
+    assignee, links, labels). Pass only the fields you want to change.
+    When NOT to use: to create a new item (use delimit_ledger_add) or
+    to mark one done (delimit_ledger_done is the convenience wrapper).
+
+    Sibling contrast: delimit_ledger_add creates;
+    delimit_ledger_done closes; this is the general-purpose updater.
+
+    Side effects: writes to the ledger via ai.ledger_manager. Coerces
+    string list inputs (labels) through _coerce_list_arg.
 
     Args:
-        item_id: The item ID (e.g. LED-001 or STR-001).
-        venture: Project name or path. Auto-detects if empty.
-        status: New status - "open", "in_progress", "blocked", "done".
-        priority: New priority - "P0", "P1", "P2".
+        item_id: Ledger item id, e.g. "LED-001" or "STR-001". Required.
+        venture: Project name/path. Empty = auto-detect.
+        status: New status — "open", "in_progress", "blocked", "done".
+        priority: New priority — "P0", "P1", "P2".
         title: New title.
         description: New description.
-        note: Add a note/comment to the item.
-        assignee: Assign to a person or agent (e.g. "founder", "claude", "codex").
-        due_date: Due date in ISO format (e.g. "2026-04-01").
-        labels: Labels/tags (e.g. ["dashboard", "ux"] or "dashboard,ux").
-        blocked_by: Item ID that blocks this item (e.g. "LED-025").
-        blocks: Item ID that this item blocks (e.g. "STR-005").
-        worked_by: Which AI model is working on this. Auto-detected if empty.
+        note: Append a note/comment to the item.
+        assignee: Assign to person or agent (e.g. "founder", "claude").
+        due_date: ISO date string (e.g. "2026-04-01").
+        labels: Labels/tags as comma string or list.
+        blocked_by: Item id that blocks this one (e.g. "LED-025").
+        blocks: Item id that this one blocks (e.g. "STR-005").
+        worked_by: AI model working on this. Empty = auto-detect.
+
+    Returns:
+        Dict with the update result and next_steps.
     """
     try:
         labels = _coerce_list_arg(labels, "labels") if labels else None
@@ -5450,12 +7114,26 @@ def delimit_ledger_update(
 
 @mcp.tool()
 def delimit_ledger_done(item_id: str, note: str = "", venture: str = "") -> Dict[str, Any]:
-    """Mark a ledger item as done.
+    """Mark a ledger item as done (convenience wrapper).
+
+    When to use: to close out a ledger item with one call instead of
+    using delimit_ledger_update with status="done".
+    When NOT to use: to change other fields (use delimit_ledger_update)
+    or create new items (delimit_ledger_add).
+
+    Sibling contrast: delimit_ledger_update changes any field;
+    this is the close-out shortcut.
+
+    Side effects: writes status="done" + optional note via
+    ai.ledger_manager.update_item.
 
     Args:
-        item_id: The item ID (e.g. LED-001 or STR-001).
+        item_id: Ledger item id (e.g. "LED-001"). Required.
         note: Optional completion note.
-        venture: Project name or path. Auto-detects if empty.
+        venture: Project name or path. Empty = auto-detect.
+
+    Returns:
+        Dict with the update result and next_steps.
     """
     from ai.ledger_manager import update_item
     project = _resolve_venture(venture)
@@ -5471,14 +7149,42 @@ def delimit_ledger_list(
     priority: str = "",
     limit: int = 20,
 ) -> Dict[str, Any]:
-    """List ledger items for a venture/project.
+    """List ledger items with rich filters, sort, and pagination (LED-1145).
+
+    When to use: to query a venture's ledger with filters — by status,
+    priority, tags, text, time window, or external link.
+    When NOT to use: for a top-N summary (use delimit_ledger_context)
+    or to fetch a single item (delimit_ledger_query).
+
+    Sibling contrast: delimit_ledger_context is the top-5 summary;
+    delimit_ledger_query fetches one; this is the powerful list call.
+
+    Side effects: read-only. Calls ai.ledger_manager.list_items.
+    Single-value `status` / `priority` are kept for back-compat.
 
     Args:
-        venture: Project name or path. Auto-detects if empty.
-        ledger: "ops", "strategy", or "both".
-        status: Filter by status - "open", "done", "in_progress", or empty for all.
-        priority: Filter by priority - "P0", "P1", "P2", or empty for all.
-        limit: Max items to return.
+        venture: Project name/path. Empty = auto-detect.
+        ledger: "ops", "strategy", or "both" (default).
+        status: Single-value status filter (back-compat).
+        priority: Single-value priority filter (back-compat).
+        status_in: Comma-separated statuses (e.g. "open,blocked").
+        priority_in: Comma-separated priorities (e.g. "P0,P1").
+        tags_contains_all: Comma-separated tags; item must contain ALL.
+        text: Case-insensitive substring match on title + description.
+        linked_external_id: Substring match in description / tags /
+            context (github URL, Linear id, Discord thread).
+        created_before / created_after / updated_before / updated_after:
+            ISO-8601 timestamp boundaries.
+        sort: "updated_at" (default), "created_at", or "priority".
+        order: "asc" or "desc" (default).
+        fields: Response projection. "" / "*" = full; "slim" = subset;
+            CSV = those fields only. Unknown names ERROR.
+        limit: Page size. Default 20.
+        cursor: Opaque pagination token from prior next_cursor. Becomes
+            invalid if filters change between calls.
+
+    Returns:
+        Dict with items, optional next_cursor, plus next_steps.
     """
     from ai.ledger_manager import list_items
     project = _resolve_venture(venture)
@@ -5488,13 +7194,23 @@ def delimit_ledger_list(
 
 @mcp.tool()
 def delimit_ledger_context(venture: str = "") -> Dict[str, Any]:
-    """Get a quick summary of what's open in the ledger.
+    """Quick summary of what's open in the ledger (top 5 by priority).
 
-    Auto-detects the venture from context. Pass a venture name to check a specific project.
-    Returns the top 5 open items by priority so the AI knows what to work on.
+    When to use: at session start as part of the orchestrator session
+    ritual, to see the highest-priority open items.
+    When NOT to use: for the full list (use delimit_ledger_list) or to
+    fetch a specific item (delimit_ledger_query).
+
+    Sibling contrast: delimit_ledger_list returns the full list;
+    this returns a top-5 summary.
+
+    Side effects: read-only. Calls ai.ledger_manager.get_context.
 
     Args:
-        venture: Project name or path. Auto-detects if empty.
+        venture: Project name or path. Empty = auto-detect from cwd.
+
+    Returns:
+        Dict with the top 5 open items and next_steps.
     """
     from ai.ledger_manager import get_context
     project = _resolve_venture(venture) if venture else "."
@@ -5507,19 +7223,27 @@ def delimit_ledger_query(
     query: str,
     venture: str = "",
 ) -> Dict[str, Any]:
-    """Ask natural language questions about the ledger (ChatOps 2.0).
+    """Ask natural-language questions about the ledger (ChatOps 2.0).
 
-    Examples:
-      "what shipped this week?"
-      "what's blocked?"
-      "show me all P0s"
-      "how many items total?"
-      "what should I work on next?"
-      "search for dashboard"
+    When to use: when an operator wants a free-form answer ("what
+    shipped this week?", "what's blocked?", "show all P0s") rather
+    than a structured filter query.
+    When NOT to use: for structured listing (use delimit_ledger_list)
+    or top-N summary (delimit_ledger_context).
+
+    Sibling contrast: delimit_ledger_list takes structured filters;
+    this maps natural language to those filters internally.
+
+    Side effects: read-only. Internally calls list / context queries.
 
     Args:
-        query: Natural language question about the ledger.
-        venture: Project name or path. Auto-detects if empty.
+        query: Natural-language question (e.g. "what's blocked?",
+            "search for dashboard"). Required.
+        venture: Project name/path. Empty = auto-detect.
+
+    Returns:
+        Dict with the query response (matched items, summary) and
+        next_steps.
     """
     from ai.ledger_manager import query_ledger
     project = _resolve_venture(venture)
@@ -5534,17 +7258,31 @@ def delimit_ledger_link(
     note: str = "",
     venture: str = "",
 ) -> Dict[str, Any]:
-    """Create a relationship between two ledger items.
+    """Create a typed relationship between two ledger items.
 
-    Supports: blocks/blocked_by (auto-creates reverse), parent/child,
-    relates_to, duplicates. Use to track dependencies and sub-tasks.
+    When to use: to track dependencies and structure (blocks,
+    parent/child, duplicates) between ledger items.
+    When NOT to use: to read existing links (use delimit_ledger_links)
+    or update other fields (delimit_ledger_update).
+
+    Sibling contrast: delimit_ledger_links reads;
+    delimit_ledger_update changes simple fields; this writes a
+    relationship.
+
+    Side effects: writes the link via ai.ledger_manager.link_items.
+    "blocks" / "blocked_by" auto-create the reverse direction so
+    both items see the relationship.
 
     Args:
-        from_id: Source item ID (e.g. "LED-025").
-        to_id: Target item ID (e.g. "STR-005").
-        link_type: Relationship type - "blocks", "blocked_by", "parent", "child", "relates_to", "duplicates".
+        from_id: Source item id (e.g. "LED-025"). Required.
+        to_id: Target item id (e.g. "STR-005"). Required.
+        link_type: One of "blocks" (default), "blocked_by", "parent",
+            "child", "relates_to", "duplicates".
         note: Optional note explaining the relationship.
-        venture: Project name or path. Auto-detects if empty.
+        venture: Project name/path. Empty = auto-detect.
+
+    Returns:
+        Dict with the link record and next_steps.
     """
     from ai.ledger_manager import link_items
     project = _resolve_venture(venture)
@@ -5556,14 +7294,25 @@ def delimit_ledger_links(
     item_id: str,
     venture: str = "",
 ) -> Dict[str, Any]:
-    """Get all relationships/dependencies for a ledger item.
+    """List relationships / dependencies for a ledger item.
 
-    Returns all links where this item is either the source or target.
-    Shows: blocks, blocked_by, parent, child, relates_to, duplicates.
+    When to use: to inspect what an item blocks, what it depends on,
+    its parent/child, related items, and duplicates.
+    When NOT to use: to add a link (use delimit_ledger_link) or
+    update fields (delimit_ledger_update).
+
+    Sibling contrast: delimit_ledger_link adds links;
+    this reads existing ones.
+
+    Side effects: read-only. Calls ai.ledger_manager.get_links.
 
     Args:
-        item_id: The item ID to look up links for.
-        venture: Project name or path. Auto-detects if empty.
+        item_id: Item id to look up links for. Required.
+        venture: Project name/path. Empty = auto-detect.
+
+    Returns:
+        Dict with link records by relationship type (blocks, blocked_by,
+        parent, child, relates_to, duplicates).
     """
     from ai.ledger_manager import get_links
     project = _resolve_venture(venture)
@@ -5582,17 +7331,31 @@ def delimit_session_handoff(
 ) -> Dict[str, Any]:
     """Save a session summary for cross-session continuity.
 
-    Call at the end of a productive session so the next session can recover context.
-    Stores: what was completed, what was added, key decisions, blockers, and files changed.
+    When to use: at the end of a productive session, to leave a
+    structured record the next session can recover.
+    When NOT to use: for richer cross-model state (use
+    delimit_soul_capture, which auto-detects more) or single-line
+    memory (delimit_memory_store).
+
+    Sibling contrast: delimit_soul_capture writes a richer "soul" with
+    git state; this writes a structured handoff with explicit fields.
+
+    Side effects: writes a handoff record via
+    ai.ledger_manager.session_handoff. Coerces list inputs from comma
+    strings via _coerce_list_arg.
 
     Args:
-        summary: 2-3 sentence summary of what happened this session.
-        items_completed: List of completed ledger item IDs (e.g. ["LED-164", "LED-165"]).
-        items_added: List of newly added item IDs.
+        summary: 2-3 sentence summary of the session. Required.
+        items_completed: Completed ledger item ids
+            (e.g. ["LED-164"]) as list or comma string.
+        items_added: Newly added item ids as list or comma string.
         key_decisions: Key decisions or consensus results.
         blockers: What's blocked and why.
         files_changed: Key files that were modified.
-        venture: Venture context. Auto-detects if empty.
+        venture: Venture context. Empty = auto-detect.
+
+    Returns:
+        Dict with the saved handoff record.
     """
     try:
         items_completed = _coerce_list_arg(items_completed, "items_completed") if items_completed else None
@@ -5626,11 +7389,22 @@ def delimit_session_handoff(
 def delimit_session_history(limit: int = 5) -> Dict[str, Any]:
     """Load recent session handoffs for context recovery.
 
-    Call at the start of a new session to see what happened previously.
-    Returns the last N session summaries with items completed, decisions, and blockers.
+    When to use: at session start to see what previous sessions left —
+    items completed, key decisions, blockers from the last N runs.
+    When NOT to use: to write a handoff (use delimit_session_handoff)
+    or for richer cross-model state (delimit_revive).
+
+    Sibling contrast: delimit_session_handoff writes;
+    delimit_revive reads soul state; this reads structured handoffs.
+
+    Side effects: read-only. Calls ai.ledger_manager.session_history.
 
     Args:
-        limit: Number of recent sessions to return (default 5).
+        limit: Number of recent sessions to return. Default 5.
+
+    Returns:
+        Dict with recent session summaries (items_completed, decisions,
+        blockers per session) and next_steps.
     """
     from ai.ledger_manager import session_history
     return session_history(limit=limit)
@@ -5638,9 +7412,25 @@ def delimit_session_history(limit: int = 5) -> Dict[str, Any]:
 
 @mcp.tool()
 def delimit_ventures() -> Dict[str, Any]:
-    """List all registered ventures/projects that Delimit has been used with.
+    """List all registered ventures (auto-registered project directories).
 
-    Ventures are auto-registered when you use any Delimit tool in a project directory.
+    When to use: to inventory which projects Delimit has tracked, before
+    routing a ledger query or context operation.
+    When NOT to use: to read venture-scoped context (use
+    delimit_context_list) or memory (delimit_memory_recent).
+
+    Sibling contrast: delimit_context_list inventories artifacts inside
+    one venture; this lists the ventures themselves.
+
+    Side effects: read-only. Calls ai.ledger_manager.list_ventures.
+    Note: ventures are auto-registered when any Delimit tool is run in
+    a project directory.
+
+    Args:
+        None.
+
+    Returns:
+        Dict with the venture list (each entry has name, path, etc.).
     """
     from ai.ledger_manager import list_ventures
     return list_ventures()
@@ -5662,10 +7452,22 @@ def delimit_soul_capture(
     tokens_used: int = 0,
     context_fullness: float = 0.0,
 ) -> Dict[str, Any]:
-    """Capture current session state as a 'soul' for cross-model resurrection (Pro).
+    """Capture session state as a 'soul' for cross-model resurrection (Pro).
 
-    Save what you're working on so the next session (in any model) picks up
-    where you left off. Auto-detects git state and files changed.
+    When to use: at session end or when context gets full, to save
+    what you're working on so the next session in any model can pick
+    up where you left off.
+    When NOT to use: for general memory writes (use
+    delimit_memory_store) or full handoff orchestration
+    (delimit_session_handoff).
+
+    Sibling contrast: delimit_session_handoff writes a structured
+    handoff for the next session; this writes a richer "soul" with
+    git state and active task pointers, used by delimit_revive.
+
+    Side effects: writes a soul record via ai.session_phoenix.capture_soul.
+    Auto-detects git state and the current model. Splits comma-string
+    inputs into lists internally.
 
     Args:
         active_task: What you're currently working on (one line).
@@ -5673,9 +7475,12 @@ def delimit_soul_capture(
         key_context: Comma-separated important context for next session.
         blockers: Comma-separated blockers.
         next_steps: Comma-separated next steps.
-        task_status: in_progress, blocked, or almost_done.
+        task_status: One of "in_progress", "blocked", "almost_done".
         tokens_used: Estimated tokens consumed this session.
-        context_fullness: 0.0-1.0 how full the context window is.
+        context_fullness: 0.0-1.0 representing context-window fullness.
+
+    Returns:
+        Dict with the captured soul record, plus next_steps suggestions.
     """
     from ai.session_phoenix import capture_soul as _capture
 
@@ -5711,14 +7516,26 @@ def delimit_soul_capture(
 
 @mcp.tool()
 def delimit_revive(project_path: str = "", soul_id: str = "") -> Dict[str, Any]:
-    """Revive the last session's state in any model (Pro).
+    """Revive the last session's captured soul in any model (Pro).
 
-    Run this at the start of a new session to pick up where you left off.
-    Works across Claude Code, Codex, Gemini CLI, and Cursor.
+    When to use: at the start of a new session, to load the previous
+    session's "soul" (active task, decisions, blockers, next steps).
+    When NOT to use: to capture a new soul (use delimit_soul_capture)
+    or to read recent memories (delimit_memory_recent).
+
+    Sibling contrast: delimit_soul_capture writes the soul; this reads
+    and applies it. Works across Claude Code, Codex, Gemini CLI, and
+    Cursor.
+
+    Side effects: read-only on the soul store; calls
+    ai.session_phoenix.revive. Does not write a new soul.
 
     Args:
-        project_path: Project to revive. Auto-detects from cwd.
-        soul_id: Specific soul to revive. Empty = latest.
+        project_path: Project path to revive. Empty = auto-detect from cwd.
+        soul_id: Specific soul id to revive. Empty = latest.
+
+    Returns:
+        Dict with the resurrected soul state and next_steps.
     """
     from ai.session_phoenix import revive as _revive
     result = _revive(project_path=project_path, soul_id=soul_id)
@@ -5737,22 +7554,31 @@ def delimit_models(
     api_key: str = "",
     model_name: str = "",
 ) -> Dict[str, Any]:
-    """ (Pro).
-        View and configure AI models for multi-model deliberation.
+    """View and configure AI models for multi-model deliberation (Pro).
 
-    Actions:
-      - "list": show configured models and what's available
-      - "detect": auto-detect API keys from environment and configure
-      - "add": add a model provider (set provider + api_key)
-      - "remove": remove a model provider (set provider)
+    When to use: to inventory configured providers, auto-detect new
+    keys, or register/remove a provider for delimit_deliberate.
+    When NOT to use: to actually run a deliberation (use
+    delimit_deliberate) or to inspect deliberation history.
 
-    Supported providers: grok, gemini, openai, anthropic, codex
+    Sibling contrast: delimit_deliberate runs the panel; this manages
+    which models the panel can call.
+
+    Side effects: gated by require_premium. action="add" / "remove"
+    write provider config; "list" / "detect" are read-only.
 
     Args:
-        action: list, detect, add, or remove.
-        provider: Model provider for add/remove (grok, gemini, openai, anthropic, codex).
-        api_key: API key for the provider (only used with action=add).
-        model_name: Optional model name override (e.g. "gpt-4o", "claude-sonnet-4-5-20250514").
+        action: One of "list" (default), "detect", "add", "remove".
+        provider: Provider name for add/remove. One of "grok",
+            "gemini", "openai", "anthropic", "codex". Required for
+            add/remove.
+        api_key: API key value. Required for action="add".
+        model_name: Optional model override (e.g. "gpt-4o",
+            "claude-sonnet-4-5"). Falls back to provider default.
+
+    Returns:
+        Dict with the action result (provider list, detection summary,
+        or add/remove confirmation).
     """
     from ai.license import require_premium
     gate = require_premium("models")
@@ -5844,11 +7670,31 @@ def delimit_models(
 
 @mcp.tool()
 def delimit_deliberation_status() -> Dict[str, Any]:
-    """Check your deliberation usage and mode (hosted free tier vs BYOK).
+    """Check deliberation usage and mode (hosted free tier vs BYOK).
 
-    Returns how many free deliberations you have used and remaining,
-    whether you are in hosted (free) or BYOK (bring your own keys) mode,
-    and your total deliberation count.
+    When to use: before invoking delimit_deliberate, to confirm whether
+    you are still inside the hosted free-tier quota or running BYOK
+    (bring-your-own-keys), and to read the signed-in OAuth state.
+    When NOT to use: to run an actual panel (use delimit_deliberate) or
+    to manage provider keys (delimit_models).
+
+    Sibling contrast: delimit_deliberate runs the panel; delimit_models
+    manages provider keys; this is the lightweight pre-flight status
+    check.
+
+    Side effects: read-only. Calls ai.deliberation.get_deliberation_status
+    which reads ~/.delimit state.
+
+    LED-2092: hosted access now requires a delimit.ai account.
+
+    Args:
+        None.
+
+    Returns:
+        Dict with: oauth_required, oauth_signed_in, lifetime_used,
+        lifetime_remaining, daily_cap_remaining, signin_url, plus the
+        legacy hosted_used / hosted_remaining / hosted_limit fields
+        retained for backward compatibility with scripted callers.
     """
     from ai.deliberation import get_deliberation_status
     return get_deliberation_status()
@@ -5863,24 +7709,38 @@ def delimit_deliberate(
     save_path: str = "",
     scope: str = "",
 ) -> Dict[str, Any]:
-    """Run multi-model consensus via real AI-to-AI deliberation (Pro).
+    """Run multi-model consensus via AI-to-AI deliberation (Pro).
 
-    Models debate each other directly until unanimous agreement.
-    Free tier: 3 deliberations using Gemini Flash + GPT-4o-mini, no setup required.
-    BYOK: configure your own API keys in ~/.delimit/models.json for unlimited use
-    with any models (Grok, Claude, Gemini Pro, GPT-4o, etc).
+    When to use: for foundational decisions (pricing, naming,
+    public-facing copy framing, doctrine edits), external PR diffs, or
+    any decision where cross-model contradiction-detection adds value.
+    When NOT to use: for routine implementation choices (orchestrate
+    in-thread or via subagent dispatch) — deliberation is for
+    cross-checked confabulation, not capability.
+
+    Sibling contrast: delimit_models manages which providers can be
+    called; this runs the actual panel. delimit_security_deliberate
+    is the security-class variant.
+
+    Side effects: writes transcripts under save_path when provided.
+    Models are called via configured providers; Free tier uses 3
+    builtin slots, Pro/Premium uses BYOK from ~/.delimit/models.json.
+    Strategic / social scopes enforce a 3-model minimum and may
+    invoke Grok as a tiebreaker.
 
     Args:
-        question: The question to reach consensus on.
-        context: Background context for all models.
+        question: The question to reach consensus on. Required.
+        context: Background context shared to all models.
         mode: "dialogue" (short turns) or "debate" (long essays).
-        max_rounds: Maximum rounds (default 3 for debate, 6 for dialogue).
+            Default "dialogue".
+        max_rounds: Max rounds. Default 3 for debate, 6 for dialogue.
         save_path: Optional file path to save the full transcript.
         scope: Optional scope override — "strategic", "social", or
-            "operational". When empty, the engine classifies from
-            keywords in the question and context. Strategic and social
-            scopes enforce the 3-model minimum (charter consensus-thresholds)
-            and allow Grok as a tiebreaker on deadlock.
+            "operational". Empty = engine classifies from keywords.
+
+    Returns:
+        Dict with the consensus result, per-round transcripts, and
+        next_steps.
     """
     from ai.license import require_premium
     gate = require_premium("deliberate")
@@ -6016,17 +7876,33 @@ def delimit_audit(
     target_type: str = "file",
     lenses: str = "",
 ) -> Dict[str, Any]:
-    """Cross-model code audit -- 3 models, 3 lenses, synthesized findings (Pro).
+    """Cross-model code audit — 3 models, 3 lenses, synthesized (Pro).
 
-    Run security, correctness, and governance reviews through different AI models
-    simultaneously. Agreements are high-confidence. Disagreements surface tradeoffs.
+    When to use: for high-confidence review of a code change, where
+    agreement across models is the signal and disagreements surface
+    tradeoffs.
+    When NOT to use: for raw multi-model debate (use delimit_deliberate)
+    or single-model review (delimit_review).
 
-    "Trust through triangulation."
+    Sibling contrast: delimit_review is single-prompt multi-model;
+    delimit_deliberate is full debate; this is structured cross-lens
+    audit (security / correctness / governance).
+
+    Side effects: gated by require_premium. Calls models via
+    ai.cross_model_audit.audit. No ledger write — caller decides what
+    to do with findings.
 
     Args:
         target: File path, git diff output, or code snippet to audit.
-        target_type: "file" (reads file), "diff" (git diff text), "snippet" (inline code).
-        lenses: Comma-separated lenses to apply (security, correctness, governance). Default: all.
+            Required.
+        target_type: "file" (default — reads file), "diff" (git diff
+            text), or "snippet" (inline code).
+        lenses: Comma-separated lenses — "security", "correctness",
+            "governance". Empty = all three.
+
+    Returns:
+        Dict with synthesised findings, agreement matrix, per-model
+        raw responses.
     """
     from ai.license import require_premium
     gate = require_premium("audit")
@@ -6065,7 +7941,27 @@ def delimit_audit(
 
 @mcp.tool()
 def delimit_release_sync(action: str = "audit") -> Dict[str, Any]:
-    """Audit or sync all public surfaces for consistency (Pro)."""
+    """Audit or report config of public surfaces for consistency (Pro).
+
+    When to use: to confirm that all public surfaces (CLI, action, npm,
+    site) reference the same release version and configuration.
+    When NOT to use: to actually deploy or sync content — this is a
+    read/audit tool only.
+
+    Sibling contrast: delimit_release_status reports the deployed state;
+    this audits the public surface configuration for drift.
+
+    Side effects: gated by require_premium. Calls ai.release_sync.audit
+    (read-only audit) or ai.release_sync.get_release_config when
+    action="config".
+
+    Args:
+        action: Sub-action — "audit" (default) or "config".
+
+    Returns:
+        Dict with audit findings or release config payload, plus
+        next_steps when action="audit".
+    """
     return _delimit_release_impl(action="sync", sync_action=action)
 
 
@@ -6074,13 +7970,25 @@ def delimit_drift_check(spec_path: str = "", project_path: str = ".",
                          staleness_days: int = 7) -> Dict[str, Any]:
     """Check for API spec drift since last governance review.
 
-    Detects: spec changed without lint, stale baseline, missing policy.
-    Run on a schedule (cron) for continuous compliance monitoring.
+    When to use: as a scheduled (cron) compliance monitor — detects
+    spec changes without lint, stale baseline, or missing policy.
+    When NOT to use: for one-shot lint (use delimit_lint) or to read
+    historical drift (delimit_drift_history).
+
+    Sibling contrast: delimit_lint is enforcement;
+    delimit_drift_history reads past drift records;
+    this is the periodic monitor.
+
+    Side effects: read-only on spec + governance state. Calls
+    ai.drift_monitor.check_drift.
 
     Args:
-        spec_path: Path to OpenAPI spec. Auto-detects if empty.
-        project_path: Project root. Defaults to current directory.
-        staleness_days: Alert if baseline older than this (default 7).
+        spec_path: OpenAPI spec path. Empty = auto-detect.
+        project_path: Project root. Default "." (cwd).
+        staleness_days: Alert if baseline older than this. Default 7.
+
+    Returns:
+        Dict with drift verdict, alerts, and next_steps.
     """
     from ai.drift_monitor import check_drift
     result = _safe_call(check_drift, spec_path=spec_path, project_path=project_path,
@@ -6090,10 +7998,23 @@ def delimit_drift_check(spec_path: str = "", project_path: str = ".",
 
 @mcp.tool()
 def delimit_drift_history(limit: int = 20) -> Dict[str, Any]:
-    """View recent drift check history.
+    """List recent drift-check results from the drift monitor.
+
+    When to use: to investigate when API spec drift was last detected
+    and what changed.
+    When NOT to use: to perform a fresh drift check (use
+    delimit_drift_check).
+
+    Sibling contrast: delimit_drift_check runs a check; this reads
+    historical results.
+
+    Side effects: read-only. Calls ai.drift_monitor.get_drift_history.
 
     Args:
-        limit: Max entries to return.
+        limit: Max entries to return. Default 20.
+
+    Returns:
+        Dict with recent drift records (timestamp, change type, action).
     """
     from ai.drift_monitor import get_drift_history
     return _safe_call(get_drift_history, limit=limit)
@@ -6101,14 +8022,27 @@ def delimit_drift_history(limit: int = 20) -> Dict[str, Any]:
 
 @mcp.tool()
 def delimit_scan(project_path: str = ".") -> Dict[str, Any]:
-    """Scan a project and show what Delimit can do for it.
+    """Scan a project and report what Delimit can do for it.
 
-    First-run discovery tool. Finds OpenAPI specs, checks for security issues,
-    detects frameworks, and suggests what to track. Use this when you first
-    install Delimit or open a new project.
+    When to use: as a first-run discovery on a new project — finds
+    OpenAPI specs, checks for security issues, detects frameworks,
+    suggests what to track.
+    When NOT to use: to initialize governance (use delimit_init) or
+    run the 60-second quickstart (delimit_quickstart).
+
+    Sibling contrast: delimit_quickstart is a guided first-run flow;
+    delimit_init creates the governance scaffolding; this is read-only
+    discovery.
+
+    Side effects: read-only scan via filesystem globs. Does not write
+    to project files.
 
     Args:
-        project_path: Path to the project to scan.
+        project_path: Path to the project to scan. Default "." (cwd).
+
+    Returns:
+        Dict with findings (specs, security, frameworks), suggestions,
+        next_steps.
     """
     import glob as _glob
     p = Path(project_path).resolve()
@@ -6230,13 +8164,26 @@ def delimit_scan(project_path: str = ".") -> Dict[str, Any]:
 
 @mcp.tool()
 def delimit_quickstart(project_path: str = ".") -> Dict[str, Any]:
-    """60-second guided quickstart that proves Delimit value immediately.
+    """60-second guided quickstart for a new install.
 
-    Combines init + scan + environment detection into a single first-run
-    experience. Run this right after installing Delimit.
+    When to use: immediately after installing Delimit, as the
+    minimum-effort path to prove value — combines init + scan +
+    environment detection.
+    When NOT to use: for activation/license confirmation (use
+    delimit_activate) or full diagnostics (delimit_diagnose).
+
+    Sibling contrast: delimit_init only writes scaffolding;
+    delimit_scan only inspects; delimit_activate is post-license;
+    this is the unified first-run flow.
+
+    Side effects: triggers init (writes .delimit/) and runs scan
+    (read-only). Detects environment in passing.
 
     Args:
-        project_path: Path to the project to quickstart.
+        project_path: Project path to quickstart. Default "." (cwd).
+
+    Returns:
+        Dict with steps_completed, environment, suggestions, next_steps.
     """
     steps_completed = []
     p = Path(project_path).resolve()
@@ -6531,7 +8478,30 @@ def delimit_secret_store(
     scope: str = "all",
     description: str = "",
 ) -> Dict[str, Any]:
-    """Store a secret in the Delimit secrets broker."""
+    """Store a secret in the Delimit secrets broker.
+
+    When to use: when an agent or tool needs a credential (API key,
+    token) and you want to scope its access via the broker.
+    When NOT to use: to read a secret (use delimit_secret_get) or to
+    inspect what's stored (use delimit_secret_list).
+
+    Sibling contrast: delimit_secret_get reads via JIT access;
+    delimit_secret_list shows metadata; delimit_secret_revoke disables.
+
+    Side effects: writes the secret to the broker store via
+    ai.secrets_broker.store_secret. The value is stored at rest. Scope
+    governs which agent/tool combinations may later request the secret.
+
+    Args:
+        name: Secret name (key). Required.
+        value: Secret value (the actual credential). Required.
+        scope: Comma-separated agent/tool scopes that may access this
+            secret, or "all" to allow any. Default "all".
+        description: Human-readable description for audit trails.
+
+    Returns:
+        Dict with the broker's store result.
+    """
     return _delimit_secret_impl(action="store", name=name, value=value, scope=scope, description=description)
 
 
@@ -6541,25 +8511,103 @@ def delimit_secret_get(
     agent_type: str = "",
     tool: str = "",
 ) -> Dict[str, Any]:
-    """Request JIT access to a secret through the broker."""
+    """Request just-in-time access to a stored secret.
+
+    When to use: when a tool or agent needs a credential at execution
+    time. The broker logs every access for audit.
+    When NOT to use: to add a secret (use delimit_secret_store) or to
+    examine the audit log (use delimit_secret_access_log).
+
+    Sibling contrast: delimit_secret_store writes; this reads with
+    audit; delimit_secret_access_log shows the resulting access trail.
+
+    Side effects: appends an access log entry via
+    ai.secrets_broker.get_secret. Does not return secrets to scopes
+    that were not authorised at store time.
+
+    Args:
+        name: Secret name to retrieve. Required.
+        agent_type: Identity of the requesting agent (used by the
+            broker to check scope).
+        tool: Name of the requesting tool (used by the broker to check
+            scope).
+
+    Returns:
+        Dict with the secret value if access is permitted, otherwise
+        a denial / error payload from the broker.
+    """
     return _delimit_secret_impl(action="get", name=name, agent_type=agent_type, tool=tool)
 
 
 @mcp.tool()
 def delimit_secret_list() -> Dict[str, Any]:
-    """List all secrets in the broker (metadata only, never values)."""
+    """List secrets in the broker (metadata only — never values).
+
+    When to use: to inventory what credentials are stored without
+    exposing the values themselves.
+    When NOT to use: to retrieve a value (use delimit_secret_get) or
+    to add one (delimit_secret_store).
+
+    Sibling contrast: delimit_secret_get returns values (audited);
+    this returns only metadata (name, scope, description).
+
+    Side effects: read-only. Calls ai.secrets_broker.list_secrets.
+
+    Args:
+        None.
+
+    Returns:
+        Dict with key "secrets" containing a list of metadata records,
+        plus next_steps suggestions.
+    """
     return _delimit_secret_impl(action="list")
 
 
 @mcp.tool()
 def delimit_secret_revoke(name: str = "") -> Dict[str, Any]:
-    """Revoke a secret, preventing any future access."""
+    """Revoke a secret to prevent any future access.
+
+    When to use: after a credential leak or when rotating away from
+    an old secret name.
+    When NOT to use: to delete metadata only — revocation also blocks
+    delimit_secret_get from succeeding.
+
+    Sibling contrast: delimit_secret_store creates; this disables.
+
+    Side effects: writes a revocation record via
+    ai.secrets_broker.revoke_secret. Subsequent get calls will be
+    denied; the access log is preserved.
+
+    Args:
+        name: Secret name to revoke. Required.
+
+    Returns:
+        Dict with the revocation result.
+    """
     return _delimit_secret_impl(action="revoke", name=name)
 
 
 @mcp.tool()
 def delimit_secret_access_log(name: str = "") -> Dict[str, Any]:
-    """View the access audit log for secrets."""
+    """Show the audit log of secret accesses.
+
+    When to use: for compliance review, incident investigation, or to
+    see who/what fetched a credential.
+    When NOT to use: to read a secret value (delimit_secret_get) or
+    to inventory secrets (delimit_secret_list).
+
+    Sibling contrast: delimit_secret_get appends to this log; this
+    reads it back.
+
+    Side effects: read-only. Calls ai.secrets_broker.get_access_log.
+
+    Args:
+        name: Optional secret name to filter the log. Empty = all
+            secrets.
+
+    Returns:
+        Dict with key "log" (list of access entries) and "count".
+    """
     return _delimit_secret_impl(action="access_log", name=name)
 
 
@@ -6647,37 +8695,155 @@ delimit_context = mcp.tool()(_delimit_context_impl)
 
 @mcp.tool()
 def delimit_context_init(venture: str = "default") -> Dict[str, Any]:
-    """Initialize a context namespace for a venture."""
+    """Initialize a context filesystem namespace for a venture (STR-048).
+
+    When to use: once per venture, the first time you want to persist
+    cross-session/cross-model context (plans, decisions, code snippets).
+    When NOT to use: for single-session memory (use delimit_memory_store)
+    or to read existing artifacts (use delimit_context_read).
+
+    Sibling contrast: delimit_memory_* is conversation-scoped; the
+    context FS is venture-scoped and versioned (snapshot/branch).
+
+    Side effects: creates the venture directory and metadata files via
+    ai.context_fs.init_context. Idempotent — safe to call repeatedly.
+
+    Args:
+        venture: Venture/project namespace key. Default "default".
+
+    Returns:
+        Dict with init result and next_steps.
+    """
     return _delimit_context_impl(action="init", venture=venture)
 
 
 @mcp.tool()
 def delimit_context_write(venture: str, name: str, content: str, artifact_type: str = "text") -> Dict[str, Any]:
-    """Write an artifact to the context filesystem."""
+    """Write an artifact to a venture's context filesystem (STR-048).
+
+    When to use: to persist a plan, decision record, or code artifact
+    that other models or future sessions will need.
+    When NOT to use: for ephemeral conversation context (use
+    delimit_memory_store) or to snapshot all artifacts at once (use
+    delimit_context_snapshot).
+
+    Sibling contrast: delimit_context_read fetches one artifact;
+    delimit_context_list inventories the venture; this writes one.
+
+    Side effects: writes the artifact under the venture namespace via
+    ai.context_fs (file creation under ~/.delimit/context/<venture>/).
+
+    Args:
+        venture: Venture namespace key. Required.
+        name: Artifact name (used as the file key). Required.
+        content: Artifact text. Required.
+        artifact_type: Type hint, one of "text", "json", "code", "plan".
+            Default "text". Affects render hints, not storage format.
+
+    Returns:
+        Dict with write result and next_steps.
+    """
     return _delimit_context_impl(action="write", venture=venture, name=name, content=content, artifact_type=artifact_type)
 
 
 @mcp.tool()
 def delimit_context_read(venture: str, name: str) -> Dict[str, Any]:
-    """Read an artifact from the context filesystem."""
+    """Read an artifact from a venture's context filesystem (STR-048).
+
+    When to use: to fetch a specific previously-written artifact by
+    name within a venture namespace.
+    When NOT to use: for venture-wide listing (use delimit_context_list)
+    or memory search (delimit_memory_search).
+
+    Sibling contrast: delimit_context_list returns names only; this
+    returns a single artifact's content.
+
+    Side effects: read-only. Calls ai.context_fs to load the artifact.
+
+    Args:
+        venture: Venture namespace key. Required.
+        name: Artifact name. Required.
+
+    Returns:
+        Dict with the artifact content and metadata, or an error if
+        the artifact does not exist.
+    """
     return _delimit_context_impl(action="read", venture=venture, name=name)
 
 
 @mcp.tool()
 def delimit_context_list(venture: str) -> Dict[str, Any]:
-    """List all artifacts in a venture's context."""
+    """List all artifacts in a venture's context filesystem (STR-048).
+
+    When to use: to inventory what artifacts have been written for a
+    venture before reading or branching.
+    When NOT to use: to read an artifact's content (use
+    delimit_context_read) or to scan memories (delimit_memory_recent).
+
+    Sibling contrast: delimit_context_read returns one artifact's
+    content; this returns metadata for all of them.
+
+    Side effects: read-only. Calls ai.context_fs to enumerate artifacts.
+
+    Args:
+        venture: Venture namespace key. Required.
+
+    Returns:
+        Dict with artifact metadata list and next_steps.
+    """
     return _delimit_context_impl(action="list", venture=venture)
 
 
 @mcp.tool()
 def delimit_context_snapshot(venture: str, label: str = "") -> Dict[str, Any]:
-    """Create a point-in-time snapshot of the entire context."""
+    """Capture a point-in-time snapshot of a venture's context (STR-048).
+
+    When to use: before a risky model handoff, doctrine edit, or
+    refactor — so you can roll back the context if it goes sideways.
+    When NOT to use: for individual artifact persistence (use
+    delimit_context_write) or one-time conversation memory
+    (delimit_memory_store).
+
+    Sibling contrast: delimit_context_branch creates a divergent line
+    of work; this captures the current state as an immutable point.
+
+    Side effects: writes a snapshot record under the venture namespace
+    via ai.context_fs.
+
+    Args:
+        venture: Venture namespace key. Required.
+        label: Optional human-readable label for the snapshot.
+
+    Returns:
+        Dict with the snapshot id/label and next_steps.
+    """
     return _delimit_context_impl(action="snapshot", venture=venture, label=label)
 
 
 @mcp.tool()
 def delimit_context_branch(venture: str, action: str = "list", branch_name: str = "") -> Dict[str, Any]:
-    """Manage context branches -- create, merge, or list."""
+    """Manage divergent branches of a venture's context (STR-048).
+
+    When to use: when exploring alternative directions for a venture
+    and you want to keep the main line clean.
+    When NOT to use: for immutable point-in-time captures (use
+    delimit_context_snapshot) — branches are mutable working areas.
+
+    Sibling contrast: delimit_context_snapshot is read-only history;
+    this manages active branches you can write to.
+
+    Side effects: depending on action, may create or merge branches
+    in the venture namespace via ai.context_fs.
+
+    Args:
+        venture: Venture namespace key. Required.
+        action: Branch sub-action, one of "list", "create", "merge".
+            Default "list".
+        branch_name: Branch name (required for create / merge).
+
+    Returns:
+        Dict with the branch operation result.
+    """
     return _delimit_context_impl(action="branch", venture=venture, branch_action=action, branch_name=branch_name)
 
 
@@ -6695,17 +8861,30 @@ def delimit_resource_list(
     state: str = "open",
     limit: int = 10,
 ) -> Dict[str, Any]:
-    """List resources from a connected system (Pro).
+    """List resources from a connected data-plane system (Pro).
 
-    Drivers: github. Resources: repos, pull_requests, issues, workflows.
+    When to use: to enumerate items via a driver — repos, PRs, issues,
+    workflow runs.
+    When NOT to use: to fetch a specific item (use
+    delimit_resource_get) or inventory drivers (delimit_resource_drivers).
+
+    Sibling contrast: delimit_resource_drivers lists drivers;
+    delimit_resource_get fetches one item; this lists items.
+
+    Side effects: read-only network calls via the chosen driver.
+    Calls ai.data_plane.get_driver and the driver's list_* method.
 
     Args:
-        driver: The data plane driver to use (default: github).
-        resource: The resource type to list (repos, pull_requests, issues, workflows).
-        repo: Repository in owner/name format (required for workflows).
-        org: Organization filter (for repos).
-        state: State filter for PRs/issues (open, closed, all).
-        limit: Maximum number of results.
+        driver: Driver key. Default "github".
+        resource: One of "repos", "pull_requests", "issues",
+            "workflows". Required.
+        repo: "owner/name" — required for workflow listing.
+        org: Organization filter for repos.
+        state: PR/issue state — "open" (default), "closed", "all".
+        limit: Max results. Default 10.
+
+    Returns:
+        Dict with the listed resources from the driver.
     """
     from ai.data_plane import get_driver
 
@@ -6737,13 +8916,30 @@ def delimit_resource_get(
     identifier: str = "",
     repo: str = "",
 ) -> Dict[str, Any]:
-    """Get a specific resource from a connected system (Pro).
+    """Get a specific resource from a connected data-plane system (Pro).
+
+    When to use: to fetch a single item by identifier via a driver —
+    a repo, PR, issue, or workflow run.
+    When NOT to use: to list items (use delimit_resource_list) or
+    inventory drivers (delimit_resource_drivers).
+
+    Sibling contrast: delimit_resource_list returns many;
+    this returns one.
+
+    Side effects: read-only network call via the driver. Calls
+    ai.data_plane.get_driver and the driver's get_* method.
 
     Args:
-        driver: The data plane driver to use (default: github).
-        resource: The resource type (repos, pull_requests, issues, workflows).
-        identifier: The resource identifier (repo name, PR number, run ID).
-        repo: Repository in owner/name format (for PRs, issues, workflow runs).
+        driver: Driver key. Default "github".
+        resource: One of "repos", "pull_requests", "issues",
+            "workflows". Required.
+        identifier: Resource identifier — repo name, PR number, run id.
+            Required.
+        repo: "owner/name" required for PRs / issues / workflow runs.
+
+    Returns:
+        Dict with the resource detail or {error: ...} when identifier
+        cannot be parsed.
     """
     from ai.data_plane import get_driver
 
@@ -6767,7 +8963,25 @@ def delimit_resource_get(
 
 @mcp.tool()
 def delimit_resource_drivers() -> Dict[str, Any]:
-    """List available data plane drivers and their resource schemas."""
+    """List available data plane drivers and their resource schemas.
+
+    When to use: to inventory which external systems Delimit can read
+    from (github, etc.) and what resources each driver exposes.
+    When NOT to use: to read data from a driver (use
+    delimit_resource_list / delimit_resource_get).
+
+    Sibling contrast: delimit_resource_list lists items via a driver;
+    this lists the drivers themselves.
+
+    Side effects: read-only. Calls ai.data_plane.list_drivers.
+
+    Args:
+        None.
+
+    Returns:
+        Dict with key "drivers" (list of driver definitions and their
+        resource schemas) and next_steps.
+    """
     from ai.data_plane import list_drivers
 
     return _with_next_steps("resource_drivers", {"drivers": list_drivers()})
@@ -6784,15 +8998,28 @@ def delimit_tracker_sync(
     labels: str = "",
     limit: int = 10,
 ) -> Dict[str, Any]:
-    """Pull open issues from GitHub into the Delimit ledger as context.
+    """Pull open GitHub issues into the Delimit ledger as context (LED-188).
 
-    Read-only sync - enriches your ledger with external issue context.
-    Does NOT write back to GitHub.
+    When to use: to enrich the ledger with external issue context
+    from a GitHub repo so cross-references work.
+    When NOT to use: to write back to GitHub (this is read-only) or
+    to monitor a single issue (delimit_sensor_github_issue).
+
+    Sibling contrast: delimit_sensor_github_issue watches one issue;
+    this syncs many into the ledger as context.
+
+    Side effects: read-only on GitHub (network calls via gh CLI).
+    Writes context entries into the ledger but does not push back to
+    GitHub.
 
     Args:
-        repo: GitHub repository in owner/repo format. Auto-detects from git remote if empty.
+        repo: "owner/repo" GitHub repo. Empty = auto-detect from git
+            remote.
         labels: Comma-separated label filter (e.g. "bug,priority:high").
-        limit: Max issues to sync (default 10).
+        limit: Max issues to sync. Default 10.
+
+    Returns:
+        Dict with sync result (issues fetched, ledger entries written).
     """
     import re as _re
 
@@ -6861,19 +9088,29 @@ def delimit_webhook_manage(
 ) -> Dict[str, Any]:
     """Manage webhook notifications for governance events.
 
-    Get notified in Slack or Discord when governance blocks a deploy,
-    detects a security finding, or a deliberation reaches consensus.
+    When to use: to register a Slack/Discord/HTTP webhook to receive
+    governance alerts (deploy blocked, security finding, consensus).
+    When NOT to use: for SIEM-class structured streaming (use
+    delimit_siem) or one-shot notifications (delimit_notify).
 
-    Actions:
-      - "list": show configured webhooks
-      - "add": add a webhook (set url + events filter)
-      - "remove": remove a webhook by url
-      - "test": send a test notification
+    Sibling contrast: delimit_siem streams structured audit events;
+    this routes governance alerts to chat / HTTP endpoints.
+
+    Side effects: action="add" / "remove" mutate
+    ~/.delimit/webhooks.json. action="test" sends a test notification
+    to the configured webhooks. action="list" is read-only.
 
     Args:
-        action: list, add, remove, or test.
+        action: One of "list" (default), "add", "remove", "test".
         url: Webhook URL (Slack, Discord, or any HTTP endpoint).
-        events: Comma-separated event filter: "all", "blocked", "critical", "security".
+            Required for add / remove / test (test uses all configured
+            if not specified).
+        events: Comma-separated event filter — "all" (default),
+            "blocked", "critical", "security".
+
+    Returns:
+        Dict with the webhook list / add/remove confirmation / test
+        delivery result.
     """
     webhooks_file = Path.home() / ".delimit" / "webhooks.json"
 
@@ -6954,18 +9191,35 @@ def delimit_social_post(text: str = "", category: str = "", platform: str = "twi
                         account: str = "", quote_tweet_id: str = "",
                         reply_to_id: str = "", draft: bool = False,
                         context: str = "") -> Dict[str, Any]:
-    """Post to social media (Pro).
+    """Post to social media (Twitter / Reddit) (Pro).
+
+    When to use: when the AI drafts a social post, it MUST call this
+    immediately (auto-trigger rule). Email approval flow handles human
+    review.
+    When NOT to use: just to generate (use delimit_social_generate) or
+    to inspect history (delimit_social_history).
+
+    Sibling contrast: delimit_social_generate is draft-only;
+    delimit_social_approve manages the queue;
+    this is the actual post path.
+
+    Side effects: when draft=True, queues for delimit_social_approve.
+    Otherwise posts via the social backend. Subject to rate cap: 2
+    original posts per hour, 24 per day (founder-approved 2026-04-30).
+    Override via DELIMIT_HOURLY_TWEETS / DELIMIT_DAILY_TWEETS env.
+    Sends approval email with the registry_draft_id for inbox-daemon
+    matching.
 
     IMPORTANT - AUTO-TRIGGER RULE:
-    When the AI drafts a social post, it MUST call this tool immediately.
-    Never ask "want me to send this?" - just call the tool. The email-based
-    approval flow handles human review. The AI's job is to draft and send,
-    the founder's job is to approve/reject via email reply.
+    When the AI drafts a social post, it MUST call this tool
+    immediately. Never ask "want me to send this?" — just call the
+    tool. The email-based approval flow handles human review.
 
     Categories: tip, changelog, insight, engagement.
     Leave text empty to auto-generate from templates.
     Every post provides value - tips, insights, governance wisdom.
-    Max 2 posts per day to stay authentic.
+    Rate cap: 2 original posts per hour, 24 per day (founder-approved
+    2026-04-30). Override via DELIMIT_HOURLY_TWEETS / DELIMIT_DAILY_TWEETS.
 
     IMPORTANT - Platform tone rules (these are DIFFERENT per platform):
     - Twitter: confident technical brand. Direct, professional, ALWAYS POSITIVE.
@@ -6985,6 +9239,13 @@ def delimit_social_post(text: str = "", category: str = "", platform: str = "twi
         reply_to_id: Tweet ID to reply to (creates a reply).
         draft: If True, save as draft for approval instead of posting immediately.
         context: WHY this post should be made. Strategic reasoning shown in the approval email.
+
+    Returns:
+        Dict with status (posted | queued | skipped | error), the post
+        payload, registry_draft_id (when emailed for approval), rate-cap
+        decision details, and next_steps. On rate-cap returns
+        {"status": "skipped", "reason": ...}; on unsupported platform
+        returns {"error": ..., "supported": [...]}.
     """
     from ai.social import generate_post, post_tweet, should_post_today, save_draft
 
@@ -7168,10 +9429,26 @@ def delimit_social_post(text: str = "", category: str = "", platform: str = "twi
 
 @mcp.tool()
 def delimit_social_generate(category: str = "tip") -> Dict[str, Any]:
-    """Generate a social media post without posting (Pro).
+    """Generate a social media post draft (no posting) (Pro).
 
-    Categories: tip, changelog, insight, engagement.
-    Returns the generated text for review before posting.
+    When to use: to draft a tweet for review before manual or
+    automated posting.
+    When NOT to use: to actually publish (use delimit_social_post or
+    delimit_content_publish) or to manage targets
+    (delimit_social_target_config).
+
+    Sibling contrast: delimit_social_post publishes a draft;
+    this only generates one.
+
+    Side effects: read-only / draft. Calls ai.social.generate_post.
+
+    Args:
+        category: Post category — "tip" (default), "changelog",
+            "insight", or "engagement".
+
+    Returns:
+        Dict with the generated post payload (text + metadata) and
+        next_steps.
     """
     from ai.social import generate_post
 
@@ -7183,8 +9460,22 @@ def delimit_social_generate(category: str = "tip") -> Dict[str, Any]:
 def delimit_social_accounts() -> Dict[str, Any]:
     """List configured social media accounts (Pro).
 
-    Shows all Twitter accounts with credentials configured.
-    Each account has its own credentials file at ~/.delimit/secrets/twitter-<handle>.json.
+    When to use: to inventory which Twitter/X accounts have credentials
+    available before drafting or scheduling a post.
+    When NOT to use: to draft content (use delimit_social_generate) or
+    publish (delimit_social_post).
+
+    Sibling contrast: delimit_social_generate drafts;
+    delimit_social_post publishes; this lists who can publish.
+
+    Side effects: read-only. Calls ai.social.list_twitter_accounts,
+    which scans ~/.delimit/secrets/twitter-<handle>.json files.
+
+    Args:
+        None.
+
+    Returns:
+        Dict with "accounts" list and "count" plus next_steps.
     """
     from ai.social import list_twitter_accounts
 
@@ -7197,15 +9488,26 @@ def delimit_social_history(limit: int = 20, platform: str = "",
                            user: str = "", subreddit: str = "") -> Dict[str, Any]:
     """View recent social media post history (Pro).
 
-    Filter by platform, Reddit user, or subreddit to recall prior conversations.
-    Reddit comments include thread context (subreddit, thread_url, replying_to_user)
-    so you can reference what was said when drafting follow-ups or DM replies.
+    When to use: to recall prior posts/comments for context when
+    drafting follow-ups or DM replies — Reddit entries include thread
+    context.
+    When NOT to use: to draft new posts (use delimit_social_generate)
+    or scan targets (delimit_social_target).
+
+    Sibling contrast: delimit_social_generate drafts;
+    delimit_social_post publishes; this reads what was already posted.
+
+    Side effects: read-only. Calls ai.social.get_post_history.
 
     Args:
-        limit: Max entries to return.
-        platform: Filter by platform - "twitter" or "reddit".
-        user: Filter by Reddit user we interacted with (e.g. "coolinjapan001").
+        limit: Max entries to return. Default 20.
+        platform: Filter by "twitter" or "reddit". Empty = all.
+        user: Filter by Reddit user we interacted with
+            (e.g. "coolinjapan001").
         subreddit: Filter by subreddit (e.g. "r/vibecoding").
+
+    Returns:
+        Dict with history entries and next_steps.
     """
     from ai.social import get_post_history
 
@@ -7215,14 +9517,27 @@ def delimit_social_history(limit: int = 20, platform: str = "",
 
 @mcp.tool()
 def delimit_social_approve(action: str = "list", draft_id: str = "") -> Dict[str, Any]:
-    """Manage social media drafts: list, approve, or reject (Pro).
+    """Manage social media drafts — list, approve, reject (Pro).
 
-    Use with delimit_social_post(draft=True) to queue content for review.
+    When to use: to clear the social drafts queue created by
+    delimit_social_post(draft=True).
+    When NOT to use: to draft (use delimit_social_post(draft=True)) or
+    inspect history (delimit_social_history).
+
+    Sibling contrast: delimit_social_post creates the draft;
+    this lists / approves / rejects them.
+
+    Side effects: action="approve" actually posts via the social
+    backend (network write). action="reject" discards. action="list"
+    is read-only.
 
     Args:
-        action: 'list' to show pending drafts, 'approve' to post a draft,
-                'reject' to discard a draft.
-        draft_id: Required for approve/reject actions. The draft ID from save_draft().
+        action: "list" (default), "approve", or "reject".
+        draft_id: Required for approve / reject. Returned by
+            delimit_social_post(draft=True).
+
+    Returns:
+        Dict with drafts list / post result / discard confirmation.
     """
     from ai.social import list_drafts, approve_draft, reject_draft
 
@@ -7258,15 +9573,35 @@ def delimit_social_target(
 ) -> Dict[str, Any]:
     """Discover engagement opportunities across platforms (Pro).
 
+    When to use: to find posts on X, Reddit, HN, Dev.to, GitHub where
+    a Delimit venture can engage. Run inside a /loop for continuous
+    discovery.
+    When NOT to use: to fetch one X tweet (use delimit_x_fetch) or
+    drafts (delimit_social_generate).
+
+    Sibling contrast: delimit_social_target_config configures which
+    platforms to scan; delimit_x_fetch is single-tweet; this is the
+    multi-platform scanner.
+
+    Side effects: read-only network scans by default. With
+    draft_replies=True, calls delimit_social_post(draft=True) for
+    "reply" targets. With create_ledger=True, calls
+    delimit_ledger_add for "strategic" targets. Deduplicates across
+    runs.
+
     IMPORTANT - TOOL CHAINING RULE:
     After scanning, the AI MUST immediately process results:
-    1. For "reply" targets: draft a reply via delimit_social_post or delimit_notify
-    2. For "strategic" targets: create a ledger item via delimit_ledger_add
+    1. For "reply" targets: draft a reply via delimit_social_post or
+       delimit_notify
+    2. For "strategic" targets: create a ledger item via
+       delimit_ledger_add
     3. For "both": do both
-    Never just return targets and stop. Always chain to the next action.
+    Never just return targets and stop. Always chain to the next
+    action.
 
-    Scans X, Reddit (RapidAPI), HN, Dev.to, GitHub for posts where ventures can engage.
-    NamePros flagged as manual_check_needed (no API).
+    Scans X, Reddit (RapidAPI), HN, Dev.to, GitHub for posts where
+    ventures can engage. NamePros flagged as manual_check_needed
+    (no API).
 
     Run in a /loop for continuous discovery. Deduplicates across runs.
     Targets are classified as: reply (social engagement), strategic (ledger item), or both.
@@ -7279,6 +9614,13 @@ def delimit_social_target(
         limit: Max targets per platform.
         draft_replies: If True, auto-draft social posts for "reply" targets.
         create_ledger: If True, create ledger items for "strategic" targets.
+
+    Returns:
+        Dict whose shape depends on action — scan returns
+        {action, targets_found, targets[], optional processed} with each
+        target's classification (reply / strategic / both) and platform
+        metadata; list returns recent targets; stats returns counts.
+        Every response includes next_steps.
     """
     from ai.social_target import scan_targets, process_targets, list_targets, get_stats
 
@@ -7309,18 +9651,28 @@ def delimit_social_target_config(
 ) -> Dict[str, Any]:
     """Configure social target scanning platforms (Pro).
 
-    Actions:
-        status: Show current config and which platforms are available
-        detect: Auto-detect available platforms from configured API keys
-        update: Update a platform's config (enable/disable, change provider)
-        add_subreddits: Add subreddits to scan for a venture
+    When to use: to inspect / update which platforms the social-target
+    scanner uses, or to add subreddits a venture should scan.
+    When NOT to use: to run a scan (use delimit_social_target) or
+    drafts (delimit_social_generate).
+
+    Sibling contrast: delimit_social_target runs scans;
+    this configures which platforms to scan.
+
+    Side effects: action="update" / "add_subreddits" write to the
+    target config. action="status" / "detect" are read-only.
 
     Args:
-        action: status, detect, update, add_subreddits
-        platform: Platform to configure (x, reddit, github, hn, devto, namepros)
-        enabled: Enable/disable the platform (used with update action)
-        provider: Provider to use, e.g. twttr241, xai, proxy, gh_cli (used with update action)
-        subreddits: Comma-separated subreddits to add (with add_subreddits action)
+        action: "status" (default), "detect", "update", "add_subreddits".
+        platform: Platform key — "x", "reddit", "github", "hn",
+            "devto", "namepros".
+        enabled: Enable/disable on update. Default True.
+        provider: Provider name — "twttr241", "xai", "proxy", "gh_cli",
+            etc., for update.
+        subreddits: Comma-separated subreddits for add_subreddits.
+
+    Returns:
+        Dict with the action result.
     """
     from ai.social_target import (
         get_config_status, _detect_available_platforms,
@@ -7348,18 +9700,33 @@ def delimit_social_target_config(
 def delimit_reddit_scan(sort: str = "hot", limit: int = 10) -> Dict[str, Any]:
     """Bulk scan 25+ subreddits for outreach targets (Pro).
 
-    Scans via residential proxy. Rate limited to 1 req/2sec.
-    Returns ranked, categorized targets ready for comment drafting.
+    When to use: as a venture-agnostic bulk Reddit scan — returns
+    ranked, categorized targets ready for comment drafting.
+    When NOT to use: for venture-scoped scan (use delimit_reddit_fetch_thread
+    or delimit_social_target) or one specific thread.
+
+    Sibling contrast: delimit_reddit_fetch_thread is single thread;
+    delimit_social_target is multi-platform venture scan;
+    this is the broad Reddit pass.
+
+    Side effects: read-only network via residential proxy. Rate limited
+    to 1 req / 2sec. The orchestrator must chain (per rule below).
 
     IMPORTANT -- TOOL CHAINING RULE:
     After scanning, the AI MUST process high_priority targets:
     1. Draft replies via delimit_social_post or delimit_notify
-    2. Create ledger items for strategic opportunities via delimit_ledger_add
-    Never just return targets and stop. Always chain to the next action.
+    2. Create ledger items for strategic opportunities via
+       delimit_ledger_add
+    Never just return targets and stop. Always chain.
 
     Args:
-        sort: Reddit sort order (hot, new, top).
-        limit: Posts per subreddit (default 10, max 25).
+        sort: Reddit sort order — "hot" (default), "new", "top".
+        limit: Posts per subreddit. Default 10, max 25.
+
+    Returns:
+        Dict with ranked, categorized targets (subreddit, post id, url,
+        title, score, classification high_priority / standard, suggested
+        chain action), aggregate counts, plus next_steps.
     """
     from ai.reddit_scanner import scan_all
 
@@ -7376,22 +9743,42 @@ def delimit_github_scan(
     cadence: str = "pulse",
     limit: int = 20,
 ) -> Dict[str, Any]:
-    """Scan GitHub for adoption leads, competitive intel, and repo health (Pro).
+    """Scan GitHub for adoption leads, competitive intel, repo health (Pro).
 
-    Three cadences:
-      pulse: Own repo health (stars, forks, issues, traffic). Fast, run often.
-      hunter: Repository signals, engagement threads. Medium, run hourly.
-      deep: Full ecosystem intel. Slow, run daily.
+    When to use: at the configured cadence — pulse (own repo health),
+    hunter (engagement signals, hourly), deep (full ecosystem, daily).
+    When NOT to use: to monitor one issue (use delimit_sensor_github_issue)
+    or pull issues (delimit_tracker_sync).
+
+    Sibling contrast: delimit_sensor_github_issue is single-issue;
+    delimit_tracker_sync ingests issues to ledger;
+    this is the broad GitHub corpus scanner.
+
+    Side effects: read-only network. With chain rule below, the
+    orchestrator should call delimit_ledger_add for high-score
+    findings and delimit_notify for pain threads.
 
     IMPORTANT -- TOOL CHAINING RULE:
     After scanning, the AI MUST process high-score findings:
     1. Auto-ledger high-score findings via delimit_ledger_add
     2. Pain threads with existing_feature relevance via delimit_notify
-    Never just return findings and stop. Always chain to the next action.
+    Never just return findings and stop. Always chain to the next
+    action.
+
+    Three cadences:
+      pulse: Own repo health (stars, forks, issues, traffic). Fast.
+      hunter: Repository signals, engagement threads. Medium, hourly.
+      deep: Full ecosystem intel. Slow, daily.
 
     Args:
-        cadence: pulse, hunter, or deep.
-        limit: Max results per search query (default 20, max 30).
+        cadence: "pulse" (default), "hunter", or "deep".
+        limit: Max results per search query. Default 20. Max 30.
+
+    Returns:
+        Dict whose shape depends on cadence — pulse returns repo health
+        snapshot (stars, forks, issues, traffic); hunter returns engagement
+        signals and pain-thread findings with relevance scores; deep
+        returns the full ecosystem intel corpus. All include next_steps.
     """
     from ai.github_scanner import scan
 
@@ -7410,7 +9797,25 @@ def delimit_github_scan(
 
 @mcp.tool()
 def delimit_content_schedule() -> Dict[str, Any]:
-    """View the upcoming content schedule: queued tweets, pending videos, recent activity (Pro)."""
+    """View the upcoming content schedule (queued + pending + recent) (Pro).
+
+    When to use: to inspect what's queued (tweets, videos) and what
+    has shipped recently before adding more or triggering a publish.
+    When NOT to use: to actually publish (use delimit_content_publish)
+    or to manage the content queue (delimit_content_queue).
+
+    Sibling contrast: delimit_content_queue mutates queue state;
+    this reads the resulting schedule.
+
+    Side effects: read-only. Calls ai.content_engine.get_content_schedule.
+
+    Args:
+        None.
+
+    Returns:
+        Dict with queued tweets, pending videos, recent activity,
+        next_steps.
+    """
     from ai.content_engine import get_content_schedule
 
     return _with_next_steps("content_schedule", get_content_schedule())
@@ -7418,10 +9823,26 @@ def delimit_content_schedule() -> Dict[str, Any]:
 
 @mcp.tool()
 def delimit_content_publish(content_type: str = "tweet") -> Dict[str, Any]:
-    """Manually trigger a content publish: tweet or youtube video (Pro).
+    """Manually trigger a content publish (tweet or YouTube video) (Pro).
+
+    When to use: to fire off the next queued tweet or video on demand,
+    bypassing the autonomous content loop.
+    When NOT to use: to inspect the queue (use
+    delimit_content_schedule) or modify it (delimit_content_queue).
+
+    Sibling contrast: delimit_content_schedule reads;
+    delimit_content_queue mutates queue;
+    this performs a single publish step.
+
+    Side effects: writes to the social/YouTube backends — for tweet,
+    posts the next queued tweet; for youtube, generates and uploads.
 
     Args:
-        content_type: 'tweet' to post next queued tweet, 'youtube' to generate+upload next video.
+        content_type: "tweet" (default) to post next queued tweet,
+            or "youtube" to generate + upload the next video.
+
+    Returns:
+        Dict with publish result for the chosen content_type.
     """
     if content_type == "tweet":
         from ai.content_engine import post_next_tweet
@@ -7438,9 +9859,24 @@ def delimit_content_publish(content_type: str = "tweet") -> Dict[str, Any]:
 def delimit_content_queue(action: str = "status", items: str = "") -> Dict[str, Any]:
     """Manage the tweet and video content queues (Pro).
 
+    When to use: to view, seed, or add to the autonomous content
+    queues that delimit_content_publish drains.
+    When NOT to use: to publish (use delimit_content_publish) or read
+    upcoming schedule (delimit_content_schedule).
+
+    Sibling contrast: delimit_content_publish drains;
+    delimit_content_schedule reads; this mutates the queue.
+
+    Side effects: action="seed" populates queue with defaults;
+    action="add" appends items. action="status" is read-only.
+
     Args:
-        action: 'status' to view queue, 'seed' to populate with defaults, 'add' to add custom tweets.
-        items: For 'add' action -- newline-separated tweet texts to add to the queue.
+        action: "status" (default), "seed", or "add".
+        items: For "add" — newline-separated tweet texts.
+
+    Returns:
+        Dict with queue state and next_steps. Returns
+        {error: "..."} for action="add" with empty items.
     """
     if action == "status":
         from ai.content_engine import get_tweet_queue_status, get_content_schedule
@@ -7471,18 +9907,51 @@ def delimit_content_queue(action: str = "status", items: str = "") -> Dict[str, 
 
 @mcp.tool()
 def delimit_daemon_status() -> Dict[str, Any]:
-    """Check autonomous daemon status - loops, items processed, recent actions."""
+    """Report the autonomous daemon's status (loops, items, actions).
+
+    When to use: to inspect what the autonomous daemon has been doing
+    recently and whether it's healthy.
+    When NOT to use: to start a run (use delimit_daemon_run) or
+    classify a pending item (delimit_daemon_classify).
+
+    Sibling contrast: delimit_daemon_run advances iterations;
+    this reads runtime state.
+
+    Side effects: read-only. Calls ai.daemon.get_daemon_status.
+
+    Args:
+        None.
+
+    Returns:
+        Dict with loop counts, items processed, recent actions, next_steps.
+    """
     from ai.daemon import get_daemon_status
     return _with_next_steps("daemon_status", get_daemon_status())
 
 
 @mcp.tool()
 def delimit_daemon_run(iterations: int = 1, dry_run: bool = True) -> Dict[str, Any]:
-    """Run the autonomous daemon for N iterations (Pro).
+    """Advance the autonomous daemon by N iterations (Pro).
+
+    When to use: to manually advance the daemon loop one or more
+    iterations, e.g. for testing or scheduled cron-style execution.
+    When NOT to use: for inspection only (use delimit_daemon_status)
+    or to classify an item (delimit_daemon_classify).
+
+    Sibling contrast: delimit_daemon_status reads;
+    delimit_daemon_classify decides; this drives the loop.
+
+    Side effects: in dry_run mode, logs actions without executing
+    them. In live mode, executes the daemon's automatable actions.
+    Calls ai.daemon.run_loop with a 5-second interval between
+    iterations.
 
     Args:
-        iterations: Number of loop iterations (0 = infinite, default 1)
-        dry_run: If true, log actions but don't execute (default true)
+        iterations: Number of iterations. 0 = infinite. Default 1.
+        dry_run: If True (default), log actions but do not execute.
+
+    Returns:
+        Dict with loop result and next_steps.
     """
     from ai.daemon import run_loop
     return _with_next_steps("daemon_run", run_loop(
@@ -7492,23 +9961,36 @@ def delimit_daemon_run(iterations: int = 1, dry_run: bool = True) -> Dict[str, A
 @mcp.tool()
 def delimit_build_loop(action: str = "run", session_id: str = "", loop_type: str = "build",
                        cycle_mode: str = "full") -> Dict[str, Any]:
-    """Execute a governed continuous loop (LED-239).
+    """Execute one iteration of a governed continuous loop (LED-239).
 
-    Supports four loop types:
-    - **cycle** (RECOMMENDED): unified think→build→deploy in one call.
-      Each stage auto-triggers the next. Failed stages don't block
-      subsequent stages.
-    - **build**: picks feat/fix/task items from ledger, dispatches via swarm
-    - **social** (think): scans Reddit/X/HN, drafts replies, handles social/outreach/content/sensor ledger items
-    - **deploy**: runs deploy gates, publishes, verifies
+    When to use: to advance the autonomous build / social / deploy
+    loop one step, either interactively or from a daemon.
+    When NOT to use: for status only (use delimit_loop_status) or to
+    configure (delimit_loop_config).
+
+    Sibling contrast: delimit_loop_status reads;
+    delimit_loop_config sets policy; this drives one iteration.
+
+    Side effects: depends on loop_type. cycle/build dispatches swarm
+    work; social drafts replies; deploy runs gates and publishes.
+    All loops write to the loop_engine's session record.
+
+    Loop types:
+    - cycle (recommended): unified think -> build -> deploy in one call.
+    - build: picks feat/fix/task items from ledger, dispatches via swarm.
+    - social (think): scans Reddit/X/HN, drafts replies.
+    - deploy: runs deploy gates, publishes, verifies.
 
     Args:
-        action: 'init' to start a session, 'run' to execute one iteration.
-        session_id: Optional session ID to continue.
-        loop_type: 'cycle', 'build', 'social', or 'deploy' (default: build).
-        cycle_mode: 'sense' (think+strategy), 'execute' (build+deploy),
-                    'full' (all stages). Only applies to loop_type='cycle'.
-                    Daemon uses 'sense', interactive sessions use 'full' or 'execute'.
+        action: "init" to start a session, "run" (default) to execute
+            one iteration.
+        session_id: Optional session id to continue.
+        loop_type: "cycle", "build" (default), "social", or "deploy".
+        cycle_mode: For loop_type="cycle" — "sense" (think+strategy),
+            "execute" (build+deploy), or "full" (all). Default "full".
+
+    Returns:
+        Dict with iteration outcome, session_id, next_steps.
     """
     from ai.loop_engine import (
         create_governed_session, run_governed_iteration,
@@ -7535,21 +10017,34 @@ def delimit_build_loop_daemon(
     interval_seconds: int = 900,
     loop_type: str = "build",
 ) -> Dict[str, Any]:
-    """Background auto-pull daemon for the governed build/social/deploy loops (Pro).
+    """Background auto-pull daemon for governed build/social/deploy loops (Pro).
 
-    Spawns a daemon thread that calls run_governed_iteration (or run_social_iteration)
-    every interval_seconds. Preserves the pull-based triage pattern — each tick logs
-    the returned task_id to ~/.delimit/logs/loop_daemon_{session_id}.jsonl so the
-    orchestrating Claude session can tail the log and handle triage.
+    When to use: to spawn a long-running daemon that ticks the
+    governed loop every N seconds — the orchestrating Claude session
+    tails ~/.delimit/logs/loop_daemon_<session_id>.jsonl for triage.
+    When NOT to use: for one-shot iteration (use delimit_build_loop)
+    or to read loop metrics (delimit_loop_status).
 
-    Respects existing delimit_loop_config safeguards (cost_cap, error_threshold,
-    max_iterations, status=paused/stopped) via loop_status check before each tick.
+    Sibling contrast: delimit_build_loop is one iteration;
+    this is the long-running daemon.
+
+    Side effects: action="start" spawns a daemon thread that calls
+    run_governed_iteration / run_social_iteration on a cadence.
+    action="stop" halts. Each tick logs returned task_id to a JSONL.
+    Respects delimit_loop_config safeguards (cost_cap, error_threshold,
+    max_iterations, status=paused/stopped) via loop_status before each
+    tick. Gated by require_premium.
 
     Args:
-        action: 'start', 'stop', or 'status' (default: status)
-        session_id: Session to run (required for all actions)
-        interval_seconds: Tick interval in seconds (default 900 = 15 min). Only used on start.
-        loop_type: 'build', 'social', or 'deploy' (default: build). Only used on start.
+        action: "start", "stop", or "status" (default).
+        session_id: Session to run. Required for all actions.
+        interval_seconds: Tick interval. Default 900 (15 min). Used on
+            start.
+        loop_type: "build" (default), "social", or "deploy". Used on
+            start.
+
+    Returns:
+        Dict with daemon state / start/stop confirmation.
     """
     from ai.license import require_premium
     gate = require_premium("build_loop_daemon")
@@ -7572,8 +10067,24 @@ def delimit_build_loop_daemon(
 def delimit_daemon_classify(item_id: str = "") -> Dict[str, Any]:
     """Classify a ledger item's risk tier and suggested automation tool.
 
+    When to use: to preview what the autonomous daemon would do with
+    a given ledger item (or the next automatable one).
+    When NOT to use: to actually run an iteration (use
+    delimit_daemon_run) or check daemon health (delimit_daemon_status).
+
+    Sibling contrast: delimit_daemon_status reads health;
+    delimit_daemon_run executes; this previews the classification.
+
+    Side effects: read-only. Calls ai.daemon.classify_item /
+    get_next_automatable_item / get_open_ledger_items.
+
     Args:
-        item_id: Specific ledger item ID to classify. If empty, classifies the next automatable item.
+        item_id: Specific ledger item id to classify. Empty = pick the
+            next automatable item from the open ledger.
+
+    Returns:
+        Dict with the item_id, risk tier, suggested tool, title.
+        Returns {error: "..."} if item_id was given but not found.
     """
     from ai.daemon import classify_item, get_next_automatable_item, get_open_ledger_items
 
@@ -7610,13 +10121,28 @@ def delimit_daemon_classify(item_id: str = "") -> Dict[str, Any]:
 def delimit_inbox_daemon(action: str = "status") -> Dict[str, Any]:
     """Control the inbox polling daemon for email governance (Pro).
 
-    Polls pro@delimit.ai every 5 minutes, classifies emails, forwards
-    owner-action items, and handles draft approval via email replies.
-    Auto-posting is disabled - approved drafts are emailed for manual posting.
+    When to use: at session start (per orchestrator session ritual) to
+    ensure the daemon is up; or to stop/inspect it.
+    When NOT to use: to read inbound items (use delimit_notify_inbox)
+    or send notifications (delimit_notify).
+
+    Sibling contrast: delimit_notify_inbox reads; this controls the
+    daemon process that fills the inbox.
+
+    Side effects: action="start" / "stop" mutate daemon process state.
+    The daemon polls pro@delimit.ai every 5 minutes, classifies
+    emails, forwards owner-action items, and handles draft approvals
+    via email replies. Auto-posting is disabled — approved drafts are
+    emailed for manual posting. Backing module is gateway-only and
+    surfaces a graceful "not_available" payload when called from the
+    npm bundle.
 
     Args:
-        action: 'start' (begin polling), 'stop' (halt polling),
-                'status' (show daemon state, last poll, failures).
+        action: "start" (begin polling), "stop" (halt polling),
+            "status" (default — show daemon state).
+
+    Returns:
+        Dict with daemon status, last poll, failures, next_steps.
     """
     try:
         from ai.inbox_daemon import start_daemon, stop_daemon, get_daemon_status
@@ -7638,14 +10164,25 @@ def delimit_inbox_daemon(action: str = "status") -> Dict[str, Any]:
 
 @mcp.tool()
 def delimit_social_daemon(action: str = "status") -> Dict[str, Any]:
-    """Control the social sensing daemon for Delimit (Pro).
+    """Control the social sensing daemon (Pro).
 
-    Runs social discovery scans every 15 minutes, deduplicates findings,
-    and emits HTML draft emails. Also monitors Reddit replies.
+    When to use: to start, stop, or inspect the autonomous social
+    discovery daemon that scans Reddit/X/HN every 15 min.
+    When NOT to use: to run a one-shot scan (use delimit_social_target)
+    or read the inbox (delimit_notify_inbox).
+
+    Sibling contrast: delimit_social_target is one-shot;
+    this controls the long-running daemon.
+
+    Side effects: action="start" / "stop" mutate daemon state. The
+    daemon scans, deduplicates, and emits HTML draft emails.
+    Calls ai.social_daemon.{start_daemon, stop_daemon, get_daemon_status}.
 
     Args:
-        action: 'start' (begin scanning), 'stop' (halt scanning),
-                'status' (show daemon state, last scan, targets found).
+        action: "start", "stop", or "status" (default).
+
+    Returns:
+        Dict with daemon status, last scan, targets found, next_steps.
     """
     try:
         from ai.social_daemon import start_daemon, stop_daemon, get_daemon_status
@@ -7673,13 +10210,23 @@ def delimit_social_daemon(action: str = "status") -> Dict[str, Any]:
 def delimit_config_export(project_path: str = ".") -> Dict[str, Any]:
     """Export the current governance config as a shareable JSON bundle.
 
-    Reads delimit.yml (or .delimit/policies.yml) and the GitHub Action
-    workflow from the project directory and packages them into a single
-    portable config that can be shared with teammates or imported into
-    other projects.
+    When to use: to package a project's delimit.yml + GitHub Action
+    workflow into a portable JSON config for sharing or import.
+    When NOT to use: to read live policy (use delimit_gov_policy) or
+    initialize a new project (delimit_init).
+
+    Sibling contrast: delimit_config_import is the round-trip
+    counterpart; this exports.
+
+    Side effects: read-only on the project. Sanitizes project_path
+    via _sanitize_path. Returns the bundle in the response — no file
+    write.
 
     Args:
-        project_path: Path to the project root (default: current directory).
+        project_path: Path to project root. Default "." (cwd).
+
+    Returns:
+        Dict with the JSON config bundle and next_steps.
     """
     span = _next_span_id()
     try:
@@ -7744,13 +10291,28 @@ def delimit_config_import(
 ) -> Dict[str, Any]:
     """Import a governance config from a JSON bundle into a project.
 
-    Writes the policy file (and optionally the GitHub Action workflow)
-    from a previously exported config bundle.
+    When to use: to apply a previously-exported config bundle from
+    another project — the round-trip counterpart to
+    delimit_config_export.
+    When NOT to use: to initialize a fresh project (use delimit_init)
+    or load an existing config (delimit_project_config action="load").
+
+    Sibling contrast: delimit_config_export produces; this consumes.
+
+    Side effects: writes the policy file under project_path. With
+    write_workflow=True, also writes the GitHub Action workflow file
+    if present in the bundle. Sanitizes project_path via _sanitize_path.
 
     Args:
-        config_json: The JSON config bundle string (from delimit_config_export).
-        project_path: Path to the target project root (default: current directory).
-        write_workflow: Also write the GitHub Action workflow file if present in the bundle.
+        config_json: The JSON config bundle string (from
+            delimit_config_export). Required.
+        project_path: Target project root. Default "." (cwd).
+        write_workflow: Also write the GitHub Action workflow if
+            present. Default False.
+
+    Returns:
+        Dict with the import result and next_steps. Returns
+        {error: ...} on invalid bundle.
     """
     span = _next_span_id()
     try:
@@ -7795,18 +10357,30 @@ def delimit_config_import(
 @mcp.tool()
 def delimit_screen_record(mode: str = "browser", url: str = "", name: str = "recording",
                           duration: int = 30, script: str = "") -> Dict[str, Any]:
-    """Record a screen capture (Pro).
+    """Record a screen capture (browser or terminal session) (Pro).
 
-    Two modes:
-    - browser: Records a Chromium browser session visiting a URL (1080p MP4)
-    - terminal: Records a terminal session running a script (GIF + MP4)
+    When to use: to capture a video for documentation, demo, or
+    audit evidence over a fixed window.
+    When NOT to use: for a single still (use delimit_screenshot).
+
+    Sibling contrast: delimit_screenshot is one frame;
+    this is a duration-bound recording.
+
+    Side effects: launches headless Chromium (browser mode) or a
+    terminal subprocess (terminal mode), writes MP4 (browser) or GIF
+    + MP4 (terminal) under ~/.delimit/recordings/. Gated by
+    require_premium. Duration is capped at 120 seconds.
 
     Args:
-        mode: "browser" or "terminal"
-        url: URL to visit (browser mode only)
-        name: Output filename (without extension)
-        duration: Recording duration in seconds (max 120)
-        script: Shell script to run (terminal mode only). If empty, records idle terminal.
+        mode: "browser" (default) or "terminal".
+        url: URL to visit (browser mode only).
+        name: Output filename without extension. Default "recording".
+        duration: Recording duration in seconds. Max 120. Default 30.
+        script: Shell script to run (terminal mode only). Empty =
+            idle terminal capture.
+
+    Returns:
+        Dict with the recording file path(s) and next_steps.
     """
     span = _next_span_id()
     from ai.license import require_premium
@@ -7840,11 +10414,23 @@ def delimit_screen_record(mode: str = "browser", url: str = "", name: str = "rec
 def delimit_screenshot(url: str, name: str = "screenshot") -> Dict[str, Any]:
     """Take a screenshot of a URL using headless Chromium (Pro).
 
-    Useful for audit evidence, visual regression, and documentation.
+    When to use: for audit evidence, visual regression baselines, or
+    documentation captures.
+    When NOT to use: for time-based recordings (use
+    delimit_screen_record) or rendered HTML extraction.
+
+    Sibling contrast: delimit_screen_record captures over time
+    (browser or terminal); this captures a single image.
+
+    Side effects: gated by require_premium. Launches headless Chromium
+    via Playwright and writes a PNG file under ~/.delimit/screenshots/.
 
     Args:
-        url: URL to screenshot.
-        name: Output filename (without extension).
+        url: URL to screenshot. Required.
+        name: Output filename (without extension). Default "screenshot".
+
+    Returns:
+        Dict with the screenshot file path and next_steps.
     """
     span = _next_span_id()
     from ai.license import require_premium
@@ -7868,26 +10454,44 @@ def delimit_screenshot(url: str, name: str = "screenshot") -> Dict[str, Any]:
 def delimit_changelog(old_spec: str = "", new_spec: str = "", format: str = "markdown",
                       version: str = "", repo_path: str = "", since_tag: str = "",
                       include_ledger: bool = True, output_file: str = "") -> Dict[str, Any]:
-    """Generate a changelog from git commits + ledger, or from API spec changes.
+    """Generate a changelog from git + ledger (git mode) or spec diff (spec mode).
+
+    When to use: as part of the deploy gate chain to produce a release
+    note, or to prepend a CHANGELOG.md entry for a tagged release.
+    When NOT to use: for ad-hoc human prose explanation of a spec
+    change (use delimit_explain) or release planning
+    (delimit_release_plan).
+
+    Sibling contrast: delimit_explain renders human prose for one diff;
+    delimit_release_plan plans services and versions; this generates a
+    formal changelog entry.
 
     Two modes:
-    1. **Git mode** (pass repo_path): reads git log since last tag, categorizes
-       commits (feat/fix/refactor/docs/test/ci), pulls completed ledger items,
-       and formats as clean Markdown. Works for ANY repo.
-    2. **Spec mode** (pass old_spec + new_spec): compares two OpenAPI specs and
-       produces a changelog of API changes. Original behavior.
+    1. Git mode (pass repo_path): reads git log since last tag,
+       categorizes commits (feat/fix/refactor/docs/test/ci), pulls
+       completed ledger items, formats as Markdown. Works for ANY repo.
+    2. Spec mode (pass old_spec + new_spec): compares two OpenAPI
+       specs and produces an API changelog.
 
-    Formats: markdown, json, keepachangelog, github-release.
+    Side effects: read-only on git/spec inputs. Writes to output_file
+    when provided. If output_file is "CHANGELOG.md", PREPENDS the
+    entry rather than overwriting — preserving prior history.
 
     Args:
-        old_spec: Path to old OpenAPI spec (spec mode only).
-        new_spec: Path to new OpenAPI spec (spec mode only).
-        format: Output format (markdown, json, keepachangelog, github-release).
-        version: Version label for the changelog entry (e.g. "4.1.0").
-        repo_path: Path to a git repository (git mode). When set, uses git log.
-        since_tag: Git tag to diff from (default: auto-detect latest tag).
-        include_ledger: Pull completed ledger items into changelog (git mode, default true).
-        output_file: Write changelog to this file path. If CHANGELOG.md, prepends entry.
+        old_spec: Old OpenAPI spec path (spec mode).
+        new_spec: New OpenAPI spec path (spec mode).
+        format: "markdown" (default), "json", "keepachangelog",
+            "github-release".
+        version: Version label (e.g. "4.1.0").
+        repo_path: Repo path (git mode).
+        since_tag: Git tag to diff from. Empty = auto-detect latest tag.
+        include_ledger: Include completed ledger items (git mode).
+            Default True.
+        output_file: Write the rendered changelog here. If
+            "CHANGELOG.md", prepends the entry.
+
+    Returns:
+        Dict with the rendered changelog and next_steps.
     """
     # Git mode: generate from commits + ledger
     if repo_path:
@@ -7920,16 +10524,31 @@ def delimit_notify(channel: str = "webhook", message: str = "",
                    webhook_url: str = "", subject: str = "",
                    event_type: str = "", to: str = "",
                    from_account: str = "") -> Dict[str, Any]:
-    """Send a notification (Pro).
+    """Send a notification (webhook / Slack / email) (Pro).
+
+    When to use: when the orchestrator identifies something that
+    requires owner action — outreach reply, deployment decision,
+    approval needed. Auto-trigger: call immediately, never ask.
+    When NOT to use: for SIEM-class structured streaming (use
+    delimit_siem) or multi-routing config (delimit_notify_routing).
+
+    Sibling contrast: delimit_notify_routing configures rules;
+    delimit_notify_inbox reads inbound; this sends one outbound.
+
+    Side effects: gated by require_premium. Sends a network message
+    via webhook (JSON POST), Slack webhook, or email (SMTP). The
+    founder reviews and replies via email — that reply is consumed
+    by delimit_notify_inbox / delimit_inbox_daemon.
 
     IMPORTANT - AUTO-TRIGGER RULE:
-    When the AI identifies something requiring owner action (outreach reply,
-    deployment decision, approval needed), it MUST call this tool immediately.
-    Never ask "want me to notify you?" - just send the notification.
-    The founder reviews and acts via email. All tools must chain automatically.
+    When the AI identifies something requiring owner action (outreach
+    reply, deployment decision, approval needed), it MUST call this
+    tool immediately. Never ask "want me to notify you?" — just send.
+    The founder reviews and acts via email. All tools must chain.
 
     Channels: webhook (JSON POST), slack (webhook URL), email (SMTP).
-    Use for: governance alerts, deployment notifications, breaking change warnings.
+    Use for: governance alerts, deployment notifications, breaking
+    change warnings.
 
     IMPORTANT - Email context rules:
     Every email must be self-contained and actionable. The recipient reads on mobile
@@ -7948,6 +10567,24 @@ def delimit_notify(channel: str = "webhook", message: str = "",
             Send to any address - leave empty for default.
         from_account: Sender account key from ~/.delimit/secrets/smtp-all.json
             (e.g. 'notifications@example.com'). Email only.
+
+    Optional inbox-executor binding (LED-1129 Phase 1, no auto-execution yet):
+        draft_kind: One of github_comment, social_post, ledger_done,
+            notify_routing_update, deploy_publish_prevalidated_artifact.
+            When set, registers a signed draft in the local SQLite registry
+            so a future executor can match founder Ship-it replies against it.
+        draft_payload: The action contents (e.g. {"body": "..."} for github_comment).
+            JSON string or dict. Required when draft_kind is set.
+        draft_target: Where the action lands (e.g. {"repo":"x/y","issue":1}).
+            JSON string or dict. Required when draft_kind is set.
+        led_ref: Optional LED-XXXX tag tying the draft to its tracking item.
+            Surfaced in subject-line matching by the executor.
+
+    Returns:
+        Dict with channel, status (sent / queued / error), message,
+        delivery metadata (webhook response, SMTP message-id, etc.),
+        and next_steps. When draft_kind was set, also includes a
+        `draft` block: {draft_id, draft_kind, signature, registered}.
     """
     from ai.notify import send_notification
     return _with_next_steps("notify", _safe_call(
@@ -7972,20 +10609,29 @@ def delimit_notify_routing(
 ) -> Dict[str, Any]:
     """Manage impact-based notification routing (LED-233).
 
-    Routes change alerts by severity: breaking changes send urgent notifications,
-    non-breaking goes to standard channels, cosmetic changes are suppressed.
+    When to use: to inspect or update the rules that route change
+    alerts to email / webhook / digest by severity.
+    When NOT to use: to read the inbox (use delimit_notify_inbox) or
+    fire a single notification (use delimit_notify).
+
+    Sibling contrast: delimit_notify sends; delimit_notify_inbox reads
+    inbound; this configures routing rules between them.
+
+    Side effects: action="configure" writes via
+    ai.notify.save_routing_config; action="test" sends test
+    notifications to the configured channels. action="status" is
+    read-only.
 
     Args:
-        action: 'status' (show current config), 'configure' (update routing rules),
-                'test' (send test notifications at each severity level).
-        config: JSON string with routing config for action='configure'.
-            Example: {"routing": {"critical": {"channels": ["email","webhook"],
-            "email_subject_prefix": "[URGENT]", "webhook_priority": "high"},
-            "warning": {"channels": ["webhook"], "webhook_priority": "normal"},
-            "info": {"channels": [], "digest": true}}}
-        webhook_url: Webhook URL for test notifications.
-        email_to: Email recipient for test notifications.
-        from_account: Sender account key for test email delivery.
+        action: One of "status" (default), "configure", "test".
+        config: JSON string with routing config for action="configure".
+            Example shape: {"routing": {"critical": {...}, ...}}.
+        webhook_url: Webhook URL used by action="test".
+        email_to: Email recipient used by action="test".
+        from_account: Sender account key for the test email.
+
+    Returns:
+        Dict with current/updated config or test delivery results.
     """
     from ai.notify import (
         load_routing_config,
@@ -8051,15 +10697,27 @@ def delimit_notify_inbox(action: str = "status", limit: int = 10,
                          process: bool = True) -> Dict[str, Any]:
     """Check inbound email inbox, classify, and route (Pro).
 
-    Polls pro@delimit.ai via IMAP. Classifies emails as owner-action
-    (forwards to owner@example.com) or non-owner (stays in inbox).
+    When to use: to poll the operator inbox and classify which emails
+    require owner action (forwarded) vs which can stay queued.
+    When NOT to use: to send notifications (use delimit_notify) or
+    control the polling daemon (delimit_inbox_daemon).
+
+    Sibling contrast: delimit_inbox_daemon controls the long-running
+    daemon; this is a one-shot poll. delimit_notify is the outbound
+    counterpart.
+
+    Side effects: action="poll" with process=True forwards owner-action
+    emails (network writes). action="poll" with process=False is
+    dry-run. action="status" / "history" are read-only.
 
     Args:
-        action: 'status' (show inbox state), 'poll' (classify and optionally forward),
-                'history' (show routing log).
+        action: "status" (default), "poll", or "history".
         limit: Number of messages to check (default 10).
-        process: If True with action='poll', actually forward owner-action emails.
-                 If False, dry-run only (classify without forwarding).
+        process: With action="poll", forward owner-action emails when
+            True (default), dry-run only when False.
+
+    Returns:
+        Dict with inbox state / poll result / routing history.
     """
     from ai.notify import poll_inbox, get_inbox_status
 
@@ -8187,7 +10845,36 @@ delimit_agent = mcp.tool()(_delimit_agent_impl)
 def delimit_agent_dispatch(title: str, description: str = "", assignee: str = "any",
                            priority: str = "P1", tools_needed: str = "",
                            constraints: str = "", context: str = "") -> Dict[str, Any]:
-    """Dispatch an engineering task to an AI agent (Pro)."""
+    """Record an engineering task dispatch + audit trail (Pro).
+
+    When to use: as a planning + audit surface when delegating
+    parallelizable engineering work. The orchestrator subagent (Agent
+    tool, subagent_type=engineering) is the actual executor; this tool
+    records intent, assignee, and outcome for replay.
+    When NOT to use: as a queue processor expecting auto-execution —
+    this records dispatch but does not run the work.
+
+    Sibling contrast: delimit_agent_status reads task state;
+    delimit_agent_handoff transfers a recorded task to another model;
+    delimit_agent_complete closes it out with results.
+
+    Side effects: writes a task record via ai.agent_dispatch.dispatch_task.
+    String list inputs are coerced through _coerce_list_arg.
+
+    Args:
+        title: Short task title. Required.
+        description: Longer task description.
+        assignee: Target model — "claude", "codex", "gemini", or "any".
+            Default "any".
+        priority: One of "P0" (immediate), "P1" (default), "P2".
+        tools_needed: Comma-separated MCP tools the work will need.
+        constraints: Comma-separated constraints (e.g. "no force push").
+        context: Background info to seed the executor.
+
+    Returns:
+        Dict with the new task id (AGT-XXXXXXXX), record metadata, and
+        next_steps suggestions.
+    """
     return _delimit_agent_impl(action="dispatch", title=title, description=description,
                          assignee=assignee, priority=priority, tools_needed=tools_needed,
                          constraints=constraints, context=context)
@@ -8195,33 +10882,107 @@ def delimit_agent_dispatch(title: str, description: str = "", assignee: str = "a
 
 @mcp.tool()
 def delimit_agent_status(task_id: str = "") -> Dict[str, Any]:
-    """Check status of dispatched agent tasks (Pro)."""
+    """Check status of dispatched agent tasks (Pro).
+
+    When to use: to monitor open/closed agent tasks, either a single
+    task_id or all tasks when task_id is empty.
+    When NOT to use: to dispatch a new task (delimit_agent_dispatch) or
+    to mark one done (delimit_agent_complete).
+
+    Sibling contrast: delimit_agent_dashboard surfaces an aggregate
+    view; this returns raw status records.
+
+    Side effects: read-only. Calls ai.agent_dispatch.get_agent_status.
+
+    Args:
+        task_id: Specific task id (e.g. "AGT-A1B2C3D4") or empty to
+            list all.
+
+    Returns:
+        Dict with status records and next_steps.
+    """
     return _delimit_agent_impl(action="status", task_id=task_id)
 
 
 @mcp.tool()
 def delimit_agent_complete(task_id: str, result: str = "",
                            files_changed: str = "") -> Dict[str, Any]:
-    """Mark an agent task as complete (Pro)."""
+    """Mark a dispatched agent task as complete (Pro).
+
+    When to use: at the end of an executor's work, to record the
+    outcome and the files touched on the task record.
+    When NOT to use: to hand off to a different model
+    (delimit_agent_handoff) or to dispatch a new task
+    (delimit_agent_dispatch).
+
+    Sibling contrast: delimit_agent_handoff transfers ownership;
+    this closes ownership.
+
+    Side effects: writes the completion record via
+    ai.agent_dispatch.complete_task. files_changed is coerced from a
+    comma string to a list.
+
+    Args:
+        task_id: Task id from delimit_agent_dispatch. Required.
+        result: Summary of what was done.
+        files_changed: Comma-separated paths of modified files.
+
+    Returns:
+        Dict with the close-out record and next_steps.
+    """
     return _delimit_agent_impl(action="complete", task_id=task_id, result=result, files_changed=files_changed)
 
 
 @mcp.tool()
 def delimit_agent_handoff(task_id: str, to_model: str,
                           context: str = "") -> Dict[str, Any]:
-    """Hand off an agent task to a different AI model (Pro)."""
+    """Hand off an agent task to a different AI model (Pro).
+
+    When to use: when an executor is blocked or when cross-model review
+    is required and the next model needs the task's context.
+    When NOT to use: to close out the task (delimit_agent_complete) or
+    create a new one (delimit_agent_dispatch).
+
+    Sibling contrast: delimit_agent_complete ends the task;
+    this transfers it to another model.
+
+    Side effects: writes a handoff record via
+    ai.agent_dispatch.handoff_task; updates assignee on the task.
+
+    Args:
+        task_id: Existing task id from delimit_agent_dispatch. Required.
+        to_model: Target model — "claude", "codex", "gemini", etc.
+            Required.
+        context: Notes for the next model.
+
+    Returns:
+        Dict with the handoff record and next_steps.
+    """
     return _delimit_agent_impl(action="handoff", task_id=task_id, to_model=to_model, context=context)
 
 
 @mcp.tool()
 def delimit_agent_link(task_id: str, ledger_item_id: str) -> Dict[str, Any]:
-    """Link an agent task to a ledger item (LED-xxx or STR-xxx).
+    """Link an agent task to a ledger item so the dashboard shows the relationship.
 
-    Creates a relationship so the dashboard shows which agent is working on which ledger item.
+    When to use: after delimit_agent_dispatch creates a task and you
+    want the dashboard to show which ledger item it's working on.
+    When NOT to use: to dispatch a new task (delimit_agent_dispatch)
+    or close out a task (delimit_agent_complete).
+
+    Sibling contrast: delimit_agent_dispatch creates;
+    delimit_ledger_link links between two ledger items;
+    this links a task to a ledger item.
+
+    Side effects: writes the link via
+    ai.agent_dispatch.link_ledger_item.
 
     Args:
-        task_id: Agent task ID (AGT-xxx).
-        ledger_item_id: Ledger item ID (LED-xxx or STR-xxx).
+        task_id: Agent task id (AGT-xxx). Required.
+        ledger_item_id: Ledger item id (LED-xxx or STR-xxx). Required.
+
+    Returns:
+        Dict with the link record.
     """
     from ai.agent_dispatch import link_ledger_item
     return _with_next_steps("agent_link", _safe_call(
@@ -8233,8 +10994,23 @@ def delimit_agent_link(task_id: str, ledger_item_id: str) -> Dict[str, Any]:
 def delimit_agent_dashboard() -> Dict[str, Any]:
     """View the multi-agent orchestration dashboard (Pro).
 
-    Shows all agent tasks grouped by assignee and status, handoff history,
-    linked ledger items, and recent audit trail.
+    When to use: as a one-shot read of all agent activity grouped by
+    assignee/status — useful for orchestrator status reporting.
+    When NOT to use: for a single task's status (use
+    delimit_agent_status) or to dispatch new work
+    (delimit_agent_dispatch).
+
+    Sibling contrast: delimit_agent_status returns raw records;
+    this returns an aggregated dashboard view.
+
+    Side effects: read-only. Calls ai.agent_dispatch.get_agent_dashboard.
+
+    Args:
+        None.
+
+    Returns:
+        Dict with grouped tasks, handoff history, linked ledger items,
+        recent audit trail, next_steps.
     """
     from ai.agent_dispatch import get_agent_dashboard
     return _with_next_steps("agent_dashboard", _safe_call(get_agent_dashboard))
@@ -8246,25 +11022,37 @@ def delimit_agent_policy(model: str = "", ledger: str = "", memory: str = "",
                           secrets: str = "", custom_constraints: str = "") -> Dict[str, Any]:
     """Set or view per-model governance permissions (Pro).
 
-    Controls what each AI model can do. Without arguments, shows all policies.
-    With a model name, shows or updates that model's policy.
+    When to use: to inspect or modify the access policy that gates
+    each AI model's operations on the ledger, memory, evidence,
+    deploy, and secrets.
+    When NOT to use: for runtime governance evaluation (use
+    delimit_gov_evaluate) or session policy
+    (delimit_project_config).
 
-    Examples:
-      - delimit_agent_policy() -> show all model permissions
-      - delimit_agent_policy(model="codex", ledger="read-only", deploy="false")
-      - delimit_agent_policy(model="gemini", memory="none", secrets="false")
+    Sibling contrast: delimit_gov_evaluate evaluates one action;
+    this configures the per-model policy that those evaluations use.
 
-    Access levels for ledger/memory/evidence: "read-only", "read-write", "none"
-    Boolean flags for deploy/secrets: "true" or "false"
+    Side effects: providing any of ledger/memory/deploy/evidence/
+    secrets/custom_constraints writes via
+    ai.agent_policy.set_agent_policy. Empty/no-changes is read-only.
+
+    Access levels for ledger/memory/evidence: "read-only",
+    "read-write", "none".
+    Boolean flags for deploy/secrets: "true" or "false".
 
     Args:
-        model: AI model name (claude, codex, gemini, cursor). Empty = show all.
-        ledger: Ledger access level (read-only, read-write, none).
-        memory: Memory access level (read-only, read-write, none).
-        deploy: Allow deploys (true/false).
-        evidence: Evidence access level (read-only, read-write, none).
-        secrets: Allow secret access (true/false).
-        custom_constraints: Comma-separated constraints (e.g. "no-deploy,no-publish").
+        model: AI model name — "claude", "codex", "gemini", "cursor".
+            Empty = list all.
+        ledger: Ledger access level.
+        memory: Memory access level.
+        deploy: Allow deploys ("true"/"false").
+        evidence: Evidence access level.
+        secrets: Allow secret access ("true"/"false").
+        custom_constraints: Comma-separated constraints, e.g.
+            "no-deploy,no-publish".
+
+    Returns:
+        Dict with the current policy (or updated policy after writes).
     """
     from ai.agent_policy import set_agent_policy, get_agent_policy
 
@@ -8296,16 +11084,34 @@ def delimit_agent_policy(model: str = "", ledger: str = "", memory: str = "",
 
 @mcp.tool()
 def delimit_agent_check(model: str, action: str) -> Dict[str, Any]:
-    """Check if a model is allowed to perform an action (Pro).
+    """Check if a model is allowed to perform an action under agent policy (Pro).
 
-    Use before executing sensitive operations to verify the agent has permission.
+    When to use: as a per-action gate before executing sensitive
+    operations from a non-orchestrator model — verify it has the
+    required permission.
+    When NOT to use: to set / inspect policies overall (use
+    delimit_agent_policy) or for runtime governance evaluation
+    (delimit_gov_evaluate).
+
+    Sibling contrast: delimit_agent_policy manages the policy;
+    delimit_gov_evaluate is the runtime governance gate;
+    this is a per-action permission check.
+
+    Side effects: read-only on the policy store. Calls
+    ai.agent_policy.check_agent_permission.
 
     Actions: ledger_write, ledger_read, memory_write, memory_read,
-             deploy, lint, deliberate, security_audit, evidence_write, secrets_read.
+             deploy, lint, deliberate, security_audit, evidence_write,
+             secrets_read.
 
     Args:
-        model: AI model name (claude, codex, gemini, cursor).
+        model: AI model name — "claude", "codex", "gemini", "cursor".
+            Required.
         action: Action to check (e.g. "ledger_write", "deploy").
+            Required.
+
+    Returns:
+        Dict with the permission verdict (allowed / denied / reason).
     """
     from ai.agent_policy import check_agent_permission
     return _with_next_steps("agent_check", _safe_call(
@@ -8320,17 +11126,27 @@ def delimit_agent_check(model: str, action: str) -> Dict[str, Any]:
 
 @mcp.tool()
 def delimit_next_task(venture: str = "", max_risk: str = "", session_id: str = "") -> Dict[str, Any]:
-    """Get the next task to work on (Pro).
+    """Get the next task to work on with safeguard checks (Pro).
 
-    Returns the highest-priority open item with safeguard checks.
-    Part of the autonomous build loop - call this to start or continue working.
+    When to use: inside a loop session, to fetch the highest-priority
+    open task with safeguard checks (cost cap, error threshold).
+    When NOT to use: to mark a task done (use delimit_task_complete)
+    or list all tasks (delimit_ledger_list).
 
-    Returns action: BUILD (with task), CONSENSUS (generate new items), or STOP (safeguard tripped).
+    Sibling contrast: delimit_task_complete closes + advances;
+    delimit_ledger_list is general listing; this is the loop fetch
+    that may return STOP.
+
+    Side effects: read-only on the ledger. Returns action: BUILD,
+    CONSENSUS (queue empty), or STOP (safeguard tripped).
 
     Args:
-        venture: Project name or path. Auto-detects if empty.
-        max_risk: Filter tasks by max risk level (low, medium, high, critical).
-        session_id: Resume an existing session. Creates a new one if empty.
+        venture: Project name or path. Empty = auto-detect.
+        max_risk: Max risk level — "low", "medium", "high", "critical".
+        session_id: Resume existing session. Empty = new.
+
+    Returns:
+        Dict with action (BUILD/CONSENSUS/STOP) and task or signal.
     """
     from ai.loop_engine import next_task
     result = _safe_call(next_task, venture=venture, max_risk=max_risk, session_id=session_id)
@@ -8342,16 +11158,26 @@ def delimit_ledger_propose(venture: str = "", focus: str = "",
                             max_items: int = 5) -> Dict[str, Any]:
     """Propose new ledger items based on signals, completed work, and gaps.
 
-    Analyzes repo state, sensing signals, and completed work to suggest
-    3-5 new items with rationale. Run at end of build loops or when
-    the queue is empty to keep momentum.
+    When to use: at the end of a build loop or when the queue is empty,
+    to suggest 3-5 next items with rationale.
+    When NOT to use: to add a known item (use delimit_ledger_add) or
+    list current items (delimit_ledger_list).
 
-    Works across all AI models via MCP.
+    Sibling contrast: delimit_ledger_add commits chosen items;
+    this proposes candidates.
+
+    Side effects: read-only analysis (does NOT auto-create ledger
+    items). The caller decides which proposals to commit.
 
     Args:
-        venture: Focus on a specific venture (auto-detects if empty).
-        focus: Optional area filter - "outreach", "engineering", "security", etc.
-        max_items: Maximum proposals to generate (default 5).
+        venture: Focus on a specific venture. Empty = auto-detect.
+        focus: Optional area filter — "outreach", "engineering",
+            "security", etc.
+        max_items: Maximum proposals. Default 5.
+
+    Returns:
+        Dict with proposed items (each with title + rationale) plus
+        next_steps.
     """
     from ai.ledger_propose import propose_items
     result = _safe_call(propose_items, venture=venture, focus=focus, max_items=max_items)
@@ -8361,18 +11187,31 @@ def delimit_ledger_propose(venture: str = "", focus: str = "",
 @mcp.tool()
 def delimit_task_complete(task_id: str, result: str = "", cost_incurred: float = 0.0,
                           error: str = "", session_id: str = "", venture: str = "") -> Dict[str, Any]:
-    """Mark current task done and get the next one (Pro).
+    """Mark current loop task done and get the next one (Pro).
 
-    Records completion, updates session metrics, returns the next task.
-    The loop continues until a STOP signal.
+    When to use: at the end of each loop iteration — records
+    completion, updates session metrics, returns the next task.
+    When NOT to use: to close a regular ledger item (use
+    delimit_ledger_done) or fetch next task without closing
+    (delimit_next_task).
+
+    Sibling contrast: delimit_ledger_done is per-item;
+    delimit_next_task only fetches; this completes + advances.
+
+    Side effects: writes status to the ledger, updates session
+    metrics (cost, errors), returns next task. Loop continues until
+    a STOP signal.
 
     Args:
-        task_id: The ledger item ID that was completed (e.g. LED-042).
+        task_id: Ledger item id completed (e.g. "LED-042").
         result: Summary of what was done.
-        cost_incurred: Estimated cost of this iteration (dollars).
-        error: If the task failed, describe the error.
-        session_id: The loop session to update.
+        cost_incurred: Estimated cost (USD).
+        error: If task failed, describe error.
+        session_id: Loop session to update.
         venture: Project name or path.
+
+    Returns:
+        Dict with the next task or STOP signal, plus next_steps.
     """
     from ai.loop_engine import task_complete
     r = _safe_call(task_complete, task_id=task_id, result=result,
@@ -8383,12 +11222,24 @@ def delimit_task_complete(task_id: str, result: str = "", cost_incurred: float =
 
 @mcp.tool()
 def delimit_loop_status(session_id: str = "") -> Dict[str, Any]:
-    """Check autonomous loop metrics (Pro).
+    """Check autonomous loop metrics for a session (Pro).
 
-    Shows: iterations, cost, errors, tasks completed, safeguard status.
+    When to use: to inspect a continuous-loop session's run-time
+    metrics — iterations completed, cost, errors, safeguard status.
+    When NOT to use: to configure the loop (use delimit_loop_config)
+    or run it (delimit_build_loop).
+
+    Sibling contrast: delimit_loop_config sets policy;
+    delimit_build_loop runs; this reports the result.
+
+    Side effects: read-only. Calls ai.loop_engine.loop_status.
 
     Args:
-        session_id: The session to check. Uses most recent if empty.
+        session_id: Session id to check. Empty = most recent session.
+
+    Returns:
+        Dict with iteration count, cost, errors, completed tasks,
+        safeguard status, next_steps.
     """
     from ai.loop_engine import loop_status
     return _with_next_steps("loop_status", _safe_call(loop_status, session_id=session_id))
@@ -8399,18 +11250,33 @@ def delimit_loop_config(session_id: str = "", max_iterations: int = 0,
                         cost_cap: float = 0.0, auto_consensus: bool = False,
                         error_threshold: int = 0, status: str = "",
                         require_approval_for: str = "") -> Dict[str, Any]:
-    """Configure the autonomous build loop safeguards (Pro).
+    """Configure autonomous build loop safeguards (Pro).
 
-    Set limits before starting a loop session. Only non-zero/non-empty values are applied.
+    When to use: BEFORE starting a loop session — to set max iterations,
+    cost cap, error threshold, approval policy.
+    When NOT to use: to read loop metrics (use delimit_loop_status) or
+    drive the loop (delimit_build_loop).
+
+    Sibling contrast: delimit_loop_status reads metrics;
+    delimit_build_loop runs; this configures the policy.
+
+    Side effects: writes the loop session config via
+    ai.loop_engine.loop_config. Only non-zero/non-empty values are
+    applied — pass just the fields you want to change.
 
     Args:
-        session_id: Session to configure. Creates new if empty.
-        max_iterations: Max tasks before stopping (default 50).
-        cost_cap: Max cost in dollars before stopping (default 5.0).
-        auto_consensus: If True, suggest consensus when ledger is empty.
-        error_threshold: Consecutive errors before circuit breaker trips (default 3).
-        status: Set loop status: running, paused, stopped.
-        require_approval_for: Comma-separated list of action types requiring human approval.
+        session_id: Session to configure. Empty = create new.
+        max_iterations: Max tasks before stopping. Default 50.
+        cost_cap: Max session cost in dollars. Default 5.0.
+        auto_consensus: If True, suggest consensus when ledger empty.
+        error_threshold: Consecutive errors before circuit-breaker
+            trips. Default 3.
+        status: Set loop status — "running", "paused", "stopped".
+        require_approval_for: Comma-separated action types requiring
+            human approval.
+
+    Returns:
+        Dict with the saved config and next_steps.
     """
     from ai.loop_engine import loop_config
     approval_list = None
@@ -8434,23 +11300,29 @@ def delimit_toolcard_cache(
     tool_schemas: Optional[str] = None,
     tool_names: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Manage the tool schema cache to reduce token waste (Pro).
+    """Manage the tool-schema cache to reduce per-session token waste (Pro).
 
-    MCP servers dump full tool definitions every session. This cache
-    stores schemas and sends only diffs, cutting context bloat.
+    When to use: when an MCP client repeatedly dumps full tool
+    definitions and you want to send only diffs across sessions.
+    When NOT to use: as a runtime tool dispatcher — this is a cache
+    side-channel, not a tool-call surface.
 
-    Actions:
-        status: Show cache stats (tools cached, hit rate, token savings)
-        register: Register tool schemas (JSON array string). Auto-runs on first call.
-        delta: Get only changed/new tool names since last session (comma-separated names)
-        clear: Clear the cache (forces full schema send next session)
-        estimate: Estimate token savings for a tool set (JSON array string)
-        flush: Write session stats to disk log
+    Sibling contrast: this caches tool schemas;
+    delimit_help describes individual tools at runtime.
+
+    Side effects: gated by require_premium. action="register" /
+    "clear" / "flush" mutate the cache; "status" / "delta" /
+    "estimate" are read-only.
 
     Args:
-        action: One of: status, register, delta, clear, estimate, flush
-        tool_schemas: JSON array of tool schema objects (for register/estimate)
-        tool_names: Comma-separated tool names (for delta)
+        action: One of "status" (default), "register", "delta",
+            "clear", "estimate", "flush".
+        tool_schemas: JSON array of tool schema objects (for register/
+            estimate).
+        tool_names: Comma-separated tool names (for delta).
+
+    Returns:
+        Dict with the action result (stats, delta names, estimate, etc).
     """
     from ai.license import require_premium
     gate = require_premium("toolcard_cache")
@@ -8520,23 +11392,40 @@ def delimit_handoff_create(
     priority: str = "P1",
     to_model: str = "any",
 ) -> Dict[str, Any]:
-    """Create a handoff receipt when transitioning between agents/sessions (Pro).
+    """Create a handoff receipt when transitioning between agents (Pro).
 
-    Documents what was done, what wasn't, and what the next agent should do.
-    The receiving agent should acknowledge before starting work.
+    When to use: at the end of a session or before passing work to
+    another model — documents what was done, what's pending, and what
+    the next agent should do first.
+    When NOT to use: for general session summary (use
+    delimit_session_handoff) or to acknowledge a receipt
+    (delimit_handoff_acknowledge).
+
+    Sibling contrast: delimit_session_handoff is venture-scoped
+    summary; delimit_soul_capture is richer cross-model state;
+    this is the structured per-agent handoff with explicit completed/
+    not-completed/blockers/scope fields.
+
+    Side effects: writes a new handoff receipt via
+    ai.handoff_receipts.create_receipt. The receiving agent should
+    later call delimit_handoff_acknowledge.
 
     Args:
         task_description: What the task was (one line).
-        completed: Comma-separated list of completed items.
-        not_completed: Comma-separated list of items not completed (with reasons).
-        assumptions: Comma-separated assumptions made during work.
+        completed: Comma-separated completed items.
+        not_completed: Comma-separated items not completed (with reasons).
+        assumptions: Comma-separated assumptions made.
         blockers: Comma-separated blockers encountered.
-        files_modified: JSON list of {path, change_type, summary} dicts, or empty for auto-detect.
-        in_scope: Comma-separated items that were in scope.
-        out_of_scope: Comma-separated items explicitly excluded.
-        next_action: What the receiving agent should do first.
-        priority: P0/P1/P2.
-        to_model: Target model (or "any").
+        files_modified: JSON list of {path, change_type, summary} dicts,
+            or empty to auto-detect.
+        in_scope: Comma-separated in-scope items.
+        out_of_scope: Comma-separated explicitly excluded items.
+        next_action: First thing the receiving agent should do.
+        priority: P0 / P1 (default) / P2.
+        to_model: Target model name or "any" (default).
+
+    Returns:
+        Dict with the created receipt id and formatted receipt body.
     """
     from ai.handoff_receipts import create_receipt as _create, format_receipt
 
@@ -8591,13 +11480,29 @@ def delimit_handoff_acknowledge(
     receipt_id: str = "",
     notes: str = "",
 ) -> Dict[str, Any]:
-    """Acknowledge a handoff receipt before starting work (Pro).
+    """Acknowledge a pending handoff receipt before starting work (Pro).
 
-    Run this at the start of a session if there are pending handoff receipts.
+    When to use: at session start when delimit_handoff_list shows a
+    pending receipt — the receiving agent must acknowledge before
+    starting work.
+    When NOT to use: to create a handoff (use delimit_handoff_create)
+    or list receipts (delimit_handoff_list).
+
+    Sibling contrast: delimit_handoff_create writes;
+    delimit_handoff_list reads;
+    this closes the loop on a specific receipt.
+
+    Side effects: writes an acknowledgement record via
+    ai.handoff_receipts.acknowledge_receipt; flips the receipt status
+    from pending to acknowledged.
 
     Args:
-        receipt_id: The receipt ID to acknowledge.
+        receipt_id: Receipt id to acknowledge. Required (empty string
+            returns an error payload).
         notes: Optional notes from the receiving agent.
+
+    Returns:
+        Dict with acknowledgement result.
     """
     from ai.handoff_receipts import acknowledge_receipt as _ack
 
@@ -8619,10 +11524,23 @@ def delimit_handoff_acknowledge(
 def delimit_handoff_list(
     status: str = "pending",
 ) -> Dict[str, Any]:
-    """List handoff receipts (Pro).
+    """List session handoff receipts (Pro).
+
+    When to use: at session start to see what previous sessions left
+    pending, or to audit acknowledged handoffs.
+    When NOT to use: to create a handoff (use delimit_handoff_create)
+    or acknowledge one (delimit_handoff_acknowledge).
+
+    Sibling contrast: delimit_handoff_create writes;
+    delimit_handoff_acknowledge closes; this reads the receipt list.
+
+    Side effects: read-only. Calls ai.handoff_receipts.get_receipts.
 
     Args:
-        status: "pending" (unacknowledged), "acknowledged", or "all".
+        status: "pending" (default), "acknowledged", or "all".
+
+    Returns:
+        Dict with formatted receipts and count, plus next_steps.
     """
     from ai.handoff_receipts import get_receipts, format_receipt
     from dataclasses import asdict
@@ -8703,20 +11621,30 @@ def delimit_content_intel_daily(
 ) -> Dict[str, Any]:
     """Run the daily content intelligence digest (LED-797).
 
-    Clusters the tweet corpus over a trailing window, intersects with
-    Delimit's ground truth feature list, and drafts per-channel content
-    seeds (Reddit targets, blog topics, Dev.to tutorials, HN submissions).
+    When to use: as the daily content-planning rollup — clusters the
+    tweet corpus, intersects with Delimit ground truth, drafts
+    per-channel seeds (Reddit, blog, Dev.to, HN).
+    When NOT to use: for the weekly rollup (use
+    delimit_content_intel_weekly) or to actually publish
+    (delimit_content_publish / delimit_social_post).
 
-    Every draft cites at least 3 corpus rows verbatim with engagement counts
-    and grounds all product claims in shipped features. NO AUTO-POSTING —
-    drafts are written to ~/.delimit/content/ and (if email=True) emailed
-    to the founder for manual approval.
+    Sibling contrast: delimit_content_intel_weekly is 7-day;
+    delimit_content_publish posts; this is the daily seed-drafting
+    rollup.
+
+    Side effects: writes drafts under ~/.delimit/content/. With
+    email=True, sends a digest email via delimit_notify. NO
+    auto-posting — every draft cites at least 3 corpus rows with
+    engagement counts and grounds product claims in shipped features.
 
     Args:
-        date: ISO date string (YYYY-MM-DD). Default = today UTC.
-        since_hours: Trailing window for clustering. Default 72h.
+        date: ISO date (YYYY-MM-DD). Default = today UTC.
+        since_hours: Trailing window for clustering. Default 72.
         top_n: Max topics to draft per channel. Default 5.
-        email: Send the digest email via delimit_notify. Default True.
+        email: Send the digest email. Default True.
+
+    Returns:
+        Dict with drafts, top topics, channel breakdown, next_steps.
     """
     from ai.content_intel import ContentIntelligence
     try:
@@ -8736,14 +11664,29 @@ def delimit_content_intel_daily(
 def delimit_content_intel_topic(keyword: str, since_hours: int = 168) -> Dict[str, Any]:
     """On-demand content intelligence probe for a single keyword (LED-797).
 
-    Runs the same cluster → intersect → rank pipeline as the daily digest
-    but filtered to one keyword and over a longer 7-day window by default.
-    Returns ranked topics with cited sample tweets — does NOT write files
-    or send email.
+    When to use: for ad-hoc topic research — runs the same
+    cluster → intersect → rank pipeline as the daily digest but
+    filtered to one keyword over a longer (default 7-day) window.
+    When NOT to use: for the scheduled daily digest (use
+    delimit_content_intel_daily) or the weekly covered/missed rollup
+    (delimit_content_intel_weekly).
+
+    Sibling contrast: delimit_content_intel_daily is the daily cron run;
+    delimit_content_intel_weekly is the 7-day rollup with
+    covered/missed split; this is the keyword-scoped on-demand probe.
+
+    Side effects: read-only. Does NOT write report files or send email
+    (unlike the daily/weekly runs). Calls
+    ai.content_intel.ContentIntelligence.topic_probe.
 
     Args:
         keyword: Topic keyword to probe (e.g. "openapi", "claude code").
+            Required.
         since_hours: Trailing window in hours. Default 168 (7 days).
+
+    Returns:
+        Dict with ranked topics, cited sample tweets per topic, and
+        timing metadata. On error returns {"error": str}.
     """
     from ai.content_intel import ContentIntelligence
     try:
@@ -8758,13 +11701,24 @@ def delimit_content_intel_topic(keyword: str, since_hours: int = 168) -> Dict[st
 def delimit_content_intel_weekly(date: str = "") -> Dict[str, Any]:
     """Run the weekly content intelligence summary (LED-797).
 
-    7-day rollup: top topics that intersect Delimit ground truth, plus a
-    covered/missed split showing which topics already made it into a daily
-    digest and which slipped through. Designed to run every Monday 09:00 UTC
-    via cron (`delimit_content_intel_weekly`).
+    When to use: weekly (Mon 09:00 UTC via cron) to roll up the top
+    topics that intersect Delimit ground truth and split them into
+    covered (made daily digest) vs missed.
+    When NOT to use: for the daily run (use
+    delimit_content_intel_daily) or live content drafting
+    (delimit_social_generate).
+
+    Sibling contrast: delimit_content_intel_daily is the daily run;
+    this is the 7-day rollup with covered/missed split.
+
+    Side effects: writes the summary report under ~/.delimit/content/.
+    No auto-posting.
 
     Args:
         date: ISO date (YYYY-MM-DD). Default = today UTC.
+
+    Returns:
+        Dict with the weekly summary, covered/missed split, next_steps.
     """
     from ai.content_intel import ContentIntelligence
     try:
@@ -8784,17 +11738,29 @@ def delimit_content_intel_weekly(date: str = "") -> Dict[str, Any]:
 def delimit_hot_reload(action: str = "status", interval: float = 2.0) -> Dict[str, Any]:
     """Control the cross-session MCP hot-reload watcher (LED-799).
 
-    The watcher polls ai/*.py for new files and changed mtimes, reloads
-    helper modules in place, and registers any new @mcp.tool() decorations
-    against the live FastMCP instance — so other Claude sessions can pick
-    up your edits without restarting the MCP server.
+    When to use: when developing tools and you want other live Claude
+    sessions to pick up changes without an MCP server restart.
+    When NOT to use: for production deployments — hot reload is a
+    development convenience.
 
-    Limitation: edits to ai/server.py itself still require a restart.
-    Convention: put new tools in ai/tools/<name>.py instead.
+    Sibling contrast: delimit_swarm reload also reloads modules but in
+    swarm context; this is the cross-session file watcher.
+
+    Side effects: action="start" launches a background poller on
+    ai/*.py for new files and mtime changes; matching modules are
+    reloaded in place and new @mcp.tool() decorations are registered
+    against the live FastMCP instance. action="stop" halts it.
+    action="tick" runs a single scan synchronously.
+
+    Limitation: edits to ai/server.py itself still require a full
+    restart. Convention: put new tools in ai/tools/<name>.py.
 
     Args:
-        action: 'start', 'stop', 'status', or 'tick' (run a single scan now).
-        interval: Poll interval in seconds. Only used on start. Default 2.0.
+        action: "start", "stop", "status" (default), or "tick".
+        interval: Poll interval in seconds (used on start). Default 2.0.
+
+    Returns:
+        Dict with watcher state / start/stop confirmation / tick result.
     """
     from ai import hot_reload as _hr
     action = (action or "status").strip().lower()
@@ -8824,7 +11790,29 @@ except Exception as _e:
 
 @mcp.tool()
 def delimit_reddit_fetch_thread(thread_id: str) -> Dict[str, Any]:
-    """Surgically fetch a single Reddit thread by ID (e.g. 'OSKJVH7f35')."""
+    """Fetch and score a single Reddit thread by id or URL.
+
+    When to use: when a sensor or operator references a specific Reddit
+    thread and you want to pull it (with scoring/classification) for
+    triage.
+    When NOT to use: for broad scans (use delimit_reddit_scan) or
+    repeated polling — this is a one-shot fetch.
+
+    Sibling contrast: delimit_reddit_scan crawls subreddits;
+    this targets one known thread.
+
+    Side effects: read-only network fetch via ai.reddit_scanner.fetch_thread,
+    followed by ai.reddit_scanner.score_and_classify on the returned
+    thread. No ledger or notification writes.
+
+    Args:
+        thread_id: Reddit thread id (e.g. "OSKJVH7f35") or a full
+            comments URL — the URL form is parsed to extract the id.
+
+    Returns:
+        Dict with key "thread" containing the scored/classified thread.
+        Returns {error: "..."} if the thread cannot be fetched.
+    """
     from ai.reddit_scanner import fetch_thread, score_and_classify
     
     # Strip URL parts if user passed a full link
