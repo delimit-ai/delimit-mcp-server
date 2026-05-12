@@ -51,11 +51,12 @@ import subprocess
 import threading
 import traceback
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Annotated, Any, Dict, List, Optional, Union
 
 from fastmcp import FastMCP
+from pydantic import Field
 
 logger = logging.getLogger("delimit.ai")
 
@@ -1419,7 +1420,7 @@ def _with_next_steps(tool_name: str, result: Dict[str, Any]) -> Dict[str, Any]:
 
 
 @mcp.tool()
-def delimit_lint(old_spec: str, new_spec: str, policy_file: Optional[str] = None, dry_run: bool = False) -> Dict[str, Any]:
+def delimit_lint(old_spec: Annotated[str, Field(description="Path or URL to the baseline spec.")], new_spec: Annotated[str, Field(description="Path or URL to the proposed spec.")], policy_file: Annotated[Optional[str], Field(description="Optional .delimit/policies.yml path.")] = None, dry_run: Annotated[bool, Field(description="If True, return violations + semver without side effects.")] = False) -> Dict[str, Any]:
     """Lint two OpenAPI specs for breaking changes and policy violations.
 
     When to use: as the primary CI gate before merging API spec
@@ -1448,109 +1449,137 @@ def delimit_lint(old_spec: str, new_spec: str, policy_file: Optional[str] = None
         Dict with violations, semver, gates, plus next_steps.
     """
     from backends.gateway_core import run_lint, run_semver
+    from ai.remote_resolve import RemoteResolveError, resolve_spec_input
 
-    # Step 1: Core lint
-    lint_result = _safe_call(run_lint, old_spec=old_spec, new_spec=new_spec, policy_file=policy_file)
-
-    # Dry-run mode: return raw lint + semver, skip all chains and governance
-    if dry_run:
-        lint_result["dry_run"] = True
-        lint_result["simulated"] = True
-        # Still classify semver (informational, no side effects)
-        semver_result = _safe_call(run_semver, old_spec=old_spec, new_spec=new_spec)
-        if not semver_result.get("error"):
-            lint_result["semver"] = semver_result
-        return lint_result
-
-    chain: Dict[str, Any] = {"id": "lint_chain", "steps": []}
-
-    if lint_result.get("error"):
-        lint_result["chain"] = chain
-        return _with_next_steps("lint", lint_result)
-
-    # Step 2: Auto-classify semver bump (non-blocking on failure)
-    semver_result = _chain_call("lint", "semver", run_semver,
-                                required=False, old_spec=old_spec, new_spec=new_spec)
-    chain["steps"].append({"step": "semver", "ok": not _chain_is_error(semver_result)})
-    lint_result["semver"] = semver_result
-
-    if _chain_is_error(semver_result):
-        chain["status"] = "semver_failed_nonfatal"
-        lint_result["chain"] = chain
-        return _with_next_steps("lint", lint_result)
-
-    bump = str(semver_result.get("bump", "")).upper()
-
-    # Step 2b: Impact-based notification routing (LED-233, non-blocking)
+    # Resolve any URL inputs up-front. Both contextmanagers share a
+    # single ExitStack so cleanup happens once at the end.
+    import contextlib as _contextlib
     try:
-        from ai.notify import route_by_impact
-        all_changes = lint_result.get("all_changes", lint_result.get("violations", []))
-        if all_changes:
-            routing_result = route_by_impact(all_changes, dry_run=False)
-            chain["steps"].append({"step": "impact_routing", "ok": True})
-            lint_result["impact_routing"] = routing_result
-    except Exception as e:
-        logger.debug("Impact routing non-fatal error: %s", e)
-        chain["steps"].append({"step": "impact_routing", "ok": False, "error": str(e)})
+        with _contextlib.ExitStack() as stack:
+            old_resolved, old_meta = stack.enter_context(resolve_spec_input(old_spec))
+            new_resolved, new_meta = stack.enter_context(resolve_spec_input(new_spec))
+            resolved_from = [old_meta["resolved_from"], new_meta["resolved_from"]]
 
-    if bump != "MAJOR":
-        chain["status"] = f"complete_{bump.lower() or 'none'}"
-        lint_result["chain"] = chain
-        return _with_next_steps("lint", lint_result)
+            # Step 1: Core lint (against resolved local paths)
+            lint_result = _safe_call(
+                run_lint,
+                old_spec=old_resolved,
+                new_spec=new_resolved,
+                policy_file=policy_file,
+            )
 
-    # Step 3: MAJOR bump detected -- evaluate governance
-    # Note: _delimit_gov_impl has its own Pro gate. Free-tier gets lint+semver only.
-    gov_result = _delimit_gov_impl(
-        action="evaluate",
-        eval_action="api_breaking_change",
-        context={
-            "tool": "delimit_lint",
-            "old_spec": old_spec,
-            "new_spec": new_spec,
-            "semver_bump": bump,
-            "breaking_changes": lint_result.get("breaking", []),
-        },
-        repo=".",
-    )
-    chain["steps"].append({"step": "gov_evaluate", "ok": not _chain_is_error(gov_result)})
-    lint_result["gov_evaluate"] = gov_result
+            # Dry-run mode: return raw lint + semver, skip all chains and governance
+            if dry_run:
+                lint_result["dry_run"] = True
+                lint_result["simulated"] = True
+                # Still classify semver (informational, no side effects)
+                semver_result = _safe_call(run_semver, old_spec=old_resolved, new_spec=new_resolved)
+                if not semver_result.get("error"):
+                    lint_result["semver"] = semver_result
+                lint_result["resolved_from"] = resolved_from
+                return lint_result
 
-    # If Pro gate blocked governance, return gracefully with lint+semver
-    if gov_result.get("status") == "premium_required":
-        chain["status"] = "governance_skipped_free_tier"
-        lint_result["chain"] = chain
-        return _with_next_steps("lint", lint_result)
+            chain: Dict[str, Any] = {"id": "lint_chain", "steps": []}
 
-    # Step 4: If governance blocked, record in ledger (best-effort)
-    gov_blocked = (
-        str(gov_result.get("status", "")).lower() == "blocked"
-        or gov_result.get("governance", {}).get("action") == "policy_blocked"
-    )
+            if lint_result.get("error"):
+                lint_result["chain"] = chain
+                lint_result["resolved_from"] = resolved_from
+                return _with_next_steps("lint", lint_result)
 
-    if gov_blocked:
-        from ai.ledger_manager import add_item
-        ledger_result = _chain_call(
-            "lint", "ledger_add", add_item,
-            required=False,
-            title=f"Governance blocked: MAJOR API change in {new_spec}",
-            ledger="ops",
-            item_type="fix",
-            priority="P0",
-            description="MAJOR semver bump detected. Governance blocked the change.",
-            source="chain:lint:gov_blocked",
-        )
-        chain["steps"].append({"step": "ledger_add", "ok": not _chain_is_error(ledger_result)})
-        lint_result["governance_blocked"] = True
-    else:
-        lint_result["governance_blocked"] = False
+            # Step 2: Auto-classify semver bump (non-blocking on failure)
+            semver_result = _chain_call("lint", "semver", run_semver,
+                                        required=False, old_spec=old_resolved, new_spec=new_resolved)
+            chain["steps"].append({"step": "semver", "ok": not _chain_is_error(semver_result)})
+            lint_result["semver"] = semver_result
 
-    chain["status"] = "major_change_evaluated"
-    lint_result["chain"] = chain
-    return _with_next_steps("lint", lint_result)
+            if _chain_is_error(semver_result):
+                chain["status"] = "semver_failed_nonfatal"
+                lint_result["chain"] = chain
+                lint_result["resolved_from"] = resolved_from
+                return _with_next_steps("lint", lint_result)
+
+            bump = str(semver_result.get("bump", "")).upper()
+
+            # Step 2b: Impact-based notification routing (LED-233, non-blocking)
+            try:
+                from ai.notify import route_by_impact
+                all_changes = lint_result.get("all_changes", lint_result.get("violations", []))
+                if all_changes:
+                    routing_result = route_by_impact(all_changes, dry_run=False)
+                    chain["steps"].append({"step": "impact_routing", "ok": True})
+                    lint_result["impact_routing"] = routing_result
+            except Exception as e:
+                logger.debug("Impact routing non-fatal error: %s", e)
+                chain["steps"].append({"step": "impact_routing", "ok": False, "error": str(e)})
+
+            if bump != "MAJOR":
+                chain["status"] = f"complete_{bump.lower() or 'none'}"
+                lint_result["chain"] = chain
+                lint_result["resolved_from"] = resolved_from
+                return _with_next_steps("lint", lint_result)
+
+            # Step 3: MAJOR bump detected -- evaluate governance
+            # Note: _delimit_gov_impl has its own Pro gate. Free-tier gets lint+semver only.
+            # Pass the *original* user inputs (not the tempfile paths) into the
+            # governance context so audit trails capture the real spec source.
+            gov_result = _delimit_gov_impl(
+                action="evaluate",
+                eval_action="api_breaking_change",
+                context={
+                    "tool": "delimit_lint",
+                    "old_spec": old_spec,
+                    "new_spec": new_spec,
+                    "semver_bump": bump,
+                    "breaking_changes": lint_result.get("breaking", []),
+                },
+                repo=".",
+            )
+            chain["steps"].append({"step": "gov_evaluate", "ok": not _chain_is_error(gov_result)})
+            lint_result["gov_evaluate"] = gov_result
+
+            # If Pro gate blocked governance, return gracefully with lint+semver
+            if gov_result.get("status") == "premium_required":
+                chain["status"] = "governance_skipped_free_tier"
+                lint_result["chain"] = chain
+                lint_result["resolved_from"] = resolved_from
+                return _with_next_steps("lint", lint_result)
+
+            # Step 4: If governance blocked, record in ledger (best-effort)
+            gov_blocked = (
+                str(gov_result.get("status", "")).lower() == "blocked"
+                or gov_result.get("governance", {}).get("action") == "policy_blocked"
+            )
+
+            if gov_blocked:
+                from ai.ledger_manager import add_item
+                ledger_result = _chain_call(
+                    "lint", "ledger_add", add_item,
+                    required=False,
+                    title=f"Governance blocked: MAJOR API change in {new_spec}",
+                    ledger="ops",
+                    type="fix",
+                    priority="P0",
+                    description="MAJOR semver bump detected. Governance blocked the change.",
+                    source="chain:lint:gov_blocked",
+                )
+                chain["steps"].append({"step": "ledger_add", "ok": not _chain_is_error(ledger_result)})
+                lint_result["governance_blocked"] = True
+            else:
+                lint_result["governance_blocked"] = False
+
+            chain["status"] = "major_change_evaluated"
+            lint_result["chain"] = chain
+            lint_result["resolved_from"] = resolved_from
+            return _with_next_steps("lint", lint_result)
+    except RemoteResolveError as e:
+        out = e.to_dict()
+        out["old_spec"] = old_spec
+        out["new_spec"] = new_spec
+        return out
 
 
 @mcp.tool()
-def delimit_diff(old_spec: str, new_spec: str) -> Dict[str, Any]:
+def delimit_diff(old_spec: Annotated[str, Field(description="Path to the baseline OpenAPI spec file. Required.")], new_spec: Annotated[str, Field(description="Path to the proposed OpenAPI spec file. Required.")]) -> Dict[str, Any]:
     """Diff two OpenAPI specs and list all changes (pure diff, no policy).
 
     When to use: when you only need the structural change set (added /
@@ -1578,11 +1607,11 @@ def delimit_diff(old_spec: str, new_spec: str) -> Dict[str, Any]:
 
 @mcp.tool()
 def delimit_diff_report(
-    old_spec: str,
-    new_spec: str,
-    output_format: str = "html",
-    output_file: Optional[str] = None,
-    policy_file: Optional[str] = None,
+    old_spec: Annotated[str, Field(description="Baseline OpenAPI spec path.")],
+    new_spec: Annotated[str, Field(description="Proposed OpenAPI spec path.")],
+    output_format: Annotated[str, Field(description="\"html\" (default) or \"json\".")] = "html",
+    output_file: Annotated[Optional[str], Field(description="Optional path to write the report to disk.")] = None,
+    policy_file: Annotated[Optional[str], Field(description="Optional .delimit/policies.yml path.")] = None,
 ) -> Dict[str, Any]:
     """Generate a shareable API diff report with full analysis.
 
@@ -1624,7 +1653,7 @@ def delimit_diff_report(
 
 
 @mcp.tool()
-def delimit_spec_health(spec: str) -> Dict[str, Any]:
+def delimit_spec_health(spec: Annotated[str, Field(description="Path to an OpenAPI spec file (YAML or JSON).")]) -> Dict[str, Any]:
     """Score an OpenAPI spec on quality dimensions (0-100, A-F grade).
 
     When to use: for quick spec quality checks during onboarding or
@@ -1652,11 +1681,11 @@ def delimit_spec_health(spec: str) -> Dict[str, Any]:
 
 @mcp.tool()
 def delimit_policy(
-    spec_files: List[str],
-    policy_file: Optional[str] = None,
-    action: str = "inspect",
-    old_spec: Optional[str] = None,
-    new_spec: Optional[str] = None,
+    spec_files: Annotated[List[str], Field(description="List of spec file paths. Required.")],
+    policy_file: Annotated[Optional[str], Field(description="Optional custom policy file path.")] = None,
+    action: Annotated[str, Field(description="\"inspect\" (default) or \"simulate\".")] = "inspect",
+    old_spec: Annotated[Optional[str], Field(description="Baseline spec path (required for simulate).")] = None,
+    new_spec: Annotated[Optional[str], Field(description="Proposed spec path (required for simulate).")] = None,
 ) -> Dict[str, Any]:
     """Inspect or simulate governance policy configuration.
 
@@ -1694,7 +1723,7 @@ def delimit_policy(
 
 
 @mcp.tool()
-def delimit_ledger(ledger_path: str, api_name: Optional[str] = None, repository: Optional[str] = None, validate_chain: bool = False) -> Dict[str, Any]:
+def delimit_ledger(ledger_path: Annotated[str, Field(description="Path to the ledger JSONL file (e.g. .delimit/ledger/operations.jsonl). Required.")], api_name: Annotated[Optional[str], Field(description="Optional filter by API name.")] = None, repository: Annotated[Optional[str], Field(description="Optional filter by repository.")] = None, validate_chain: Annotated[bool, Field(description="If True, verify the hash chain integrity in addition to filtering. Default False.")] = False) -> Dict[str, Any]:
     """Query the append-only contract ledger (hash-chained JSONL).
 
     When to use: to read or audit the cryptographically-chained
@@ -1726,7 +1755,7 @@ def delimit_ledger(ledger_path: str, api_name: Optional[str] = None, repository:
 
 
 @mcp.tool()
-def delimit_impact(api_name: str, dependency_file: Optional[str] = None) -> Dict[str, Any]:
+def delimit_impact(api_name: Annotated[str, Field(description="The API name that changed. Required.")], dependency_file: Annotated[Optional[str], Field(description="Optional path to a dependency manifest file (package.json, requirements.txt, go.mod) to scan for callers. Default None = backend default path.")] = None) -> Dict[str, Any]:
     """Analyze downstream impact of an API change (informational only).
 
     When to use: when assessing blast radius for a planned API change,
@@ -1753,7 +1782,7 @@ def delimit_impact(api_name: str, dependency_file: Optional[str] = None) -> Dict
 
 
 @mcp.tool()
-def delimit_semver(old_spec: str, new_spec: str, current_version: Optional[str] = None) -> Dict[str, Any]:
+def delimit_semver(old_spec: Annotated[str, Field(description="Path to the baseline OpenAPI spec file. Required.")], new_spec: Annotated[str, Field(description="Path to the proposed OpenAPI spec file. Required.")], current_version: Annotated[Optional[str], Field(description="Optional version string (e.g. \"1.2.3\") to compute the next version. Default None = no next computed.")] = None) -> Dict[str, Any]:
     """Classify a spec change's semver bump (MAJOR/MINOR/PATCH/NONE).
 
     When to use: to deterministically pick the version bump for an API
@@ -1783,12 +1812,12 @@ def delimit_semver(old_spec: str, new_spec: str, current_version: Optional[str] 
 
 @mcp.tool()
 def delimit_explain(
-    old_spec: str,
-    new_spec: str,
-    template: str = "developer",
-    old_version: Optional[str] = None,
-    new_version: Optional[str] = None,
-    api_name: Optional[str] = None,
+    old_spec: Annotated[str, Field(description="Path to the baseline OpenAPI spec file. Required.")],
+    new_spec: Annotated[str, Field(description="Path to the proposed OpenAPI spec file. Required.")],
+    template: Annotated[str, Field(description="One of \"developer\" (default), \"team_lead\", \"product\", \"migration\", \"changelog\", \"pr_comment\", \"slack\".")] = "developer",
+    old_version: Annotated[Optional[str], Field(description="Previous version string for context.")] = None,
+    new_version: Annotated[Optional[str], Field(description="New version string for context.")] = None,
+    api_name: Annotated[Optional[str], Field(description="API/service name for context.")] = None,
 ) -> Dict[str, Any]:
     """Render a human-readable explanation of API changes (7 templates).
 
@@ -1821,8 +1850,8 @@ def delimit_explain(
 
 @mcp.tool()
 def delimit_zero_spec(
-    project_dir: str = ".",
-    python_bin: Optional[str] = None,
+    project_dir: Annotated[str, Field(description="Project root directory. Default \".\" (cwd).")] = ".",
+    python_bin: Annotated[Optional[str], Field(description="Optional Python binary path. Empty = auto-detect.")] = None,
 ) -> Dict[str, Any]:
     """Extract OpenAPI spec from framework source code (no spec file needed).
 
@@ -1855,9 +1884,9 @@ def delimit_zero_spec(
 
 @mcp.tool()
 def delimit_init(
-    project_path: str = ".",
-    preset: str = "default",
-    no_permissions: bool = False,
+    project_path: Annotated[str, Field(description="Project root directory. Default \".\" (cwd).")] = ".",
+    preset: Annotated[str, Field(description="Policy preset — \"strict\", \"default\", \"relaxed\".")] = "default",
+    no_permissions: Annotated[bool, Field(description="Skip filesystem permission auto-config (LED-269).")] = False,
 ) -> Dict[str, Any]:
     """Initialize Delimit governance scaffolding for a project.
 
@@ -1994,33 +2023,56 @@ def delimit_init(
 
 @mcp.tool()
 def delimit_os_plan(
-    operation: str,
-    target: str,
-    parameters: Optional[Union[str, Dict[str, Any]]] = None,
-    require_approval: bool = True,
+    operation: Annotated[str, Field(description="Operation to plan (e.g. \"deploy\", \"migrate\"). Required.")],
+    target: Annotated[str, Field(description="Target component or service. Required.")],
+    parameters: Annotated[Optional[Union[str, Dict[str, Any]]], Field(description="Optional operation parameters as dict or JSON string.")] = None,
+    require_approval: Annotated[bool, Field(description="If True (default), the plan requires approval before execution.")] = True,
 ) -> Dict[str, Any]:
-    """Create a governed execution plan against a target (Pro).
+    """Mint an OS-level execution plan against a target component (Pro).
 
-    When to use: to draft an OS plan (deploy, migrate, etc.) that the
-    governance kernel can later inspect via delimit_os_gates.
-    When NOT to use: for the OS-wide status (use delimit_os_status) or
-    actual deploy execution (delimit_deploy_*).
+    When to use: to draft a structured plan (deploy, migrate,
+    rotation, rollback) that the governance kernel can later inspect
+    via delimit_os_gates and human reviewers can approve before any
+    side-effecting execution. The pattern is plan -> approval check
+    via gates -> separate execution call.
+    When NOT to use: for aggregate OS counts (delimit_os_status), to
+    check gate state on an existing plan (delimit_os_gates), or to
+    actually execute a deploy (delimit_deploy_* / delimit_deploy_build).
+    Also do not use this as an audit-trail surrogate for free-form
+    work; that is delimit_ledger_add territory.
 
-    Sibling contrast: delimit_os_gates checks gates on a plan;
-    delimit_os_status reports counts; this creates a new plan.
+    Sibling contrast: delimit_os_gates checks gates on an existing
+    plan; delimit_os_status reports portfolio-wide counts; this is
+    the only OS surface that mints a new plan. Compared to
+    delimit_gov_new_task (governance-classed task), this records an
+    OS-level operation (deploy/migrate/rotation) rather than a
+    policy-scoped task.
 
-    Side effects: gated by require_premium. Writes a new plan record
-    via the OS bridge.
+    Side effects: gated by require_premium — unlicensed callers
+    receive a license payload and no plan is created. On a licensed
+    call, `parameters` is first coerced (string -> dict via
+    _coerce_dict_arg); a malformed payload short-circuits with an
+    error response. On success, invokes backends.os_bridge.create_plan
+    which writes a new plan record to the OS plan store keyed by a
+    generated plan_id. Result is wrapped via _with_next_steps. No
+    deploy is executed by this call.
 
     Args:
         operation: Operation to plan (e.g. "deploy", "migrate"). Required.
         target: Target component or service. Required.
         parameters: Optional operation parameters as dict or JSON string.
+            Strings are auto-coerced via _coerce_dict_arg; None is
+            allowed and means no parameters.
         require_approval: If True (default), the plan requires approval
-            before execution.
+            before execution. If False, the plan is marked
+            auto-executable — use only for low-risk routine operations.
 
     Returns:
-        Dict with the new plan id, status, and next_steps.
+        Dict with keys: plan_id (e.g. "PLAN-A1B2C3D4"), status
+        (typically "pending_approval"), operation, target, plus a
+        next_steps field. Returns {"error": "..."} if `parameters`
+        cannot be coerced, or a license-gate payload if the caller
+        lacks Premium.
     """
     from ai.license import require_premium
     gate = require_premium("os_plan")
@@ -2065,7 +2117,7 @@ def delimit_os_status() -> Dict[str, Any]:
 
 
 @mcp.tool()
-def delimit_os_gates(plan_id: str) -> Dict[str, Any]:
+def delimit_os_gates(plan_id: Annotated[str, Field(description="Plan identifier, e.g. \"PLAN-A1B2C3D4\". Required.")]) -> Dict[str, Any]:
     """Check governance gates for an OS plan (Pro).
 
     When to use: to check whether a specific plan is currently blocked
@@ -2110,19 +2162,59 @@ def _delimit_gov_impl(
     # run/verify params
     task_id: str = "",
 ) -> Dict[str, Any]:
-    """Manage governance (Pro for policy/evaluate/new_task/run/verify).
+    """Unified governance entry point — dispatches to one of seven actions.
 
-    Actions: health, status, policy, evaluate, new_task, run, verify.
+    When to use: as the single MCP-registered governance surface
+    (delimit_gov) when the caller wants to pick the action by name in
+    one call rather than choosing a specific delimit_gov_* alias.
+    When NOT to use: from internal code paths — prefer the specific
+    alias (delimit_gov_health, delimit_gov_evaluate, etc.) for clarity
+    and so docstrings and license gates show up at the right call site.
+
+    Sibling contrast: each delimit_gov_<action> wrapper above is a thin
+    alias over this implementation; they exist so the action's
+    docstring lives at the right name. This is the dispatch core.
+
+    Side effects: action="health" / "status" are read-only and not
+    gated. action="policy" / "evaluate" / "new_task" / "run" / "verify"
+    are gated by require_premium — unlicensed callers receive a
+    license payload and no backend call is made. Each gated action
+    routes to a distinct backends.governance_bridge function (health,
+    status, policy, evaluate_trigger, new_task, run_task, verify) and
+    the result is wrapped via _with_next_steps for orchestrator hints.
+    Errors are deterministic (`{"error": ...}`); inputs that cannot be
+    coerced (e.g. malformed `context` for `evaluate`) short-circuit
+    before the backend call.
 
     Args:
-        action: Which governance operation to perform.
-        repo: Repository path.
-        eval_action: The action to evaluate (for action='evaluate').
-        context: Additional context (for action='evaluate').
-        title: Task title (for action='new_task').
-        scope: Task scope (for action='new_task').
-        risk_level: Risk level low/medium/high/critical (for action='new_task').
-        task_id: Task ID (for action='run' or action='verify').
+        action: Which governance operation to perform. One of "health",
+            "status", "policy", "evaluate", "new_task", "run",
+            "verify". Default "health". Other values return a
+            deterministic error.
+        repo: Repository path. Default "." (cwd).
+        eval_action: The proposed action name to evaluate (used only
+            when action="evaluate"). Empty string is rejected by the
+            backend.
+        context: Additional context (used only when action="evaluate").
+            Strings are auto-coerced to {"text": ...} via
+            _coerce_dict_arg; dicts are passed through. None is
+            allowed.
+        title: Task title (used only when action="new_task"). Required
+            for new_task.
+        scope: Task scope (used only when action="new_task"). Required
+            for new_task.
+        risk_level: Risk level low/medium/high/critical (used only when
+            action="new_task"). Default "medium".
+        task_id: Task ID (used only when action="run" or
+            action="verify"). Required for those actions.
+
+    Returns:
+        Dict whose shape depends on action — see the per-action
+        wrapper (delimit_gov_health, delimit_gov_run, etc.) for the
+        exact keys. All responses include a next_steps field from
+        _with_next_steps. Returns a license-gate payload for gated
+        actions when unlicensed, or {"error": "..."} for unknown
+        actions or coercion failures.
     """
     action = action.lower().strip()
     valid_actions = ("health", "status", "policy", "evaluate", "new_task", "run", "verify")
@@ -2189,31 +2281,46 @@ delimit_gov = mcp.tool()(_delimit_gov_impl)
 # --- Thin wrappers (aliases) for backward compatibility ---
 
 @mcp.tool()
-def delimit_gov_health(repo: str = ".") -> Dict[str, Any]:
-    """Report governance subsystem health for a repository.
+def delimit_gov_health(repo: Annotated[str, Field(description="Filesystem path to the repository. Default \".\" (cwd).")] = ".") -> Dict[str, Any]:
+    """Report whether the governance kernel and policy are reachable.
 
-    When to use: at session start or as a CI smoke check to confirm the
-    governance backend is reachable and the policy kernel is loaded.
-    When NOT to use: to evaluate whether a specific action requires
-    gating — use delimit_gov_evaluate instead.
+    When to use: at session start as part of the standard orchestrator
+    ritual (delimit_revive + delimit_ledger_context + this + inbox
+    daemon), or as a CI smoke check before a gated deploy. Confirms
+    the governance backend is reachable and the policy kernel is
+    loaded so downstream gates will fail-closed correctly rather than
+    silently no-op.
+    When NOT to use: to evaluate whether a specific candidate action
+    requires gating (use delimit_gov_evaluate), to read the rules
+    themselves (delimit_gov_policy), or to check per-repo task state
+    (delimit_gov_status).
 
-    Sibling contrast: delimit_gov_status reports per-repo task state;
-    this reports the engine itself (kernel, policy, integration).
+    Sibling contrast: delimit_gov_status reports per-repo workload
+    (open tasks, recent decisions); this reports the engine layer
+    itself (kernel boot status, policy load, backend integration). If
+    a deploy gate is failing, run this first to rule out "engine
+    down" before debugging policy logic.
 
-    Side effects: read-only. Calls backends.governance_bridge.health and
-    routes the response through _with_next_steps (no ledger write).
+    Side effects: read-only and not license-gated. Invokes
+    backends.governance_bridge.health and wraps the response through
+    _with_next_steps. No ledger write, no notification, no evidence
+    file. Safe to call on every session start without rate concern.
 
     Args:
         repo: Filesystem path to the repository. Default "." (cwd).
 
     Returns:
-        Dict with backend health status plus next_steps suggestions.
+        Dict with keys: kernel status (loaded / failed / degraded),
+        policy load state, backend reachability indicators, plus a
+        next_steps field from _with_next_steps. Returns the backend's
+        error payload (still as a dict) if the bridge call fails;
+        does not raise.
     """
     return _delimit_gov_impl(action="health", repo=repo)
 
 
 @mcp.tool()
-def delimit_gov_status(repo: str = ".") -> Dict[str, Any]:
+def delimit_gov_status(repo: Annotated[str, Field(description="Filesystem path to the repository. Default \".\" (cwd).")] = ".") -> Dict[str, Any]:
     """Report governance state (open tasks, decisions) for a repo.
 
     When to use: when you need a snapshot of governance activity for a
@@ -2236,7 +2343,7 @@ def delimit_gov_status(repo: str = ".") -> Dict[str, Any]:
 
 
 @mcp.tool()
-def delimit_gov_policy(repo: str = ".") -> Dict[str, Any]:
+def delimit_gov_policy(repo: Annotated[str, Field(description="Filesystem path to the repository. Default \".\" (cwd).")] = ".") -> Dict[str, Any]:
     """Read the active governance policy for a repository (Pro).
 
     When to use: when an agent or operator needs to inspect the live
@@ -2261,128 +2368,190 @@ def delimit_gov_policy(repo: str = ".") -> Dict[str, Any]:
 
 @mcp.tool()
 def delimit_gov_evaluate(
-    action: str = "",
-    context: Optional[Union[str, Dict[str, Any]]] = None,
-    repo: str = ".",
+    action: Annotated[str, Field(description="Proposed action name to evaluate (e.g. \"external_pr\", \"deploy\"). Empty string returns an error.")] = "",
+    context: Annotated[Optional[Union[str, Dict[str, Any]]], Field(description="Optional dict with action-specific context (e.g. target repo, author). Strings are auto-coerced to {\"text\": ...} via _coerce_dict_arg.")] = None,
+    repo: Annotated[str, Field(description="Filesystem path to the repository. Default \".\" (cwd).")] = ".",
 ) -> Dict[str, Any]:
-    """Evaluate whether a proposed action triggers governance (Pro).
+    """Evaluate whether a proposed action triggers governance gating (Pro).
 
-    When to use: BEFORE performing an action that may require gating
-    (deploy, external PR, schema change). The orchestrator and CI hooks
-    call this as their canonical pre-action check.
-    When NOT to use: to read the policy itself (use delimit_gov_policy)
-    or to create a tracked task (use delimit_gov_new_task).
+    When to use: BEFORE performing any action whose policy class is
+    uncertain — deploy, external PR submission, schema change, npm
+    publish, force-push, force-update of a floating tag, account
+    switch, ruleset edit. This is the canonical pre-action check the
+    orchestrator and CI hooks call; the response is the gate verdict.
+    When NOT to use: to read the policy rules themselves (use
+    delimit_gov_policy), to materialize a tracked task from a "gating
+    required" verdict (delimit_gov_new_task), or to check engine
+    health (delimit_gov_health). Also: do not call after starting the
+    action — the verdict is decision-time and a retroactive call has
+    no gating effect.
 
-    Sibling contrast: delimit_gov_policy returns rules; this evaluates
-    a candidate action against those rules.
+    Sibling contrast: delimit_gov_policy returns the rules; this
+    evaluates a candidate action against them. delimit_external_pr_check
+    handles the specialised external-PR duplicate path; this is the
+    general action evaluator. delimit_gov_new_task is what you call
+    AFTER this returns "gating required" to mint a tracked task.
 
-    Side effects: read-only on policy storage; gated by require_premium.
-    Calls backends.governance_bridge.evaluate_trigger. Does not create
-    a task — only returns the verdict.
+    Side effects: read-only on policy storage and gated by
+    require_premium — unlicensed callers receive a license payload
+    and no evaluation runs. On a licensed call, invokes
+    backends.governance_bridge.evaluate_trigger which loads the
+    active policy and returns a verdict; no task is created, no
+    ledger write, no evidence file. Inputs are coerced before the
+    backend call: a string `context` is wrapped as {"text": ...}
+    via _coerce_dict_arg; a malformed `context` short-circuits with
+    an error response.
 
     Args:
         action: Proposed action name to evaluate (e.g. "external_pr",
-            "deploy"). Empty string returns an error.
-        context: Optional dict with action-specific context (e.g. target
-            repo, author). Strings are auto-coerced to {"text": ...} via
-            _coerce_dict_arg.
+            "deploy", "npm_publish", "force_push"). Empty string
+            returns an error.
+        context: Optional dict with action-specific context (e.g.
+            target repo, author). Strings are auto-coerced to
+            {"text": ...} via _coerce_dict_arg. None is allowed.
         repo: Filesystem path to the repository. Default "." (cwd).
 
     Returns:
-        Dict with policy verdict plus next_steps suggestions. Returns
-        {error: "..."} if context cannot be coerced to a dict.
+        Dict with keys: verdict (allow / gate / deny / blocked_duplicate),
+        reasons (list of policy hits), suggested follow-up if gated
+        (e.g. "call delimit_gov_new_task"), plus a next_steps field
+        from _with_next_steps. Returns {"error": "..."} if `context`
+        cannot be coerced to a dict, or a license-gate payload if
+        the caller lacks Premium.
     """
     return _delimit_gov_impl(action="evaluate", eval_action=action, context=context, repo=repo)
 
 
 @mcp.tool()
-def delimit_gov_new_task(title: str = "", scope: str = "", risk_level: str = "medium", repo: str = ".") -> Dict[str, Any]:
-    """Create a governance task for a planned change (Pro).
+def delimit_gov_new_task(title: Annotated[str, Field(description="Short task title. Required (empty string is rejected).")] = "", scope: Annotated[str, Field(description="Description of what the task covers. Required.")] = "", risk_level: Annotated[str, Field(description="One of \"low\", \"medium\", \"high\", \"critical\". Default \"medium\". Drives later approval requirements.")] = "medium", repo: Annotated[str, Field(description="Filesystem path to the repository. Default \".\" (cwd).")] = ".") -> Dict[str, Any]:
+    """Create a governance-classed task with risk tier and scope (Pro).
 
-    When to use: when delimit_gov_evaluate returns "gating required" and
-    you need to open a tracked task that delimit_gov_run will execute
-    against and delimit_gov_verify will close out.
-    When NOT to use: for free-form ledger entries (use delimit_ledger_add)
-    or to actually perform the work (use delimit_gov_run).
+    When to use: immediately after delimit_gov_evaluate returns a
+    "gating required" verdict and you need a tracked, audit-bearing
+    record before performing the gated work. The three-step pipeline is
+    delimit_gov_new_task -> delimit_gov_run -> delimit_gov_verify; this
+    is step one.
+    When NOT to use: for free-form work tracking (use delimit_ledger_add),
+    to perform the work itself (delimit_gov_run), or to verify a
+    completed task (delimit_gov_verify).
 
-    Sibling contrast: delimit_ledger_add tracks general work; this
-    creates a governance-classed task with risk level and scope, which
-    delimit_gov_run/verify operate on.
+    Sibling contrast: delimit_ledger_add tracks general work items with
+    no policy gating; this creates a governance-classed task with a
+    risk tier and scope record that the run/verify steps operate on.
+    delimit_gov_evaluate returns a verdict only; this materializes that
+    verdict into a tracked task.
 
-    Side effects: writes a new task record via
-    backends.governance_bridge.new_task; gated by require_premium.
+    Side effects: gated by require_premium — unlicensed callers receive
+    a license payload, no task created. On a licensed call, invokes
+    backends.governance_bridge.new_task which writes a new task record
+    keyed by a generated task_id into the governance task store; the
+    record carries title, scope, risk_level, repo path, and creation
+    timestamp. The response is routed through _with_next_steps so the
+    returned dict carries orchestrator hints.
 
     Args:
-        title: Short task title. Required (empty string is rejected).
+        title: Short task title. Required (empty string is rejected by
+            the backend).
         scope: Description of what the task covers. Required.
         risk_level: One of "low", "medium", "high", "critical". Default
-            "medium". Drives later approval requirements.
+            "medium". Drives later approval requirements at run/verify.
         repo: Filesystem path to the repository. Default "." (cwd).
 
     Returns:
-        Dict with the created task id and metadata, plus next_steps.
+        Dict with keys: task_id (str), title, scope, risk_level, repo,
+        plus a next_steps field from _with_next_steps. Returns a
+        license-gate payload (no task_id) if the caller lacks Premium.
+        Returns {"error": "..."} if the backend rejects the inputs.
     """
     return _delimit_gov_impl(action="new_task", title=title, scope=scope, risk_level=risk_level, repo=repo)
 
 
 @mcp.tool()
-def delimit_gov_run(task_id: str = "", repo: str = ".") -> Dict[str, Any]:
-    """Execute a previously created governance task (Pro).
+def delimit_gov_run(task_id: Annotated[str, Field(description="Identifier returned by delimit_gov_new_task. Required.")] = "", repo: Annotated[str, Field(description="Filesystem path to the repository. Default \".\" (cwd).")] = ".") -> Dict[str, Any]:
+    """Execute a previously created governance task under policy (Pro).
 
-    When to use: after delimit_gov_new_task has created a task record
-    and you are ready to perform the gated work under the policy
-    engine's supervision.
+    When to use: as step two of the three-step governance pipeline,
+    after delimit_gov_new_task has minted a task_id and before
+    delimit_gov_verify closes it out. Call when you are ready to
+    perform the gated work and want the policy engine to record the
+    execution.
     When NOT to use: to evaluate a candidate action (use
-    delimit_gov_evaluate) or close out a completed task (use
-    delimit_gov_verify).
+    delimit_gov_evaluate), to mint a task (delimit_gov_new_task), or
+    to attest a completed task (delimit_gov_verify).
 
-    Sibling contrast: delimit_gov_new_task creates the task; this runs
-    it; delimit_gov_verify validates the run output.
+    Sibling contrast: delimit_gov_new_task creates the task record but
+    does no work; this records the execution against an existing
+    task_id; delimit_gov_verify attests the run output afterwards.
+    The full pipeline is new_task -> run -> verify.
 
-    Side effects: invokes backends.governance_bridge.run_task which
-    records the execution against the task_id; gated by require_premium.
+    Side effects: gated by require_premium — unlicensed callers receive
+    a license payload, no execution recorded. On a licensed call,
+    invokes backends.governance_bridge.run_task which appends a run
+    record to the task identified by task_id (status transition,
+    timestamp, repo). The response is routed through _with_next_steps
+    so the returned dict carries orchestrator hints. Note this tool
+    records the run event; it does NOT itself perform the underlying
+    work — the caller is expected to do that.
 
     Args:
-        task_id: Identifier returned by delimit_gov_new_task. Required.
+        task_id: Identifier returned by delimit_gov_new_task. Required;
+            empty or unknown ids return a backend error.
         repo: Filesystem path to the repository. Default "." (cwd).
 
     Returns:
-        Dict with run status and next_steps.
+        Dict with keys: task_id, status (run-state transition), and a
+        next_steps field from _with_next_steps. Returns a license-gate
+        payload if the caller lacks Premium. Returns {"error": "..."}
+        if the task_id is unknown or the backend rejects the call.
     """
     return _delimit_gov_impl(action="run", task_id=task_id, repo=repo)
 
 
 @mcp.tool()
-def delimit_gov_verify(task_id: str = "", repo: str = ".") -> Dict[str, Any]:
-    """Verify a governance task ran to completion under policy (Pro).
+def delimit_gov_verify(task_id: Annotated[str, Field(description="Identifier from delimit_gov_new_task / delimit_gov_run. Required.")] = "", repo: Annotated[str, Field(description="Filesystem path to the repository. Default \".\" (cwd).")] = ".") -> Dict[str, Any]:
+    """Attest that a governance task completed under policy (Pro).
 
-    When to use: as the final gate after delimit_gov_run, to confirm
-    the task's outputs satisfy the policy and close it out.
-    When NOT to use: to start or run a task (delimit_gov_new_task /
-    delimit_gov_run) — verify is the closing step only.
+    When to use: as step three (closing step) of the governance
+    pipeline, immediately after delimit_gov_run has recorded the
+    execution. This is the call that flips a task from "ran" to
+    "verified" and produces the attestation entry used by downstream
+    audit consumers.
+    When NOT to use: to mint a task (delimit_gov_new_task) or to
+    record the execution itself (delimit_gov_run). Verify is closing
+    only — it does not run work and does not create tasks.
 
-    Sibling contrast: delimit_gov_run executes; this attests the run.
-    Together they form new_task -> run -> verify.
+    Sibling contrast: delimit_gov_new_task creates; delimit_gov_run
+    records execution; this attests the outputs satisfy policy.
+    Compared to delimit_evidence_verify (which checks an evidence
+    file), this attests against the policy engine, not a static file.
 
-    Side effects: writes a verification record against the task via
-    backends.governance_bridge.verify; gated by require_premium.
+    Side effects: gated by require_premium — unlicensed callers receive
+    a license payload, no verification recorded. On a licensed call,
+    invokes backends.governance_bridge.verify which writes a
+    verification record against the task_id (verdict, timestamp, repo,
+    policy snapshot). The response is routed through _with_next_steps.
+    Does not perform additional work — only validates and records the
+    verdict.
 
     Args:
         task_id: Identifier from delimit_gov_new_task / delimit_gov_run.
-            Required.
+            Required; empty or unknown ids return a backend error.
         repo: Filesystem path to the repository. Default "." (cwd).
 
     Returns:
-        Dict with verification verdict and next_steps.
+        Dict with keys: task_id, verdict (pass/fail under policy), and
+        a next_steps field from _with_next_steps. Returns a
+        license-gate payload if the caller lacks Premium. Returns
+        {"error": "..."} if the task_id is unknown or unverifiable.
     """
     return _delimit_gov_impl(action="verify", task_id=task_id, repo=repo)
 
 
 @mcp.tool()
 def delimit_external_pr_check(
-    repo: str,
-    author: str = "",
-    state: str = "all",
+    repo: Annotated[str, Field(description="External GitHub repo, e.g. \"goharbor/harbor\". Required.")],
+    author: Annotated[str, Field(description="GitHub username to filter by (recommended). Empty = all.")] = "",
+    state: Annotated[str, Field(description="\"open\", \"closed\", \"merged\", or \"all\" (default).")] = "all",
 ) -> Dict[str, Any]:
     """Pre-PR duplicate guard for external repos — call BEFORE drafting.
 
@@ -2417,10 +2586,55 @@ def delimit_external_pr_check(
     )
 
 
+@mcp.tool()
+def delimit_tdqs_lint(
+    target_file: Annotated[str, Field(description="Path to a Python file with @mcp.tool() decorators. Default \"ai/server.py\", resolved against cwd.")] = "ai/server.py",
+    human: Annotated[bool, Field(description="If True, include a human-readable \"report\" string in the response. Default False (JSON-only is cheaper for CI pipes).")] = False,
+) -> Dict[str, Any]:
+    """Score MCP tool docstrings against the 6 TDQS dimensions (LED-2108).
+
+    When to use: as a CI gate before publishing the MCP server, to catch
+    low-quality tool descriptions. Operates on any Python file with
+    @mcp.tool()-decorated functions.
+
+    When NOT to use: for runtime tool selection or policy decisions —
+    TDQS grades documentation, not behaviour. Use delimit_lint for
+    OpenAPI specs and delimit_gov_evaluate for policy-class decisions.
+
+    Sibling contrast: unlike delimit_lint (OpenAPI specs) and
+    delimit_spec_health (spec quality scoring), this scores Python
+    source against Glama's Tool Definition Quality Score rubric.
+
+    Side effects: none. Pure read-only static analysis via ast (no
+    import, no execution). Does not write ledger, evidence, or notify.
+
+    Args:
+        target_file: Path to a Python file with @mcp.tool() decorators.
+            Default "ai/server.py", resolved against cwd.
+        human: If True, include a human-readable "report" string in the
+            response. Default False (JSON-only is cheaper for CI pipes).
+
+    Returns:
+        Dict {tools: [{name, lineno, scores, mean_score, grade, defects}],
+        aggregate: {grade, mean_score, dim_means, tool_count}, target_file}.
+        Grades are A (mean>=4.5), B (>=3.5), C (>=2.5), D (<2.5).
+
+    Errors:
+        Returns {error: "..."} when target_file is missing. Malformed
+        Python yields tools=[] (never raises), so CI does not block.
+    """
+    from ai.tdqs_lint import lint_file, render_human
+
+    result = lint_file(target_file)
+    if human and not result.get("error"):
+        result["report"] = render_human(result)
+    return result
+
+
 # ─── Memory ─────────────────────────────────────────────────────────────
 
 @mcp.tool()
-def delimit_memory_search(query: str, limit: int = 10) -> Dict[str, Any]:
+def delimit_memory_search(query: Annotated[str, Field(description="Natural-language search query. Required.")], limit: Annotated[int, Field(description="Maximum number of matching entries to return. Default 10.")] = 10) -> Dict[str, Any]:
     """Search conversation memory semantically (Pro).
 
     When to use: to recall prior context by meaning rather than recency
@@ -2452,9 +2666,10 @@ def delimit_memory_search(query: str, limit: int = 10) -> Dict[str, Any]:
 
 @mcp.tool()
 def delimit_memory_store(
-    content: str,
-    tags: Optional[Union[str, List[str]]] = None,
-    context: Optional[str] = None,
+    content: Annotated[str, Field(description="The content to remember. Required.")],
+    tags: Annotated[Optional[Union[str, List[str]]], Field(description="Optional categorization tags as comma string or list.")] = None,
+    context: Annotated[Optional[str], Field(description="Optional context about when/why this was stored.")] = None,
+    hot_load: Annotated[bool, Field(description="When True, mark for one-way projection into the Claude Code MEMORY.md hot-load index (LED-1165 Phase 2). Default False = durable but not projected.")] = False,
 ) -> Dict[str, Any]:
     """Store a memory entry for future cross-session retrieval (Free tier).
 
@@ -2491,11 +2706,14 @@ def delimit_memory_store(
     except ValueError as e:
         return _with_next_steps("memory_store", {"error": str(e)})
     from backends.memory_bridge import store
-    return _with_next_steps("memory_store", _safe_call(store, content=content, tags=tags, context=context))
+    return _with_next_steps(
+        "memory_store",
+        _safe_call(store, content=content, tags=tags, context=context, hot_load=hot_load),
+    )
 
 
 @mcp.tool()
-def delimit_memory_recent(limit: int = 5) -> Dict[str, Any]:
+def delimit_memory_recent(limit: Annotated[int, Field(description="Number of most-recent entries to return. Default 5.")] = 5) -> Dict[str, Any]:
     """Return the most recent memory entries (Free tier).
 
     When to use: at session start to recall what the previous session
@@ -2520,10 +2738,62 @@ def delimit_memory_recent(limit: int = 5) -> Dict[str, Any]:
     return _with_next_steps("memory_recent", _safe_call(get_recent, limit=limit))
 
 
+@mcp.tool()
+def delimit_memory_index(
+    target_path: Annotated[str, Field(description="file to write. Empty = default ~/.claude/projects/-root/memory/MEMORY.md.")] = "",
+    dry_run: Annotated[bool, Field(description="True returns the rendered content size without writing.")] = False,
+    limit: Annotated[int, Field(description="cap on entries projected. Default 200.")] = 200,
+) -> Dict[str, Any]:
+    """Project delimit_memory hot entries into Claude Code's MEMORY.md.
+
+    When to use: to surface hot delimit_memory entries (flagged
+    `hot_load=True`) into Claude Code's MEMORY.md so they load on
+    session start without making delimit_memory dependent on
+    Anthropic's auto-memory format.
+    When NOT to use: to add a new memory (use delimit_memory_store) or
+    search existing memories (delimit_memory_search,
+    delimit_memory_recent).
+
+    Sibling contrast: delimit_memory_store writes a new entry;
+    delimit_memory_search queries; delimit_memory_recent returns the
+    tail; this is the one-way projection into MEMORY.md.
+
+    Side effects: writes to target_path (default
+    ~/.claude/projects/-root/memory/MEMORY.md). If the file already has
+    `<!-- delimit:start -->` / `<!-- delimit:end -->` markers, ONLY the
+    content between them is replaced; anything outside is preserved.
+    If markers are missing, the managed section is APPENDED to the end
+    of the file (existing content is never touched). If the file does
+    not exist, it is created with just the section. One-way projection
+    only — MEMORY.md is never read back into delimit_memory (Anthropic
+    owns the auto-memory format; format-drift risk).
+
+    LED-1165 Phase 2 #5 PR-B.
+
+    Args:
+        target_path: file to write. Empty = default
+            ~/.claude/projects/-root/memory/MEMORY.md.
+        dry_run: True returns the rendered content size without writing.
+        limit: cap on entries projected. Default 200.
+
+    Returns:
+        Dict with: target, dry_run, entries, wrote_chars (or
+        would_write_chars when dry_run), had_existing_block,
+        had_existing_file, preserved_user_content.
+    """
+    from backends.memory_bridge import project_to_memory_md
+    from pathlib import Path
+    target = Path(target_path) if target_path else None
+    return _with_next_steps(
+        "memory_index",
+        _safe_call(project_to_memory_md, target_path=target, dry_run=dry_run, limit=limit),
+    )
+
+
 # ─── Vault ──────────────────────────────────────────────────────────────
 
 @mcp.tool()
-def delimit_vault_search(query: str) -> Dict[str, Any]:
+def delimit_vault_search(query: Annotated[str, Field(description="Search query string. Required.")]) -> Dict[str, Any]:
     """Search vault entries by query string (Pro).
 
     When to use: to retrieve stored vault content matching a search
@@ -2800,7 +3070,7 @@ def _deploy_plan_chain(app: str = "", env: str = "", git_ref: Optional[str] = No
 
 
 @mcp.tool()
-def delimit_deploy_plan(app: str = "", env: str = "", git_ref: Optional[str] = None) -> Dict[str, Any]:
+def delimit_deploy_plan(app: Annotated[str, Field(description="Application name (project key in the deploy backend). Required.")] = "", env: Annotated[str, Field(description="Target environment, typically \"staging\" or \"production\".")] = "", git_ref: Annotated[Optional[str], Field(description="Git ref (branch/tag/SHA). Optional; defaults to the backend's notion of HEAD when omitted.")] = None) -> Dict[str, Any]:
     """Generate a deploy plan with security preflight (Pro).
 
     When to use: as the first step in the deploy chain. The plan
@@ -2832,33 +3102,51 @@ def delimit_deploy_plan(app: str = "", env: str = "", git_ref: Optional[str] = N
 
 
 @mcp.tool()
-def delimit_deploy_build(app: str = "", git_ref: Optional[str] = None) -> Dict[str, Any]:
-    """Build Docker images for an app at a git ref (Pro).
+def delimit_deploy_build(app: Annotated[str, Field(description="Application name (project key in the deploy backend).")] = "", git_ref: Annotated[Optional[str], Field(description="Git ref (branch/tag/SHA). Default None = backend HEAD.")] = None) -> Dict[str, Any]:
+    """Build container images for an app at a specific git ref (Pro).
 
-    When to use: after delimit_deploy_plan succeeds, to produce SHA-tagged
-    images that delimit_deploy_publish will later push to the registry.
-    When NOT to use: to push images (delimit_deploy_publish) or run the
-    full deploy chain (delimit_deploy_plan).
+    When to use: as the second step of the deploy chain after
+    delimit_deploy_plan has succeeded and you need SHA-tagged
+    container images locally before delimit_deploy_publish pushes
+    them to the registry. The full chain is plan -> build -> publish
+    -> verify -> (rollback on failure).
+    When NOT to use: to push existing images to a registry (use
+    delimit_deploy_publish), to deploy a site (delimit_deploy_site),
+    to publish an npm package (delimit_deploy_npm), or to start the
+    full chain (delimit_deploy_plan).
 
-    Sibling contrast: deploy_plan plans, this builds, deploy_publish
-    pushes, deploy_verify checks rollout health, deploy_rollback reverts.
+    Sibling contrast: deploy_plan plans, this builds local images,
+    deploy_publish pushes to the registry, deploy_verify checks
+    rollout health, deploy_rollback reverts. Compared to
+    delimit_deploy_site (static-site deploy) and delimit_deploy_npm
+    (npm publish), this is the container path.
 
-    Side effects: gated by require_premium. Calls
-    backends.deploy_bridge.build, which invokes the local container
-    builder (writes images to local Docker storage).
+    Side effects: gated by require_premium — unlicensed callers
+    receive a license payload and no build runs. On a licensed call,
+    invokes backends.deploy_bridge.build which shells out to the
+    local container builder (e.g. docker buildx) — this consumes
+    local disk for image layers and CPU for the build. No network
+    push at this step (that is delivery_publish). The response is
+    routed through _with_next_steps.
 
     Args:
         app: Application name (project key in the deploy backend).
-        git_ref: Git ref (branch/tag/SHA). Default None = backend HEAD.
+            Required for a real build; empty errors at the backend.
+        git_ref: Git ref (branch/tag/SHA). Default None = backend
+            HEAD. The image tag derives from this ref.
 
     Returns:
-        Dict with build status, image tags produced, plus next_steps.
+        Dict with keys: app, git_ref, image_tags (list of produced
+        tags), build_status (success / failed), build_log_path, plus
+        a next_steps field. Returns a license-gate payload if the
+        caller lacks Premium, or {"error": "..."} on builder
+        failure.
     """
     return _delimit_deploy_impl(action="build", app=app, git_ref=git_ref)
 
 
 @mcp.tool()
-def delimit_deploy_publish(app: str = "", git_ref: Optional[str] = None) -> Dict[str, Any]:
+def delimit_deploy_publish(app: Annotated[str, Field(description="Application name (project key in the deploy backend).")] = "", git_ref: Annotated[Optional[str], Field(description="Git ref the images were built at. Default None.")] = None) -> Dict[str, Any]:
     """Publish previously built images to the registry (Pro).
 
     When to use: after delimit_deploy_build has produced images locally.
@@ -2883,35 +3171,53 @@ def delimit_deploy_publish(app: str = "", git_ref: Optional[str] = None) -> Dict
 
 
 @mcp.tool()
-def delimit_deploy_verify(app: str = "", env: str = "", git_ref: Optional[str] = None) -> Dict[str, Any]:
-    """Verify post-deploy health for an app/env (experimental) (Pro).
+def delimit_deploy_verify(app: Annotated[str, Field(description="Application name.")] = "", env: Annotated[str, Field(description="Target environment (\"staging\" or \"production\").")] = "", git_ref: Annotated[Optional[str], Field(description="Optional git ref the deploy targets.")] = None) -> Dict[str, Any]:
+    """Probe a freshly-deployed revision's health — experimental (Pro).
 
-    When to use: immediately after a publish/rollout, to confirm the
-    new revision is healthy before closing out the deploy chain.
-    When NOT to use: for ongoing observability — use delimit_obs_status
-    or delimit_obs_metrics for steady-state checks.
+    When to use: immediately after delimit_deploy_publish has rolled
+    out a new revision, to confirm the new SHA is actually healthy
+    before declaring the deploy done and closing out the chain
+    (delimit_deploy_verify -> delimit_evidence_collect ->
+    delimit_ledger_done -> delimit_notify). If this returns
+    unhealthy, the next step is delimit_deploy_rollback.
+    When NOT to use: for steady-state runtime health checks (use
+    delimit_obs_status / delimit_obs_metrics), to read deploy-system
+    metadata only (delimit_deploy_status), or for a smoke test
+    before deploy (delimit_test_smoke).
 
-    Sibling contrast: delimit_deploy_status reports the rollout state;
-    this exercises health checks against the running deployment.
+    Sibling contrast: delimit_deploy_status reads deploy-system
+    metadata only; this actively probes the running deployment.
+    delimit_obs_status is the steady-state observability surface;
+    this is post-deploy-only.
 
-    Side effects: gated by require_premium. Calls
-    backends.deploy_bridge.verify, which performs network checks
-    against the deployed app. Marked experimental — health logic may
-    return partial results on backends without health endpoints.
+    Side effects: gated by require_premium — unlicensed callers
+    receive a license payload and no probe runs. On a licensed call,
+    invokes backends.deploy_bridge.verify which performs network
+    health checks against the deployed app (HTTP probes, container
+    inspection, dependency reachability). No write. Marked
+    EXPERIMENTAL — health logic may return partial results on
+    backends without health endpoints; do not treat as authoritative
+    for runtime SLOs.
 
     Args:
         app: Application name.
         env: Target environment ("staging" or "production").
-        git_ref: Optional git ref the deploy targets.
+        git_ref: Optional git ref the deploy targets — used to scope
+            the verification to a specific SHA. Default None = use
+            the current rollout.
 
     Returns:
-        Dict with verification verdict, per-check results, raw payload.
+        Dict with keys: verdict (healthy / unhealthy / partial),
+        per_check (list of {check_name, status, detail}), raw
+        backend payload, plus a next_steps field. Returns a
+        license-gate payload if the caller lacks Premium, or
+        {"error": "..."} on probe failure.
     """
     return _delimit_deploy_impl(action="verify", app=app, env=env, git_ref=git_ref)
 
 
 @mcp.tool()
-def delimit_deploy_rollback(app: str = "", env: str = "", to_sha: Optional[str] = None) -> Dict[str, Any]:
+def delimit_deploy_rollback(app: Annotated[str, Field(description="Application name.")] = "", env: Annotated[str, Field(description="Target environment.")] = "", to_sha: Annotated[Optional[str], Field(description="Target SHA to roll back to. If None, the backend selects the previous deployed SHA.")] = None) -> Dict[str, Any]:
     """Roll back an environment to a previous SHA (Pro).
 
     When to use: when delimit_deploy_verify shows a regression and you
@@ -2939,26 +3245,41 @@ def delimit_deploy_rollback(app: str = "", env: str = "", to_sha: Optional[str] 
 
 
 @mcp.tool()
-def delimit_deploy_status(app: str = "", env: str = "") -> Dict[str, Any]:
-    """Report current rollout status for an app/env (Pro).
+def delimit_deploy_status(app: Annotated[str, Field(description="Application name.")] = "", env: Annotated[str, Field(description="Target environment.")] = "") -> Dict[str, Any]:
+    """Read the current rollout metadata for an app/env (Pro).
 
-    When to use: to inspect the currently deployed SHA and rollout
-    state without executing any health probe.
-    When NOT to use: for runtime health checks (use delimit_deploy_verify)
-    or to deploy a change (delimit_deploy_plan).
+    When to use: to inspect the currently deployed SHA, rollout
+    state, and any in-progress deploy without actually probing the
+    running app. Useful for "what is live right now?" questions and
+    for the deploy dashboard.
+    When NOT to use: for active runtime health probes (use
+    delimit_deploy_verify), for steady-state observability metrics
+    (delimit_obs_metrics / delimit_obs_status), or to deploy a
+    change (delimit_deploy_plan / delimit_deploy_build).
 
-    Sibling contrast: delimit_deploy_verify probes the running app;
-    this reads deploy-system metadata only.
+    Sibling contrast: delimit_deploy_verify exercises the running
+    app via probes; this reads deploy-system metadata only.
+    delimit_release_status is the sibling on the release-tracking
+    side (versions, history). Compared to a registry inspection,
+    this reports rollout state, not just image presence.
 
-    Side effects: read-only against the deploy backend. Gated by
-    require_premium. Calls backends.deploy_bridge.status.
+    Side effects: read-only against the deploy backend and gated by
+    require_premium — unlicensed callers receive a license payload
+    and no query runs. On a licensed call, invokes
+    backends.deploy_bridge.status which queries the deploy state
+    store. No write, no probe, no notification. Response routed
+    through _with_next_steps.
 
     Args:
         app: Application name.
-        env: Target environment.
+        env: Target environment ("staging" or "production").
 
     Returns:
-        Dict with the current SHA, rollout state, and next_steps.
+        Dict with keys: app, env, current_sha, rollout_state (e.g.
+        "stable", "progressing", "failed"), last_change_at, plus a
+        next_steps field. Returns a license-gate payload if the
+        caller lacks Premium, or {"error": "..."} on backend
+        failure.
     """
     return _delimit_deploy_impl(action="status", app=app, env=env)
 
@@ -2967,9 +3288,9 @@ def delimit_deploy_status(app: str = "", env: str = "") -> Dict[str, Any]:
 
 @mcp.tool()
 def delimit_intel_dataset_register(
-    name: str,
-    schema: Optional[Union[str, Dict[str, Any]]] = None,
-    description: Optional[str] = None,
+    name: Annotated[str, Field(description="Dataset name (key). Required.")],
+    schema: Annotated[Optional[Union[str, Dict[str, Any]]], Field(description="Optional JSON schema as dict or JSON string.")] = None,
+    description: Annotated[Optional[str], Field(description="Human-readable description for the registry.")] = None,
 ) -> Dict[str, Any]:
     """Register a new dataset in the file-based intel registry.
 
@@ -3028,7 +3349,7 @@ def delimit_intel_dataset_list() -> Dict[str, Any]:
 
 
 @mcp.tool()
-def delimit_intel_dataset_freeze(dataset_id: str) -> Dict[str, Any]:
+def delimit_intel_dataset_freeze(dataset_id: Annotated[str, Field(description="Dataset identifier from the registry. Required.")]) -> Dict[str, Any]:
     """Freeze a dataset to make it immutable for replay integrity.
 
     When to use: when a dataset is about to be referenced as evidence
@@ -3056,8 +3377,8 @@ def delimit_intel_dataset_freeze(dataset_id: str) -> Dict[str, Any]:
 
 @mcp.tool()
 def delimit_intel_snapshot_ingest(
-    data: Union[str, Dict[str, Any]],
-    provenance: Optional[Union[str, Dict[str, Any]]] = None,
+    data: Annotated[Union[str, Dict[str, Any]], Field(description="Snapshot data (JSON-serializable dict or JSON string). Required.")],
+    provenance: Annotated[Optional[Union[str, Dict[str, Any]]], Field(description="Optional provenance metadata (source, author, etc.).")] = None,
 ) -> Dict[str, Any]:
     """Store a research snapshot with provenance in the intel store.
 
@@ -3093,9 +3414,9 @@ def delimit_intel_snapshot_ingest(
 
 @mcp.tool()
 def delimit_intel_query(
-    dataset_id: Optional[str] = None,
-    query: str = "",
-    parameters: Optional[Union[str, Dict[str, Any]]] = None,
+    dataset_id: Annotated[Optional[str], Field(description="Optional dataset to scope the query to.")] = None,
+    query: Annotated[str, Field(description="Keyword search string. Empty = all.")] = "",
+    parameters: Annotated[Optional[Union[str, Dict[str, Any]]], Field(description="Optional dict with date_from, date_to, limit. Accepted as JSON string and coerced.")] = None,
 ) -> Dict[str, Any]:
     """Search saved intel snapshots by keyword, date, or dataset.
 
@@ -3132,10 +3453,10 @@ def delimit_intel_query(
 
 @mcp.tool()
 def delimit_digest(
-    action: str = "run",
-    window_hours: int = 24,
-    send_email: bool = False,
-    to: str = "",
+    action: Annotated[str, Field(description="\"run\" (default) or \"latest\".")] = "run",
+    window_hours: Annotated[int, Field(description="Lookback window. Default 24.")] = 24,
+    send_email: Annotated[bool, Field(description="If True, attempt to email the digest. Requires DELIMIT_DIGEST_EMAIL=true env to actually send.")] = False,
+    to: Annotated[str, Field(description="Email recipient. Empty = DELIMIT_SMTP_TO.")] = "",
 ) -> Dict[str, Any]:
     """Generate a structured daily digest of loop activity (LED-966).
 
@@ -3206,10 +3527,10 @@ def delimit_digest(
 
 @mcp.tool()
 def delimit_work_orders(
-    action: str = "list",
-    status: str = "pending",
-    wo_id: str = "",
-    note: str = "",
+    action: Annotated[str, Field(description="One of \"list\" (default), \"show\", \"complete\".")] = "list",
+    status: Annotated[str, Field(description="Filter for list — \"pending\" (default), \"completed\", \"all\".")] = "pending",
+    wo_id: Annotated[str, Field(description="Work order id (required for \"show\" / \"complete\").")] = "",
+    note: Annotated[str, Field(description="Completion note (used by \"complete\").")] = "",
 ) -> Dict[str, Any]:
     """Manage work orders — structured task artifacts for the founder (STR-177).
 
@@ -3274,10 +3595,10 @@ def delimit_work_orders(
 
 @mcp.tool()
 def delimit_executor(
-    action: str = "status",
-    wo_id: str = "",
-    live: bool = False,
-    executed_by: str = "",
+    action: Annotated[str, Field(description="\"run\" (one), \"poll\" (scan + run all approved), \"status\" (default), \"pause\", \"resume\".")] = "status",
+    wo_id: Annotated[str, Field(description="Work order id. Required for action=\"run\".")] = "",
+    live: Annotated[bool, Field(description="When False (default), dry-run — describe what would happen without firing.")] = False,
+    executed_by: Annotated[str, Field(description="Identifier for the audit log (e.g. \"dashboard\", \"cron\").")] = "",
 ) -> Dict[str, Any]:
     """Run approved work orders from the dashboard inbox (Pro) (Worker Pool v2).
 
@@ -3370,14 +3691,14 @@ def delimit_executor(
 
 @mcp.tool()
 def delimit_sense(
-    action: str = "query",
-    since_days: int = 1,
-    platform: str = "",
-    limit: int = 50,
-    signal_id: str = "",
-    ledger: str = "ops",
-    priority: str = "P2",
-    month: str = "",
+    action: Annotated[str, Field(description="One of \"query\" (default), \"digest\", \"show\", \"promote\", \"freeze\", \"status\".")] = "query",
+    since_days: Annotated[int, Field(description="Lookback window in days (query/digest). Default 1.")] = 1,
+    platform: Annotated[str, Field(description="Filter source platform — \"reddit\", \"x\", \"github\", \"hn\". Empty = all.")] = "",
+    limit: Annotated[int, Field(description="Max rows for query. Default 50.")] = 50,
+    signal_id: Annotated[str, Field(description="SIG-XXXX id for \"show\" / \"promote\".")] = "",
+    ledger: Annotated[str, Field(description="Target ledger for promote — \"ops\" (default) or \"strategy\".")] = "ops",
+    priority: Annotated[str, Field(description="Priority for promoted item — \"P0\", \"P1\", \"P2\".")] = "P2",
+    month: Annotated[str, Field(description="YYYY-MM string for \"freeze\".")] = "",
 ) -> Dict[str, Any]:
     """Review and manage the signal corpus (LED-877).
 
@@ -3496,38 +3817,55 @@ def delimit_sense(
 
 @mcp.tool()
 def delimit_generate_template(
-    template_type: str,
-    name: str,
-    framework: str = "nextjs",
-    features: Optional[Union[str, List[str]]] = None,
-    target: str = ".",
+    template_type: Annotated[str, Field(description="Template flavour, e.g. \"component\", \"page\", \"api\". Required.")],
+    name: Annotated[str, Field(description="Name for the generated code (file stem). Required.")],
+    framework: Annotated[str, Field(description="Target framework key, e.g. \"react\", \"nextjs\", \"fastapi\".")] = "nextjs",
+    features: Annotated[Optional[Union[str, List[str]]], Field(description="Optional feature flags as a comma string or list.")] = None,
+    target: Annotated[str, Field(description="Output directory. Default \".\" (cwd). Sanitized to remain inside the workspace.")] = ".",
 ) -> Dict[str, Any]:
-    """Generate a single code-template file (component / page / api / etc.).
+    """Write a single file from a code template into an existing project.
 
-    When to use: to scaffold one file from a chosen template into an
-    existing project directory.
-    When NOT to use: to scaffold a whole new project (use
-    delimit_generate_scaffold) or design a UI component skeleton
-    (delimit_design_generate_component).
+    When to use: when an existing project needs one more piece — a
+    component, a page, an API handler — and you want the
+    framework-conformant skeleton (imports, exports, default
+    structure) rather than hand-writing the boilerplate. Pair with
+    delimit_test_generate to scaffold the matching test file.
+    When NOT to use: to lay out a fresh project (use
+    delimit_generate_scaffold), to design a UI component with tokens
+    (delimit_design_generate_component), or to bulk-generate many
+    files (call this once per file, or write a custom script).
 
-    Sibling contrast: delimit_generate_scaffold lays out a full project;
-    this writes a single file from a template.
+    Sibling contrast: delimit_generate_scaffold lays out a complete
+    project tree; this writes a single file. Compared to
+    delimit_design_generate_component, this is framework-only and
+    does not consume design tokens. Compared to
+    delimit_test_generate, this writes source, not tests.
 
-    Side effects: writes the generated file under target/ via
-    backends.generate_bridge.template. Sanitizes target via
-    _sanitize_path; coerces features from a comma string to a list.
+    Side effects: writes ONE file to disk under `target/` via
+    backends.generate_bridge.template. `target` is sanitised via
+    _sanitize_path — paths escaping the workspace short-circuit
+    with an error. `features` is coerced from a comma string to a
+    list via _coerce_list_arg. No license gate, no ledger write, no
+    notification. If a file with the same name already exists, the
+    backend determines overwrite vs. error — call with care on
+    populated directories.
 
     Args:
-        template_type: Template flavour, e.g. "component", "page", "api".
-            Required.
+        template_type: Template flavour, e.g. "component", "page",
+            "api". Required.
         name: Name for the generated code (file stem). Required.
-        framework: Target framework key, e.g. "react", "nextjs", "fastapi".
-        features: Optional feature flags as a comma string or list.
-        target: Output directory. Default "." (cwd). Sanitized to remain
-            inside the workspace.
+        framework: Target framework key, e.g. "react", "nextjs",
+            "fastapi". Default "nextjs".
+        features: Optional feature flags as a comma string or list
+            (e.g. "typescript,styled-components"). Default None.
+        target: Output directory. Default "." (cwd). Sanitized —
+            must not escape the workspace root.
 
     Returns:
-        Dict with the file path written and next_steps.
+        Dict with keys: file_path (the path written), template_type
+        echo, framework echo, status, plus a next_steps field.
+        Returns {"error": "..."} on path sanitisation failure or
+        coercion failure.
     """
     try:
         _sanitize_path(target, "target")
@@ -3540,32 +3878,51 @@ def delimit_generate_template(
 
 @mcp.tool()
 def delimit_generate_scaffold(
-    project_type: str,
-    name: str,
-    packages: Optional[Union[str, List[str]]] = None,
+    project_type: Annotated[str, Field(description="Project flavour, e.g. \"nextjs\", \"api\", \"library\". Required.")],
+    name: Annotated[str, Field(description="Project name (becomes the root directory). Required.")],
+    packages: Annotated[Optional[Union[str, List[str]]], Field(description="Packages to include — either a comma string or list.")] = None,
 ) -> Dict[str, Any]:
-    """Scaffold a new project skeleton with chosen packages.
+    """Lay out a fresh project tree with framework-conformant skeleton.
 
-    When to use: at the start of a new project to lay down a
-    framework-conformant directory tree (Next.js app, API service, etc.).
-    When NOT to use: to add to an existing project — that needs
-    delimit_generate_template for individual file scaffolds.
+    When to use: at project zero, when starting a new Next.js app,
+    API service, or library and you want the standard directory
+    tree, package.json/pyproject.toml, lint config, and entry-point
+    files all written in one call. Typical follow-up is
+    delimit_init to set up governance scaffolding in the new
+    project root.
+    When NOT to use: to add files to an existing project (use
+    delimit_generate_template for single-file scaffolds), to
+    duplicate an existing project (use the shell), or to add a
+    package to an existing project (use the project's own package
+    manager directly).
 
-    Sibling contrast: delimit_generate_template generates a single file;
-    this generates a whole project tree.
+    Sibling contrast: delimit_generate_template writes a single
+    file into an existing project; this writes a NEW project tree.
+    Compared to `create-next-app` / `cookiecutter`, this routes the
+    scaffold through the Delimit bridge so the resulting project
+    can later be wired into delimit_init governance with no manual
+    cleanup.
 
-    Side effects: writes new files/directories under name/ via
-    backends.generate_bridge.scaffold. Coerces packages from a comma
-    string to a list.
+    Side effects: writes MANY new files and directories under a new
+    `name/` root via backends.generate_bridge.scaffold. `packages`
+    is coerced from a comma string to a list via _coerce_list_arg
+    (malformed values short-circuit). No license gate. No ledger
+    write, no notification. The backend determines collision
+    behaviour if `name/` already exists — call against a fresh
+    target.
 
     Args:
-        project_type: Project flavour, e.g. "nextjs", "api", "library".
-            Required.
+        project_type: Project flavour, e.g. "nextjs", "api",
+            "library". Required.
         name: Project name (becomes the root directory). Required.
-        packages: Packages to include — either a comma string or list.
+        packages: Packages to include — either a comma string
+            ("react,zod,vitest") or list. Default None.
 
     Returns:
-        Dict with scaffold result, files created, next_steps.
+        Dict with keys: project_root (path to the new root),
+        files_created (list of generated files), project_type
+        echo, status, plus a next_steps field. Returns
+        {"error": "..."} on coercion failure or backend error.
     """
     try:
         packages = _coerce_list_arg(packages, "packages")
@@ -3578,7 +3935,7 @@ def delimit_generate_scaffold(
 # ─── Repo (RepoDoctor + ConfigSentry) ──────────────────────────────────
 
 @mcp.tool()
-def delimit_repo_diagnose(target: str = ".") -> Dict[str, Any]:
+def delimit_repo_diagnose(target: Annotated[str, Field(description="Repository path. Default \".\" (cwd).")] = ".") -> Dict[str, Any]:
     """Diagnose repository health issues (experimental) (Pro).
 
     When to use: before a commit or push to surface common repo
@@ -3607,8 +3964,42 @@ def delimit_repo_diagnose(target: str = ".") -> Dict[str, Any]:
     return _safe_call(diagnose, target=target)
 
 
+def _run_repo_tool_with_remote(
+    target: str,
+    backend_fn,
+    pro_capability: str,
+) -> Dict[str, Any]:
+    """Shared wrapper for repo-bridge tools with remote-input support (LED-1237).
+
+    Resolves ``target`` (local path, ``owner/repo`` shorthand, or
+    GitHub URL) into a local path, calls the backend, and merges the
+    resolution metadata into the response so panel members can see
+    what got cloned.
+    """
+    from ai.license import require_premium
+    gate = require_premium(pro_capability)
+    if gate:
+        return gate
+
+    from ai.remote_resolve import RemoteResolveError, resolve_repo_target
+
+    try:
+        with resolve_repo_target(target) as (resolved_path, meta):
+            result = _safe_call(backend_fn, target=resolved_path)
+            if isinstance(result, dict):
+                # Don't clobber a backend-supplied resolved_from field.
+                for k, v in meta.items():
+                    result.setdefault(k, v)
+            return result
+    except RemoteResolveError as e:
+        out = e.to_dict()
+        # Preserve the user's original input for debuggability.
+        out["target"] = target
+        return out
+
+
 @mcp.tool()
-def delimit_repo_analyze(target: str = ".") -> Dict[str, Any]:
+def delimit_repo_analyze(target: Annotated[str, Field(description="Repository path, \"owner/repo\", or GitHub URL. Default \".\" (cwd).")] = ".") -> Dict[str, Any]:
     """Analyze repository structure and quality (experimental) (Pro).
 
     When to use: for a deep audit of a repo (local or remote) — code
@@ -3632,16 +4023,12 @@ def delimit_repo_analyze(target: str = ".") -> Dict[str, Any]:
         Dict with structure / quality findings, "target", and the
         resolved local path metadata when target was remote.
     """
-    from ai.license import require_premium
-    gate = require_premium("repo_analyze")
-    if gate:
-        return gate
     from backends.repo_bridge import analyze
-    return _safe_call(analyze, target=target)
+    return _run_repo_tool_with_remote(target, analyze, "repo_analyze")
 
 
 @mcp.tool()
-def delimit_repo_config_validate(target: str = ".") -> Dict[str, Any]:
+def delimit_repo_config_validate(target: Annotated[str, Field(description="Repository or config path, \"owner/repo\", or GitHub URL. Default \".\" (cwd).")] = ".") -> Dict[str, Any]:
     """Validate repository configuration files (experimental) (Pro).
 
     When to use: as a pre-merge check that .github/, package.json,
@@ -3665,16 +4052,12 @@ def delimit_repo_config_validate(target: str = ".") -> Dict[str, Any]:
     Returns:
         Dict with per-file validation outcomes and resolution metadata.
     """
-    from ai.license import require_premium
-    gate = require_premium("repo_config_validate")
-    if gate:
-        return gate
     from backends.repo_bridge import config_validate
-    return _safe_call(config_validate, target=target)
+    return _run_repo_tool_with_remote(target, config_validate, "repo_config_validate")
 
 
 @mcp.tool()
-def delimit_repo_config_audit(target: str = ".") -> Dict[str, Any]:
+def delimit_repo_config_audit(target: Annotated[str, Field(description="Repository or config path, \"owner/repo\", or GitHub URL. Default \".\" (cwd).")] = ".") -> Dict[str, Any]:
     """Audit repository configuration for compliance (experimental) (Pro).
 
     When to use: when checking a repo's config against a compliance
@@ -3698,18 +4081,14 @@ def delimit_repo_config_audit(target: str = ".") -> Dict[str, Any]:
     Returns:
         Dict with per-rule compliance verdict and resolution metadata.
     """
-    from ai.license import require_premium
-    gate = require_premium("repo_config_audit")
-    if gate:
-        return gate
     from backends.repo_bridge import config_audit
-    return _safe_call(config_audit, target=target)
+    return _run_repo_tool_with_remote(target, config_audit, "repo_config_audit")
 
 
 # ─── Security ───────────────────────────────────────────────────────────
 
 @mcp.tool()
-def delimit_security_scan(target: str = ".") -> Dict[str, Any]:
+def delimit_security_scan(target: Annotated[str, Field(description="Repository or file path. Default \".\" (cwd).")] = ".") -> Dict[str, Any]:
     """Scan a repository for security vulnerabilities.
 
     When to use: as a baseline security pass over a repo, before a
@@ -3737,10 +4116,10 @@ def delimit_security_scan(target: str = ".") -> Dict[str, Any]:
 
 @mcp.tool()
 def delimit_security_ingest(
-    tool: str,
-    results: str,
-    repo: str = "",
-    commit_sha: str = "",
+    tool: Annotated[str, Field(description="Scanner name — one of \"trivy\", \"semgrep\", \"npm-audit\", \"pip-audit\", \"snyk\", \"codeql\". Required.")],
+    results: Annotated[str, Field(description="JSON string of scan results, or path to a JSON file. Required.")],
+    repo: Annotated[str, Field(description="\"owner/repo\" identifier. Empty = auto-detect.")] = "",
+    commit_sha: Annotated[str, Field(description="Git SHA the scan ran against. Empty = auto-detect.")] = "",
 ) -> Dict[str, Any]:
     """Ingest external security scan output and normalize into ledger findings (Pro).
 
@@ -3992,9 +4371,9 @@ def delimit_security_ingest(
 
 @mcp.tool()
 def delimit_security_deliberate(
-    findings: str = "",
-    repo: str = "",
-    focus: str = "critical",
+    findings: Annotated[str, Field(description="JSON string of findings to triage. Empty = pull from the ledger automatically.")] = "",
+    repo: Annotated[str, Field(description="Repository context for the triage.")] = "",
+    focus: Annotated[str, Field(description="Which findings to triage — \"critical\" (default), \"high\", \"all\".")] = "critical",
 ) -> Dict[str, Any]:
     """Multi-model triage of security findings (Pro).
 
@@ -4128,9 +4507,9 @@ def delimit_security_deliberate(
 
 
 @mcp.tool()
-def delimit_siem(action: str = "status", integration: str = "",
-                  settings: str = "", enabled: str = "",
-                  event: str = "") -> Dict[str, Any]:
+def delimit_siem(action: Annotated[str, Field(description="One of \"status\" (default), \"configure\", \"test\", \"forward\".")] = "status", integration: Annotated[str, Field(description="One of \"splunk\", \"datadog\", \"eventbridge\", \"webhook\" (for configure).")] = "",
+                  settings: Annotated[str, Field(description="JSON string of settings (for configure).")] = "", enabled: Annotated[str, Field(description="\"true\" or \"false\" (for configure).")] = "",
+                  event: Annotated[str, Field(description="JSON string of an event (for forward / test).")] = "") -> Dict[str, Any]:
     """Manage SIEM streaming for audit-event forwarding (Splunk/Datadog/etc.).
 
     When to use: to inspect or configure where Delimit's audit events
@@ -4187,7 +4566,7 @@ def delimit_siem(action: str = "status", integration: str = "",
 
 
 @mcp.tool()
-def delimit_security_audit(target: str = ".") -> Dict[str, Any]:
+def delimit_security_audit(target: Annotated[str, Field(description="Repository or file path to audit. Default \".\" (cwd).")] = ".") -> Dict[str, Any]:
     """Audit security and auto-chain evidence + governance on critical findings.
 
     When to use: as the deploy gate / pre-release security check —
@@ -4273,7 +4652,7 @@ def delimit_security_audit(target: str = ".") -> Dict[str, Any]:
 # ─── Evidence ───────────────────────────────────────────────────────────
 
 @mcp.tool()
-def delimit_evidence_collect(target: str = ".", evidence_type: str = "") -> Dict[str, Any]:
+def delimit_evidence_collect(target: Annotated[str, Field(description="Repository or task path. Default \".\" (cwd).")] = ".", evidence_type: Annotated[str, Field(description="Type of evidence — e.g. \"deploy\", \"security\", \"test\", \"audit\". Stored in bundle metadata. Empty = generic.")] = "") -> Dict[str, Any]:
     """Collect evidence artifacts for governance (Pro).
 
     When to use: after a deploy, security audit, test run, or other
@@ -4309,7 +4688,7 @@ def delimit_evidence_collect(target: str = ".", evidence_type: str = "") -> Dict
 
 
 @mcp.tool()
-def delimit_evidence_verify(bundle_id: Optional[str] = None, bundle_path: Optional[str] = None) -> Dict[str, Any]:
+def delimit_evidence_verify(bundle_id: Annotated[Optional[str], Field(description="Evidence bundle id. Either this or bundle_path must be provided.")] = None, bundle_path: Annotated[Optional[str], Field(description="Path to a bundle file on disk. Either this or bundle_id must be provided.")] = None) -> Dict[str, Any]:
     """Verify the integrity of an evidence bundle (Pro).
 
     When to use: to attest that a previously-collected evidence bundle
@@ -4427,7 +4806,7 @@ delimit_release = mcp.tool()(_delimit_release_impl)
 # --- Thin wrappers (aliases) for backward compatibility ---
 
 @mcp.tool()
-def delimit_release_plan(environment: str = "production", version: str = "", repository: str = ".", services: Optional[List[str]] = None) -> Dict[str, Any]:
+def delimit_release_plan(environment: Annotated[str, Field(description="Target environment, \"production\" or \"staging\". Default \"production\".")] = "production", version: Annotated[str, Field(description="Release version. Auto-detected from git tags if empty.")] = "", repository: Annotated[str, Field(description="Repository path. Default \".\" (cwd).")] = ".", services: Annotated[Optional[List[str]], Field(description="Optional list of service names to scope the plan; None = all services in the repo manifest.")] = None) -> Dict[str, Any]:
     """Generate a release plan from git history (Pro).
 
     When to use: ahead of cutting a release, to enumerate the services
@@ -4492,7 +4871,7 @@ def _release_validate_chain(environment: str, version: str) -> Dict[str, Any]:
     ledger_result = _chain_call("release_validate", "ledger_add",
                                 add_item, required=False,
                                 title=f"Release validation failed: {version} -> {environment}",
-                                ledger="ops", item_type="fix", priority="P1",
+                                ledger="ops", type="fix", priority="P1",
                                 description="Automated: release_validate chain detected failure",
                                 source="chain:release_validate:failed")
     chain["steps"].append({"step": "ledger_add", "ok": not _chain_is_error(ledger_result)})
@@ -4504,86 +4883,154 @@ def _release_validate_chain(environment: str, version: str) -> Dict[str, Any]:
 
 
 @mcp.tool()  # Promoted from experimental (Consensus 120: chaining makes it production-ready)
-def delimit_release_validate(environment: str, version: str) -> Dict[str, Any]:
-    """Validate release readiness.
-    Auto-chains on failure: evidence collection, notification, ledger recording.
+def delimit_release_validate(environment: Annotated[str, Field(description="Target environment (\"production\" / \"staging\").")], version: Annotated[str, Field(description="Release version string. Required.")]) -> Dict[str, Any]:
+    """Validate that a release is safe to ship (Pro).
+
+    When to use: as the gate between delimit_release_plan and the actual
+    rollout — confirms the release passes preflight checks.
+    When NOT to use: for OpenAPI spec linting (delimit_lint) or for
+    runtime health (delimit_obs_status).
+
+    Sibling contrast: delimit_release_plan describes what would ship;
+    this attests it is safe to ship.
+
+    Side effects: on success, returns a passed verdict (no side effects).
+    On failure, auto-chains:
+    1. backends.repo_bridge.evidence_collect (records failure evidence)
+    2. ai.notify.send_notification (webhook event release_validation_failed)
+    3. ai.ledger_manager.add_item (creates ops-ledger fix item, P1)
+
+    Args:
+        environment: Target environment ("production" / "staging").
+        version: Release version string. Required.
+
+    Returns:
+        Dict with validation result, a "chain" trace of the steps run,
+        and on failure an "evidence" payload from evidence_collect.
     """
     return _release_validate_chain(environment=environment, version=version)
 
 
 @mcp.tool()
-def delimit_release_status(environment: str = "production") -> Dict[str, Any]:
-    """Report current release / deploy state for an environment (Pro).
+def delimit_release_status(environment: Annotated[str, Field(description="Target environment. Default \"production\".")] = "production") -> Dict[str, Any]:
+    """Report the active release version for a whole environment (Pro).
 
-    When to use: to inspect the active release version and rollout
-    state for an environment.
-    When NOT to use: for app-level deploy state (use delimit_deploy_status)
-    or for past releases (use delimit_release_history).
+    When to use: to inspect which release version is currently live
+    across all services in an environment — the "what is shipped
+    right now?" check at the release-tier (versions across services)
+    rather than the deploy-tier (per-app SHA). Useful for incident
+    pages and pre-deploy "what are we coming from?" snapshots.
+    When NOT to use: for per-app rollout state (use
+    delimit_deploy_status), for past releases on the same env (use
+    delimit_release_history), or to plan a new release
+    (delimit_release_plan).
 
     Sibling contrast: delimit_deploy_status reports a single app's
-    rollout; this reports the environment's release version overall.
+    SHA rollout; this reports the environment's release version
+    overall (the rollup across apps). delimit_release_history is
+    the time-axis sibling; this is the point-in-time snapshot.
 
-    Side effects: read-only against the ops backend; gated by
-    require_premium. Calls backends.tools_infra.release_status.
+    Side effects: read-only against the ops backend and gated by
+    require_premium — unlicensed callers receive a license payload
+    and no query runs. On a licensed call, invokes
+    backends.tools_infra.release_status which reads the release
+    manifest for the environment. No write, no probe, no
+    notification. Response routed through _with_next_steps.
 
     Args:
         environment: Target environment. Default "production".
 
     Returns:
-        Dict with current release version, rollout state, next_steps.
+        Dict with keys: environment echo, current_version (release
+        version string), rollout_state, services (list of
+        {name, version}), last_release_at, plus a next_steps
+        field. Returns a license-gate payload if the caller lacks
+        Premium, or {"error": "..."} on backend failure.
     """
     return _delimit_release_impl(action="status", environment=environment)
 
 
 @mcp.tool()
-def delimit_release_rollback(environment: str, version: str, to_version: str) -> Dict[str, Any]:
-    """Roll an environment back to a prior release version (experimental).
+def delimit_release_rollback(environment: Annotated[str, Field(description="Target environment. Required.")], version: Annotated[str, Field(description="Current release version that is failing. Required.")], to_version: Annotated[str, Field(description="Prior release version to roll back to. Required.")]) -> Dict[str, Any]:
+    """Revert a whole environment to a prior release version (experimental).
 
     When to use: when delimit_release_validate or delimit_obs_alerts
-    indicate a regression and you need to revert the whole environment.
-    When NOT to use: to roll back a single app (use delimit_deploy_rollback).
+    indicate a regression that spans services and you need to revert
+    the WHOLE environment to a known-good release, not just one app.
+    Typical sequence: alert fires -> delimit_release_history to pick
+    a target -> this -> delimit_release_status to confirm.
+    When NOT to use: to roll back a single app at the SHA level (use
+    delimit_deploy_rollback), to roll back an npm publish (npm
+    publish history is largely append-only — there is no clean
+    rollback), or to roll forward (delimit_release_plan).
 
-    Sibling contrast: delimit_deploy_rollback reverts one app at the
-    SHA level; this reverts a release version across services.
+    Sibling contrast: delimit_deploy_rollback reverts one app at
+    the SHA level; this reverts a release version across services
+    in lockstep. delimit_release_history is how you pick the
+    `to_version`.
 
-    Side effects: calls backends.ops_bridge.release_rollback which
-    mutates the live environment. Marked experimental — handler may
-    return partial results on backends without rollback automation.
+    Side effects: invokes backends.ops_bridge.release_rollback which
+    MUTATES the live environment — services are flipped to the
+    `to_version` artifacts. No license gate at this level (handled
+    by the backend's own admin checks). Marked EXPERIMENTAL —
+    handler may return partial results on backends without rollback
+    automation; verify with delimit_release_status afterwards. No
+    automatic ledger write, no automatic notification — pair with
+    delimit_evidence_collect + delimit_notify per the deploy-gate
+    chain.
 
     Args:
         environment: Target environment. Required.
         version: Current release version that is failing. Required.
+            Used to validate the rollback is from the expected
+            current state.
         to_version: Prior release version to roll back to. Required.
+            Must be a release that previously shipped to this
+            environment (pick via delimit_release_history).
 
     Returns:
-        Dict with rollback result from the ops backend.
+        Dict with keys: environment echo, from_version (== version),
+        to_version echo, rollback_status (success / partial /
+        failed), per_service results (list of {service, status}),
+        plus a next_steps field from the bridge. Returns
+        {"error": "..."} on backend rejection or unknown
+        to_version.
     """
     return _delimit_release_impl(action="rollback", environment=environment, version=version, to_version=to_version)
 
 
 @mcp.tool()
-def delimit_release_history(environment: str, limit: int = 10) -> Dict[str, Any]:
-    """List recent release versions for an environment (experimental).
+def delimit_release_history(environment: Annotated[str, Field(description="Target environment. Required.")], limit: Annotated[int, Field(description="Maximum number of releases to return. Default 10.")] = 10) -> Dict[str, Any]:
+    """Return the recent release timeline for an environment (experimental).
 
-    When to use: when investigating an incident and you need the
-    timeline of what shipped, or when picking a target for
-    delimit_release_rollback's to_version.
-    When NOT to use: to inspect the current release (use
-    delimit_release_status) or per-app deploy timeline
-    (delimit_deploy_status).
+    When to use: during incident investigation when you need to see
+    what shipped and when ("what changed in the last 10 releases?"),
+    or when picking a known-good `to_version` for
+    delimit_release_rollback. The output is the release-tier
+    equivalent of `git log` for a deploy environment.
+    When NOT to use: to inspect only the current release (use
+    delimit_release_status) or for per-app deploy timeline
+    (delimit_deploy_status / SHA-level history). Also: for
+    audit-trail evidence collection use delimit_evidence_collect.
 
-    Sibling contrast: delimit_release_status returns the current state;
-    this returns a history list.
+    Sibling contrast: delimit_release_status is the point-in-time
+    snapshot; this is the time-axis sibling. delimit_release_rollback
+    consumes the output of this tool when picking a target version.
 
-    Side effects: read-only. Calls backends.ops_bridge.release_history.
-    Marked experimental — output schema may evolve.
+    Side effects: read-only against the ops backend. No license gate
+    at this level. Calls backends.ops_bridge.release_history which
+    reads the release timeline store. No write, no probe, no
+    notification. Marked EXPERIMENTAL — output schema may evolve.
 
     Args:
         environment: Target environment. Required.
         limit: Maximum number of releases to return. Default 10.
+            Larger limits may be capped server-side.
 
     Returns:
-        Dict with a list of past releases (version, time, status).
+        Dict with keys: environment echo, releases (list of
+        {version, deployed_at, status, deployed_by}), count, plus
+        next_steps. Returns {"error": "..."} on backend failure.
     """
     return _delimit_release_impl(action="history", environment=environment, limit=limit)
 
@@ -4591,7 +5038,7 @@ def delimit_release_history(environment: str, limit: int = 10) -> Dict[str, Any]
 # ─── CostGuard (Governance Primitive) ──────────────────────────────────
 
 @mcp.tool()
-def delimit_cost_analyze(target: str = ".") -> Dict[str, Any]:
+def delimit_cost_analyze(target: Annotated[str, Field(description="Project or infrastructure path to analyze. Default \".\" (cwd).")] = ".") -> Dict[str, Any]:
     """Analyze a project for cost drivers (Dockerfile, deps, cloud) (Pro).
 
     When to use: when investigating spend on a project — scans
@@ -4622,7 +5069,7 @@ def delimit_cost_analyze(target: str = ".") -> Dict[str, Any]:
 
 
 @mcp.tool()
-def delimit_cost_optimize(target: str = ".") -> Dict[str, Any]:
+def delimit_cost_optimize(target: Annotated[str, Field(description="Project or infrastructure path to analyze. Default \".\" (cwd).")] = ".") -> Dict[str, Any]:
     """Find cost optimization opportunities in a project (Pro).
 
     When to use: after delimit_cost_analyze surfaces drivers, to get
@@ -4653,8 +5100,8 @@ def delimit_cost_optimize(target: str = ".") -> Dict[str, Any]:
 
 
 @mcp.tool()
-def delimit_cost_alert(action: str = "list", name: Optional[str] = None,
-                       threshold: Optional[float] = None, alert_id: Optional[str] = None) -> Dict[str, Any]:
+def delimit_cost_alert(action: Annotated[str, Field(description="One of \"list\" (default), \"create\", \"delete\", \"toggle\".")] = "list", name: Annotated[Optional[str], Field(description="Alert name. Required for create.")] = None,
+                       threshold: Annotated[Optional[float], Field(description="Cost threshold in USD. Required for create.")] = None, alert_id: Annotated[Optional[str], Field(description="Existing alert id. Required for delete/toggle.")] = None) -> Dict[str, Any]:
     """Manage cost alert rules (CRUD on spending thresholds) (Pro).
 
     When to use: to configure ongoing spend thresholds and notifications
@@ -4703,10 +5150,10 @@ def delimit_cost_alert(action: str = "list", name: Optional[str] = None,
 
 @mcp.tool()
 def delimit_cost_controls(
-    action: str = "status",
-    tool_name: str = "",
-    limit: Optional[int] = None,
-    cost_cap: Optional[float] = None,
+    action: Annotated[str, Field(description="One of \"status\" (default), \"quota\", \"set\", \"reset\".")] = "status",
+    tool_name: Annotated[str, Field(description="Tool name. Required for \"quota\" and \"set\" with limit.")] = "",
+    limit: Annotated[Optional[int], Field(description="New hourly call limit (used with action=\"set\").")] = None,
+    cost_cap: Annotated[Optional[float], Field(description="New session cost cap in USD (used with action=\"set\").")] = None,
 ) -> Dict[str, Any]:
     """Manage MCP rate limits and session cost controls.
 
@@ -4741,7 +5188,7 @@ def delimit_cost_controls(
 # ─── DataSteward (Governance Primitive) ────────────────────────────────
 
 @mcp.tool()
-def delimit_data_validate(target: str = ".") -> Dict[str, Any]:
+def delimit_data_validate(target: Annotated[str, Field(description="Directory or file path with data files. Default \".\" (cwd).")] = ".") -> Dict[str, Any]:
     """Validate data files: JSON parse, CSV shape, SQLite integrity.
 
     When to use: as a smoke check before relying on data files (CI
@@ -4767,7 +5214,7 @@ def delimit_data_validate(target: str = ".") -> Dict[str, Any]:
 
 
 @mcp.tool()
-def delimit_data_migrate(target: str = ".") -> Dict[str, Any]:
+def delimit_data_migrate(target: Annotated[str, Field(description="Project path to scan for migration files. Default \".\" (cwd).")] = ".") -> Dict[str, Any]:
     """Inspect migration files (alembic / Django / Prisma / Knex) for status.
 
     When to use: to audit pending and applied migrations before a
@@ -4795,7 +5242,7 @@ def delimit_data_migrate(target: str = ".") -> Dict[str, Any]:
 
 
 @mcp.tool()
-def delimit_data_backup(target: str = ".") -> Dict[str, Any]:
+def delimit_data_backup(target: Annotated[str, Field(description="Directory or file to back up. Default \".\" (cwd).")] = ".") -> Dict[str, Any]:
     """Back up SQLite and JSON data files to ~/.delimit/backups/.
 
     When to use: before a risky migration or refactor that touches
@@ -4887,109 +5334,182 @@ delimit_obs = mcp.tool()(_delimit_obs_impl)
 # --- Thin wrappers (aliases) for backward compatibility ---
 
 @mcp.tool()
-def delimit_obs_metrics(query: str = "system", time_range: str = "1h", source: Optional[str] = None) -> Dict[str, Any]:
-    """Query live system metrics from the observability backend (Pro).
+def delimit_obs_metrics(query: Annotated[str, Field(description="Metric query name. Default \"system\" (general system metrics). Backend-specific values supported.")] = "system", time_range: Annotated[str, Field(description="Window like \"1h\", \"24h\", \"7d\". Default \"1h\".")] = "1h", source: Annotated[Optional[str], Field(description="Optional data source override. Default None = backend default source.")] = None) -> Dict[str, Any]:
+    """Pull numeric metric series from the observability backend (Pro).
 
-    When to use: for runtime health investigation — CPU, memory, request
-    rate, error rate over a window.
-    When NOT to use: for log search (use delimit_obs_logs) or for one-shot
-    health check (use delimit_obs_status).
+    When to use: during runtime health investigation when you need
+    numeric series (CPU, memory, request rate, error rate, latency
+    percentiles) over a named time window. Pair with delimit_obs_logs
+    to correlate a numeric anomaly with the underlying log lines.
+    When NOT to use: for free-text search of log lines (use
+    delimit_obs_logs), to read or configure alert rules
+    (delimit_obs_alerts), or for a quick at-a-glance health rollup
+    (delimit_obs_status).
 
-    Sibling contrast: delimit_obs_logs searches text; this returns
-    numeric series. delimit_obs_status is a high-level rollup.
+    Sibling contrast: delimit_obs_logs returns text matches; this
+    returns numeric time series. delimit_obs_status is the
+    rollup-summary surface; this is the raw-series surface.
+    delimit_obs_alerts configures thresholds against these same
+    series.
 
-    Side effects: read-only on the metrics backend; gated by
-    require_premium. Calls backends.tools_infra.obs_metrics.
+    Side effects: read-only on the metrics backend and gated by
+    require_premium — unlicensed callers receive a license payload
+    and no query runs. On a licensed call, invokes
+    backends.tools_infra.obs_metrics which queries the backing
+    metrics store; no data is written, no ledger entry, no
+    notification. The response is routed through _with_next_steps.
 
     Args:
         query: Metric query name. Default "system" (general system
-            metrics). Backend-specific values supported.
+            metrics). Backend-specific values supported (e.g.
+            "http_requests", "memory_rss").
         time_range: Window like "1h", "24h", "7d". Default "1h".
+            Larger windows may downsample at the backend.
         source: Optional data source override. Default None = backend
-            default source.
+            default source. Use to query a specific service or env.
 
     Returns:
-        Dict with metric series and next_steps.
+        Dict with keys: series (list of {name, points: [(t, v), ...]}),
+        time_range echo, source echo, plus a next_steps field from
+        _with_next_steps. Returns a license-gate payload if the
+        caller lacks Premium, or {"error": "..."} if the backend
+        rejects the query.
     """
     return _delimit_obs_impl(action="metrics", query=query, time_range=time_range, source=source)
 
 
 @mcp.tool()
-def delimit_obs_logs(query: str, time_range: str = "1h", source: Optional[str] = None) -> Dict[str, Any]:
-    """Search system and application logs (Pro).
+def delimit_obs_logs(query: Annotated[str, Field(description="Search string (backend-specific syntax). Required.")], time_range: Annotated[str, Field(description="Window like \"1h\", \"24h\", \"7d\". Default \"1h\".")] = "1h", source: Annotated[Optional[str], Field(description="Optional log source override. Default None.")] = None) -> Dict[str, Any]:
+    """Search application and system logs across configured sources (Pro).
 
-    When to use: for incident investigation — find error messages,
-    trace IDs, or specific events across the configured log sources.
-    When NOT to use: for numeric metric data (use delimit_obs_metrics)
-    or to manage alerts (use delimit_obs_alerts).
+    When to use: during incident investigation when you have a
+    symptom (error string, trace id, user id, request id) and need to
+    find every log line mentioning it across the configured sources
+    over a time window. The typical pattern is: delimit_obs_metrics
+    flags a numeric anomaly, then this tool finds the offending log
+    lines.
+    When NOT to use: for numeric series (use delimit_obs_metrics),
+    for the at-a-glance health rollup (delimit_obs_status), or to
+    configure ongoing alerts (delimit_obs_alerts). Also: do not use
+    this as a tail-follow surface — it is a windowed search, not a
+    streaming subscription.
 
-    Sibling contrast: delimit_obs_metrics is for numeric series; this
-    is for text search.
+    Sibling contrast: delimit_obs_metrics returns numeric series for
+    the same backend; this returns text matches. Compared to grepping
+    the local filesystem, this queries the centralised log store
+    across services / hosts.
 
-    Side effects: read-only on the log backend; gated by require_premium.
-    Calls backends.tools_infra.obs_logs.
+    Side effects: read-only on the log backend and gated by
+    require_premium — unlicensed callers receive a license payload
+    and no query runs. On a licensed call, invokes
+    backends.tools_infra.obs_logs which queries the backing log
+    store; no data is written, no ledger entry, no notification. The
+    response is routed through _with_next_steps.
 
     Args:
-        query: Search string (backend-specific syntax). Required.
+        query: Search string in the backend's query syntax. Required;
+            empty queries return an error.
         time_range: Window like "1h", "24h", "7d". Default "1h".
-        source: Optional log source override. Default None.
+            Larger windows may be capped server-side.
+        source: Optional log source override (e.g. specific service,
+            host). Default None = all configured sources.
 
     Returns:
-        Dict with matching log entries and next_steps.
+        Dict with keys: matches (list of log entries with timestamp,
+        source, message), match_count, time_range echo, source echo,
+        plus a next_steps field. Returns a license-gate payload if
+        the caller lacks Premium, or {"error": "..."} on backend
+        rejection.
     """
     return _delimit_obs_impl(action="logs", query=query, time_range=time_range, source=source)
 
 
 @mcp.tool()
-def delimit_obs_alerts(action: str, alert_rule: Optional[Dict[str, Any]] = None, rule_id: Optional[str] = None) -> Dict[str, Any]:
-    """Manage alerting rules (list/create/update/delete) (experimental).
+def delimit_obs_alerts(action: Annotated[str, Field(description="Alert sub-action. One of \"list\", \"create\", \"update\", \"delete\". Required.")], alert_rule: Annotated[Optional[Dict[str, Any]], Field(description="Rule definition dict (required for create/update). Backend-specific schema.")] = None, rule_id: Annotated[Optional[str], Field(description="Identifier for an existing rule (required for delete/update).")] = None) -> Dict[str, Any]:
+    """Manage alerting rules — list, create, update, delete (experimental).
 
     When to use: to configure ongoing alerts for production thresholds
-    (latency, error rate, saturation).
-    When NOT to use: for one-shot metric queries (use delimit_obs_metrics)
-    or status snapshots (delimit_obs_status).
+    (latency, error rate, saturation, queue depth) against the same
+    metric series visible via delimit_obs_metrics. Sub-actions:
+    "list" inventories existing rules, "create" mints one, "update"
+    edits, "delete" removes.
+    When NOT to use: for one-shot metric queries
+    (delimit_obs_metrics), log search (delimit_obs_logs), or the
+    health rollup (delimit_obs_status). Also: do not call "create"
+    repeatedly to retry a failed alert delivery — alerting is
+    configuration, not delivery.
 
-    Sibling contrast: delimit_obs_metrics queries data; this configures
-    automated thresholds against that data.
+    Sibling contrast: delimit_obs_metrics queries data; this
+    configures automated thresholds against that data. Compared to
+    cloud-provider alerting consoles, this routes through the ops
+    bridge so the rule set is recorded in the same observability
+    layer as the metric source.
 
-    Side effects: writes to the alert configuration on the ops backend.
-    Calls backends.ops_bridge.obs_alerts. Marked experimental — schema
-    for alert_rule may evolve.
+    Side effects: WRITES to the alert configuration on the ops
+    backend for action in ("create", "update", "delete"); reads only
+    for "list". Routes through backends.ops_bridge.obs_alerts. Marked
+    EXPERIMENTAL — the schema for `alert_rule` is backend-specific
+    and may evolve; pin tested rule shapes if depending on this in
+    production. No license gate at this level (gating handled by
+    the backend's own admin checks).
 
     Args:
         action: Alert sub-action. One of "list", "create", "update",
             "delete". Required.
-        alert_rule: Rule definition dict (required for create/update).
-            Backend-specific schema.
+        alert_rule: Rule definition dict (required for "create" and
+            "update"). Backend-specific schema — typically includes
+            metric, threshold, comparison, window, severity.
         rule_id: Identifier for an existing rule (required for
-            delete/update).
+            "delete" and "update").
 
     Returns:
-        Dict with the action's result from the ops backend.
+        Dict from the ops backend. For "list": {rules: [...]}. For
+        "create": {rule_id, status}. For "update" / "delete":
+        {rule_id, status}. All variants include a next_steps field
+        from the bridge. Returns {"error": "..."} on schema
+        rejection or missing required field.
     """
     return _delimit_obs_impl(action="alerts", alert_action=action, alert_rule=alert_rule, rule_id=rule_id)
 
 
 @mcp.tool()
 def delimit_obs_status() -> Dict[str, Any]:
-    """High-level system health rollup (Pro).
+    """Return a high-level health rollup from the observability layer (Pro).
 
-    When to use: for a quick "are we green?" signal at session start or
-    in a status dashboard.
-    When NOT to use: for detailed metric series (delimit_obs_metrics) or
-    log investigation (delimit_obs_logs).
+    When to use: for the "are we green?" check at session start, in a
+    status dashboard, or as a single-call smoke test before a
+    deploy. The orchestrator's session-start ritual calls this only
+    if delimit_agent_dashboard or delimit_gov_health flag anomalies
+    — it is the second-tier health surface, not the first.
+    When NOT to use: for detailed numeric series
+    (delimit_obs_metrics), for log investigation (delimit_obs_logs),
+    or for alerting rule management (delimit_obs_alerts). Also do
+    not use as the only deploy gate — pair with
+    delimit_security_audit + delimit_test_smoke per the deploy
+    chain.
 
-    Sibling contrast: delimit_obs_metrics returns numeric series; this
-    returns a health rollup suitable for an at-a-glance summary.
+    Sibling contrast: delimit_obs_metrics returns raw numeric
+    series; this returns a synthesised rollup (typically per-service
+    status + a few key indicators). Compared to
+    delimit_gov_health, this reports the runtime observability layer
+    rather than the governance kernel.
 
-    Side effects: read-only on the observability backend; gated by
-    require_premium. Calls backends.tools_infra.obs_status.
+    Side effects: read-only on the observability backend and gated
+    by require_premium — unlicensed callers receive a license
+    payload and no query runs. On a licensed call, invokes
+    backends.tools_infra.obs_status which composes a health summary
+    from the backing data sources. No write, no ledger entry, no
+    notification. Response is wrapped through _with_next_steps.
 
     Args:
         None.
 
     Returns:
-        Dict with overall health summary and next_steps.
+        Dict with keys: overall (green/yellow/red), services (list
+        of {name, status, indicators}), checked_at timestamp, plus
+        a next_steps field from _with_next_steps. Returns a
+        license-gate payload if the caller lacks Premium, or
+        {"error": "..."} on backend failure (does not raise).
     """
     return _delimit_obs_impl(action="status")
 
@@ -4998,9 +5518,9 @@ def delimit_obs_status() -> Dict[str, Any]:
 
 @mcp.tool()
 def delimit_design_extract_tokens(
-    figma_file_key: Optional[str] = None,
-    token_types: Optional[Union[str, List[str]]] = None,
-    project_path: Optional[str] = None,
+    figma_file_key: Annotated[Optional[str], Field(description="Optional Figma file key (uses Figma API if a token is available).")] = None,
+    token_types: Annotated[Optional[Union[str, List[str]]], Field(description="Token types — \"colors\", \"typography\", \"spacing\", \"breakpoints\". Comma string or list. None = all.")] = None,
+    project_path: Annotated[Optional[str], Field(description="Project directory to scan. Default = cwd.")] = None,
 ) -> Dict[str, Any]:
     """Extract design tokens from a project's CSS/SCSS/Tailwind config.
 
@@ -5039,7 +5559,7 @@ def delimit_design_extract_tokens(
 
 
 @mcp.tool()
-def delimit_design_generate_component(component_name: str, figma_node_id: Optional[str] = None, output_path: Optional[str] = None, project_path: Optional[str] = None) -> Dict[str, Any]:
+def delimit_design_generate_component(component_name: Annotated[str, Field(description="Component name (PascalCase). Required.")], figma_node_id: Annotated[Optional[str], Field(description="Optional Figma node ID (reserved for future use).")] = None, output_path: Annotated[Optional[str], Field(description="Output file path. Default = components/<Name>/<Name>.tsx.")] = None, project_path: Annotated[Optional[str], Field(description="Project root for Tailwind detection.")] = None) -> Dict[str, Any]:
     """Generate a React/Next.js component skeleton with Tailwind support.
 
     When to use: to scaffold a new component (.tsx) with props
@@ -5070,7 +5590,7 @@ def delimit_design_generate_component(component_name: str, figma_node_id: Option
 
 
 @mcp.tool()
-def delimit_design_generate_tailwind(figma_file_key: Optional[str] = None, output_path: Optional[str] = None, project_path: Optional[str] = None) -> Dict[str, Any]:
+def delimit_design_generate_tailwind(figma_file_key: Annotated[Optional[str], Field(description="Optional Figma file key (reserved for future use).")] = None, output_path: Annotated[Optional[str], Field(description="Output file path for generated config.")] = None, project_path: Annotated[Optional[str], Field(description="Project root to scan for existing config or CSS tokens.")] = None) -> Dict[str, Any]:
     """Read an existing tailwind.config or generate one from detected CSS tokens.
 
     When to use: to bootstrap a Tailwind config from existing CSS
@@ -5102,8 +5622,8 @@ def delimit_design_generate_tailwind(figma_file_key: Optional[str] = None, outpu
 
 @mcp.tool()
 def delimit_design_validate_responsive(
-    project_path: str,
-    check_types: Optional[Union[str, List[str]]] = None,
+    project_path: Annotated[str, Field(description="Project path to validate. Required.")],
+    check_types: Annotated[Optional[Union[str, List[str]]], Field(description="Specific checks (\"breakpoints\", \"containers\", \"fluid-type\", etc.) as comma string or list. None = all.")] = None,
 ) -> Dict[str, Any]:
     """Validate responsive design patterns via static CSS analysis.
 
@@ -5137,7 +5657,7 @@ def delimit_design_validate_responsive(
 
 
 @mcp.tool()
-def delimit_design_component_library(project_path: str, output_format: str = "json") -> Dict[str, Any]:
+def delimit_design_component_library(project_path: Annotated[str, Field(description="Project path to scan. Required.")], output_format: Annotated[str, Field(description="One of \"json\" (default) or \"markdown\".")] = "json") -> Dict[str, Any]:
     """Scan a project for React/Vue/Svelte components and emit a catalog.
 
     When to use: to inventory a project's UI components for review,
@@ -5167,9 +5687,9 @@ def delimit_design_component_library(project_path: str, output_format: str = "js
 
 @mcp.tool()
 def delimit_story_generate(
-    component_path: str,
-    story_name: Optional[str] = None,
-    variants: Optional[Union[str, List[str]]] = None,
+    component_path: Annotated[str, Field(description="Path to the component (.tsx) file. Required.")],
+    story_name: Annotated[Optional[str], Field(description="Custom story name. Default = component name.")] = None,
+    variants: Annotated[Optional[Union[str, List[str]]], Field(description="Variants to generate (e.g. \"Default,WithChildren\"). Default = [\"Default\", \"WithChildren\"].")] = None,
 ) -> Dict[str, Any]:
     """Generate a .stories.tsx file for a UI component (no Storybook required).
 
@@ -5204,7 +5724,7 @@ def delimit_story_generate(
 
 
 @mcp.tool()
-def delimit_story_visual_test(url: str, project_path: Optional[str] = None, threshold: float = 0.05) -> Dict[str, Any]:
+def delimit_story_visual_test(url: Annotated[str, Field(description="URL to screenshot.")], project_path: Annotated[Optional[str], Field(description="Project path for baseline storage.")] = None, threshold: Annotated[float, Field(description="Diff threshold (0.0-1.0). Default 0.05.")] = 0.05) -> Dict[str, Any]:
     """Run visual regression test — screenshot vs stored baseline.
 
     When to use: as a CI gate after UI changes, to catch unintended
@@ -5234,7 +5754,7 @@ def delimit_story_visual_test(url: str, project_path: Optional[str] = None, thre
 
 
 @mcp.tool()
-def delimit_story_build(project_path: str, output_dir: Optional[str] = None) -> Dict[str, Any]:
+def delimit_story_build(project_path: Annotated[str, Field(description="Project path. Required.")], output_dir: Annotated[Optional[str], Field(description="Output directory. None = Storybook default.")] = None) -> Dict[str, Any]:
     """Build a Storybook static site (or return setup guidance).
 
     When to use: to build the Storybook static site for an existing
@@ -5262,7 +5782,7 @@ def delimit_story_build(project_path: str, output_dir: Optional[str] = None) -> 
 
 
 @mcp.tool()
-def delimit_story_accessibility(project_path: str, standards: str = "WCAG2AA") -> Dict[str, Any]:
+def delimit_story_accessibility(project_path: Annotated[str, Field(description="Project path to scan. Required.")], standards: Annotated[str, Field(description="WCAG standard — \"WCAG2A\", \"WCAG2AA\" (default), \"WCAG2AAA\".")] = "WCAG2AA") -> Dict[str, Any]:
     """Scan HTML/JSX/TSX for WCAG accessibility issues.
 
     When to use: as a CI gate or pre-merge check on UI changes for
@@ -5293,7 +5813,7 @@ def delimit_story_accessibility(project_path: str, standards: str = "WCAG2AA") -
 # ─── TestSmith (Testing - Real implementations) ──────────────────────
 
 @mcp.tool()
-def delimit_test_generate(project_path: str, source_files: Optional[List[str]] = None, framework: str = "jest") -> Dict[str, Any]:
+def delimit_test_generate(project_path: Annotated[str, Field(description="Project path. Required.")], source_files: Annotated[Optional[List[str]], Field(description="Specific files to generate tests for. None = all detectable public functions.")] = None, framework: Annotated[str, Field(description="Test framework — \"jest\" (default), \"pytest\", \"vitest\".")] = "jest") -> Dict[str, Any]:
     """Generate test skeletons for source code (Jest / pytest / vitest).
 
     When to use: to scaffold new test stubs for public functions when
@@ -5322,7 +5842,7 @@ def delimit_test_generate(project_path: str, source_files: Optional[List[str]] =
 
 
 @mcp.tool()
-def delimit_test_coverage(project_path: str, threshold: int = 80) -> Dict[str, Any]:
+def delimit_test_coverage(project_path: Annotated[str, Field(description="Path to the project root. Required.")], threshold: Annotated[int, Field(description="Coverage percentage threshold for pass/fail. Default 80.")] = 80) -> Dict[str, Any]:
     """Analyze test coverage for a project (experimental) (Pro).
 
     When to use: to surface coverage by file/folder against a threshold
@@ -5354,7 +5874,7 @@ def delimit_test_coverage(project_path: str, threshold: int = 80) -> Dict[str, A
 
 
 @mcp.tool()
-def delimit_test_smoke(project_path: str, test_suite: Optional[str] = None) -> Dict[str, Any]:
+def delimit_test_smoke(project_path: Annotated[str, Field(description="Project path. Required.")], test_suite: Annotated[Optional[str], Field(description="Optional specific test suite or pattern.")] = None) -> Dict[str, Any]:
     """Run smoke tests for a project.
 
     When to use: as a pre-commit / pre-deploy gate to confirm tests
@@ -5384,7 +5904,7 @@ def delimit_test_smoke(project_path: str, test_suite: Optional[str] = None) -> D
 # ─── Docs (Real implementations) ─────────────────────────────────────
 
 @mcp.tool()
-def delimit_docs_generate(target: str = ".") -> Dict[str, Any]:
+def delimit_docs_generate(target: Annotated[str, Field(description="Project path. Default \".\" (cwd).")] = ".") -> Dict[str, Any]:
     """Generate a markdown API reference from source docstrings/JSDoc.
 
     When to use: to produce a starter API reference doc from existing
@@ -5409,7 +5929,7 @@ def delimit_docs_generate(target: str = ".") -> Dict[str, Any]:
 
 
 @mcp.tool()
-def delimit_docs_validate(target: str = ".") -> Dict[str, Any]:
+def delimit_docs_validate(target: Annotated[str, Field(description="Project path. Default \".\" (cwd).")] = ".") -> Dict[str, Any]:
     """Validate documentation quality and completeness.
 
     When to use: as a CI gate to surface missing READMEs, undocumented
@@ -5451,9 +5971,9 @@ _NEGATIVE_KEYWORDS = [
 
 @mcp.tool()
 async def delimit_sensor_github_issue(
-    repo: str,
-    issue_number: int,
-    since_comment_id: int = 0,
+    repo: Annotated[str, Field(description="\"owner/repo\" GitHub repository. Required.")],
+    issue_number: Annotated[int, Field(description="Issue number to monitor. Must be > 0.")],
+    since_comment_id: Annotated[int, Field(description="Last seen comment id. 0 = all comments.")] = 0,
 ) -> Dict[str, Any]:
     """Check a GitHub issue for new comments since the last sensor tick.
 
@@ -5591,8 +6111,8 @@ async def delimit_sensor_github_issue(
 
 @mcp.tool()
 def delimit_sensor_github_migrations(
-    repos: List[str],
-    limit: int = 20,
+    repos: Annotated[List[str], Field(description="List of GitHub repos in owner/repo format (e.g. [\"chatwoot/chatwoot\", \"cal-com/cal.com\"]). Required.")],
+    limit: Annotated[int, Field(description="Max migration signals per repo. Default 20.")] = 20,
 ) -> Dict[str, Any]:
     """Scan GitHub issues/PRs for migration patterns across target repos.
 
@@ -5780,10 +6300,10 @@ STANDARD_WORKFLOWS = [
 
 
 @mcp.tool()
-def delimit_swarm(action: str = "status", venture: str = "",
-                   agent_id: str = "", repo_path: str = "",
-                   deploy_target: str = "", target_path: str = "",
-                   access_action: str = "read") -> Dict[str, Any]:
+def delimit_swarm(action: Annotated[str, Field(description="See actions above.")] = "status", venture: Annotated[str, Field(description="Venture name (for register/venture/create_agent).")] = "",
+                   agent_id: Annotated[str, Field(description="Agent ID (for agent/check/create_agent/approve_agent).")] = "", repo_path: Annotated[str, Field(description="Repo path, description, or reason depending on action.")] = "",
+                   deploy_target: Annotated[str, Field(description="Deploy target for venture registration.")] = "", target_path: Annotated[str, Field(description="File path, tool name, or role name depending on action.")] = "",
+                   access_action: Annotated[str, Field(description="Action name - for check: \"read\"/\"write\"/\"deploy\". For approve: \"deploy_production\"/\"deploy_staging\"/\"social_post\" etc.")] = "read") -> Dict[str, Any]:
     """Manage the cross-venture agent swarm (personas + namespace isolation).
 
     When to use: to inspect or mutate the swarm — register a venture
@@ -5915,8 +6435,8 @@ def delimit_swarm(action: str = "status", venture: str = "",
 
 
 @mcp.tool()
-def delimit_review(diff: str = "", file_path: str = "",
-                    context: str = "", pr_url: str = "") -> Dict[str, Any]:
+def delimit_review(diff: Annotated[str, Field(description="Git diff or code text to review. Takes priority over file_path.")] = "", file_path: Annotated[str, Field(description="Path to file to review (reads current content if no diff).")] = "",
+                    context: Annotated[str, Field(description="Additional context about the change.")] = "", pr_url: Annotated[str, Field(description="GitHub PR URL for linking the review.")] = "") -> Dict[str, Any]:
     """Run a multi-model code review on a diff or file.
 
     When to use: to get cross-model feedback on a code change before
@@ -6017,8 +6537,8 @@ def delimit_review(diff: str = "", file_path: str = "",
 
 
 @mcp.tool()
-def delimit_redact(action: str = "scan", text: str = "",
-                    categories: str = "") -> Dict[str, Any]:
+def delimit_redact(action: Annotated[str, Field(description="\"scan\" (preview, default) or \"redact\" (replace).")] = "scan", text: Annotated[str, Field(description="Text to process.")] = "",
+                    categories: Annotated[str, Field(description="Comma-separated categories — \"api_key\", \"secret\", \"pii\", \"infra\". Empty = all categories.")] = "") -> Dict[str, Any]:
     """Scan or redact sensitive data (API keys, secrets, PII) from text.
 
     When to use: before sending text to external LLMs or publishing
@@ -6065,9 +6585,9 @@ def delimit_redact(action: str = "scan", text: str = "",
 
 
 @mcp.tool()
-def delimit_prompt_drift(action: str = "check", prompt: str = "",
-                          model: str = "", result_summary: str = "",
-                          success: str = "true", task_type: str = "") -> Dict[str, Any]:
+def delimit_prompt_drift(action: Annotated[str, Field(description="\"record\", \"check\" (default), or \"rank\".")] = "check", prompt: Annotated[str, Field(description="Prompt text (for record / check).")] = "",
+                          model: Annotated[str, Field(description="AI model name (required for record).")] = "", result_summary: Annotated[str, Field(description="Brief description of the result (for record).")] = "",
+                          success: Annotated[str, Field(description="\"true\" / \"false\" — whether the result was good.")] = "true", task_type: Annotated[str, Field(description="Task category — \"refactoring\", \"testing\", \"debugging\", \"docs\".")] = "") -> Dict[str, Any]:
     """Detect prompt drift across Claude / Codex / Gemini for the same task.
 
     When to use: to track per-model prompt performance over time, or
@@ -6122,8 +6642,8 @@ def delimit_prompt_drift(action: str = "check", prompt: str = "",
 
 
 @mcp.tool()
-def delimit_collision_check(action: str = "check", file_path: str = "",
-                             model: str = "", task_id: str = "") -> Dict[str, Any]:
+def delimit_collision_check(action: Annotated[str, Field(description="\"check\" (default), \"claim\", or \"release\".")] = "check", file_path: Annotated[str, Field(description="File to claim/release (required for claim/release).")] = "",
+                             model: Annotated[str, Field(description="AI model name — \"claude\", \"codex\", \"gemini\".")] = "", task_id: Annotated[str, Field(description="Optional task id for tracking.")] = "") -> Dict[str, Any]:
     """Detect / prevent multi-model file edit collisions (LED-129).
 
     When to use: in cross-model workflows — claim a file before
@@ -6161,9 +6681,9 @@ def delimit_collision_check(action: str = "check", file_path: str = "",
 
 
 @mcp.tool()
-def delimit_project_config(action: str = "load", project_path: str = ".",
-                            mode: str = "advisory", preset: str = "default",
-                            task_type: str = "") -> Dict[str, Any]:
+def delimit_project_config(action: Annotated[str, Field(description="\"load\" (default), \"init\", or \"model\".")] = "load", project_path: Annotated[str, Field(description="Project root directory. Default \".\" (cwd).")] = ".",
+                            mode: Annotated[str, Field(description="Governance mode (only for init). One of \"advisory\", \"guarded\", \"enforce\". Default \"advisory\".")] = "advisory", preset: Annotated[str, Field(description="Policy preset (only for init). One of \"strict\", \"default\", \"relaxed\". Default \"default\".")] = "default",
+                            task_type: Annotated[str, Field(description="Task type for model lookup (only for action=\"model\").")] = "") -> Dict[str, Any]:
     """Manage delimit.yml project configuration (load / init / model).
 
     When to use: to inspect, create, or query the project's delimit.yml
@@ -6208,9 +6728,9 @@ def delimit_project_config(action: str = "load", project_path: str = ".",
 
 
 @mcp.tool()
-def delimit_playbook(action: str = "list", name: str = "", prompt: str = "",
-                      description: str = "", variables: str = "",
-                      model_hint: str = "", tags: str = "") -> Dict[str, Any]:
+def delimit_playbook(action: Annotated[str, Field(description="\"save\", \"run\", \"list\" (default), or \"delete\".")] = "list", name: Annotated[str, Field(description="Playbook name. Required for save/run/delete.")] = "", prompt: Annotated[str, Field(description="Template with {{variable}} placeholders (save only).")] = "",
+                      description: Annotated[str, Field(description="Short description.")] = "", variables: Annotated[str, Field(description="For run, \"key=value,...\"; for save, \"name1,name2,...\".")] = "",
+                      model_hint: Annotated[str, Field(description="Suggested model (e.g. \"claude-opus\").")] = "", tags: Annotated[str, Field(description="Comma-separated tags for organization.")] = "") -> Dict[str, Any]:
     """Manage reusable prompt templates — save / run / list / delete.
 
     When to use: to save your best prompts as named commands and run
@@ -6277,7 +6797,7 @@ def delimit_playbook(action: str = "list", name: str = "", prompt: str = "",
 
 
 @mcp.tool()
-def delimit_help(tool_name: str = "") -> Dict[str, Any]:
+def delimit_help(tool_name: Annotated[str, Field(description="Tool name (e.g. \"lint\", \"gov_health\"). Empty returns the workflows overview.")] = "") -> Dict[str, Any]:
     """Get help for a Delimit tool — purpose, parameters, examples.
 
     When to use: when an agent or operator needs a quick reminder of
@@ -6319,7 +6839,7 @@ def delimit_help(tool_name: str = "") -> Dict[str, Any]:
 
 
 @mcp.tool()
-def delimit_diagnose(project_path: str = ".", dry_run: bool = False, undo: bool = False) -> Dict[str, Any]:
+def delimit_diagnose(project_path: Annotated[str, Field(description="Project to diagnose. Default \".\" (cwd).")] = ".", dry_run: Annotated[bool, Field(description="If True, preview changes without executing.")] = False, undo: Annotated[bool, Field(description="If True, revert changes from the last run.")] = False) -> Dict[str, Any]:
     """Comprehensive health check of the Delimit installation (delimit doctor).
 
     When to use: as the universal first-step diagnostic when something
@@ -6818,7 +7338,7 @@ def delimit_diagnose(project_path: str = ".", dry_run: bool = False, undo: bool 
 
 
 @mcp.tool()
-def delimit_activate(license_key: str = "", project_path: str = ".", auto_permissions: bool = True) -> Dict[str, Any]:
+def delimit_activate(license_key: Annotated[str, Field(description="Optional license key (e.g. DELIMIT-XXXX-XXXX-XXXX). Empty = free-tier readiness only.")] = "", project_path: Annotated[str, Field(description="Project directory to check. Default \".\" (cwd).")] = ".", auto_permissions: Annotated[bool, Field(description="Auto-configure AI assistant permissions (default True).")] = True) -> Dict[str, Any]:
     """Activate Delimit and run a readiness checklist.
 
     When to use: as the post-install confirmation that everything is
@@ -6882,66 +7402,113 @@ def delimit_license_status() -> Dict[str, Any]:
 
 @mcp.tool()
 def delimit_deploy_site(
-    project_path: str = ".",
-    message: str = "",
+    project_path: Annotated[str, Field(description="Path to the site project. Default \".\" (cwd). Sanitized — must not escape the workspace root.")] = ".",
+    message: Annotated[str, Field(description="Git commit message for the deploy commit.")] = "",
 ) -> Dict[str, Any]:
-    """Deploy a static/Next.js site via git push + Vercel build (Pro).
+    """Ship a static / Next.js site via git push to the Vercel pipeline (Pro).
 
-    When to use: to ship UI/site changes (commit, push, trigger Vercel
-    build, then deploy).
-    When NOT to use: for npm package publishes (use delimit_deploy_npm)
-    or container deploys (delimit_deploy_publish).
+    When to use: to deploy UI / site changes (typically delimit-ui or
+    a venture marketing site) — this performs the commit, push, and
+    triggers the Vercel build that produces the production
+    deployment. Pair with delimit_deploy_verify on the resulting
+    deploy URL to confirm rollout health.
+    When NOT to use: to publish an npm package (use
+    delimit_deploy_npm), to push container images
+    (delimit_deploy_publish / delimit_deploy_build), or to roll back
+    (delimit_deploy_rollback).
 
-    Sibling contrast: delimit_deploy_publish ships container images;
-    delimit_deploy_npm publishes packages; this is the site-flavour.
+    Sibling contrast: delimit_deploy_publish ships container
+    images; delimit_deploy_npm publishes packages; this is the
+    static-site / Vercel flavour. Compared to running `git push`
+    by hand, this wraps the push with sanitisation, governance
+    hooks, and (for delimit-ui) automatic ChatOps env-var
+    injection from CHATOPS_AUTH_TOKEN.
 
-    Side effects: gated by require_premium. Sanitizes project_path
-    via _sanitize_path. Performs git operations and a network deploy
-    via backends.tools_infra.deploy_site. For the delimit-ui project,
-    auto-injects ChatOps env vars from CHATOPS_AUTH_TOKEN.
+    Side effects: gated by require_premium — unlicensed callers
+    receive a license payload and no deploy runs. `project_path` is
+    sanitised via _sanitize_path; paths escaping the workspace root
+    short-circuit with an error. On a licensed call, invokes
+    backends.tools_infra.deploy_site which performs LOCAL git
+    operations (add, commit, push) and triggers a NETWORK deploy
+    (Vercel build webhook). For the delimit-ui project, automatically
+    injects ChatOps env vars from the CHATOPS_AUTH_TOKEN environment
+    variable into the build context. No rollback — use
+    delimit_deploy_rollback if the deploy regresses.
 
     Args:
         project_path: Path to the site project. Default "." (cwd).
             Sanitized — must not escape the workspace root.
-        message: Git commit message for the deploy commit.
+        message: Git commit message for the deploy commit. Empty
+            string is allowed but discouraged; use a meaningful
+            message so the deploy history is auditable.
 
     Returns:
-        Dict with deploy status, build URL, next_steps. Returns
-        {error: "..."} on path sanitisation failure.
+        Dict with keys: deploy_status, build_url (the Vercel build
+        URL), commit_sha, project_path echo, plus a next_steps
+        field. Returns {"error": "..."} on path sanitisation failure
+        or git operation failure, or a license-gate payload if the
+        caller lacks Premium.
     """
     return _delimit_deploy_impl(action="site", project_path=project_path, message=message)
 
 
 @mcp.tool()
 def delimit_deploy_npm(
-    project_path: str = ".",
-    bump: str = "patch",
-    tag: str = "latest",
-    dry_run: bool = False,
+    project_path: Annotated[str, Field(description="Path to the npm project root. Default \".\" (cwd).")] = ".",
+    bump: Annotated[str, Field(description="Semver bump — \"patch\" (default), \"minor\", or \"major\".")] = "patch",
+    tag: Annotated[str, Field(description="npm dist-tag for the publish. Default \"latest\".")] = "latest",
+    dry_run: Annotated[bool, Field(description="If True, run the chain without publishing. Default False.")] = False,
 ) -> Dict[str, Any]:
-    """Publish an npm package with version bump and dist-tag (Pro).
+    """Publish an npm package: version bump, pack, and push to registry (Pro).
 
     When to use: to ship a new version of an npm-published package
-    (CLI, SDK, etc.).
-    When NOT to use: for site deploys (use delimit_deploy_site) or
-    container images (delimit_deploy_publish).
+    (delimit-cli, a venture SDK, etc.). This is a PRODUCTION DEPLOY
+    — every successful publish reaches real users, so it must be
+    preceded by the deploy gate chain (delimit_security_audit ->
+    delimit_test_smoke -> delimit_changelog -> delimit_deploy_plan)
+    and explicit founder approval per the customer-protection rule.
+    When NOT to use: to deploy a site (use delimit_deploy_site), to
+    push container images (delimit_deploy_publish), to dry-run
+    locally (`npm pack --dry-run` is faster), or to test the chain
+    without publishing — for that, pass dry_run=True here.
 
-    Sibling contrast: delimit_deploy_site ships UI; delimit_deploy_publish
-    ships images; this ships npm tarballs.
+    Sibling contrast: delimit_deploy_site ships UI / static; this
+    ships npm tarballs to the registry. Compared to running `npm
+    publish` by hand, this wraps the chain with a bump,
+    governance gate, and is the auditable surface that other tools
+    can chain against.
 
-    Side effects: gated by require_premium. Calls
-    backends.tools_infra.deploy_npm which runs the npm publish chain:
-    version bump in package.json, npm pack, npm publish to the
-    registry. dry_run=True suppresses the actual publish.
+    Side effects: gated by require_premium — unlicensed callers
+    receive a license payload and no publish runs. On a licensed
+    call, invokes backends.tools_infra.deploy_npm which runs the
+    npm publish chain: (1) bumps the version in package.json
+    (LOCAL write to the source tree), (2) runs the project's
+    prepublishOnly hook if present (which may build or sync
+    artifacts — note the 2026-05-08 v4.5.12 prepublish regression),
+    (3) runs `npm pack` and (4) `npm publish` to the configured
+    registry — a NETWORK write that is publicly visible and
+    NOT undoable except by an `unpublish` (heavily restricted by
+    npm). dry_run=True suppresses step (4) only — the version
+    bump and pack still happen so the chain can be exercised.
 
     Args:
-        project_path: Path to the npm project root. Default "." (cwd).
+        project_path: Path to the npm project root. Default "."
+            (cwd). Must contain a package.json.
         bump: Semver bump — "patch" (default), "minor", or "major".
-        tag: npm dist-tag for the publish. Default "latest".
-        dry_run: If True, run the chain without publishing. Default False.
+            Drives the resulting version string.
+        tag: npm dist-tag for the publish. Default "latest". Use
+            "next" or a custom tag to avoid auto-installing the
+            new version for existing users.
+        dry_run: If True, run the chain without publishing to the
+            registry. Default False.
 
     Returns:
-        Dict with publish status, new version, registry URL, next_steps.
+        Dict with keys: publish_status (published / dry_run /
+        failed), new_version (the resulting semver), registry_url
+        (npm package URL), tag echo, project_path echo, plus a
+        next_steps field. Returns a license-gate payload if the
+        caller lacks Premium, or {"error": "..."} on any step
+        failure.
     """
     return _delimit_deploy_impl(action="npm", project_path=project_path, bump=bump, tag=tag, dry_run=dry_run)
 
@@ -6977,19 +7544,19 @@ def _resolve_venture(venture: str) -> str:
 
 @mcp.tool()
 def delimit_ledger_add(
-    title: str,
-    venture: str = "",
-    ledger: str = "ops",
-    item_type: str = "task",
-    priority: str = "P1",
-    description: str = "",
-    source: str = "session",
-    tags: Optional[Union[str, List[str]]] = None,
-    acceptance_criteria: Optional[Union[str, List[str]]] = None,
-    context: str = "",
-    tools_needed: Optional[Union[str, List[str]]] = None,
-    estimated_complexity: str = "",
-    worked_by: str = "",
+    title: Annotated[str, Field(description="What needs to be done. Required.")],
+    venture: Annotated[str, Field(description="Project name or path. Empty = auto-detect from cwd.")] = "",
+    ledger: Annotated[str, Field(description="\"ops\" (tasks, bugs, features) or \"strategy\" (decisions, direction).")] = "ops",
+    item_type: Annotated[str, Field(description="task, fix, feat, strategy, consensus.")] = "task",
+    priority: Annotated[str, Field(description="P0 (urgent), P1 (important), P2 (nice to have).")] = "P1",
+    description: Annotated[str, Field(description="Details.")] = "",
+    source: Annotated[str, Field(description="Where this came from (session, consensus, focus-group, etc).")] = "session",
+    tags: Annotated[Optional[Union[str, List[str]]], Field(description="Labels/tags (e.g. [\"deploy-ready\", \"ship\"] or \"deploy-ready,ship\").")] = None,
+    acceptance_criteria: Annotated[Optional[Union[str, List[str]]], Field(description="List of testable \"done when\" conditions (e.g. \"tests pass\", \"coverage > 80%\").")] = None,
+    context: Annotated[str, Field(description="Background info an AI agent needs to work on this item.")] = "",
+    tools_needed: Annotated[Optional[Union[str, List[str]]], Field(description="Delimit tools needed (e.g. \"delimit_lint\", \"delimit_test_coverage\").")] = None,
+    estimated_complexity: Annotated[str, Field(description="small, medium, or large.")] = "",
+    worked_by: Annotated[str, Field(description="Which AI model is working on this. Auto-detected if empty.")] = "",
 ) -> Dict[str, Any]:
     """Add a new item to a project's ledger.
 
@@ -7051,19 +7618,19 @@ def delimit_ledger_add(
 
 @mcp.tool()
 def delimit_ledger_update(
-    item_id: str,
-    venture: str = "",
-    status: str = "",
-    priority: str = "",
-    title: str = "",
-    description: str = "",
-    note: str = "",
-    assignee: str = "",
-    due_date: str = "",
-    labels: Optional[Union[str, List[str]]] = None,
-    blocked_by: str = "",
-    blocks: str = "",
-    worked_by: str = "",
+    item_id: Annotated[str, Field(description="Ledger item id, e.g. \"LED-001\" or \"STR-001\". Required.")],
+    venture: Annotated[str, Field(description="Project name/path. Empty = auto-detect.")] = "",
+    status: Annotated[str, Field(description="New status — \"open\", \"in_progress\", \"blocked\", \"done\".")] = "",
+    priority: Annotated[str, Field(description="New priority — \"P0\", \"P1\", \"P2\".")] = "",
+    title: Annotated[str, Field(description="New title.")] = "",
+    description: Annotated[str, Field(description="New description.")] = "",
+    note: Annotated[str, Field(description="Append a note/comment to the item.")] = "",
+    assignee: Annotated[str, Field(description="Assign to person or agent (e.g. \"founder\", \"claude\").")] = "",
+    due_date: Annotated[str, Field(description="ISO date string (e.g. \"2026-04-01\").")] = "",
+    labels: Annotated[Optional[Union[str, List[str]]], Field(description="Labels/tags as comma string or list.")] = None,
+    blocked_by: Annotated[str, Field(description="Item id that blocks this one (e.g. \"LED-025\").")] = "",
+    blocks: Annotated[str, Field(description="Item id that this one blocks (e.g. \"STR-005\").")] = "",
+    worked_by: Annotated[str, Field(description="AI model working on this. Empty = auto-detect.")] = "",
 ) -> Dict[str, Any]:
     """Update any field on an existing ledger item.
 
@@ -7113,7 +7680,7 @@ def delimit_ledger_update(
 
 
 @mcp.tool()
-def delimit_ledger_done(item_id: str, note: str = "", venture: str = "") -> Dict[str, Any]:
+def delimit_ledger_done(item_id: Annotated[str, Field(description="Ledger item id (e.g. \"LED-001\"). Required.")], note: Annotated[str, Field(description="Optional completion note.")] = "", venture: Annotated[str, Field(description="Project name or path. Empty = auto-detect.")] = "") -> Dict[str, Any]:
     """Mark a ledger item as done (convenience wrapper).
 
     When to use: to close out a ledger item with one call instead of
@@ -7142,12 +7709,329 @@ def delimit_ledger_done(item_id: str, note: str = "", venture: str = "") -> Dict
 
 
 @mcp.tool()
+def delimit_ledger_bulk(
+    item_ids: Annotated[str, Field(description="comma-separated LED ids (e.g. \"LED-915,LED-916,LED-918\") or a JSON array of strings.")],
+    action: Annotated[str, Field(description="one of the actions above.")],
+    dry_run: Annotated[bool, Field(description="True (default) returns `would_change`; False applies and returns `changed`.")] = True,
+    note: Annotated[str, Field(description="optional note attached to every successful update event.")] = "",
+    new_status: Annotated[str, Field(description="required when action=\"set_status\".")] = "",
+    new_priority: Annotated[str, Field(description="required when action=\"set_priority\".")] = "",
+    tag: Annotated[str, Field(description="required when action=\"add_tag\".")] = "",
+    venture: Annotated[str, Field(description="project name or path. Auto-detects if empty.")] = "",
+) -> Dict[str, Any]:
+    """Apply one action to many ledger items in a single call (LED-1145 Phase 1 PR-B).
+
+    When to use: after delimit_ledger_groom or another tool surfaces
+    a list of item ids that should all receive the same change.
+    When NOT to use: for a single item (use delimit_ledger_update or
+    delimit_ledger_done).
+
+    Sibling contrast: delimit_ledger_update is one item;
+    delimit_ledger_groom proposes; this applies bulk.
+
+    Side effects: when dry_run=False, writes status/priority/tag
+    changes via the ledger manager. Per-item failures don't block the
+    batch. Default dry_run=True returns what would change without
+    writing — callers MUST explicitly pass dry_run=False to apply.
+
+    Allowed actions:
+      - archive         -> sets status="archived" (soft, replay-preserving)
+      - mark_done       -> sets status="done"
+      - cancel          -> sets status="cancelled"
+      - set_status      -> sets status to `new_status`
+                           (one of open/in_progress/blocked/done/cancelled/archived/completed)
+      - set_priority    -> sets priority to `new_priority`
+                           (one of P0/P1/P2/P3)
+      - add_tag         -> appends `tag` if not already present (idempotent)
+
+    NO hard delete. Items remain in the append-only JSONL forever; archive is
+    a status transition that can be reversed via set_status.
+
+    Args:
+        item_ids: comma-separated LED ids (e.g. "LED-915,LED-916,LED-918")
+            or a JSON array of strings.
+        action: one of the actions above.
+        dry_run: True (default) returns `would_change`; False applies and
+            returns `changed`.
+        note: optional note attached to every successful update event.
+        new_status: required when action="set_status".
+        new_priority: required when action="set_priority".
+        tag: required when action="add_tag".
+        venture: project name or path. Auto-detects if empty.
+
+    Returns:
+        Dict with action, dry_run flag, and either `would_change`
+        (preview when dry_run=True) or `changed` (applied results,
+        per-item ok/error) plus failure counts, plus next_steps.
+    """
+    from ai.ledger_manager import bulk_action
+    project = _resolve_venture(venture)
+    result = bulk_action(
+        item_ids=item_ids,
+        action=action,
+        dry_run=dry_run,
+        note=note or None,
+        new_status=new_status or None,
+        new_priority=new_priority or None,
+        tag=tag or None,
+        project_path=project,
+    )
+    return _with_next_steps("ledger_bulk", result)
+
+
+@mcp.tool()
+def delimit_ledger_auto_close_external(
+    venture: Annotated[str, Field(description="project name or path. Auto-detects if empty.")] = "",
+    dry_run: Annotated[bool, Field(description="True (default) returns a plan without writing.")] = True,
+    max_items: Annotated[int, Field(description="hard cap on items processed in one call (default 200). When the candidate set exceeds this, the response is `truncated=True`.")] = 200,
+) -> Dict[str, Any]:
+    """Auto-close ledger items whose linked GitHub issue/PR already resolved.
+
+    When to use: as periodic maintenance to keep the ledger in sync
+    with external reality — LEDs whose tracked GitHub issue/PR is
+    closed/merged should not stay open.
+    When NOT to use: to close one item by hand (use delimit_ledger_done)
+    or to read external state (delimit_resource_get).
+
+    Sibling contrast: delimit_ledger_done is per-item;
+    this auto-detects across many items.
+
+    Side effects: when dry_run=False, marks/archives via
+    delimit_ledger_bulk under the hood. Default dry_run=True returns
+    a plan only. Detection scans description/context/last_note/tags
+    for github links / shorthand / gh: tag form.
+
+    Detection scans description / context / last_note / tags for:
+      - https://github.com/<owner>/<repo>/(issues|pull)/<num>
+      - <owner>/<repo>#<num>  (short form)
+      - gh:<owner>/<repo>/<num>  (explicit tag form)
+
+    Action map (per LED-1146 deliberation):
+      - PR with merged=true → mark_done with merge SHA in note
+      - issue/PR closed with state_reason="completed" → mark_done with closed_at
+      - issue/PR closed with state_reason="not_planned" or no reason → archive
+      - state="open" → leave alone
+      - gh API error / 404 → leave alone, recorded in `errors`
+
+    Implementation re-uses bulk_action() under the hood; nothing new on the
+    write path. dry_run=True (default) returns a plan; dry_run=False applies.
+
+    Args:
+        venture: project name or path. Auto-detects if empty.
+        dry_run: True (default) returns a plan without writing.
+        max_items: hard cap on items processed in one call (default 200).
+            When the candidate set exceeds this, the response is `truncated=True`.
+
+    Returns:
+        Dict with the per-item plan or applied results (item_id,
+        detected github ref, decided action, error if any), aggregate
+        counts by action, truncated flag, plus next_steps.
+    """
+    from ai.ledger_manager import auto_close_linked_external
+    project = _resolve_venture(venture)
+    result = auto_close_linked_external(
+        project_path=project,
+        dry_run=dry_run,
+        max_items=max_items,
+    )
+    return _with_next_steps("ledger_auto_close_external", result)
+
+
+@mcp.tool()
+def delimit_ledger_groom(
+    venture: Annotated[str, Field(description="project name or path. Auto-detects if empty.")] = "",
+    stale_days: Annotated[int, Field(description="threshold for stale_open detector (default 30).")] = 30,
+    dup_min_count: Annotated[int, Field(description="minimum group size for duplicate_titles (default 3).")] = 3,
+    max_per_category: Annotated[int, Field(description="cap per category in the response (default 50).")] = 50,
+) -> Dict[str, Any]:
+    """Read-only grooming proposal — flags stale / duplicate / garbage items.
+
+    When to use: as a periodic review tool to surface items that
+    likely should be archived (stale, duplicate, garbage venture).
+    When NOT to use: to apply the changes — use delimit_ledger_bulk
+    after reviewing the proposal.
+
+    Sibling contrast: delimit_ledger_bulk applies;
+    delimit_ledger_health composes this with other checks; this is
+    the read-only proposer.
+
+    Side effects: read-only on the ledger. Returns proposals only —
+    risky operations (mass-cancel, dedup-merge) MUST go through
+    delimit_ledger_bulk after founder review. Each proposal includes
+    a copy-pasteable ready_to_apply invocation.
+
+    LED-1145 Phase 2 #2. Risky operations (mass-cancellation, dedup-merge)
+    must NOT be a single atomic action — this tool only PROPOSES; the
+    founder applies via `delimit_ledger_bulk` after review. Each proposal
+    in the response includes a copy-pasteable `ready_to_apply` invocation.
+
+    Categories detected:
+      - stale_open: status open|in_progress|blocked AND updated_at older
+        than `stale_days`. Suggested action: archive.
+      - duplicate_titles: groups of >= `dup_min_count` items sharing the
+        same normalised title prefix (50 chars, [BRACKETED] prefixes
+        stripped, lowercased). Suggested: keep the most-recent item;
+        archive the others.
+      - garbage_venture: items in tmp* / test_* / venture_<letter> /
+        custom-venture buckets. Suggested action: archive.
+
+    Categories NOT detected here (separate tools / future PRs):
+      - linked-external resolved → use `delimit_ledger_auto_close_external`
+      - P0 inflation review
+      - cross-venture orphan cleanup
+
+    Args:
+        venture: project name or path. Auto-detects if empty.
+        stale_days: threshold for stale_open detector (default 30).
+        dup_min_count: minimum group size for duplicate_titles (default 3).
+        max_per_category: cap per category in the response (default 50).
+
+    Returns:
+        Dict with per-category proposals (stale_open, duplicate_titles,
+        garbage_venture) — each entry includes the candidate item ids,
+        a suggested action, and a copy-pasteable `ready_to_apply`
+        delimit_ledger_bulk invocation. Plus next_steps.
+    """
+    from ai.ledger_manager import groom_proposal
+    project = _resolve_venture(venture)
+    result = groom_proposal(
+        project_path=project,
+        stale_days=stale_days,
+        dup_min_count=dup_min_count,
+        max_per_category=max_per_category,
+    )
+    return _with_next_steps("ledger_groom", result)
+
+
+@mcp.tool()
+def delimit_ledger_auto_cancel_stale(
+    venture: Annotated[str, Field(description="Project name or path. Auto-detects if empty.")] = "",
+    threshold_days: Annotated[int, Field(description="dormancy threshold in days. 0 = read default (60 from STALE_TTL_DEFAULT_DAYS or DELIMIT_STALE_TTL_DAYS env). Pass an int to override.")] = 0,
+    dry_run: Annotated[bool, Field(description="True (default) returns the plan; False applies via bulk_action(archive).")] = True,
+    max_items: Annotated[int, Field(description="cap items processed per call. When the candidate list exceeds this, response includes truncated=True so the caller can run again to drain.")] = 200,
+) -> Dict[str, Any]:
+    """Auto-archive open ledger items dormant past the stale-TTL threshold.
+
+    When to use: as nightly automation / scripted cleanup to retire
+    items that have gone quiet past a strict threshold (default 60
+    days).
+    When NOT to use: to merely surface stale candidates without
+    applying (use delimit_ledger_groom which is propose-only and uses
+    a softer 30-day default), to inspect ledger health (use
+    delimit_ledger_health), or to auto-close items mirrored from
+    external repos (delimit_ledger_auto_close_external).
+
+    Sibling contrast: delimit_ledger_groom proposes archives with a
+    softer threshold and never applies; delimit_ledger_auto_close_external
+    targets externally-mirrored items; delimit_ledger_bulk is the
+    underlying bulk-action surface; this composes the stale-detector
+    with bulk_action(archive) on a stricter dormancy threshold.
+
+    Side effects: with dry_run=False, archives matching items via
+    bulk_action(archive). Items are never hard-deleted — the JSONL
+    append-only log retains the full record. With dry_run=True
+    (default), returns the plan only.
+
+    LED-1145 Phase 2 #4.
+
+    Args:
+        venture: Project name or path. Auto-detects if empty.
+        threshold_days: dormancy threshold in days. 0 = read default
+            (60 from STALE_TTL_DEFAULT_DAYS or DELIMIT_STALE_TTL_DAYS env).
+            Pass an int to override.
+        dry_run: True (default) returns the plan; False applies via
+            bulk_action(archive).
+        max_items: cap items processed per call. When the candidate list
+            exceeds this, response includes truncated=True so the caller
+            can run again to drain.
+
+    Returns:
+        Dict with the archive plan or applied result (candidate items,
+        threshold used, count archived/planned, truncated flag when the
+        candidate list exceeds max_items), plus next_steps.
+    """
+    from ai.ledger_manager import auto_cancel_stale
+    project = _resolve_venture(venture)
+    threshold = threshold_days if threshold_days > 0 else None
+    result = auto_cancel_stale(
+        project_path=project,
+        threshold_days=threshold,
+        dry_run=dry_run,
+        max_items=max_items,
+    )
+    return _with_next_steps("ledger_auto_cancel_stale", result)
+
+
+@mcp.tool()
+def delimit_ledger_health(
+    venture: Annotated[str, Field(description="project name or path. Auto-detects if empty.")] = "",
+    stale_days: Annotated[int, Field(description="stale-detector threshold passed to groom_proposal.")] = 30,
+    dup_min_count: Annotated[int, Field(description="duplicate-detector threshold passed to groom_proposal.")] = 3,
+) -> Dict[str, Any]:
+    """One-shot ledger health check — totals + P0 + stale + duplicates + garbage.
+
+    When to use: at session start (orchestrator session ritual) or
+    nightly review to get a traffic-light verdict on the ledger.
+    When NOT to use: to apply changes (use delimit_ledger_bulk) or
+    inspect a single item (delimit_ledger_query).
+
+    Sibling contrast: delimit_ledger_groom proposes archives;
+    delimit_ledger_context returns top-5 open;
+    this composes them into a one-shot health verdict with
+    pre-formatted next_actions.
+
+    Side effects: read-only. Internally calls list_items + groom +
+    P0 quota helpers.
+
+    LED-1145 capstone — closes the loop on the entire ledger-tooling
+    refactor. Designed for nightly/weekly review or session-start status
+    snapshot. Returns:
+      - totals (unresolved / open / in_progress / blocked)
+      - p0 (count vs quota + health)
+      - stale (count >stale_days + health)
+      - duplicates (group count + total items + health)
+      - garbage_venture (count + health)
+      - overall_health (worst-of: green / yellow / red)
+      - next_actions: pre-formatted list of {reason, tool, args, follow_up}
+
+    All Phase 1+2 tools are referenced in the suggested actions, so the
+    response is self-contained for an AI agent that wants to act on it.
+
+    Args:
+        venture: project name or path. Auto-detects if empty.
+        stale_days: stale-detector threshold passed to groom_proposal.
+        dup_min_count: duplicate-detector threshold passed to groom_proposal.
+    """
+    from ai.ledger_manager import health_summary
+    project = _resolve_venture(venture)
+    result = health_summary(
+        project_path=project,
+        stale_days=stale_days,
+        dup_min_count=dup_min_count,
+    )
+    return _with_next_steps("ledger_health", result)
+
+
+@mcp.tool()
 def delimit_ledger_list(
-    venture: str = "",
-    ledger: str = "both",
-    status: str = "",
-    priority: str = "",
-    limit: int = 20,
+    venture: Annotated[str, Field(description="Project name/path. Empty = auto-detect.")] = "",
+    ledger: Annotated[str, Field(description="\"ops\", \"strategy\", or \"both\" (default).")] = "both",
+    status: Annotated[str, Field(description="Single-value status filter (back-compat).")] = "",
+    priority: Annotated[str, Field(description="Single-value priority filter (back-compat).")] = "",
+    status_in: Annotated[str, Field(description="Comma-separated statuses (e.g. \"open,blocked\").")] = "",
+    priority_in: Annotated[str, Field(description="Comma-separated priorities (e.g. \"P0,P1\").")] = "",
+    tags_contains_all: Annotated[str, Field(description="Comma-separated tags; item must contain ALL.")] = "",
+    text: Annotated[str, Field(description="Case-insensitive substring match on title + description.")] = "",
+    linked_external_id: Annotated[str, Field(description="Substring match in description / tags / context (github URL, Linear id, Discord thread).")] = "",
+    created_before: Annotated[str, Field(description="ISO-8601 timestamp upper bound on creation time. If omitted, no upper bound is applied.")] = "",
+    created_after: Annotated[str, Field(description="ISO-8601 timestamp lower bound on creation time. If omitted, no lower bound is applied.")] = "",
+    updated_before: Annotated[str, Field(description="ISO-8601 timestamp upper bound on last-update time. If omitted, no upper bound is applied.")] = "",
+    updated_after: Annotated[str, Field(description="ISO-8601 timestamp lower bound on last-update time. If omitted, no lower bound is applied.")] = "",
+    sort: Annotated[str, Field(description="\"updated_at\" (default), \"created_at\", or \"priority\".")] = "updated_at",
+    order: Annotated[str, Field(description="\"asc\" or \"desc\" (default).")] = "desc",
+    fields: Annotated[str, Field(description="Response projection. \"\" / \"*\" = full; \"slim\" = subset; CSV = those fields only. Unknown names ERROR.")] = "",
+    limit: Annotated[int, Field(description="Page size. Default 20.")] = 20,
+    cursor: Annotated[str, Field(description="Opaque pagination token from prior next_cursor. Becomes invalid if filters change between calls.")] = "",
 ) -> Dict[str, Any]:
     """List ledger items with rich filters, sort, and pagination (LED-1145).
 
@@ -7188,12 +8072,31 @@ def delimit_ledger_list(
     """
     from ai.ledger_manager import list_items
     project = _resolve_venture(venture)
-    result = list_items(ledger=ledger, status=status or None, priority=priority or None, limit=limit, project_path=project)
+    result = list_items(
+        ledger=ledger,
+        status=status or None,
+        priority=priority or None,
+        status__in=status_in or None,
+        priority__in=priority_in or None,
+        tags__contains_all=tags_contains_all or None,
+        text=text or None,
+        linked_external_id=linked_external_id or None,
+        created_before=created_before or None,
+        created_after=created_after or None,
+        updated_before=updated_before or None,
+        updated_after=updated_after or None,
+        sort=sort,
+        order=order,
+        fields=fields or None,
+        limit=limit,
+        cursor=cursor or None,
+        project_path=project,
+    )
     return _with_next_steps("ledger_list", result)
 
 
 @mcp.tool()
-def delimit_ledger_context(venture: str = "") -> Dict[str, Any]:
+def delimit_ledger_context(venture: Annotated[str, Field(description="Project name or path. Empty = auto-detect from cwd.")] = "") -> Dict[str, Any]:
     """Quick summary of what's open in the ledger (top 5 by priority).
 
     When to use: at session start as part of the orchestrator session
@@ -7220,8 +8123,8 @@ def delimit_ledger_context(venture: str = "") -> Dict[str, Any]:
 
 @mcp.tool()
 def delimit_ledger_query(
-    query: str,
-    venture: str = "",
+    query: Annotated[str, Field(description="Natural-language question (e.g. \"what's blocked?\", \"search for dashboard\"). Required.")],
+    venture: Annotated[str, Field(description="Project name/path. Empty = auto-detect.")] = "",
 ) -> Dict[str, Any]:
     """Ask natural-language questions about the ledger (ChatOps 2.0).
 
@@ -7252,11 +8155,11 @@ def delimit_ledger_query(
 
 @mcp.tool()
 def delimit_ledger_link(
-    from_id: str,
-    to_id: str,
-    link_type: str = "blocks",
-    note: str = "",
-    venture: str = "",
+    from_id: Annotated[str, Field(description="Source item id (e.g. \"LED-025\"). Required.")],
+    to_id: Annotated[str, Field(description="Target item id (e.g. \"STR-005\"). Required.")],
+    link_type: Annotated[str, Field(description="One of \"blocks\" (default), \"blocked_by\", \"parent\", \"child\", \"relates_to\", \"duplicates\".")] = "blocks",
+    note: Annotated[str, Field(description="Optional note explaining the relationship.")] = "",
+    venture: Annotated[str, Field(description="Project name/path. Empty = auto-detect.")] = "",
 ) -> Dict[str, Any]:
     """Create a typed relationship between two ledger items.
 
@@ -7291,8 +8194,8 @@ def delimit_ledger_link(
 
 @mcp.tool()
 def delimit_ledger_links(
-    item_id: str,
-    venture: str = "",
+    item_id: Annotated[str, Field(description="Item id to look up links for. Required.")],
+    venture: Annotated[str, Field(description="Project name/path. Empty = auto-detect.")] = "",
 ) -> Dict[str, Any]:
     """List relationships / dependencies for a ledger item.
 
@@ -7321,13 +8224,13 @@ def delimit_ledger_links(
 
 @mcp.tool()
 def delimit_session_handoff(
-    summary: str,
-    items_completed: Optional[Union[str, List[str]]] = None,
-    items_added: Optional[Union[str, List[str]]] = None,
-    key_decisions: Optional[Union[str, List[str]]] = None,
-    blockers: Optional[Union[str, List[str]]] = None,
-    files_changed: Optional[Union[str, List[str]]] = None,
-    venture: str = "",
+    summary: Annotated[str, Field(description="2-3 sentence summary of the session. Required.")],
+    items_completed: Annotated[Optional[Union[str, List[str]]], Field(description="Completed ledger item ids (e.g. [\"LED-164\"]) as list or comma string.")] = None,
+    items_added: Annotated[Optional[Union[str, List[str]]], Field(description="Newly added item ids as list or comma string.")] = None,
+    key_decisions: Annotated[Optional[Union[str, List[str]]], Field(description="Key decisions or consensus results.")] = None,
+    blockers: Annotated[Optional[Union[str, List[str]]], Field(description="What's blocked and why.")] = None,
+    files_changed: Annotated[Optional[Union[str, List[str]]], Field(description="Key files that were modified.")] = None,
+    venture: Annotated[str, Field(description="Venture context. Empty = auto-detect.")] = "",
 ) -> Dict[str, Any]:
     """Save a session summary for cross-session continuity.
 
@@ -7386,7 +8289,7 @@ def delimit_session_handoff(
 
 
 @mcp.tool()
-def delimit_session_history(limit: int = 5) -> Dict[str, Any]:
+def delimit_session_history(limit: Annotated[int, Field(description="Number of recent sessions to return. Default 5.")] = 5) -> Dict[str, Any]:
     """Load recent session handoffs for context recovery.
 
     When to use: at session start to see what previous sessions left —
@@ -7443,14 +8346,14 @@ def delimit_ventures() -> Dict[str, Any]:
 
 @mcp.tool()
 def delimit_soul_capture(
-    active_task: str = "",
-    decisions: str = "",
-    key_context: str = "",
-    blockers: str = "",
-    next_steps: str = "",
-    task_status: str = "in_progress",
-    tokens_used: int = 0,
-    context_fullness: float = 0.0,
+    active_task: Annotated[str, Field(description="What you're currently working on (one line).")] = "",
+    decisions: Annotated[str, Field(description="Comma-separated key decisions made this session.")] = "",
+    key_context: Annotated[str, Field(description="Comma-separated important context for next session.")] = "",
+    blockers: Annotated[str, Field(description="Comma-separated blockers.")] = "",
+    next_steps: Annotated[str, Field(description="Comma-separated next steps.")] = "",
+    task_status: Annotated[str, Field(description="One of \"in_progress\", \"blocked\", \"almost_done\".")] = "in_progress",
+    tokens_used: Annotated[int, Field(description="Estimated tokens consumed this session.")] = 0,
+    context_fullness: Annotated[float, Field(description="0.0-1.0 representing context-window fullness.")] = 0.0,
 ) -> Dict[str, Any]:
     """Capture session state as a 'soul' for cross-model resurrection (Pro).
 
@@ -7515,7 +8418,7 @@ def delimit_soul_capture(
 
 
 @mcp.tool()
-def delimit_revive(project_path: str = "", soul_id: str = "") -> Dict[str, Any]:
+def delimit_revive(project_path: Annotated[str, Field(description="Project path to revive. Empty = auto-detect from cwd.")] = "", soul_id: Annotated[str, Field(description="Specific soul id to revive. Empty = latest.")] = "") -> Dict[str, Any]:
     """Revive the last session's captured soul in any model (Pro).
 
     When to use: at the start of a new session, to load the previous
@@ -7549,10 +8452,10 @@ def delimit_revive(project_path: str = "", soul_id: str = "") -> Dict[str, Any]:
 
 @mcp.tool()
 def delimit_models(
-    action: str = "list",
-    provider: str = "",
-    api_key: str = "",
-    model_name: str = "",
+    action: Annotated[str, Field(description="One of \"list\" (default), \"detect\", \"add\", \"remove\".")] = "list",
+    provider: Annotated[str, Field(description="Provider name for add/remove. One of \"grok\", \"gemini\", \"openai\", \"anthropic\", \"codex\". Required for add/remove.")] = "",
+    api_key: Annotated[str, Field(description="API key value. Required for action=\"add\".")] = "",
+    model_name: Annotated[str, Field(description="Optional model override (e.g. \"gpt-4o\", \"claude-sonnet-4-5\"). Falls back to provider default.")] = "",
 ) -> Dict[str, Any]:
     """View and configure AI models for multi-model deliberation (Pro).
 
@@ -7702,12 +8605,12 @@ def delimit_deliberation_status() -> Dict[str, Any]:
 
 @mcp.tool()
 def delimit_deliberate(
-    question: str,
-    context: str = "",
-    mode: str = "dialogue",
-    max_rounds: int = 3,
-    save_path: str = "",
-    scope: str = "",
+    question: Annotated[str, Field(description="The question to reach consensus on. Required.")],
+    context: Annotated[str, Field(description="Background context shared to all models.")] = "",
+    mode: Annotated[str, Field(description="\"dialogue\" (short turns) or \"debate\" (long essays). Default \"dialogue\".")] = "dialogue",
+    max_rounds: Annotated[int, Field(description="Max rounds. Default 3 for debate, 6 for dialogue.")] = 3,
+    save_path: Annotated[str, Field(description="Optional file path to save the full transcript.")] = "",
+    scope: Annotated[str, Field(description="Optional scope override — \"strategic\", \"social\", or \"operational\". Empty = engine classifies from keywords.")] = "",
 ) -> Dict[str, Any]:
     """Run multi-model consensus via AI-to-AI deliberation (Pro).
 
@@ -7872,9 +8775,9 @@ def _extract_deliberation_actions(result: Dict, question: str) -> List[Dict[str,
 
 @mcp.tool()
 def delimit_audit(
-    target: str = "",
-    target_type: str = "file",
-    lenses: str = "",
+    target: Annotated[str, Field(description="File path, git diff output, or code snippet to audit. Required.")] = "",
+    target_type: Annotated[str, Field(description="\"file\" (default — reads file), \"diff\" (git diff text), or \"snippet\" (inline code).")] = "file",
+    lenses: Annotated[str, Field(description="Comma-separated lenses — \"security\", \"correctness\", \"governance\". Empty = all three.")] = "",
 ) -> Dict[str, Any]:
     """Cross-model code audit — 3 models, 3 lenses, synthesized (Pro).
 
@@ -7940,7 +8843,7 @@ def delimit_audit(
 
 
 @mcp.tool()
-def delimit_release_sync(action: str = "audit") -> Dict[str, Any]:
+def delimit_release_sync(action: Annotated[str, Field(description="Sub-action — \"audit\" (default) or \"config\".")] = "audit") -> Dict[str, Any]:
     """Audit or report config of public surfaces for consistency (Pro).
 
     When to use: to confirm that all public surfaces (CLI, action, npm,
@@ -7966,8 +8869,8 @@ def delimit_release_sync(action: str = "audit") -> Dict[str, Any]:
 
 
 @mcp.tool()
-def delimit_drift_check(spec_path: str = "", project_path: str = ".",
-                         staleness_days: int = 7) -> Dict[str, Any]:
+def delimit_drift_check(spec_path: Annotated[str, Field(description="OpenAPI spec path. Empty = auto-detect.")] = "", project_path: Annotated[str, Field(description="Project root. Default \".\" (cwd).")] = ".",
+                         staleness_days: Annotated[int, Field(description="Alert if baseline older than this. Default 7.")] = 7) -> Dict[str, Any]:
     """Check for API spec drift since last governance review.
 
     When to use: as a scheduled (cron) compliance monitor — detects
@@ -7997,7 +8900,7 @@ def delimit_drift_check(spec_path: str = "", project_path: str = ".",
 
 
 @mcp.tool()
-def delimit_drift_history(limit: int = 20) -> Dict[str, Any]:
+def delimit_drift_history(limit: Annotated[int, Field(description="Max entries to return. Default 20.")] = 20) -> Dict[str, Any]:
     """List recent drift-check results from the drift monitor.
 
     When to use: to investigate when API spec drift was last detected
@@ -8021,7 +8924,7 @@ def delimit_drift_history(limit: int = 20) -> Dict[str, Any]:
 
 
 @mcp.tool()
-def delimit_scan(project_path: str = ".") -> Dict[str, Any]:
+def delimit_scan(project_path: Annotated[str, Field(description="Path to the project to scan. Default \".\" (cwd).")] = ".") -> Dict[str, Any]:
     """Scan a project and report what Delimit can do for it.
 
     When to use: as a first-run discovery on a new project — finds
@@ -8163,7 +9066,7 @@ def delimit_scan(project_path: str = ".") -> Dict[str, Any]:
 
 
 @mcp.tool()
-def delimit_quickstart(project_path: str = ".") -> Dict[str, Any]:
+def delimit_quickstart(project_path: Annotated[str, Field(description="Project path to quickstart. Default \".\" (cwd).")] = ".") -> Dict[str, Any]:
     """60-second guided quickstart for a new install.
 
     When to use: immediately after installing Delimit, as the
@@ -8473,43 +9376,68 @@ delimit_secret = mcp.tool()(_delimit_secret_impl)
 
 @mcp.tool()
 def delimit_secret_store(
-    name: str = "",
-    value: str = "",
-    scope: str = "all",
-    description: str = "",
+    name: Annotated[str, Field(description="Secret name (key). Required.")] = "",
+    value: Annotated[str, Field(description="Secret value (the actual credential). Required.")] = "",
+    scope: Annotated[str, Field(description="Comma-separated agent/tool scopes that may access this secret, or \"all\" to allow any. Default \"all\".")] = "all",
+    description: Annotated[str, Field(description="Human-readable description for audit trails.")] = "",
 ) -> Dict[str, Any]:
-    """Store a secret in the Delimit secrets broker.
+    """Write a credential into the Delimit secrets broker store.
 
-    When to use: when an agent or tool needs a credential (API key,
-    token) and you want to scope its access via the broker.
-    When NOT to use: to read a secret (use delimit_secret_get) or to
-    inspect what's stored (use delimit_secret_list).
+    When to use: when onboarding an API key, OAuth token, or other
+    credential that one or more agents/tools will need at execution
+    time, and you want the access scoped + audit-logged rather than
+    sitting in an environment variable or .env file. Typical pairing:
+    call this once at setup, then call delimit_secret_get from the
+    consuming tool at runtime.
+    When NOT to use: to fetch the value (use delimit_secret_get for
+    just-in-time access with audit), to inspect which secrets exist
+    without revealing values (delimit_secret_list), to disable an
+    existing secret (delimit_secret_revoke), or to read the access
+    audit trail (delimit_secret_access_log). Also: do not use this
+    as a general-purpose key/value store — the broker is credential-
+    scoped and the audit log will fill up with non-credential noise.
 
-    Sibling contrast: delimit_secret_get reads via JIT access;
-    delimit_secret_list shows metadata; delimit_secret_revoke disables.
+    Sibling contrast: delimit_secret_store writes; delimit_secret_get
+    reads with JIT access logging; delimit_secret_list shows metadata
+    only (never values); delimit_secret_revoke disables; together they
+    form the broker surface. Compared to writing a value directly to
+    .env, this routes through a scoped, audited broker.
 
-    Side effects: writes the secret to the broker store via
-    ai.secrets_broker.store_secret. The value is stored at rest. Scope
-    governs which agent/tool combinations may later request the secret.
+    Side effects: invokes ai.secrets_broker.store_secret which
+    persists the value to the broker's at-rest store. The scope field
+    is also persisted and is enforced on every subsequent
+    delimit_secret_get call. There is no append-only history of
+    stored values — a re-store with the same name overwrites. No
+    network egress and no ledger write; the audit trail is the
+    broker's own access log (visible via
+    delimit_secret_access_log), which records the WRITE event as
+    well as later reads.
 
     Args:
-        name: Secret name (key). Required.
-        value: Secret value (the actual credential). Required.
+        name: Secret name (key). Required; collisions overwrite.
+        value: Secret value (the actual credential). Required; stored
+            at rest by the broker.
         scope: Comma-separated agent/tool scopes that may access this
-            secret, or "all" to allow any. Default "all".
+            secret, or "all" to allow any. Default "all". Scope is
+            checked at read time, not write time.
         description: Human-readable description for audit trails.
+            Optional but recommended — it appears in
+            delimit_secret_list output and helps future operators
+            understand what the credential is for.
 
     Returns:
-        Dict with the broker's store result.
+        Dict from the broker's store_secret call. Typical keys: name,
+        scope, stored (bool), and a status / message field. The
+        stored value is NEVER returned — confirmation is by name only.
     """
     return _delimit_secret_impl(action="store", name=name, value=value, scope=scope, description=description)
 
 
 @mcp.tool()
 def delimit_secret_get(
-    name: str = "",
-    agent_type: str = "",
-    tool: str = "",
+    name: Annotated[str, Field(description="Secret name to retrieve. Required.")] = "",
+    agent_type: Annotated[str, Field(description="Identity of the requesting agent (used by the broker to check scope).")] = "",
+    tool: Annotated[str, Field(description="Name of the requesting tool (used by the broker to check scope).")] = "",
 ) -> Dict[str, Any]:
     """Request just-in-time access to a stored secret.
 
@@ -8564,7 +9492,7 @@ def delimit_secret_list() -> Dict[str, Any]:
 
 
 @mcp.tool()
-def delimit_secret_revoke(name: str = "") -> Dict[str, Any]:
+def delimit_secret_revoke(name: Annotated[str, Field(description="Secret name to revoke. Required.")] = "") -> Dict[str, Any]:
     """Revoke a secret to prevent any future access.
 
     When to use: after a credential leak or when rotating away from
@@ -8588,7 +9516,7 @@ def delimit_secret_revoke(name: str = "") -> Dict[str, Any]:
 
 
 @mcp.tool()
-def delimit_secret_access_log(name: str = "") -> Dict[str, Any]:
+def delimit_secret_access_log(name: Annotated[str, Field(description="Optional secret name to filter the log. Empty = all secrets.")] = "") -> Dict[str, Any]:
     """Show the audit log of secret accesses.
 
     When to use: for compliance review, incident investigation, or to
@@ -8694,7 +9622,7 @@ delimit_context = mcp.tool()(_delimit_context_impl)
 # --- Thin wrappers (aliases) for backward compatibility ---
 
 @mcp.tool()
-def delimit_context_init(venture: str = "default") -> Dict[str, Any]:
+def delimit_context_init(venture: Annotated[str, Field(description="Venture/project namespace key. Default \"default\".")] = "default") -> Dict[str, Any]:
     """Initialize a context filesystem namespace for a venture (STR-048).
 
     When to use: once per venture, the first time you want to persist
@@ -8718,7 +9646,7 @@ def delimit_context_init(venture: str = "default") -> Dict[str, Any]:
 
 
 @mcp.tool()
-def delimit_context_write(venture: str, name: str, content: str, artifact_type: str = "text") -> Dict[str, Any]:
+def delimit_context_write(venture: Annotated[str, Field(description="Venture namespace key. Required.")], name: Annotated[str, Field(description="Artifact name (used as the file key). Required.")], content: Annotated[str, Field(description="Artifact text. Required.")], artifact_type: Annotated[str, Field(description="Type hint, one of \"text\", \"json\", \"code\", \"plan\". Default \"text\". Affects render hints, not storage format.")] = "text") -> Dict[str, Any]:
     """Write an artifact to a venture's context filesystem (STR-048).
 
     When to use: to persist a plan, decision record, or code artifact
@@ -8747,7 +9675,7 @@ def delimit_context_write(venture: str, name: str, content: str, artifact_type: 
 
 
 @mcp.tool()
-def delimit_context_read(venture: str, name: str) -> Dict[str, Any]:
+def delimit_context_read(venture: Annotated[str, Field(description="Venture namespace key. Required.")], name: Annotated[str, Field(description="Artifact name. Required.")]) -> Dict[str, Any]:
     """Read an artifact from a venture's context filesystem (STR-048).
 
     When to use: to fetch a specific previously-written artifact by
@@ -8772,7 +9700,7 @@ def delimit_context_read(venture: str, name: str) -> Dict[str, Any]:
 
 
 @mcp.tool()
-def delimit_context_list(venture: str) -> Dict[str, Any]:
+def delimit_context_list(venture: Annotated[str, Field(description="Venture namespace key. Required.")]) -> Dict[str, Any]:
     """List all artifacts in a venture's context filesystem (STR-048).
 
     When to use: to inventory what artifacts have been written for a
@@ -8795,7 +9723,7 @@ def delimit_context_list(venture: str) -> Dict[str, Any]:
 
 
 @mcp.tool()
-def delimit_context_snapshot(venture: str, label: str = "") -> Dict[str, Any]:
+def delimit_context_snapshot(venture: Annotated[str, Field(description="Venture namespace key. Required.")], label: Annotated[str, Field(description="Optional human-readable label for the snapshot.")] = "") -> Dict[str, Any]:
     """Capture a point-in-time snapshot of a venture's context (STR-048).
 
     When to use: before a risky model handoff, doctrine edit, or
@@ -8821,28 +9749,46 @@ def delimit_context_snapshot(venture: str, label: str = "") -> Dict[str, Any]:
 
 
 @mcp.tool()
-def delimit_context_branch(venture: str, action: str = "list", branch_name: str = "") -> Dict[str, Any]:
-    """Manage divergent branches of a venture's context (STR-048).
+def delimit_context_branch(venture: Annotated[str, Field(description="Venture namespace key. Required.")], action: Annotated[str, Field(description="Branch sub-action, one of \"list\", \"create\", \"merge\". Default \"list\".")] = "list", branch_name: Annotated[str, Field(description="Branch name (required for create / merge).")] = "") -> Dict[str, Any]:
+    """Manage mutable working branches of a venture's context (STR-048).
 
-    When to use: when exploring alternative directions for a venture
-    and you want to keep the main line clean.
-    When NOT to use: for immutable point-in-time captures (use
-    delimit_context_snapshot) — branches are mutable working areas.
+    When to use: when exploring an alternative direction for a
+    venture — a "what if we pivoted?" thread — and you want a
+    write-isolated branch of the venture context rather than
+    mutating the main line. Sub-actions: "list" inventories
+    branches, "create" mints a new branch, "merge" folds a branch
+    back into main.
+    When NOT to use: for immutable point-in-time evidence (use
+    delimit_context_snapshot — that creates a frozen capture; this
+    is for mutable working areas), to read context data (use
+    delimit_context_read), or for git branch operations on a code
+    repo (use git directly).
 
-    Sibling contrast: delimit_context_snapshot is read-only history;
-    this manages active branches you can write to.
+    Sibling contrast: delimit_context_snapshot is read-only history
+    capture; this manages active, writeable branches. Compared to
+    git branches, this operates on the venture context filesystem
+    (ai.context_fs), not the code repo.
 
-    Side effects: depending on action, may create or merge branches
-    in the venture namespace via ai.context_fs.
+    Side effects: depends on action. "list" is read-only.
+    "create" writes a new branch namespace under the venture in
+    ai.context_fs. "merge" mutates the venture's main namespace
+    with the branch's contents, then closes the branch. None of
+    these touch the code repository or any git state. No license
+    gate, no notification, no ledger write.
 
     Args:
         venture: Venture namespace key. Required.
         action: Branch sub-action, one of "list", "create", "merge".
             Default "list".
         branch_name: Branch name (required for create / merge).
+            Ignored for "list".
 
     Returns:
-        Dict with the branch operation result.
+        Dict shape depends on action. "list": {branches: [...]}.
+        "create": {branch_name, status}. "merge": {branch_name,
+        merged_at, status}. All include a next_steps field via the
+        _delimit_context_impl wrapper. Returns {"error": "..."} on
+        missing required field or backend rejection.
     """
     return _delimit_context_impl(action="branch", venture=venture, branch_action=action, branch_name=branch_name)
 
@@ -8854,12 +9800,12 @@ def delimit_context_branch(venture: str, action: str = "list", branch_name: str 
 
 @mcp.tool()
 def delimit_resource_list(
-    driver: str = "github",
-    resource: str = "",
-    repo: str = "",
-    org: str = "",
-    state: str = "open",
-    limit: int = 10,
+    driver: Annotated[str, Field(description="Driver key. Default \"github\".")] = "github",
+    resource: Annotated[str, Field(description="One of \"repos\", \"pull_requests\", \"issues\", \"workflows\". Required.")] = "",
+    repo: Annotated[str, Field(description="\"owner/name\" — required for workflow listing.")] = "",
+    org: Annotated[str, Field(description="Organization filter for repos.")] = "",
+    state: Annotated[str, Field(description="PR/issue state — \"open\" (default), \"closed\", \"all\".")] = "open",
+    limit: Annotated[int, Field(description="Max results. Default 10.")] = 10,
 ) -> Dict[str, Any]:
     """List resources from a connected data-plane system (Pro).
 
@@ -8911,10 +9857,10 @@ def delimit_resource_list(
 
 @mcp.tool()
 def delimit_resource_get(
-    driver: str = "github",
-    resource: str = "",
-    identifier: str = "",
-    repo: str = "",
+    driver: Annotated[str, Field(description="Driver key. Default \"github\".")] = "github",
+    resource: Annotated[str, Field(description="One of \"repos\", \"pull_requests\", \"issues\", \"workflows\". Required.")] = "",
+    identifier: Annotated[str, Field(description="Resource identifier — repo name, PR number, run id. Required.")] = "",
+    repo: Annotated[str, Field(description="\"owner/name\" required for PRs / issues / workflow runs.")] = "",
 ) -> Dict[str, Any]:
     """Get a specific resource from a connected data-plane system (Pro).
 
@@ -8994,9 +9940,9 @@ def delimit_resource_drivers() -> Dict[str, Any]:
 
 @mcp.tool()
 def delimit_tracker_sync(
-    repo: str = "",
-    labels: str = "",
-    limit: int = 10,
+    repo: Annotated[str, Field(description="\"owner/repo\" GitHub repo. Empty = auto-detect from git remote.")] = "",
+    labels: Annotated[str, Field(description="Comma-separated label filter (e.g. \"bug,priority:high\").")] = "",
+    limit: Annotated[int, Field(description="Max issues to sync. Default 10.")] = 10,
 ) -> Dict[str, Any]:
     """Pull open GitHub issues into the Delimit ledger as context (LED-188).
 
@@ -9082,9 +10028,9 @@ def delimit_tracker_sync(
 
 @mcp.tool()
 def delimit_webhook_manage(
-    action: str = "list",
-    url: str = "",
-    events: str = "all",
+    action: Annotated[str, Field(description="One of \"list\" (default), \"add\", \"remove\", \"test\".")] = "list",
+    url: Annotated[str, Field(description="Webhook URL (Slack, Discord, or any HTTP endpoint). Required for add / remove / test (test uses all configured if not specified).")] = "",
+    events: Annotated[str, Field(description="Comma-separated event filter — \"all\" (default), \"blocked\", \"critical\", \"security\".")] = "all",
 ) -> Dict[str, Any]:
     """Manage webhook notifications for governance events.
 
@@ -9187,10 +10133,10 @@ def delimit_webhook_manage(
 
 
 @mcp.tool()
-def delimit_social_post(text: str = "", category: str = "", platform: str = "twitter",
-                        account: str = "", quote_tweet_id: str = "",
-                        reply_to_id: str = "", draft: bool = False,
-                        context: str = "") -> Dict[str, Any]:
+def delimit_social_post(text: Annotated[str, Field(description="Tweet text. Leave empty to auto-generate.")] = "", category: Annotated[str, Field(description="Content category for auto-generation.")] = "", platform: Annotated[str, Field(description="Social platform (twitter).")] = "twitter",
+                        account: Annotated[str, Field(description="Twitter handle (without @) to post from. Empty = default account.")] = "", quote_tweet_id: Annotated[str, Field(description="Tweet ID to quote (creates a quote tweet).")] = "",
+                        reply_to_id: Annotated[str, Field(description="Tweet ID to reply to (creates a reply).")] = "", draft: Annotated[bool, Field(description="If True, save as draft for approval instead of posting immediately.")] = False,
+                        context: Annotated[str, Field(description="WHY this post should be made. Strategic reasoning shown in the approval email.")] = "") -> Dict[str, Any]:
     """Post to social media (Twitter / Reddit) (Pro).
 
     When to use: when the AI drafts a social post, it MUST call this
@@ -9247,10 +10193,10 @@ def delimit_social_post(text: str = "", category: str = "", platform: str = "twi
         {"status": "skipped", "reason": ...}; on unsupported platform
         returns {"error": ..., "supported": [...]}.
     """
-    from ai.social import generate_post, post_tweet, should_post_today, save_draft
+    from ai.social import generate_post, post_tweet, should_post_now, save_draft
 
-    if not draft and not should_post_today():
-        return {"status": "skipped", "reason": "Already posted twice today. Authenticity > volume."}
+    if not draft and not should_post_now():
+        return {"status": "skipped", "reason": "Rate cap hit (2/hr or 24/day). Wait or pass draft=True for email-approval flow."}
 
     post = generate_post(category, text)
 
@@ -9367,9 +10313,16 @@ def delimit_social_post(text: str = "", category: str = "", platform: str = "twi
                 _lines.append("Reply APPROVED to approve, CANCEL to reject.")
 
                 _handle = f"u/{_acct}"
+                # LED-1129 Phase 2 — append [draft_id:<8>] token to subject so
+                # the inbox daemon's draft_id fallback can match the approval
+                # reply even when no LED/STR token is present.
+                _reddit_subject = f"[Reddit Post] {_handle}: {_reddit_title[:60]}..."
+                _reg_id = entry.get("registry_draft_id")
+                if _reg_id:
+                    _reddit_subject = f"{_reddit_subject} [draft_id:{_reg_id[:8]}]"
                 email_result = send_email(
                     message="\n".join(_lines),
-                    subject=f"[Reddit Post] {_handle}: {_reddit_title[:60]}...",
+                    subject=_reddit_subject,
                     event_type="social_draft",
                 )
                 if email_result.get("delivered") and email_result.get("message_id"):
@@ -9411,9 +10364,16 @@ def delimit_social_post(text: str = "", category: str = "", platform: str = "twi
             _subject_type = "Tweet"
 
         _handle = f"u/{_acct}" if platform == "reddit" else f"@{_acct}"
+        # LED-1129 Phase 2 — append [draft_id:<8>] token to subject so the
+        # inbox daemon's draft_id fallback can match the approval reply even
+        # when no LED/STR token is present.
+        _social_subject = f"[{_subject_type}] {_handle}: {post['text'][:60]}..."
+        _reg_id = entry.get("registry_draft_id")
+        if _reg_id:
+            _social_subject = f"{_social_subject} [draft_id:{_reg_id[:8]}]"
         email_result = send_email(
             message="\n".join(_lines),
-            subject=f"[{_subject_type}] {_handle}: {post['text'][:60]}...",
+            subject=_social_subject,
             event_type="social_draft",
         )
         # Store the outbound Message-ID on the draft record so the
@@ -9428,7 +10388,7 @@ def delimit_social_post(text: str = "", category: str = "", platform: str = "twi
 
 
 @mcp.tool()
-def delimit_social_generate(category: str = "tip") -> Dict[str, Any]:
+def delimit_social_generate(category: Annotated[str, Field(description="Post category — \"tip\" (default), \"changelog\", \"insight\", or \"engagement\".")] = "tip") -> Dict[str, Any]:
     """Generate a social media post draft (no posting) (Pro).
 
     When to use: to draft a tweet for review before manual or
@@ -9484,8 +10444,69 @@ def delimit_social_accounts() -> Dict[str, Any]:
 
 
 @mcp.tool()
-def delimit_social_history(limit: int = 20, platform: str = "",
-                           user: str = "", subreddit: str = "") -> Dict[str, Any]:
+def delimit_x_fetch(id_or_url: Annotated[str, Field(description="Single status id (\"2048825010371039648\") OR a full x.com / twitter.com URL — id is extracted automatically. Mutually exclusive with `ids`.")] = "", ids: Annotated[str, Field(description="Comma-separated list of status ids OR URLs for a batch fetch. Each is normalized to a status id and fetched independently.")] = "") -> Dict[str, Any]:
+    """Fetch tweets from X by id or URL via twttr241 RapidAPI (LED-825).
+
+    When to use: to surgically fetch one or many tweets by id/URL,
+    sharing the cached path with delimit_social_target so repeats
+    are free.
+    When NOT to use: to scan for new content (use delimit_social_target)
+    or fetch a Reddit thread (delimit_reddit_fetch_thread).
+
+    Sibling contrast: delimit_social_target scans for opportunities;
+    delimit_reddit_fetch_thread is the Reddit equivalent;
+    this is the X (Twitter) single/batch fetcher.
+
+    Side effects: read-only network call via twttr241 (RapidAPI).
+    Inherits the LRU + SQLite cache + budget gate from the
+    social-target scanner — repeated reads are free. No writes.
+
+    Args:
+        id_or_url: Single status id ("2048825010371039648") OR a full
+            x.com / twitter.com URL — id is extracted automatically.
+            Mutually exclusive with `ids`.
+        ids: Comma-separated list of status ids OR URLs for a batch
+            fetch. Each is normalized to a status id and fetched
+            independently.
+
+    Returns:
+        Single-fetch shape: {id, text, author, author_name, created_at,
+            metrics: {favorite_count, retweet_count, reply_count,
+            quote_count, bookmark_count, view_count}, url, from_cache}
+        Batch shape: {tweets: [<single-shape>, ...], count}
+        Errors: {error: <reason>}
+
+    Why this exists: WebFetch hits 402 on x.com (auth-walled), and going
+    around to tweepy + the X API direct creds skips the cache + budget
+    gate. This tool is the cheap, cached, governable read path.
+    """
+    from ai.social_target import fetch_tweet_by_id, fetch_tweets_by_ids, extract_status_id
+
+    if ids:
+        # Batch mode — accept commas, newlines, or whitespace as separators
+        raw = [r.strip() for r in ids.replace("\n", ",").split(",") if r.strip()]
+        normalized: List[str] = []
+        for item in raw:
+            sid = extract_status_id(item)
+            if sid:
+                normalized.append(sid)
+        if not normalized:
+            return _with_next_steps("x_fetch", {"error": "no valid ids/URLs in `ids`"})
+        results = fetch_tweets_by_ids(normalized)
+        return _with_next_steps("x_fetch", {"tweets": results, "count": len(results)})
+
+    if not id_or_url:
+        return _with_next_steps("x_fetch", {"error": "provide either id_or_url or ids"})
+
+    sid = extract_status_id(id_or_url)
+    if not sid:
+        return _with_next_steps("x_fetch", {"error": f"could not parse status id from {id_or_url!r}"})
+    return _with_next_steps("x_fetch", fetch_tweet_by_id(sid))
+
+
+@mcp.tool()
+def delimit_social_history(limit: Annotated[int, Field(description="Max entries to return. Default 20.")] = 20, platform: Annotated[str, Field(description="Filter by \"twitter\" or \"reddit\". Empty = all.")] = "",
+                           user: Annotated[str, Field(description="Filter by Reddit user we interacted with (e.g. \"coolinjapan001\").")] = "", subreddit: Annotated[str, Field(description="Filter by subreddit (e.g. \"r/vibecoding\").")] = "") -> Dict[str, Any]:
     """View recent social media post history (Pro).
 
     When to use: to recall prior posts/comments for context when
@@ -9516,7 +10537,7 @@ def delimit_social_history(limit: int = 20, platform: str = "",
 
 
 @mcp.tool()
-def delimit_social_approve(action: str = "list", draft_id: str = "") -> Dict[str, Any]:
+def delimit_social_approve(action: Annotated[str, Field(description="\"list\" (default), \"approve\", or \"reject\".")] = "list", draft_id: Annotated[str, Field(description="Required for approve / reject. Returned by delimit_social_post(draft=True).")] = "") -> Dict[str, Any]:
     """Manage social media drafts — list, approve, reject (Pro).
 
     When to use: to clear the social drafts queue created by
@@ -9563,13 +10584,13 @@ def delimit_social_approve(action: str = "list", draft_id: str = "") -> Dict[str
 
 @mcp.tool()
 def delimit_social_target(
-    action: str = "scan",
-    platforms: str = "x,hn,devto,reddit,github",
-    ventures: str = "",
-    keywords: str = "",
-    limit: int = 10,
-    draft_replies: bool = False,
-    create_ledger: bool = False,
+    action: Annotated[str, Field(description="\"scan\" to discover targets, \"list\" to show recent, \"stats\" to show counts.")] = "scan",
+    platforms: Annotated[str, Field(description="Comma-separated platforms to scan (x, hn, devto, reddit, github, namepros).")] = "x,hn,devto,reddit,github",
+    ventures: Annotated[str, Field(description="Comma-separated ventures to scan for. Empty = all.")] = "",
+    keywords: Annotated[str, Field(description="Extra keywords to search for beyond venture topics.")] = "",
+    limit: Annotated[int, Field(description="Max targets per platform.")] = 10,
+    draft_replies: Annotated[bool, Field(description="If True, auto-draft social posts for \"reply\" targets.")] = False,
+    create_ledger: Annotated[bool, Field(description="If True, create ledger items for \"strategic\" targets.")] = False,
 ) -> Dict[str, Any]:
     """Discover engagement opportunities across platforms (Pro).
 
@@ -9643,11 +10664,11 @@ def delimit_social_target(
 
 @mcp.tool()
 def delimit_social_target_config(
-    action: str = "status",
-    platform: str = "",
-    enabled: bool = True,
-    provider: str = "",
-    subreddits: str = "",
+    action: Annotated[str, Field(description="\"status\" (default), \"detect\", \"update\", \"add_subreddits\".")] = "status",
+    platform: Annotated[str, Field(description="Platform key — \"x\", \"reddit\", \"github\", \"hn\", \"devto\", \"namepros\".")] = "",
+    enabled: Annotated[bool, Field(description="Enable/disable on update. Default True.")] = True,
+    provider: Annotated[str, Field(description="Provider name — \"twttr241\", \"xai\", \"proxy\", \"gh_cli\", etc., for update.")] = "",
+    subreddits: Annotated[str, Field(description="Comma-separated subreddits for add_subreddits.")] = "",
 ) -> Dict[str, Any]:
     """Configure social target scanning platforms (Pro).
 
@@ -9697,7 +10718,7 @@ def delimit_social_target_config(
 
 
 @mcp.tool()
-def delimit_reddit_scan(sort: str = "hot", limit: int = 10) -> Dict[str, Any]:
+def delimit_reddit_scan(sort: Annotated[str, Field(description="Reddit sort order — \"hot\" (default), \"new\", \"top\".")] = "hot", limit: Annotated[int, Field(description="Posts per subreddit. Default 10, max 25.")] = 10) -> Dict[str, Any]:
     """Bulk scan 25+ subreddits for outreach targets (Pro).
 
     When to use: as a venture-agnostic bulk Reddit scan — returns
@@ -9740,8 +10761,8 @@ def delimit_reddit_scan(sort: str = "hot", limit: int = 10) -> Dict[str, Any]:
 
 @mcp.tool()
 def delimit_github_scan(
-    cadence: str = "pulse",
-    limit: int = 20,
+    cadence: Annotated[str, Field(description="\"pulse\" (default), \"hunter\", or \"deep\".")] = "pulse",
+    limit: Annotated[int, Field(description="Max results per search query. Default 20. Max 30.")] = 20,
 ) -> Dict[str, Any]:
     """Scan GitHub for adoption leads, competitive intel, repo health (Pro).
 
@@ -9791,6 +10812,441 @@ def delimit_github_scan(
 
 
 # ═══════════════════════════════════════════════════════════════════════
+#  VENDOR NEWS RIFF SYSTEM - LED-1250 / LED-1253 (Pro)
+# ═══════════════════════════════════════════════════════════════════════
+#
+# Diagnostic + ad-hoc invocation surface for the vendor-news riff cron.
+# The cron at scripts/vendor_news_cron.py is the production firing path;
+# these tools expose the same backend functions (scan_vendor_news,
+# draft_vendor_riff) for in-session inspection, dry-runs, and one-off
+# drafting against a specific source tweet.
+
+
+@mcp.tool()
+def delimit_vendor_news_scan(dry_run: Annotated[bool, Field(description="If True, sensor-only (no drafter, no queue). Default False.")] = False) -> Dict[str, Any]:
+    """Scan watchlisted vendor accounts and auto-draft riffs (Pro) (LED-1253).
+
+    When to use: for ad-hoc execution of the vendor-news sensor
+    (the cron is the normal autonomous path).
+    When NOT to use: for a single tweet (use delimit_vendor_news_draft)
+    or subsystem health (delimit_vendor_news_health).
+
+    Sibling contrast: delimit_vendor_news_draft is one tweet;
+    delimit_vendor_news_health is health rollup;
+    this is the full sensor + drafter pass.
+
+    Side effects: gated by require_premium. Wraps
+    ai.vendor_news.sensor.scan_vendor_news + draft_vendor_riff.
+    dry_run=True polls (cache-friendly) but skips JSONL log write
+    AND skips the drafter entirely (no queue, no rate-cap consumption).
+
+    Args:
+        dry_run: If True, sensor-only (no drafter, no queue).
+            Default False.
+
+    Returns:
+        Dict with stats, triggered, queued, rejected, rate_capped,
+        errors — same shape as the cron summary.
+    """
+    from ai.license import require_premium
+    gate = require_premium("vendor_news_scan")
+    if gate:
+        return gate
+
+    try:
+        from ai.vendor_news import scan_vendor_news, draft_vendor_riff
+    except Exception as exc:
+        return _with_next_steps("vendor_news_scan", {
+            "error": "vendor_news_unavailable",
+            "message": f"could not import ai.vendor_news: {exc}",
+        })
+
+    try:
+        scan = scan_vendor_news(dry_run=dry_run)
+    except Exception as exc:
+        return _with_next_steps("vendor_news_scan", {
+            "error": "scan_failed",
+            "message": str(exc),
+        })
+
+    triggered = scan.get("triggered") or []
+    stats = scan.get("stats") or {}
+
+    queued = 0
+    rejected = 0
+    rate_capped = 0
+    drafter_errors: List[Dict[str, Any]] = []
+    drafts: List[Dict[str, Any]] = []
+
+    if not dry_run:
+        for tw in triggered:
+            try:
+                res = draft_vendor_riff(tw)
+            except Exception as exc:
+                drafter_errors.append({"id": tw.get("id"), "error": str(exc)})
+                continue
+            decision = res.get("decision")
+            reason = res.get("reason", "")
+            drafts.append({
+                "source_id": tw.get("id"),
+                "vendor": tw.get("vendor"),
+                "decision": decision,
+                "reason": reason,
+            })
+            if decision == "queue":
+                queued += 1
+            elif reason == "rate_capped":
+                rate_capped += 1
+            else:
+                rejected += 1
+
+    result = {
+        "stats": stats,
+        "triggered": [
+            {
+                "id": t.get("id"),
+                "vendor": t.get("vendor"),
+                "url": t.get("url"),
+                "trigger_reason": t.get("trigger_reason"),
+                "metrics": t.get("metrics"),
+            }
+            for t in triggered
+        ],
+        "queued": queued,
+        "rejected": rejected,
+        "rate_capped": rate_capped,
+        "errors": list(scan.get("errors") or []) + drafter_errors,
+        "drafts": drafts,
+        "dry_run": bool(dry_run),
+    }
+    return _with_next_steps("vendor_news_scan", result)
+
+
+@mcp.tool()
+def delimit_vendor_news_health() -> Dict[str, Any]:
+    """Health check for the vendor-news riff system (Pro) (LED-1253).
+
+    When to use: to answer "is the cron firing? are drafts landing?
+    what's getting rejected?" without grepping logs.
+    When NOT to use: to draft a riff (use delimit_vendor_news_draft) or
+    inspect the broader social daemon (delimit_social_daemon).
+
+    Sibling contrast: delimit_vendor_news_draft writes one riff;
+    delimit_social_daemon controls the broader sensing daemon;
+    this is the vendor-news subsystem health.
+
+    Side effects: read-only. Greps crontab for the cron entry, reads
+    sensor JSONL log, tweet queue, rejected log, watchlist file.
+    Gated by require_premium.
+
+    Args:
+        None.
+
+    Returns:
+        Dict with cron_installed, last_run_ts, sensor stats, 24h
+        queued/rejected entries, watchlist count, budget snapshot.
+    """
+    from ai.license import require_premium
+    gate = require_premium("vendor_news_health")
+    if gate:
+        return gate
+
+    from ai.vendor_news.sensor import SENSOR_LOG_PATH, WATCHLIST_PATH, load_watchlist
+    from ai.vendor_news.drafter import TWEET_QUEUE_PATH, REJECTED_LOG_PATH
+
+    out: Dict[str, Any] = {
+        "cron_installed": False,
+        "last_run_ts": None,
+        "last_run_stats": None,
+        "recent_queued_count_24h": 0,
+        "recent_rejected_count_24h": 0,
+        "recent_rejection_reasons_24h": {},
+        "watchlist_account_count": 0,
+        "daily_budget_used_estimate": 0,
+    }
+
+    # 1) crontab check
+    try:
+        proc = subprocess.run(
+            ["crontab", "-l"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if proc.returncode == 0 and "vendor_news_cron.py" in (proc.stdout or ""):
+            out["cron_installed"] = True
+    except (FileNotFoundError, subprocess.SubprocessError, OSError):
+        # crontab binary missing (containers, CI) — cron_installed stays False
+        out["cron_installed"] = False
+
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+
+    # 2) sensor log: last run + 24h budget estimate
+    try:
+        if SENSOR_LOG_PATH.exists():
+            last_line = None
+            budget_used = 0
+            with open(SENSOR_LOG_PATH, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+                    last_line = entry
+                    ts_raw = entry.get("ts")
+                    try:
+                        ts_norm = ts_raw[:-1] + "+00:00" if ts_raw and ts_raw.endswith("Z") else ts_raw
+                        ts = datetime.fromisoformat(ts_norm) if ts_norm else None
+                    except (ValueError, TypeError):
+                        ts = None
+                    if ts is not None:
+                        if ts.tzinfo is None:
+                            ts = ts.replace(tzinfo=timezone.utc)
+                        if ts >= cutoff:
+                            budget_used += int(entry.get("live_calls") or 0)
+            if last_line:
+                out["last_run_ts"] = last_line.get("ts")
+                out["last_run_stats"] = {
+                    k: v for k, v in last_line.items()
+                    if k not in ("triggered_ids", "error_handles")
+                }
+            out["daily_budget_used_estimate"] = budget_used
+    except OSError:
+        pass
+
+    # 3) tweet_queue.json: 24h queued vendor_news_riff entries
+    try:
+        if TWEET_QUEUE_PATH.exists():
+            data = json.loads(TWEET_QUEUE_PATH.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                count = 0
+                for entry in data:
+                    if not isinstance(entry, dict):
+                        continue
+                    if entry.get("priority") != "P0":
+                        continue
+                    if entry.get("category") != "vendor_news_riff":
+                        continue
+                    added_raw = entry.get("added_at")
+                    try:
+                        added_norm = (
+                            added_raw[:-1] + "+00:00"
+                            if added_raw and added_raw.endswith("Z")
+                            else added_raw
+                        )
+                        added = datetime.fromisoformat(added_norm) if added_norm else None
+                    except (ValueError, TypeError):
+                        added = None
+                    if added is None:
+                        continue
+                    if added.tzinfo is None:
+                        added = added.replace(tzinfo=timezone.utc)
+                    if added >= cutoff:
+                        count += 1
+                out["recent_queued_count_24h"] = count
+    except (OSError, json.JSONDecodeError, ValueError):
+        pass
+
+    # 4) rejected JSONL: 24h count + reason histogram
+    try:
+        if REJECTED_LOG_PATH.exists():
+            count = 0
+            reasons: Dict[str, int] = {}
+            with open(REJECTED_LOG_PATH, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+                    ts_raw = entry.get("ts")
+                    try:
+                        ts_norm = (
+                            ts_raw[:-1] + "+00:00"
+                            if ts_raw and ts_raw.endswith("Z")
+                            else ts_raw
+                        )
+                        ts = datetime.fromisoformat(ts_norm) if ts_norm else None
+                    except (ValueError, TypeError):
+                        ts = None
+                    if ts is None:
+                        continue
+                    if ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=timezone.utc)
+                    if ts < cutoff:
+                        continue
+                    count += 1
+                    reason = entry.get("reason") or "unknown"
+                    reasons[reason] = reasons.get(reason, 0) + 1
+            out["recent_rejected_count_24h"] = count
+            out["recent_rejection_reasons_24h"] = reasons
+    except OSError:
+        pass
+
+    # 5) watchlist account count
+    try:
+        cfg = load_watchlist()
+        accounts = cfg.get("accounts") or []
+        out["watchlist_account_count"] = len(accounts)
+    except Exception:
+        pass
+
+    return _with_next_steps("vendor_news_health", out)
+
+
+@mcp.tool()
+def delimit_vendor_news_draft(tweet_id: Annotated[str, Field(description="Source X tweet id (numeric string) or full x.com URL. Required.")] = "", dry_run: Annotated[bool, Field(description="If True, suppress queue insertion. Default False.")] = False) -> Dict[str, Any]:
+    """Draft a brand-voice Delimit-POV riff for a specific X tweet (Pro) (LED-1253).
+
+    When to use: when an operator/sensor surfaces a vendor-news tweet
+    that warrants a Delimit-POV riff for the autonomous content queue.
+    When NOT to use: to fetch the tweet without drafting (use
+    delimit_x_fetch) or for general social drafting
+    (delimit_social_generate).
+
+    Sibling contrast: delimit_x_fetch fetches; delimit_vendor_news_health
+    inspects subsystem health; this drafts a riff into the queue.
+
+    Side effects: gated by require_premium. Runs the riff drafter
+    end-to-end: rate cap, source-fit pre-filter, generator, capability
+    validator, fit floor, queue insert. dry_run=True suppresses the
+    queue insert but still runs validators (and still consults the 24h
+    per-vendor rate cap to avoid log noise).
+
+    Args:
+        tweet_id: Source X tweet id (numeric string) or full x.com URL.
+            Required.
+        dry_run: If True, suppress queue insertion. Default False.
+
+    Returns:
+        Dict with the drafted riff text, validator outcomes, queue
+        insertion id (or skipped indicator), next_steps.
+    """
+    from ai.license import require_premium
+    gate = require_premium("vendor_news_draft")
+    if gate:
+        return gate
+
+    raw = (tweet_id or "").strip()
+    if not raw:
+        return _with_next_steps("vendor_news_draft", {
+            "error": "missing_tweet_id",
+            "message": "tweet_id is required (status id or x.com URL)",
+        })
+
+    # Normalize id (accept URL or bare id)
+    try:
+        from ai.social_target import extract_status_id, fetch_tweet_by_id
+    except Exception as exc:
+        return _with_next_steps("vendor_news_draft", {
+            "error": "social_target_unavailable",
+            "message": str(exc),
+        })
+
+    sid = extract_status_id(raw)
+    if not sid:
+        return _with_next_steps("vendor_news_draft", {
+            "error": "invalid_tweet_id",
+            "message": f"could not parse status id from {raw!r}",
+        })
+
+    fetched = fetch_tweet_by_id(sid)
+    if not isinstance(fetched, dict) or fetched.get("error"):
+        return _with_next_steps("vendor_news_draft", {
+            "error": "fetch_failed",
+            "message": (fetched or {}).get("error", "unknown fetch error"),
+            "tweet_id": sid,
+        })
+
+    # Map watchlist vendor metadata onto the source author. Falls back
+    # gracefully if the tweet author isn't in the watchlist (e.g.
+    # founder is testing a one-off riff against an off-watchlist post).
+    try:
+        from ai.vendor_news.sensor import load_watchlist
+        from ai.vendor_news import draft_vendor_riff
+    except Exception as exc:
+        return _with_next_steps("vendor_news_draft", {
+            "error": "vendor_news_unavailable",
+            "message": str(exc),
+        })
+
+    author = (fetched.get("author") or "").lstrip("@")
+    vendor_name = ""
+    products: List[str] = []
+    try:
+        cfg = load_watchlist()
+        for acc in cfg.get("accounts") or []:
+            if (acc.get("handle") or "").lstrip("@").lower() == author.lower():
+                vendor_name = acc.get("vendor", "") or author
+                products = list(acc.get("products") or [])
+                break
+    except Exception:
+        pass
+    if not vendor_name:
+        vendor_name = author or "unknown"
+
+    triggered = {
+        "id": fetched.get("id") or sid,
+        "text": fetched.get("text") or "",
+        "author": author,
+        "url": fetched.get("url") or f"https://x.com/i/status/{sid}",
+        "created_at": fetched.get("created_at") or "",
+        "metrics": fetched.get("metrics") or {},
+        "vendor": vendor_name,
+        "products": products,
+        "trigger_reason": "manual_draft",
+    }
+
+    # On dry_run, route the queue write to a temp path so the real
+    # tweet queue is untouched. Drafter still runs validator + fit gates.
+    queue_path_override = None
+    if dry_run:
+        try:
+            import tempfile as _tempfile
+            tmp = _tempfile.NamedTemporaryFile(
+                mode="w", suffix=".json", prefix="vendor_news_dry_",
+                delete=False, encoding="utf-8",
+            )
+            tmp.write("[]")
+            tmp.close()
+            queue_path_override = Path(tmp.name)
+        except Exception:
+            queue_path_override = None
+
+    try:
+        if queue_path_override is not None:
+            res = draft_vendor_riff(triggered, queue_path=queue_path_override)
+        else:
+            res = draft_vendor_riff(triggered)
+    except Exception as exc:
+        return _with_next_steps("vendor_news_draft", {
+            "error": "drafter_failed",
+            "message": str(exc),
+            "tweet_id": sid,
+        })
+
+    out = {
+        "decision": res.get("decision"),
+        "text": res.get("text"),
+        "reason": res.get("reason"),
+        "queue_entry": res.get("queue_entry") if not dry_run else None,
+        "validator_result": res.get("validator_result"),
+        "fit_result": res.get("fit_result"),
+        "source": {
+            "id": triggered["id"],
+            "author": author,
+            "vendor": vendor_name,
+            "url": triggered["url"],
+        },
+        "dry_run": bool(dry_run),
+    }
+    return _with_next_steps("vendor_news_draft", out)
+
+
+# ═══════════════════════════════════════════════════════════════════════
 #  CONTENT ENGINE - Autonomous video + tweet pipeline (Pro)
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -9822,7 +11278,7 @@ def delimit_content_schedule() -> Dict[str, Any]:
 
 
 @mcp.tool()
-def delimit_content_publish(content_type: str = "tweet") -> Dict[str, Any]:
+def delimit_content_publish(content_type: Annotated[str, Field(description="\"tweet\" (default) to post next queued tweet, or \"youtube\" to generate + upload the next video.")] = "tweet") -> Dict[str, Any]:
     """Manually trigger a content publish (tweet or YouTube video) (Pro).
 
     When to use: to fire off the next queued tweet or video on demand,
@@ -9856,7 +11312,7 @@ def delimit_content_publish(content_type: str = "tweet") -> Dict[str, Any]:
 
 
 @mcp.tool()
-def delimit_content_queue(action: str = "status", items: str = "") -> Dict[str, Any]:
+def delimit_content_queue(action: Annotated[str, Field(description="\"status\" (default), \"seed\", or \"add\".")] = "status", items: Annotated[str, Field(description="For \"add\" — newline-separated tweet texts.")] = "") -> Dict[str, Any]:
     """Manage the tweet and video content queues (Pro).
 
     When to use: to view, seed, or add to the autonomous content
@@ -9930,7 +11386,7 @@ def delimit_daemon_status() -> Dict[str, Any]:
 
 
 @mcp.tool()
-def delimit_daemon_run(iterations: int = 1, dry_run: bool = True) -> Dict[str, Any]:
+def delimit_daemon_run(iterations: Annotated[int, Field(description="Number of iterations. 0 = infinite. Default 1.")] = 1, dry_run: Annotated[bool, Field(description="If True (default), log actions but do not execute.")] = True) -> Dict[str, Any]:
     """Advance the autonomous daemon by N iterations (Pro).
 
     When to use: to manually advance the daemon loop one or more
@@ -9959,8 +11415,8 @@ def delimit_daemon_run(iterations: int = 1, dry_run: bool = True) -> Dict[str, A
     ))
 
 @mcp.tool()
-def delimit_build_loop(action: str = "run", session_id: str = "", loop_type: str = "build",
-                       cycle_mode: str = "full") -> Dict[str, Any]:
+def delimit_build_loop(action: Annotated[str, Field(description="\"init\" to start a session, \"run\" (default) to execute one iteration.")] = "run", session_id: Annotated[str, Field(description="Optional session id to continue.")] = "", loop_type: Annotated[str, Field(description="\"cycle\", \"build\" (default), \"social\", or \"deploy\".")] = "build",
+                       cycle_mode: Annotated[str, Field(description="For loop_type=\"cycle\" — \"sense\" (think+strategy), \"execute\" (build+deploy), or \"full\" (all). Default \"full\".")] = "full") -> Dict[str, Any]:
     """Execute one iteration of a governed continuous loop (LED-239).
 
     When to use: to advance the autonomous build / social / deploy
@@ -10012,10 +11468,10 @@ def delimit_build_loop(action: str = "run", session_id: str = "", loop_type: str
 
 @mcp.tool()
 def delimit_build_loop_daemon(
-    action: str = "status",
-    session_id: str = "",
-    interval_seconds: int = 900,
-    loop_type: str = "build",
+    action: Annotated[str, Field(description="\"start\", \"stop\", or \"status\" (default).")] = "status",
+    session_id: Annotated[str, Field(description="Session to run. Required for all actions.")] = "",
+    interval_seconds: Annotated[int, Field(description="Tick interval. Default 900 (15 min). Used on start.")] = 900,
+    loop_type: Annotated[str, Field(description="\"build\" (default), \"social\", or \"deploy\". Used on start.")] = "build",
 ) -> Dict[str, Any]:
     """Background auto-pull daemon for governed build/social/deploy loops (Pro).
 
@@ -10064,7 +11520,7 @@ def delimit_build_loop_daemon(
 
 
 @mcp.tool()
-def delimit_daemon_classify(item_id: str = "") -> Dict[str, Any]:
+def delimit_daemon_classify(item_id: Annotated[str, Field(description="Specific ledger item id to classify. Empty = pick the next automatable item from the open ledger.")] = "") -> Dict[str, Any]:
     """Classify a ledger item's risk tier and suggested automation tool.
 
     When to use: to preview what the autonomous daemon would do with
@@ -10118,7 +11574,7 @@ def delimit_daemon_classify(item_id: str = "") -> Dict[str, Any]:
 
 
 @mcp.tool()
-def delimit_inbox_daemon(action: str = "status") -> Dict[str, Any]:
+def delimit_inbox_daemon(action: Annotated[str, Field(description="\"start\" (begin polling), \"stop\" (halt polling), \"status\" (default — show daemon state).")] = "status") -> Dict[str, Any]:
     """Control the inbox polling daemon for email governance (Pro).
 
     When to use: at session start (per orchestrator session ritual) to
@@ -10148,6 +11604,7 @@ def delimit_inbox_daemon(action: str = "status") -> Dict[str, Any]:
         from ai.inbox_daemon import start_daemon, stop_daemon, get_daemon_status
     except (ImportError, ModuleNotFoundError):
         # LED-1261: backing module is gateway-only (excluded from npm bundle).
+        # Customers calling this get a graceful message instead of a raw traceback.
         return _with_next_steps("inbox_daemon", {
             "status": "not_available",
             "error": "delimit_inbox_daemon is an internal Delimit feature not shipped in the npm bundle.",
@@ -10163,7 +11620,7 @@ def delimit_inbox_daemon(action: str = "status") -> Dict[str, Any]:
 
 
 @mcp.tool()
-def delimit_social_daemon(action: str = "status") -> Dict[str, Any]:
+def delimit_social_daemon(action: Annotated[str, Field(description="\"start\", \"stop\", or \"status\" (default).")] = "status") -> Dict[str, Any]:
     """Control the social sensing daemon (Pro).
 
     When to use: to start, stop, or inspect the autonomous social
@@ -10184,15 +11641,7 @@ def delimit_social_daemon(action: str = "status") -> Dict[str, Any]:
     Returns:
         Dict with daemon status, last scan, targets found, next_steps.
     """
-    try:
-        from ai.social_daemon import start_daemon, stop_daemon, get_daemon_status
-    except (ImportError, ModuleNotFoundError):
-        # LED-1261: backing module is gateway-only (excluded from npm bundle).
-        return _with_next_steps("social_daemon", {
-            "status": "not_available",
-            "error": "delimit_social_daemon is an internal Delimit feature not shipped in the npm bundle.",
-            "hint": "Pro customers interested in social automation can contact pro@delimit.ai.",
-        })
+    from ai.social_daemon import start_daemon, stop_daemon, get_daemon_status
 
     if action == "start":
         return _with_next_steps("social_daemon", start_daemon())
@@ -10201,13 +11650,115 @@ def delimit_social_daemon(action: str = "status") -> Dict[str, Any]:
     else:
         return _with_next_steps("social_daemon", get_daemon_status())
 
+
+@mcp.tool()
+def delimit_self_repair_daemon(action: Annotated[str, Field(description="'start' (begin polling), 'stop' (halt polling), 'status' (running / last_pass / breaches_emitted / consecutive_failures).")] = "status") -> Dict[str, Any]:
+    """Control the self-repair watcher daemon (LED-191, internal).
+
+    When to use: to start, stop, or inspect the watcher that polls
+    function KPIs and emits founder alerts on breaches.
+    When NOT to use: for general daemon status (use delimit_daemon_status)
+    or inbox / social daemons (delimit_inbox_daemon, delimit_social_daemon).
+
+    Sibling contrast: delimit_daemon_status is the autonomous loop's
+    daemon; this is the KPI-watcher daemon. Different processes.
+
+    Side effects: action="start" / "stop" mutate daemon state.
+    Idempotent start. Circuit-breakered stop after 3 consecutive pass
+    failures. Honors DELIMIT_SELF_REPAIR_PAUSE=1 at every pass without
+    requiring a daemon restart. Higher modes (diagnose / deliberate /
+    apply / verify) chain through the watcher when configured per
+    function in ~/.delimit/self_repair.yaml.
+
+    Args:
+        action: 'start' (begin polling), 'stop' (halt polling),
+                'status' (running / last_pass / breaches_emitted /
+                consecutive_failures).
+
+    Returns:
+        Dict whose shape depends on action — start/stop return
+        {status, daemon_pid, message}; status returns
+        {running, last_pass, breaches_emitted, consecutive_failures}.
+        On npm-bundle installs returns
+        {"status": "not_available", "error": ..., "hint": ...}.
+    """
+    try:
+        from ai.self_repair_daemon import (
+            start_daemon as _sr_start,
+            stop_daemon as _sr_stop,
+            get_daemon_status as _sr_status,
+        )
+    except (ImportError, ModuleNotFoundError):
+        # LED-1261: backing module is gateway-only (excluded from npm bundle).
+        return _with_next_steps("self_repair_daemon", {
+            "status": "not_available",
+            "error": "delimit_self_repair_daemon is an internal Delimit feature not shipped in the npm bundle.",
+            "hint": "Pro customers interested in self-repair watcher can contact pro@delimit.ai.",
+        })
+
+    if action == "start":
+        return _with_next_steps("self_repair_daemon", _sr_start())
+    elif action == "stop":
+        return _with_next_steps("self_repair_daemon", _sr_stop())
+    else:
+        return _with_next_steps("self_repair_daemon", _sr_status())
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  LED-189: Corp dashboard — single-call session-start synthesis
+# ═══════════════════════════════════════════════════════════════════════
+
+
+@mcp.tool()
+def delimit_corp_dashboard() -> Dict[str, Any]:
+    """One-call corp status — replaces the 6-call session-start ritual (LED-189).
+
+    When to use: at session start as the unified status snapshot —
+    daemons, self-repair, social/inbox activity, ledger pending,
+    agent queue, latest session, plus a synthesized one-line summary.
+    When NOT to use: for a single subsystem's status (use
+    delimit_daemon_status, delimit_obs_status, etc.) — those are
+    finer-grained.
+
+    Sibling contrast: delimit_obs_status is system health;
+    delimit_gov_health is governance engine; this is the corp-wide
+    rollup that composes all of them.
+
+    Side effects: read-only across all subsystems. Each sub-section is
+    failure-isolated — a partial failure returns {"error": "..."} for
+    that key only and never crashes the whole call. Gateway-only —
+    not shipped in the npm bundle.
+
+    Args:
+        None.
+
+    Returns:
+        Dict with daemon status, self_repair status, social/inbox
+        activity, ledger_pending, agent_queue, latest_session, plus a
+        synthesized one-line summary and next_steps. On npm-bundle
+        installs returns {"status": "not_available", "error": ...,
+        "hint": ...} instead.
+    """
+    try:
+        from ai.corp_dashboard import get_corp_dashboard
+    except (ImportError, ModuleNotFoundError):
+        # LED-1261: backing module is gateway-only (excluded from npm bundle).
+        return _with_next_steps("corp_dashboard", {
+            "status": "not_available",
+            "error": "delimit_corp_dashboard is an internal Delimit feature not shipped in the npm bundle.",
+            "hint": "Pro customers interested in the corp dashboard surface can contact pro@delimit.ai.",
+        })
+    result = get_corp_dashboard()
+    return _with_next_steps("corp_dashboard", result)
+
+
 # ═══════════════════════════════════════════════════════════════════════
 #  LED-187: Shareable Governance Config - export / import
 # ═══════════════════════════════════════════════════════════════════════
 
 
 @mcp.tool()
-def delimit_config_export(project_path: str = ".") -> Dict[str, Any]:
+def delimit_config_export(project_path: Annotated[str, Field(description="Path to project root. Default \".\" (cwd).")] = ".") -> Dict[str, Any]:
     """Export the current governance config as a shareable JSON bundle.
 
     When to use: to package a project's delimit.yml + GitHub Action
@@ -10285,9 +11836,9 @@ def delimit_config_export(project_path: str = ".") -> Dict[str, Any]:
 
 @mcp.tool()
 def delimit_config_import(
-    config_json: str,
-    project_path: str = ".",
-    write_workflow: bool = False,
+    config_json: Annotated[str, Field(description="The JSON config bundle string (from delimit_config_export). Required.")],
+    project_path: Annotated[str, Field(description="Target project root. Default \".\" (cwd).")] = ".",
+    write_workflow: Annotated[bool, Field(description="Also write the GitHub Action workflow if present. Default False.")] = False,
 ) -> Dict[str, Any]:
     """Import a governance config from a JSON bundle into a project.
 
@@ -10355,8 +11906,8 @@ def delimit_config_import(
 
 
 @mcp.tool()
-def delimit_screen_record(mode: str = "browser", url: str = "", name: str = "recording",
-                          duration: int = 30, script: str = "") -> Dict[str, Any]:
+def delimit_screen_record(mode: Annotated[str, Field(description="\"browser\" (default) or \"terminal\".")] = "browser", url: Annotated[str, Field(description="URL to visit (browser mode only).")] = "", name: Annotated[str, Field(description="Output filename without extension. Default \"recording\".")] = "recording",
+                          duration: Annotated[int, Field(description="Recording duration in seconds. Max 120. Default 30.")] = 30, script: Annotated[str, Field(description="Shell script to run (terminal mode only). Empty = idle terminal capture.")] = "") -> Dict[str, Any]:
     """Record a screen capture (browser or terminal session) (Pro).
 
     When to use: to capture a video for documentation, demo, or
@@ -10411,7 +11962,7 @@ def delimit_screen_record(mode: str = "browser", url: str = "", name: str = "rec
 
 
 @mcp.tool()
-def delimit_screenshot(url: str, name: str = "screenshot") -> Dict[str, Any]:
+def delimit_screenshot(url: Annotated[str, Field(description="URL to screenshot. Required.")], name: Annotated[str, Field(description="Output filename (without extension). Default \"screenshot\".")] = "screenshot") -> Dict[str, Any]:
     """Take a screenshot of a URL using headless Chromium (Pro).
 
     When to use: for audit evidence, visual regression baselines, or
@@ -10451,9 +12002,9 @@ def delimit_screenshot(url: str, name: str = "screenshot") -> Dict[str, Any]:
 
 
 @mcp.tool()
-def delimit_changelog(old_spec: str = "", new_spec: str = "", format: str = "markdown",
-                      version: str = "", repo_path: str = "", since_tag: str = "",
-                      include_ledger: bool = True, output_file: str = "") -> Dict[str, Any]:
+def delimit_changelog(old_spec: Annotated[str, Field(description="Old OpenAPI spec path (spec mode).")] = "", new_spec: Annotated[str, Field(description="New OpenAPI spec path (spec mode).")] = "", format: Annotated[str, Field(description="\"markdown\" (default), \"json\", \"keepachangelog\", \"github-release\".")] = "markdown",
+                      version: Annotated[str, Field(description="Version label (e.g. \"4.1.0\").")] = "", repo_path: Annotated[str, Field(description="Repo path (git mode).")] = "", since_tag: Annotated[str, Field(description="Git tag to diff from. Empty = auto-detect latest tag.")] = "",
+                      include_ledger: Annotated[bool, Field(description="Include completed ledger items (git mode). Default True.")] = True, output_file: Annotated[str, Field(description="Write the rendered changelog here. If \"CHANGELOG.md\", prepends the entry.")] = "") -> Dict[str, Any]:
     """Generate a changelog from git + ledger (git mode) or spec diff (spec mode).
 
     When to use: as part of the deploy gate chain to produce a release
@@ -10520,10 +12071,14 @@ def delimit_changelog(old_spec: str = "", new_spec: str = "", format: str = "mar
 
 
 @mcp.tool()
-def delimit_notify(channel: str = "webhook", message: str = "",
-                   webhook_url: str = "", subject: str = "",
-                   event_type: str = "", to: str = "",
-                   from_account: str = "") -> Dict[str, Any]:
+def delimit_notify(channel: Annotated[str, Field(description="webhook, slack, or email.")] = "webhook", message: Annotated[str, Field(description="Notification body. Must include full context (see rules above).")] = "",
+                   webhook_url: Annotated[str, Field(description="URL for webhook/slack channels.")] = "", subject: Annotated[str, Field(description="Subject line (email only). Use [ACTION], [INFO], [ALERT] prefix.")] = "",
+                   event_type: Annotated[str, Field(description="Event category for filtering.")] = "", to: Annotated[str, Field(description="Recipient email address (email only). Overrides default DELIMIT_SMTP_TO. Send to any address - leave empty for default.")] = "",
+                   from_account: Annotated[str, Field(description="Sender account key from ~/.delimit/secrets/smtp-all.json (e.g. 'notifications@example.com'). Email only. Optional inbox-executor binding (LED-1129 Phase 1, no auto-execution yet):.")] = "",
+                   draft_kind: Annotated[str, Field(description="One of github_comment, social_post, ledger_done, notify_routing_update, deploy_publish_prevalidated_artifact. When set, registers a signed draft in the local SQLite registry so a future executor can match founder Ship-it replies against it.")] = "",
+                   draft_payload: Annotated[Optional[Union[str, Dict[str, Any]]], Field(description="The action contents (e.g. {\"body\": \"...\"} for github_comment). JSON string or dict. Required when draft_kind is set.")] = None,
+                   draft_target: Annotated[Optional[Union[str, Dict[str, Any]]], Field(description="Where the action lands (e.g. {\"repo\":\"x/y\",\"issue\":1}). JSON string or dict. Required when draft_kind is set.")] = None,
+                   led_ref: Annotated[str, Field(description="Optional LED-XXXX tag tying the draft to its tracking item. Surfaced in subject-line matching by the executor.")] = "") -> Dict[str, Any]:
     """Send a notification (webhook / Slack / email) (Pro).
 
     When to use: when the orchestrator identifies something that
@@ -10587,7 +12142,63 @@ def delimit_notify(channel: str = "webhook", message: str = "",
         `draft` block: {draft_id, draft_kind, signature, registered}.
     """
     from ai.notify import send_notification
-    return _with_next_steps("notify", _safe_call(
+
+    draft_meta: Optional[Dict[str, Any]] = None
+    if draft_kind:
+        # LED-1129 Phase 1: register a signed draft alongside the email
+        # send. Phase 2 will wire the executor to consume these.
+        try:
+            from ai.inbox_drafts import (
+                DraftKind,
+                insert_draft,
+                sign_draft,
+            )
+
+            # Validate kind against the allowlist enum.
+            try:
+                DraftKind(draft_kind)
+            except ValueError:
+                return _with_next_steps("notify", {
+                    "error": (
+                        f"draft_kind must be one of "
+                        f"{[k.value for k in DraftKind]}; got '{draft_kind}'"
+                    ),
+                })
+
+            # Coerce string args to dicts for callers that pass JSON strings.
+            payload = _coerce_dict_arg(draft_payload, "draft_payload",
+                                        string_key="body") if draft_payload is not None else None
+            target = _coerce_dict_arg(draft_target, "draft_target",
+                                       string_key="target") if draft_target is not None else None
+
+            if payload is None or target is None:
+                return _with_next_steps("notify", {
+                    "error": "draft_kind requires both draft_payload and draft_target",
+                })
+
+            signed = sign_draft(
+                draft_kind=draft_kind,
+                target=target,
+                payload=payload,
+            )
+            insert_draft(signed, led_ref=(led_ref or None))
+            draft_meta = {
+                "draft_id": signed.draft_id,
+                "draft_kind": signed.draft_kind,
+                "signature": signed.signature,
+                "registered": True,
+                "led_ref": led_ref or None,
+            }
+        except Exception as e:
+            # Draft registration must not break the notify itself —
+            # the email still goes out, the draft just isn't tracked.
+            # Log the failure in the response so callers can audit.
+            draft_meta = {
+                "registered": False,
+                "error": f"{type(e).__name__}: {e}",
+            }
+
+    result = _safe_call(
         send_notification,
         channel=channel,
         message=message,
@@ -10596,16 +12207,19 @@ def delimit_notify(channel: str = "webhook", message: str = "",
         event_type=event_type,
         to=to,
         from_account=from_account,
-    ))
+    )
+    if draft_meta is not None:
+        result["draft"] = draft_meta
+    return _with_next_steps("notify", result)
 
 
 @mcp.tool()
 def delimit_notify_routing(
-    action: str = "status",
-    config: str = "",
-    webhook_url: str = "",
-    email_to: str = "",
-    from_account: str = "",
+    action: Annotated[str, Field(description="One of \"status\" (default), \"configure\", \"test\".")] = "status",
+    config: Annotated[str, Field(description="JSON string with routing config for action=\"configure\". Example shape: {\"routing\": {\"critical\": {...}, ...}}.")] = "",
+    webhook_url: Annotated[str, Field(description="Webhook URL used by action=\"test\".")] = "",
+    email_to: Annotated[str, Field(description="Email recipient used by action=\"test\".")] = "",
+    from_account: Annotated[str, Field(description="Sender account key for the test email.")] = "",
 ) -> Dict[str, Any]:
     """Manage impact-based notification routing (LED-233).
 
@@ -10693,8 +12307,8 @@ def delimit_notify_routing(
 
 
 @mcp.tool()
-def delimit_notify_inbox(action: str = "status", limit: int = 10,
-                         process: bool = True) -> Dict[str, Any]:
+def delimit_notify_inbox(action: Annotated[str, Field(description="\"status\" (default), \"poll\", or \"history\".")] = "status", limit: Annotated[int, Field(description="Number of messages to check (default 10).")] = 10,
+                         process: Annotated[bool, Field(description="With action=\"poll\", forward owner-action emails when True (default), dry-run only when False.")] = True) -> Dict[str, Any]:
     """Check inbound email inbox, classify, and route (Pro).
 
     When to use: to poll the operator inbox and classify which emails
@@ -10842,38 +12456,60 @@ delimit_agent = mcp.tool()(_delimit_agent_impl)
 # --- Thin wrappers (aliases) for backward compatibility ---
 
 @mcp.tool()
-def delimit_agent_dispatch(title: str, description: str = "", assignee: str = "any",
-                           priority: str = "P1", tools_needed: str = "",
-                           constraints: str = "", context: str = "") -> Dict[str, Any]:
-    """Record an engineering task dispatch + audit trail (Pro).
+def delimit_agent_dispatch(title: Annotated[str, Field(description="Short task title. Required.")], description: Annotated[str, Field(description="Longer task description.")] = "", assignee: Annotated[str, Field(description="Target model — \"claude\", \"codex\", \"gemini\", or \"any\". Default \"any\".")] = "any",
+                           priority: Annotated[str, Field(description="One of \"P0\" (immediate), \"P1\" (default), \"P2\".")] = "P1", tools_needed: Annotated[str, Field(description="Comma-separated MCP tools the work will need.")] = "",
+                           constraints: Annotated[str, Field(description="Comma-separated constraints (e.g. \"no force push\").")] = "", context: Annotated[str, Field(description="Background info to seed the executor.")] = "") -> Dict[str, Any]:
+    """Record an engineering-task dispatch with full audit trail (Pro).
 
-    When to use: as a planning + audit surface when delegating
-    parallelizable engineering work. The orchestrator subagent (Agent
-    tool, subagent_type=engineering) is the actual executor; this tool
-    records intent, assignee, and outcome for replay.
-    When NOT to use: as a queue processor expecting auto-execution —
-    this records dispatch but does not run the work.
+    When to use: as the PLANNING + AUDIT surface when the
+    orchestrator decides to delegate parallelizable engineering work
+    to a subagent. Per the operating model (2026-05-01 revision),
+    actual execution is performed by the Agent tool with
+    subagent_type=engineering; this tool records the intent,
+    assignee, constraints, and eventual outcome so the dispatch is
+    replayable from the ledger.
+    When NOT to use: as an autonomous queue processor expecting
+    auto-execution — this records dispatch but does NOT run the
+    work. Real autonomous queue execution is deferred to a future
+    capability (LED-193 daemon) with strict sandboxing + founder-
+    approval semantics. Also do not use for conversational tasks,
+    sub-5-minute work, or work where no function exists yet.
 
-    Sibling contrast: delimit_agent_status reads task state;
-    delimit_agent_handoff transfers a recorded task to another model;
-    delimit_agent_complete closes it out with results.
+    Sibling contrast: delimit_agent_status reads dispatched task
+    state; delimit_agent_handoff transfers a recorded task to a
+    different model; delimit_agent_complete closes the task with
+    results. Compared to delimit_ledger_add, this is the engineering-
+    work surface with assignee, tools_needed, and constraints
+    schema; ledger items are free-form.
 
-    Side effects: writes a task record via ai.agent_dispatch.dispatch_task.
-    String list inputs are coerced through _coerce_list_arg.
+    Side effects: writes a new task record to disk via
+    ai.agent_dispatch.dispatch_task (a JSON record in the agent
+    tasks file plus an audit log entry). String list inputs
+    (`tools_needed`, `constraints`) are coerced from comma strings
+    to lists. NO subagent is spawned by this call — the caller is
+    responsible for invoking the Agent tool separately. Gated by
+    require_premium — unlicensed callers receive a license payload.
 
     Args:
         title: Short task title. Required.
         description: Longer task description.
-        assignee: Target model — "claude", "codex", "gemini", or "any".
-            Default "any".
+        assignee: Target model — "claude", "codex", "gemini", or
+            "any" (default). "any" resolves to a concrete model
+            via the task-type router (LED-878).
         priority: One of "P0" (immediate), "P1" (default), "P2".
-        tools_needed: Comma-separated MCP tools the work will need.
-        constraints: Comma-separated constraints (e.g. "no force push").
+        tools_needed: Comma-separated MCP tools the work will need
+            (used for sandboxing hints).
+        constraints: Comma-separated constraints (e.g. "no force
+            push", "read-only", "no-deploy").
         context: Background info to seed the executor.
 
     Returns:
-        Dict with the new task id (AGT-XXXXXXXX), record metadata, and
-        next_steps suggestions.
+        Dict with keys: task_id (AGT-XXXXXXXX), task (record
+        metadata: title, description, assignee, priority,
+        tools_needed, constraints, context, status="dispatched",
+        created_at), agent_prompt (formatted prompt for the
+        executor), plus a next_steps field. Returns a license-gate
+        payload if the caller lacks Premium.
     """
     return _delimit_agent_impl(action="dispatch", title=title, description=description,
                          assignee=assignee, priority=priority, tools_needed=tools_needed,
@@ -10881,7 +12517,7 @@ def delimit_agent_dispatch(title: str, description: str = "", assignee: str = "a
 
 
 @mcp.tool()
-def delimit_agent_status(task_id: str = "") -> Dict[str, Any]:
+def delimit_agent_status(task_id: Annotated[str, Field(description="Specific task id (e.g. \"AGT-A1B2C3D4\") or empty to list all.")] = "") -> Dict[str, Any]:
     """Check status of dispatched agent tasks (Pro).
 
     When to use: to monitor open/closed agent tasks, either a single
@@ -10905,37 +12541,56 @@ def delimit_agent_status(task_id: str = "") -> Dict[str, Any]:
 
 
 @mcp.tool()
-def delimit_agent_complete(task_id: str, result: str = "",
-                           files_changed: str = "") -> Dict[str, Any]:
-    """Mark a dispatched agent task as complete (Pro).
+def delimit_agent_complete(task_id: Annotated[str, Field(description="Task id from delimit_agent_dispatch. Required.")], result: Annotated[str, Field(description="Summary of what was done.")] = "",
+                           files_changed: Annotated[str, Field(description="Comma-separated paths of modified files.")] = "") -> Dict[str, Any]:
+    """Close a dispatched agent task by recording the outcome (Pro).
 
-    When to use: at the end of an executor's work, to record the
-    outcome and the files touched on the task record.
-    When NOT to use: to hand off to a different model
-    (delimit_agent_handoff) or to dispatch a new task
-    (delimit_agent_dispatch).
+    When to use: at the end of an engineering subagent's work, to
+    record the result summary and the files touched on the dispatch
+    record. This is the closing step of the dispatch lifecycle
+    (delimit_agent_dispatch -> [subagent runs] -> this).
+    Without calling this, the task remains "dispatched" in the
+    ledger and dashboards will count it as in-flight.
+    When NOT to use: to hand off ownership to a different model
+    (use delimit_agent_handoff), to dispatch a fresh task
+    (delimit_agent_dispatch), or to read task status without
+    closing (delimit_agent_status). Also: do not call repeatedly on
+    the same task_id — the backend treats a second complete as an
+    error.
 
-    Sibling contrast: delimit_agent_handoff transfers ownership;
-    this closes ownership.
+    Sibling contrast: delimit_agent_handoff transfers active
+    ownership to another model (task stays open); this closes
+    ownership entirely. delimit_agent_status is the read-only
+    sibling.
 
-    Side effects: writes the completion record via
-    ai.agent_dispatch.complete_task. files_changed is coerced from a
-    comma string to a list.
+    Side effects: writes a completion record via
+    ai.agent_dispatch.complete_task — the task's status flips from
+    "dispatched" to "completed", `result` and `files_changed` are
+    persisted, and an audit log entry is appended. `files_changed`
+    is coerced from a comma string to a list. No license gate at
+    this level (handled by the backend). No notification — pair
+    with delimit_notify if the operator needs to be told.
 
     Args:
-        task_id: Task id from delimit_agent_dispatch. Required.
-        result: Summary of what was done.
-        files_changed: Comma-separated paths of modified files.
+        task_id: Task id from delimit_agent_dispatch. Required;
+            empty or unknown ids return an error.
+        result: Summary of what was done. Optional but
+            recommended for the audit trail.
+        files_changed: Comma-separated paths of modified files
+            (becomes a list after _coerce_list_arg).
 
     Returns:
-        Dict with the close-out record and next_steps.
+        Dict with keys: task_id echo, status (now "completed"),
+        completed_at timestamp, result echo, files_changed (list),
+        plus a next_steps field. Returns {"error": "..."} on
+        unknown task_id or already-completed task.
     """
     return _delimit_agent_impl(action="complete", task_id=task_id, result=result, files_changed=files_changed)
 
 
 @mcp.tool()
-def delimit_agent_handoff(task_id: str, to_model: str,
-                          context: str = "") -> Dict[str, Any]:
+def delimit_agent_handoff(task_id: Annotated[str, Field(description="Existing task id from delimit_agent_dispatch. Required.")], to_model: Annotated[str, Field(description="Target model — \"claude\", \"codex\", \"gemini\", etc. Required.")],
+                          context: Annotated[str, Field(description="Notes for the next model.")] = "") -> Dict[str, Any]:
     """Hand off an agent task to a different AI model (Pro).
 
     When to use: when an executor is blocked or when cross-model review
@@ -10962,7 +12617,7 @@ def delimit_agent_handoff(task_id: str, to_model: str,
 
 
 @mcp.tool()
-def delimit_agent_link(task_id: str, ledger_item_id: str) -> Dict[str, Any]:
+def delimit_agent_link(task_id: Annotated[str, Field(description="Agent task id (AGT-xxx). Required.")], ledger_item_id: Annotated[str, Field(description="Ledger item id (LED-xxx or STR-xxx). Required.")]) -> Dict[str, Any]:
     """Link an agent task to a ledger item so the dashboard shows the relationship.
 
     When to use: after delimit_agent_dispatch creates a task and you
@@ -11017,9 +12672,9 @@ def delimit_agent_dashboard() -> Dict[str, Any]:
 
 
 @mcp.tool()
-def delimit_agent_policy(model: str = "", ledger: str = "", memory: str = "",
-                          deploy: str = "", evidence: str = "",
-                          secrets: str = "", custom_constraints: str = "") -> Dict[str, Any]:
+def delimit_agent_policy(model: Annotated[str, Field(description="AI model name — \"claude\", \"codex\", \"gemini\", \"cursor\". Empty = list all.")] = "", ledger: Annotated[str, Field(description="Ledger access level.")] = "", memory: Annotated[str, Field(description="Memory access level.")] = "",
+                          deploy: Annotated[str, Field(description="Allow deploys (\"true\"/\"false\").")] = "", evidence: Annotated[str, Field(description="Evidence access level.")] = "",
+                          secrets: Annotated[str, Field(description="Allow secret access (\"true\"/\"false\").")] = "", custom_constraints: Annotated[str, Field(description="Comma-separated constraints, e.g. \"no-deploy,no-publish\".")] = "") -> Dict[str, Any]:
     """Set or view per-model governance permissions (Pro).
 
     When to use: to inspect or modify the access policy that gates
@@ -11083,7 +12738,7 @@ def delimit_agent_policy(model: str = "", ledger: str = "", memory: str = "",
 
 
 @mcp.tool()
-def delimit_agent_check(model: str, action: str) -> Dict[str, Any]:
+def delimit_agent_check(model: Annotated[str, Field(description="AI model name — \"claude\", \"codex\", \"gemini\", \"cursor\". Required.")], action: Annotated[str, Field(description="Action to check (e.g. \"ledger_write\", \"deploy\"). Required.")]) -> Dict[str, Any]:
     """Check if a model is allowed to perform an action under agent policy (Pro).
 
     When to use: as a per-action gate before executing sensitive
@@ -11125,7 +12780,7 @@ def delimit_agent_check(model: str, action: str) -> Dict[str, Any]:
 
 
 @mcp.tool()
-def delimit_next_task(venture: str = "", max_risk: str = "", session_id: str = "") -> Dict[str, Any]:
+def delimit_next_task(venture: Annotated[str, Field(description="Project name or path. Empty = auto-detect.")] = "", max_risk: Annotated[str, Field(description="Max risk level — \"low\", \"medium\", \"high\", \"critical\".")] = "", session_id: Annotated[str, Field(description="Resume existing session. Empty = new.")] = "") -> Dict[str, Any]:
     """Get the next task to work on with safeguard checks (Pro).
 
     When to use: inside a loop session, to fetch the highest-priority
@@ -11154,8 +12809,8 @@ def delimit_next_task(venture: str = "", max_risk: str = "", session_id: str = "
 
 
 @mcp.tool()
-def delimit_ledger_propose(venture: str = "", focus: str = "",
-                            max_items: int = 5) -> Dict[str, Any]:
+def delimit_ledger_propose(venture: Annotated[str, Field(description="Focus on a specific venture. Empty = auto-detect.")] = "", focus: Annotated[str, Field(description="Optional area filter — \"outreach\", \"engineering\", \"security\", etc.")] = "",
+                            max_items: Annotated[int, Field(description="Maximum proposals. Default 5.")] = 5) -> Dict[str, Any]:
     """Propose new ledger items based on signals, completed work, and gaps.
 
     When to use: at the end of a build loop or when the queue is empty,
@@ -11185,8 +12840,8 @@ def delimit_ledger_propose(venture: str = "", focus: str = "",
 
 
 @mcp.tool()
-def delimit_task_complete(task_id: str, result: str = "", cost_incurred: float = 0.0,
-                          error: str = "", session_id: str = "", venture: str = "") -> Dict[str, Any]:
+def delimit_task_complete(task_id: Annotated[str, Field(description="Ledger item id completed (e.g. \"LED-042\").")], result: Annotated[str, Field(description="Summary of what was done.")] = "", cost_incurred: Annotated[float, Field(description="Estimated cost (USD).")] = 0.0,
+                          error: Annotated[str, Field(description="If task failed, describe error.")] = "", session_id: Annotated[str, Field(description="Loop session to update.")] = "", venture: Annotated[str, Field(description="Project name or path.")] = "") -> Dict[str, Any]:
     """Mark current loop task done and get the next one (Pro).
 
     When to use: at the end of each loop iteration — records
@@ -11221,7 +12876,7 @@ def delimit_task_complete(task_id: str, result: str = "", cost_incurred: float =
 
 
 @mcp.tool()
-def delimit_loop_status(session_id: str = "") -> Dict[str, Any]:
+def delimit_loop_status(session_id: Annotated[str, Field(description="Session id to check. Empty = most recent session.")] = "") -> Dict[str, Any]:
     """Check autonomous loop metrics for a session (Pro).
 
     When to use: to inspect a continuous-loop session's run-time
@@ -11246,10 +12901,10 @@ def delimit_loop_status(session_id: str = "") -> Dict[str, Any]:
 
 
 @mcp.tool()
-def delimit_loop_config(session_id: str = "", max_iterations: int = 0,
-                        cost_cap: float = 0.0, auto_consensus: bool = False,
-                        error_threshold: int = 0, status: str = "",
-                        require_approval_for: str = "") -> Dict[str, Any]:
+def delimit_loop_config(session_id: Annotated[str, Field(description="Session to configure. Empty = create new.")] = "", max_iterations: Annotated[int, Field(description="Max tasks before stopping. Default 50.")] = 0,
+                        cost_cap: Annotated[float, Field(description="Max session cost in dollars. Default 5.0.")] = 0.0, auto_consensus: Annotated[bool, Field(description="If True, suggest consensus when ledger empty.")] = False,
+                        error_threshold: Annotated[int, Field(description="Consecutive errors before circuit-breaker trips. Default 3.")] = 0, status: Annotated[str, Field(description="Set loop status — \"running\", \"paused\", \"stopped\".")] = "",
+                        require_approval_for: Annotated[str, Field(description="Comma-separated action types requiring human approval.")] = "") -> Dict[str, Any]:
     """Configure autonomous build loop safeguards (Pro).
 
     When to use: BEFORE starting a loop session — to set max iterations,
@@ -11296,9 +12951,9 @@ def delimit_loop_config(session_id: str = "", max_iterations: int = 0,
 
 @mcp.tool()
 def delimit_toolcard_cache(
-    action: str = "status",
-    tool_schemas: Optional[str] = None,
-    tool_names: Optional[str] = None,
+    action: Annotated[str, Field(description="One of \"status\" (default), \"register\", \"delta\", \"clear\", \"estimate\", \"flush\".")] = "status",
+    tool_schemas: Annotated[Optional[str], Field(description="JSON array of tool schema objects (for register/ estimate).")] = None,
+    tool_names: Annotated[Optional[str], Field(description="Comma-separated tool names (for delta).")] = None,
 ) -> Dict[str, Any]:
     """Manage the tool-schema cache to reduce per-session token waste (Pro).
 
@@ -11380,17 +13035,17 @@ def delimit_toolcard_cache(
 
 @mcp.tool()
 def delimit_handoff_create(
-    task_description: str = "",
-    completed: str = "",
-    not_completed: str = "",
-    assumptions: str = "",
-    blockers: str = "",
-    files_modified: str = "",
-    in_scope: str = "",
-    out_of_scope: str = "",
-    next_action: str = "",
-    priority: str = "P1",
-    to_model: str = "any",
+    task_description: Annotated[str, Field(description="What the task was (one line).")] = "",
+    completed: Annotated[str, Field(description="Comma-separated completed items.")] = "",
+    not_completed: Annotated[str, Field(description="Comma-separated items not completed (with reasons).")] = "",
+    assumptions: Annotated[str, Field(description="Comma-separated assumptions made.")] = "",
+    blockers: Annotated[str, Field(description="Comma-separated blockers encountered.")] = "",
+    files_modified: Annotated[str, Field(description="JSON list of {path, change_type, summary} dicts, or empty to auto-detect.")] = "",
+    in_scope: Annotated[str, Field(description="Comma-separated in-scope items.")] = "",
+    out_of_scope: Annotated[str, Field(description="Comma-separated explicitly excluded items.")] = "",
+    next_action: Annotated[str, Field(description="First thing the receiving agent should do.")] = "",
+    priority: Annotated[str, Field(description="P0 / P1 (default) / P2.")] = "P1",
+    to_model: Annotated[str, Field(description="Target model name or \"any\" (default).")] = "any",
 ) -> Dict[str, Any]:
     """Create a handoff receipt when transitioning between agents (Pro).
 
@@ -11477,8 +13132,8 @@ def delimit_handoff_create(
 
 @mcp.tool()
 def delimit_handoff_acknowledge(
-    receipt_id: str = "",
-    notes: str = "",
+    receipt_id: Annotated[str, Field(description="Receipt id to acknowledge. Required (empty string returns an error payload).")] = "",
+    notes: Annotated[str, Field(description="Optional notes from the receiving agent.")] = "",
 ) -> Dict[str, Any]:
     """Acknowledge a pending handoff receipt before starting work (Pro).
 
@@ -11522,7 +13177,7 @@ def delimit_handoff_acknowledge(
 
 @mcp.tool()
 def delimit_handoff_list(
-    status: str = "pending",
+    status: Annotated[str, Field(description="\"pending\" (default), \"acknowledged\", or \"all\".")] = "pending",
 ) -> Dict[str, Any]:
     """List session handoff receipts (Pro).
 
@@ -11614,10 +13269,10 @@ def main():
 
 @mcp.tool()
 def delimit_content_intel_daily(
-    date: str = "",
-    since_hours: int = 72,
-    top_n: int = 5,
-    email: bool = True,
+    date: Annotated[str, Field(description="ISO date (YYYY-MM-DD). Default = today UTC.")] = "",
+    since_hours: Annotated[int, Field(description="Trailing window for clustering. Default 72.")] = 72,
+    top_n: Annotated[int, Field(description="Max topics to draft per channel. Default 5.")] = 5,
+    email: Annotated[bool, Field(description="Send the digest email. Default True.")] = True,
 ) -> Dict[str, Any]:
     """Run the daily content intelligence digest (LED-797).
 
@@ -11661,7 +13316,7 @@ def delimit_content_intel_daily(
 
 
 @mcp.tool()
-def delimit_content_intel_topic(keyword: str, since_hours: int = 168) -> Dict[str, Any]:
+def delimit_content_intel_topic(keyword: Annotated[str, Field(description="Topic keyword to probe (e.g. \"openapi\", \"claude code\"). Required.")], since_hours: Annotated[int, Field(description="Trailing window in hours. Default 168 (7 days).")] = 168) -> Dict[str, Any]:
     """On-demand content intelligence probe for a single keyword (LED-797).
 
     When to use: for ad-hoc topic research — runs the same
@@ -11698,7 +13353,7 @@ def delimit_content_intel_topic(keyword: str, since_hours: int = 168) -> Dict[st
 
 
 @mcp.tool()
-def delimit_content_intel_weekly(date: str = "") -> Dict[str, Any]:
+def delimit_content_intel_weekly(date: Annotated[str, Field(description="ISO date (YYYY-MM-DD). Default = today UTC.")] = "") -> Dict[str, Any]:
     """Run the weekly content intelligence summary (LED-797).
 
     When to use: weekly (Mon 09:00 UTC via cron) to roll up the top
@@ -11735,7 +13390,7 @@ def delimit_content_intel_weekly(date: str = "") -> Dict[str, Any]:
 
 
 @mcp.tool()
-def delimit_hot_reload(action: str = "status", interval: float = 2.0) -> Dict[str, Any]:
+def delimit_hot_reload(action: Annotated[str, Field(description="\"start\", \"stop\", \"status\" (default), or \"tick\".")] = "status", interval: Annotated[float, Field(description="Poll interval in seconds (used on start). Default 2.0.")] = 2.0) -> Dict[str, Any]:
     """Control the cross-session MCP hot-reload watcher (LED-799).
 
     When to use: when developing tools and you want other live Claude
@@ -11789,7 +13444,7 @@ except Exception as _e:
 
 
 @mcp.tool()
-def delimit_reddit_fetch_thread(thread_id: str) -> Dict[str, Any]:
+def delimit_reddit_fetch_thread(thread_id: Annotated[str, Field(description="Reddit thread id (e.g. \"OSKJVH7f35\") or a full comments URL — the URL form is parsed to extract the id.")]) -> Dict[str, Any]:
     """Fetch and score a single Reddit thread by id or URL.
 
     When to use: when a sensor or operator references a specific Reddit
