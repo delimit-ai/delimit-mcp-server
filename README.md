@@ -5,7 +5,7 @@
 Wrap any AI coding assistant (Claude Code, Codex, Cursor, Gemini CLI) with a governance chain that runs your gates, records what changed, and signs a replayable receipt for every merge.
 
 [![npm](https://img.shields.io/npm/v/delimit-cli)](https://www.npmjs.com/package/delimit-cli)
-[![Tests](https://img.shields.io/badge/tests-1640%2B%20passing-brightgreen)](https://github.com/delimit-ai/delimit-mcp-server)
+[![Tests](https://img.shields.io/badge/tests-4800%2B%20passing-brightgreen)](https://github.com/delimit-ai/delimit-mcp-server)
 [![GitHub Action](https://img.shields.io/badge/GitHub%20Action-latest-blue)](https://github.com/marketplace/actions/delimit-api-governance)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Glama Score](https://glama.ai/mcp/servers/delimit-ai/delimit-mcp-server/badges/score.svg)](https://glama.ai/mcp/servers/delimit-ai/delimit-mcp-server/score)
@@ -86,7 +86,7 @@ npx delimit-cli init        # Sets up governance + drift baseline
 
 ---
 
-## What's New in v4.3
+## What's New
 
 *Gate every AI-assisted invocation. Ship the receipts.*
 
@@ -114,9 +114,9 @@ delimit ai-sbom -o ./ai-sbom.json
 #   → components: 4 models detected, 187 gates run
 ```
 
-## What's New in v4.20
+## Earlier releases
 
-*The highest state of AI governance.*
+*The highest state of AI governance — earlier features still active.*
 
 - **`delimit doctor`** -- 14 prescriptive diagnostics. Every failure prints the exact command to fix it. `--ci` for pipelines, `--fix` for auto-repair.
 - **`delimit simulate`** -- policy dry-run. See what would be blocked before you commit. The `terraform plan` for API governance.
@@ -257,7 +257,7 @@ npx delimit-cli models --status                   # Show current model config
 npx delimit-cli status                           # Compact dashboard of your Delimit setup
 npx delimit-cli doctor                           # Check setup health
 npx delimit-cli uninstall --dry-run              # Preview removal
-npx delimit-cli wrap -- claude -p "..."          # Gate any AI-assisted CLI + signed attestation (v4.3)
+npx delimit-cli wrap -- claude -p "..."          # Gate any AI-assisted CLI + signed attestation
 npx delimit-cli wrap --max-time 60 -- codex "..."# With kill switch + handoff on timeout
 npx delimit-cli trust-page -o ./trust            # Render attestations into a static trust page
 npx delimit-cli ai-sbom -o ./ai-sbom.json        # Build a CycloneDX-AI bill of materials
