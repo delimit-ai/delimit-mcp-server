@@ -32,8 +32,9 @@ Every wrapped run emits a `delimit.attestation.v1` bundle: repo head before/afte
 
 ## See it in action
 
-Worked example, real OSS repo, every claim verifiable:
+Worked examples, real artifacts, every claim verifiable:
 
+- **[Cross-agent handoff: one artifact, four CLIs](https://delimit.ai/reports/cross-agent-handoff)**: structured session handoff between Claude Code, Codex, Cursor, and Gemini CLI through a single JSON record at `~/.delimit/sessions/`. Persistent context across sessions, same artifact across four CLIs.
 - **[cal.com v2 API attestation](https://delimit.ai/reports/cal-com-v2-attestation)**: full diff, signed verdict, replayable bundle. Runs the same chain you get on day one.
 
 For the schema and signing methodology behind every report, see **[delimit.ai/methodology/mcp-attestation](https://delimit.ai/methodology/mcp-attestation)**.
