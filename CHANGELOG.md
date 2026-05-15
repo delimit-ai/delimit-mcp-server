@@ -36,14 +36,17 @@ customizations around our managed section).
 - Documentation refreshes: cross-agent-handoff worked example surfaced on README,
   test-count badge bumped, misleading version stamps removed.
 
-### Known issue (pre-existing, fix tracked)
+### Known issue (pre-existing, fix tracked) — **RETRACTED 2026-05-15**
 
-- **`delimit attest mcp` exit codes** (LED-1403): on tool error (e.g. no
-  lockfile → npm audit unavailable) and unknown attestation kind, the CLI
-  currently returns exit 1 instead of the expected exit 2. CI/CD pipelines
-  that gate on tier-2 (treating "tool unavailable" as a hard error vs.
-  "fail" which is a soft check) should pin this expectation. Tracked for
-  fix in a follow-up release.
+> ~~**`delimit attest mcp` exit codes** (LED-1403): on tool error (e.g. no
+> lockfile → npm audit unavailable) and unknown attestation kind, the CLI
+> currently returns exit 1 instead of the expected exit 2.~~
+>
+> **Retraction:** the original report was a phantom test failure caused by a
+> corrupted local git worktree (LED-1401), not a real CLI bug. On a clean
+> clone, all 6 `attest-mcp` test suites pass and the CLI returns the correct
+> exit codes (0 pass+skip / 1 fail / 2 error per STR-656). LED-1403 closed
+> `not_reproducible`. No customer action required.
 
 
 ## [4.5.2] - 2026-05-02
