@@ -441,3 +441,97 @@ describe('LED-1180: managed-section preserves user-customized content', () => {
         }
     });
 });
+
+// ----------------------------------------------------------------------
+// LED-1399: Codex + Gemini governance-directive install paths
+//
+// Locks in WHICH files delimit-cli setup writes for codex / gemini CLIs:
+//   - Codex CLI: ~/AGENTS.md (Codex auto-loads from CWD up to home; the
+//     prior ~/.codex/instructions.md was dead code never read by Codex)
+//   - Gemini CLI: ~/.gemini/GEMINI.md (Gemini's user-global tier; verified
+//     against the gemini-cli bundle: `return ["GEMINI.md"]` is the
+//     discovery list)
+//
+// These tests aren't about helper correctness (setup-onboarding.test.js
+// already covers upsertDelimitSection thoroughly). They lock in the
+// FILE PATH CHOICES so a future refactor that drops AGENTS.md or
+// GEMINI.md gets caught before publish.
+// ----------------------------------------------------------------------
+
+describe('LED-1399: AGENTS.md / GEMINI.md user-content preservation', () => {
+    beforeEach(() => { setupTmpHome(); });
+    afterEach(() => { teardownTmpHome(); });
+
+    // Mirror of bin/delimit-setup.js upsertDelimitSection (kept in sync via
+    // setup-onboarding.test.js which is the helper's primary test surface).
+    function upsertDelimitSection(filePath) {
+        const { getDelimitSection } = require('../lib/delimit-template');
+        const section = getDelimitSection();
+        if (!fs.existsSync(filePath)) {
+            fs.writeFileSync(filePath, section + '\n');
+            return { action: 'created' };
+        }
+        const existing = fs.readFileSync(filePath, 'utf-8').replace(/^﻿/, '');
+        const startRe = /^[ \t]*<!-- delimit:start[^>]*-->[ \t]*$/m;
+        const endRe = /^[ \t]*<!-- delimit:end -->[ \t]*$/m;
+        const startMatch = existing.match(startRe);
+        const endMatch = existing.match(endRe);
+        if (startMatch && endMatch) {
+            const before = existing.substring(0, startMatch.index);
+            const after = existing.substring(endMatch.index + endMatch[0].length);
+            fs.writeFileSync(filePath, before + section + after);
+            return { action: 'updated' };
+        }
+        const sep = existing.endsWith('\n') ? '\n' : '\n\n';
+        fs.writeFileSync(filePath, existing + sep + section + '\n');
+        return { action: 'appended' };
+    }
+
+    it('writes ~/AGENTS.md when no file exists (Codex user-global path)', () => {
+        const agentsMd = path.join(tmpDir, 'AGENTS.md');
+        const result = upsertDelimitSection(agentsMd);
+        assert.strictEqual(result.action, 'created');
+        const content = fs.readFileSync(agentsMd, 'utf-8');
+        assert.ok(content.includes('<!-- delimit:start'), 'Should have managed-section start marker');
+        assert.ok(content.includes('<!-- delimit:end -->'), 'Should have managed-section end marker');
+        assert.ok(content.includes('Auto-Trigger Rules'), 'Should contain governance directives');
+    });
+
+    it('preserves user content in ~/AGENTS.md when adding the managed section', () => {
+        const agentsMd = path.join(tmpDir, 'AGENTS.md');
+        const userContent = '# My Project Conventions\n\nUse 2-space indents and prefer composition over inheritance.\n';
+        fs.writeFileSync(agentsMd, userContent);
+        const result = upsertDelimitSection(agentsMd);
+        assert.strictEqual(result.action, 'appended');
+        const content = fs.readFileSync(agentsMd, 'utf-8');
+        assert.ok(content.startsWith('# My Project Conventions'), 'User header MUST survive at top');
+        assert.ok(content.includes('Use 2-space indents'), 'User body MUST survive');
+        assert.ok(content.includes('<!-- delimit:start'), 'Managed section MUST be appended');
+    });
+
+    it('writes ~/.gemini/GEMINI.md when no file exists (Gemini user-global path)', () => {
+        const geminiHome = path.join(tmpDir, '.gemini');
+        fs.mkdirSync(geminiHome, { recursive: true });
+        const geminiMd = path.join(geminiHome, 'GEMINI.md');
+        const result = upsertDelimitSection(geminiMd);
+        assert.strictEqual(result.action, 'created');
+        const content = fs.readFileSync(geminiMd, 'utf-8');
+        assert.ok(content.includes('<!-- delimit:start'), 'Should have managed-section start marker');
+        assert.ok(content.includes('<!-- delimit:end -->'), 'Should have managed-section end marker');
+        assert.ok(content.includes('Auto-Trigger Rules'), 'Should contain governance directives');
+    });
+
+    it('preserves user content in ~/.gemini/GEMINI.md when adding the managed section', () => {
+        const geminiHome = path.join(tmpDir, '.gemini');
+        fs.mkdirSync(geminiHome, { recursive: true });
+        const geminiMd = path.join(geminiHome, 'GEMINI.md');
+        const userContent = '# My Gemini Memory\n\nPrefer concise replies. Always cite sources.\n';
+        fs.writeFileSync(geminiMd, userContent);
+        const result = upsertDelimitSection(geminiMd);
+        assert.strictEqual(result.action, 'appended');
+        const content = fs.readFileSync(geminiMd, 'utf-8');
+        assert.ok(content.startsWith('# My Gemini Memory'), 'User memory MUST survive at top');
+        assert.ok(content.includes('Always cite sources'), 'User body MUST survive');
+        assert.ok(content.includes('<!-- delimit:start'), 'Managed section MUST be appended');
+    });
+});

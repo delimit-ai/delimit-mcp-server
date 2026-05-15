@@ -429,10 +429,15 @@ describe('setup script structure', () => {
         assert.ok(setupContent.includes('delimit:end'), 'Should use end marker');
     });
 
-    it('setup script handles codex and cursor instruction files', () => {
+    it('setup script handles codex, gemini, and cursor instruction files (LED-1399)', () => {
         const setupPath = path.join(__dirname, '..', 'bin', 'delimit-setup.js');
         const setupContent = fs.readFileSync(setupPath, 'utf-8');
-        assert.ok(setupContent.includes('codexInstructions'), 'Should handle codex instructions');
+        // LED-1399: Codex CLI auto-loads AGENTS.md (from CWD up to home),
+        // not ~/.codex/instructions.md. The variable name is `agentsMd`.
+        assert.ok(setupContent.includes('AGENTS.md'), 'Should write Codex AGENTS.md (LED-1399)');
+        // LED-1399: Gemini CLI auto-loads ~/.gemini/GEMINI.md as user-global.
+        assert.ok(setupContent.includes('GEMINI.md'), 'Should write Gemini GEMINI.md (LED-1399)');
+        // Cursor rules path unchanged.
         assert.ok(setupContent.includes('cursorRules'), 'Should handle cursor rules');
     });
 });
