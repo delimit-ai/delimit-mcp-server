@@ -1,6 +1,51 @@
 # Changelog
 
 
+## [4.6.0] - 2026-05-15
+
+### Added — Codex CLI + Gemini CLI auto-trigger directives (LED-1399)
+
+`delimit setup` now installs governance directives at the **verified-effective**
+locations for Codex CLI and Gemini CLI, closing the gap where users of those
+CLIs got the delimit MCP server wired but **not** the auto-trigger behaviors
+(`delimit_test_smoke` after edits, `delimit_repo_diagnose` before commit, etc.)
+that Claude Code users already get.
+
+**What changed:**
+- **Codex CLI**: writes `~/AGENTS.md` (verified against the Codex binary spec —
+  Codex auto-loads `AGENTS.md` "from CWD up to the root"). The previous
+  `~/.codex/instructions.md` write was dead code; Codex never read that path.
+- **Gemini CLI**: writes `~/.gemini/GEMINI.md` (verified against the gemini-cli
+  bundle: `return ["GEMINI.md"]` is the discovery list; the global tier is
+  `~/.gemini/GEMINI.md`).
+- Both gated on the respective CLI being installed (directory exists OR
+  `which` finds the binary). Both use the existing managed-section markers
+  (`<!-- delimit:start -->` / `<!-- delimit:end -->`) so user content is
+  preserved on upgrade per the LED-1257 customer-protection rule.
+
+**Backwards-compat:** existing `~/.codex/instructions.md` files from prior
+installs are NOT removed (harmless dead config; deleting could clobber user
+customizations around our managed section).
+
+### Other changes
+
+- **server.json merge-gate framing** (LED-2178): formal merge-gate framing in
+  the public server.json descriptor.
+- **Memory Rules in `delimit init` template** (STR-143): the init-generated
+  CLAUDE.md now includes the canonical Memory Rules section.
+- Documentation refreshes: cross-agent-handoff worked example surfaced on README,
+  test-count badge bumped, misleading version stamps removed.
+
+### Known issue (pre-existing, fix tracked)
+
+- **`delimit attest mcp` exit codes** (LED-1403): on tool error (e.g. no
+  lockfile → npm audit unavailable) and unknown attestation kind, the CLI
+  currently returns exit 1 instead of the expected exit 2. CI/CD pipelines
+  that gate on tier-2 (treating "tool unavailable" as a hard error vs.
+  "fail" which is a soft check) should pin this expectation. Tracked for
+  fix in a follow-up release.
+
+
 ## [4.5.2] - 2026-05-02
 
 ### Hardened — `postinstall.js` never-block-install guard (LED-1188)
