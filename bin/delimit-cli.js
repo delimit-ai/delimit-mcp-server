@@ -4629,9 +4629,19 @@ program
         const prePushPath = path.join(hooksDir, 'pre-push');
         const marker = '# delimit-governance-hook';
 
-        // Resolution order: local node_modules → global PATH → npx fallback.
-        // npx is last because it can fail with Arborist 'extraneous' errors
-        // when a project's node_modules / lockfile drift (LED-1248).
+        // Resolution order: local node_modules → global PATH →
+        // global node_modules direct → npx fallback.
+        //
+        // npx is the LAST resort because on some npm-arborist environments
+        // it crashes with "Cannot read properties of undefined (reading
+        // 'extraneous')" before reaching the CLI (LED-1207, LED-1248). That
+        // failure mode silently breaks the gate and forces --no-verify,
+        // which violates the no-silent-no-verify rule.
+        //
+        // The third tier (`node $(npm root -g)/delimit-cli/bin/delimit-cli.js`)
+        // catches the case where delimit-cli is globally installed but its bin
+        // shim isn't on PATH (npm-installed-but-symlink-missing, fresh CI
+        // containers, etc.) — bypassing npm/npx entirely.
         const preCommitHook = `#!/bin/sh
 ${marker}
 # Delimit API governance gate
@@ -4640,6 +4650,8 @@ if [ -x ./node_modules/.bin/delimit-cli ]; then
   ./node_modules/.bin/delimit-cli check --staged
 elif command -v delimit-cli >/dev/null 2>&1; then
   delimit-cli check --staged
+elif _delimit_global="$(npm root -g 2>/dev/null)/delimit-cli/bin/delimit-cli.js" && [ -f "$_delimit_global" ]; then
+  node "$_delimit_global" check --staged
 else
   npx delimit-cli check --staged
 fi
@@ -4653,6 +4665,8 @@ if [ -x ./node_modules/.bin/delimit-cli ]; then
   ./node_modules/.bin/delimit-cli check --base origin/main
 elif command -v delimit-cli >/dev/null 2>&1; then
   delimit-cli check --base origin/main
+elif _delimit_global="$(npm root -g 2>/dev/null)/delimit-cli/bin/delimit-cli.js" && [ -f "$_delimit_global" ]; then
+  node "$_delimit_global" check --base origin/main
 else
   npx delimit-cli check --base origin/main
 fi
