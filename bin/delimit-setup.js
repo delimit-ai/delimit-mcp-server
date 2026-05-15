@@ -633,12 +633,52 @@ Run full governance compliance checks. Verify security, policy compliance, evide
         log(`  ${dim('  CLAUDE.md already up to date')}`);
     }
 
-    // Codex instructions
-    const codexInstructions = path.join(os.homedir(), '.codex', 'instructions.md');
-    if (fs.existsSync(path.join(os.homedir(), '.codex'))) {
-        const codexResult = upsertDelimitSection(codexInstructions);
-        if (codexResult.action !== 'unchanged') {
-            log(`  ${green('✓')} ${codexResult.action === 'created' ? 'Created' : 'Updated'} ${codexInstructions}`);
+    // Codex instructions: AGENTS.md is the file Codex CLI auto-loads
+    // ("from CWD up to the root", per Codex binary spec). The previous
+    // ~/.codex/instructions.md write was dead code — Codex never read it.
+    // LED-1399: install ~/AGENTS.md (parallels ~/CLAUDE.md) when codex CLI
+    // is present so user-home-rooted sessions pick up governance triggers.
+    const codexHome = path.join(os.homedir(), '.codex');
+    let hasCodex = fs.existsSync(codexHome);
+    if (!hasCodex) {
+        try { execSync('which codex 2>/dev/null', { stdio: 'pipe' }); hasCodex = true; } catch {}
+    }
+    if (hasCodex) {
+        const agentsMd = path.join(os.homedir(), 'AGENTS.md');
+        const agentsResult = upsertDelimitSection(agentsMd);
+        if (agentsResult.action === 'created') {
+            await logp(`  ${green('✓')} Created ${agentsMd} (Codex CLI auto-loads from CWD up to home)`);
+        } else if (agentsResult.action === 'updated') {
+            await logp(`  ${green('✓')} Updated Delimit section in ${agentsMd}`);
+        } else if (agentsResult.action === 'appended') {
+            await logp(`  ${green('✓')} Appended Delimit section to ${agentsMd} (user content preserved)`);
+        } else {
+            log(`  ${dim('  AGENTS.md already up to date')}`);
+        }
+    }
+
+    // Gemini CLI: GEMINI.md is the auto-loaded instruction file
+    // (~/.gemini/GEMINI.md is the user-global tier per Gemini CLI bundle).
+    // LED-1399: install when Gemini CLI is present so governance triggers
+    // fire across-projects without per-repo setup.
+    const geminiHome = path.join(os.homedir(), '.gemini');
+    let hasGemini = fs.existsSync(geminiHome);
+    if (!hasGemini) {
+        try { execSync('which gemini 2>/dev/null', { stdio: 'pipe' }); hasGemini = true; } catch {}
+    }
+    if (hasGemini) {
+        // Ensure ~/.gemini exists before writing the user-global GEMINI.md.
+        try { fs.mkdirSync(geminiHome, { recursive: true, mode: 0o755 }); } catch {}
+        const geminiMd = path.join(geminiHome, 'GEMINI.md');
+        const geminiResult = upsertDelimitSection(geminiMd);
+        if (geminiResult.action === 'created') {
+            await logp(`  ${green('✓')} Created ${geminiMd} (Gemini CLI user-global instructions)`);
+        } else if (geminiResult.action === 'updated') {
+            await logp(`  ${green('✓')} Updated Delimit section in ${geminiMd}`);
+        } else if (geminiResult.action === 'appended') {
+            await logp(`  ${green('✓')} Appended Delimit section to ${geminiMd} (user content preserved)`);
+        } else {
+            log(`  ${dim('  GEMINI.md already up to date')}`);
         }
     }
 
