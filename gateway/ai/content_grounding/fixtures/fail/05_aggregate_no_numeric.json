@@ -1,0 +1,17 @@
+{
+  "event_id": "evt-ledger-LED-555",
+  "type": "release",
+  "date": "2026-04-24T00:00:00Z",
+  "venture": "delimit",
+  "evidence_refs": ["LED-555"],
+  "claims": [
+    {
+      "claim_id": "CLM-LED-555-tests",
+      "type": "aggregate",
+      "text": "Many tests pass.",
+      "evidence_refs": ["LED-555"],
+      "visibility": "public"
+    }
+  ],
+  "visibility": "public"
+}

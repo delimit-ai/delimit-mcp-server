@@ -75,6 +75,7 @@ AUTO_PATTERNS = {
     "test": ["test", "coverage", "smoke"],
     "docs": ["docs", "documentation", "readme"],
     "governance": ["governance", "policy", "compliance"],
+    "build": ["feat", "fix", "task", "implementation"],
 }
 
 
@@ -263,6 +264,14 @@ def get_next_automatable_item(
     return None
 
 
+
+def _run_build(item_id: str, venture: str = "") -> dict:
+    """Run the governed build loop for a specific item (LED-1146)."""
+    from ai.loop_engine import run_governed_iteration
+    # Use a persistent session for the daemon
+    session_id = "daemon-build-loop"
+    return run_governed_iteration(session_id=session_id)
+
 def process_item(item: dict, log_path: Optional[Path] = None) -> dict:
     """Process a single ledger item by running the suggested tool.
 
@@ -293,6 +302,7 @@ def process_item(item: dict, log_path: Optional[Path] = None) -> dict:
         "test": _run_test,
         "governance": _run_governance,
         "docs": _run_docs,
+        "build": _run_build,
     }
 
     runner = tool_map.get(tool)

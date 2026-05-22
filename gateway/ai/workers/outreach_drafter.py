@@ -11,7 +11,6 @@ Cannot: write files, post issues, commit, push.
 
 from __future__ import annotations
 
-import json
 from typing import Any, Dict
 
 from ai.workers.base import Worker, WorkerResult

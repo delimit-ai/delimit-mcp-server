@@ -96,7 +96,34 @@ _PAIN_TO_RELEVANCE: Dict[str, str] = {
     "cost": "new_opportunity",                 # pricing transparency / cost tracking
 }
 
-PROXY_URL = "http://127.0.0.1:4819/reddit-fetch"
+def _load_proxy_url() -> str:
+    """Load proxy URL from the canonical reddit-proxy.json secrets file.
+
+    Single source of truth shared with ai.reddit_proxy. Falls back to the
+    canonical SSH-tunnel localhost endpoint if the secrets file is missing.
+
+    LED-2068b note: the residential proxy is reached via an SSH local-port-
+    forward — `127.0.0.1:4819/reddit-fetch` is the LOCAL endpoint of the
+    tunnel into the *actual* residential machine that performs the Reddit
+    fetch. There is also a local Python wrapper at `:8787/fetch` (systemd
+    unit `delimit-reddit-proxy.service`) — that one runs on this datacenter
+    VM and gets 403 from Reddit's anti-bot wall, so it serves nothing
+    useful. Do not change the default away from 4819 without first
+    confirming the SSH tunnel is no longer the canonical path.
+    """
+    try:
+        secrets_path = Path.home() / ".delimit" / "secrets" / "reddit-proxy.json"
+        if secrets_path.exists():
+            data = json.loads(secrets_path.read_text())
+            url = (data.get("proxy_url") or "").strip()
+            if url:
+                return url
+    except Exception:
+        pass
+    return "http://127.0.0.1:4819/reddit-fetch"
+
+
+PROXY_URL = _load_proxy_url()
 SCANS_DIR = Path.home() / ".delimit" / "reddit_scans"
 VENTURES_CONFIG_PATH = Path.home() / ".delimit" / "social_target_ventures.json"
 
@@ -143,29 +170,20 @@ def _fetch_subreddit(
     The proxy endpoint expects a query parameter ``url`` containing the
     actual Reddit JSON URL.  Returns a list of extracted post dicts.
     """
-    reddit_url = f"https://www.reddit.com/r/{subreddit}/{sort}.json?limit={limit}&raw_json=1"
-    fetch_url = f"{proxy_url}?url={urllib.request.quote(reddit_url, safe='')}"
-
-    req = urllib.request.Request(
-        fetch_url,
-        headers={"User-Agent": "delimit-scanner/1.0", "Accept": "application/json"},
-    )
-
+    # Delegate to ai.reddit_proxy.fetch_subreddit which has the canonical
+    # 3-tier fallback chain (residential proxy → direct → PullPush archive).
+    # Datacenter IPs get 403 from Reddit even with auth; the freshness filter
+    # in reddit_proxy drops stale-archive results so the scanner returns
+    # honest empty rather than fake old data.
+    from ai.reddit_proxy import fetch_subreddit as _proxy_fetch
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            body = json.loads(resp.read().decode())
+        raw = _proxy_fetch(subreddit, sort=sort, limit=limit) or []
     except Exception as exc:
         logger.warning("Failed to fetch r/%s: %s", subreddit, exc)
         return []
 
-    # Reddit returns {"data": {"children": [...]}}
-    children = []
-    if isinstance(body, dict):
-        children = body.get("data", {}).get("children", [])
-
     posts: List[Dict[str, Any]] = []
-    for child in children:
-        d = child.get("data", {})
+    for d in raw:
         if not d:
             continue
         # Skip stickied
@@ -452,14 +470,19 @@ def score_and_classify(
         final_score = engagement * fresh_mult * comment_opp * relevance_mult
         is_karma = group == "karma_building"
 
-        # Classification
-        if post.get("stickied") or age_h > 48 or comments > 100:
+        # Classification (LED-1335 freshness tightening 2026-05-12: founder
+        # explicit "we want fresh posts for highest visibility." Comment
+        # visibility decays sharply after 6h, marginal after 12h, ~zero
+        # after 24h. Old behavior let 12-48h posts through as medium and
+        # the daemon drafted on them. New thresholds: hard-skip > 24h,
+        # high_priority < 6h, medium_priority < 12h, low_priority < 24h.)
+        if post.get("stickied") or age_h > 24 or comments > 100:
             priority = "skip"
-        elif final_score >= 30 and age_h < 12 and comments < 50:
+        elif final_score >= 30 and age_h < 6 and comments < 50:
             priority = "high_priority"
-        elif final_score >= 10 or (len(tags) >= 2 and age_h < 24):
+        elif (final_score >= 10 and age_h < 12) or (len(tags) >= 2 and age_h < 12):
             priority = "medium_priority"
-        elif final_score >= 3:
+        elif final_score >= 3 and age_h < 24:
             priority = "low_priority"
         else:
             priority = "skip"
@@ -706,6 +729,7 @@ def monitor_user_engagement(username: str = "delimitdev", proxy_url: str = PROXY
             cd = cc.get("data", {})
             if cd.get("id") != comment_id:
                 continue
+            our_comment_body = cd.get("body") or ""
             replies_listing = cd.get("replies")
             if not isinstance(replies_listing, dict):
                 continue
@@ -714,7 +738,10 @@ def monitor_user_engagement(username: str = "delimitdev", proxy_url: str = PROXY
                 rd = rc.get("data", {})
                 reply_id = rd.get("id", "")
                 reply_author = rd.get("author", "")
-                reply_body = (rd.get("body") or "")[:200]
+                # Capture full reply body for the follow-up drafter (the alert
+                # email's short preview still uses the truncated form below).
+                reply_body_full = rd.get("body") or ""
+                reply_body = reply_body_full[:200]
                 if not reply_id or reply_author == username:
                     continue
                 seen_key = f"reply_{reply_id}"
@@ -726,6 +753,8 @@ def monitor_user_engagement(username: str = "delimitdev", proxy_url: str = PROXY
                     "reply_id": reply_id,
                     "reply_author": reply_author,
                     "reply_body": reply_body,
+                    "reply_body_full": reply_body_full,
+                    "our_comment_body": our_comment_body,
                     "subreddit": d.get("subreddit", ""),
                     "title": d.get("link_title", ""),
                     "message": f"u/{reply_author} replied to your comment in r/{d.get('subreddit','')}: {reply_body[:100]}",

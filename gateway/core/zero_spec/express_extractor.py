@@ -67,7 +67,7 @@ function extractPathParams(routePath) {
   const params = [];
   const re = /:([A-Za-z0-9_]+)/g;
   let m;
-  while ((m = re.exec(routePath)) !== null) {  # nosec B-exec_usage: AST exec of a sandboxed Express route extractor on parsed code
+  while ((m = re.exec(routePath)) !== null) {  // nosec B-exec_usage: AST exec of a sandboxed Express route extractor on parsed code
     params.push(m[1]);
   }
   return params;

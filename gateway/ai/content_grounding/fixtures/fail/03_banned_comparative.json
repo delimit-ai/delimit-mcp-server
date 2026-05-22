@@ -1,0 +1,17 @@
+{
+  "event_id": "evt-ledger-LED-777",
+  "type": "feature_shipped",
+  "date": "2026-04-24T00:00:00Z",
+  "venture": "delimit",
+  "evidence_refs": ["LED-777"],
+  "claims": [
+    {
+      "claim_id": "CLM-LED-777-compare",
+      "type": "comparative",
+      "text": "Delimit is faster than openapi-diff in every benchmark.",
+      "evidence_refs": ["LED-777"],
+      "visibility": "public"
+    }
+  ],
+  "visibility": "public"
+}

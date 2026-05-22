@@ -122,9 +122,38 @@ PROPOSE_PR_AUTHOR_NAME = "delimit-bot"
 PROPOSE_PR_AUTHOR_EMAIL = "bot@delimit.ai"
 # Hard cap on patch size — rejects accidental mega-diffs that would
 # require a different review workflow anyway.
-PROPOSE_PR_MAX_FILES = 50
-PROPOSE_PR_MAX_FILE_BYTES = 256 * 1024  # 256 KiB / file
-PROPOSE_PR_MAX_TOTAL_BYTES = 1024 * 1024  # 1 MiB / PR
+#
+# LED-2238: bumped from 256KB → 5MB per file and 1MB → 50MB per PR
+# after the original limits blocked the autonomous-build pipeline on
+# any task touching ai/server.py (542KB), ai/loop_engine.py, or other
+# normal-sized gateway files. The old limits assumed payloads went
+# through GitHub's content-API (which has its own ~50MB cap), but
+# _act_propose_pr writes via local git (`write_text` → `git add` →
+# `git commit` → `git push`), which has no API-payload constraint —
+# real git push supports multi-GB content. The caps stay as defense
+# against runaway model output, just at a level that doesn't reject
+# realistic source files.
+#
+# All three caps are overridable via env vars so an operator with a
+# legitimately-larger payload can opt in without a code change:
+#   DELIMIT_PROPOSE_PR_MAX_FILES        (default 50)
+#   DELIMIT_PROPOSE_PR_MAX_FILE_BYTES   (default 5_242_880 = 5MB)
+#   DELIMIT_PROPOSE_PR_MAX_TOTAL_BYTES  (default 52_428_800 = 50MB)
+def _env_int(name: str, default: int) -> int:
+    """Read positive integer from env var; fall back to default on bad/unset."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        v = int(raw)
+        return v if v > 0 else default
+    except ValueError:
+        return default
+
+
+PROPOSE_PR_MAX_FILES = _env_int("DELIMIT_PROPOSE_PR_MAX_FILES", 50)
+PROPOSE_PR_MAX_FILE_BYTES = _env_int("DELIMIT_PROPOSE_PR_MAX_FILE_BYTES", 5 * 1024 * 1024)  # 5 MiB / file
+PROPOSE_PR_MAX_TOTAL_BYTES = _env_int("DELIMIT_PROPOSE_PR_MAX_TOTAL_BYTES", 50 * 1024 * 1024)  # 50 MiB / PR
 
 
 class ActionError(Exception):

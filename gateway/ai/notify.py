@@ -158,6 +158,30 @@ def _record_notification(entry: Dict[str, Any]) -> None:
         logger.warning("Failed to record notification: %s", e)
 
 
+_QUARANTINE_FILE = Path.home() / ".delimit" / "notifications_quarantine.jsonl"
+
+
+def _quarantine_record(entry: Dict[str, Any]) -> None:
+    """Log a notification that was suppressed by the test-mode / skip-marker
+    guard in send_notification(). The would-be email is NOT delivered;
+    this file is for audit only.
+
+    Added 2026-05-01 after gateway pytest runs were repeatedly leaking
+    [Test] / [Test Subject] / [DELIMIT_TEST_MODE=1 skipped] emails into
+    the founder's real inbox via test paths that called send_notification
+    without stubbing.
+    """
+    import datetime as _dt
+    try:
+        _QUARANTINE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        entry = {**entry, "ts": _dt.datetime.now(_dt.timezone.utc).isoformat()}
+        with open(_QUARANTINE_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+    except OSError:
+        # Quarantine log failure must not crash the caller.
+        pass
+
+
 def record_owner_action(entry: Dict[str, Any]) -> None:
     """Append an owner-action record for dashboard and async fanout."""
     try:
@@ -895,6 +919,45 @@ def send_email(
             "intent_logged": True,
         }
 
+    # RFC 2606 reserved test domains — never relay. A test fixture in
+    # tests/test_notify_routing.py once passed email_to="lead@example.com"
+    # through to a real SMTP send, generating 220 spam-bounces against
+    # pro@delimit.ai before the fixture was patched. Refuse here so any
+    # future regression fails fast instead of silently poisoning sender rep.
+    # Tests that mock smtplib can set DELIMIT_ALLOW_TEST_RECIPIENTS=1 to
+    # bypass this guard since their mocked transport doesn't actually relay.
+    _RFC2606_TEST_DOMAINS = (
+        "example.com", "example.net", "example.org",
+        "test", "invalid", "localhost",
+    )
+    recipient_domain = smtp_to.rsplit("@", 1)[-1].strip().lower()
+    is_reserved = (
+        recipient_domain in _RFC2606_TEST_DOMAINS
+        or recipient_domain.endswith(".example")
+        or recipient_domain.endswith(".test")
+        or recipient_domain.endswith(".invalid")
+        or recipient_domain.endswith(".localhost")
+    )
+    if is_reserved and not os.environ.get("DELIMIT_ALLOW_TEST_RECIPIENTS"):
+        record = {
+            "channel": "email",
+            "event_type": event_type,
+            "to": smtp_to,
+            "from": smtp_from,
+            "subject": subject,
+            "timestamp": timestamp,
+            "success": False,
+            "reason": "reserved_test_domain",
+        }
+        _record_notification(record)
+        return {
+            "channel": "email",
+            "delivered": False,
+            "timestamp": timestamp,
+            "error": f"Refusing to send: '{smtp_to}' is an RFC 2606 reserved test domain.",
+            "intent_logged": True,
+        }
+
     subj = subject or f"Delimit: {event_type or 'Notification'}"
     html_body = _render_html_email(subj, email_body, event_type)
 
@@ -1041,9 +1104,17 @@ def _enforce_email_protocol(subject: str, message: str, event_type: str) -> tupl
     """Validate and fix email against the protocol. Returns (subject, message, warnings)."""
     warnings = []
 
-    # 1. Subject must have a valid prefix bracket
-    if not any(subject.startswith(p) for p in _VALID_SUBJECT_PREFIXES):
-        # Try to infer from event_type
+    # 1. Subject must have SOME bracket prefix (e.g. [DONE], [POSTED], [FIX])
+    # so the founder can triage on mobile.
+    #
+    # Founder-tone fix 2026-04-28: previously the validator hard-rejected any
+    # bracket prefix not in _VALID_SUBJECT_PREFIXES and injected [INFO] in
+    # front, producing subjects like "[INFO] [DONE] LED-2056 fixed". The
+    # injected prefix overrode the caller's intent and bloated the subject.
+    # Now any `[WORD]` prefix (uppercase short tag) is accepted as-is, and
+    # we only inject when there's no bracket at all.
+    _has_any_bracket_prefix = bool(_re.match(r"^\[[A-Z][A-Z0-9_-]{0,15}\]\s", subject))
+    if not _has_any_bracket_prefix:
         # LED-969: customer-facing emails should not get bracket prefixes.
         # Any event_type starting with "customer_" is external-facing and
         # the subject should be sent as-is (clean, professional).
@@ -1134,6 +1205,39 @@ def send_notification(
     """Route a notification to the appropriate channel."""
     if not message:
         return {"error": "message is required"}
+
+    # ── Contaminated-content guard ────────────────────────────────────
+    # Every gateway pytest run was spamming the founder's real inbox via
+    # tests that called send_notification without stubbing SMTP. Two
+    # failure modes observed (2026-05-01):
+    #   1. Bare test invocations (subject="Test", message="test")
+    #   2. Social drafts where _call_model returned the
+    #      "[X skipped under DELIMIT_TEST_MODE=1 ...]" sentinel and the
+    #      sentinel string ended up as the draft body.
+    # Either is a noise/leak event. Refuse to send; log to a quarantine
+    # JSONL so the would-be content is auditable.
+    #
+    # Surgical match — only on the specific leaked shapes. Tests that
+    # correctly mock smtplib.SMTP keep working (their mock fires inside
+    # send_email, after this guard, and returns a fake delivered=True).
+    if channel in ("email", "webhook", "slack", "telegram"):
+        body = message or ""
+        subj = subject or ""
+        leak_match = (
+            "skipped under DELIMIT_TEST_MODE" in body
+            or "DELIMIT_TEST_MODE=1" in body
+            or (subj.strip().lower() == "test" and body.strip().lower() == "test")
+            or (subj.strip().lower() == "test subject" and body.strip().lower() == "test body")
+        )
+        if leak_match:
+            _quarantine_record({
+                "reason": "leaked_shape",
+                "channel": channel,
+                "subject": subj[:100],
+                "event_type": event_type,
+                "to": to,
+            })
+            return {"skipped": "leaked shape detected — not sent (audit: ~/.delimit/notifications_quarantine.jsonl)"}
 
     # Enforce email protocol for all email notifications
     protocol_warnings = []

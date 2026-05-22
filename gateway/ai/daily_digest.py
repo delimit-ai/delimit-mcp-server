@@ -20,11 +20,10 @@ Call via MCP: delimit_digest(action="run") or scheduled cron.
 from __future__ import annotations
 
 import json
-import time
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict
 
 DIGEST_DIR = Path.home() / ".delimit" / "digest"
 LEDGER_DIR = Path.home() / ".delimit" / "ledger"

@@ -2,7 +2,8 @@
 
 Turns the tweet corpus into a daily topic radar for long-form content
 (Reddit, HN, Dev.to, delimit.ai/blog). See Part 2 of
-/home/delimit/delimit-private/specs/SOCIAL_PROMPT_V2_ARCHITECTURE.md.
+``$DELIMIT_PRIVATE_ROOT/specs/SOCIAL_PROMPT_V2_ARCHITECTURE.md`` (defaults
+to ``~/delimit-private/specs/SOCIAL_PROMPT_V2_ARCHITECTURE.md``).
 
 Invariants (per LED-797 acceptance criteria):
 - Every draft cites at least MIN_CITATIONS_PER_DRAFT tweet corpus rows

@@ -1,0 +1,96 @@
+# LED-216 Phase 1 — Capability Currency
+#
+# This file is the single source of truth for what Delimit is allowed to
+# claim in any social draft. The capability_validator.py module reads it
+# at draft emit time and hard-fails any draft that:
+#
+#   * names a banned surface (literal substring), OR
+#   * matches a banned surface regex (e.g. tool-count hero language).
+#
+# Drafts that mention "Delimit" / "@delimit_ai" but reference NO canonical
+# phrase are warned (not failed) so the founder can still review.
+#
+# ──────────────────────────────────────────────────────────────────────
+# GOVERNANCE (mirror of LED-1037 banned-vocabulary gate)
+# ──────────────────────────────────────────────────────────────────────
+# Edits to this file MUST be gated by `delimit_deliberate` unanimous
+# verdict. Same governance contract as the LED-1037 banned-vocabulary
+# list: any change requires a multi-model panel sign-off (Claude +
+# Gemini + Codex + Grok) before it lands. Silent edits are a policy
+# violation and will be reverted.
+#
+# 30-day review cadence: capabilities rot fast. The `last_reviewed`
+# field below MUST be bumped on every panel-approved edit, and the
+# orchestrator should re-deliberate if `now - last_reviewed >
+# review_cadence_days`.
+# ──────────────────────────────────────────────────────────────────────
+
+version: 1
+last_reviewed: 2026-05-02
+review_cadence_days: 30
+
+allowed_claims:
+  # Each entry: {id, surface_name, description, since_version, evidence_link}
+  - id: attest_mcp
+    surface_name: "delimit attest mcp"
+    description: "Local CLI subcommand that runs the 5-check methodology preview."
+    since_version: 4.5.0
+    evidence_link: https://delimit.ai/methodology/mcp-attestation
+  - id: self_repair_v1
+    surface_name: "self-repair v1 closed loop"
+    description: "Sensor → diagnose → deliberate → apply → verify with founder approval gate."
+    since_version: gateway-2026-05-01
+    evidence_link: https://delimit.ai/methodology/mcp-attestation
+  - id: merge_gate
+    surface_name: "merge gate for AI-written code"
+    description: "Signed, replayable attestation for every AI-assisted merge."
+    since_version: "1.0"
+    evidence_link: https://delimit.ai
+  - id: multi_model_deliberation
+    surface_name: "multi-model deliberation panel"
+    description: "delimit_deliberate runs Claude + Gemini + Codex + Grok to consensus."
+    since_version: "1.0"
+  - id: persistent_context
+    surface_name: "persistent context across sessions"
+    description: "Memory + ledger survive across sessions and models via delimit_revive / delimit_session_handoff."
+  - id: governance_kernel
+    surface_name: "fail-closed governance kernel"
+    description: "Audit trail + evidence_collect at every gate."
+  - id: diff_engine
+    surface_name: "27 breaking-change types"
+    description: "Deterministic diff engine for OpenAPI spec changes."
+    evidence_link: https://delimit.ai/docs/changes
+  - id: github_action
+    surface_name: "delimit-ai/delimit-action GitHub Action"
+    description: "On Marketplace, breaking-change detection on PRs."
+  - id: corp_dashboard
+    surface_name: "delimit_corp_dashboard"
+    description: "Single-call corp status synthesis."
+    since_version: gateway-2026-05-01
+  - id: methodology_v1
+    surface_name: "MCP attestation methodology v1"
+    description: "Public methodology document at delimit.ai/methodology/mcp-attestation."
+
+banned_surfaces:
+  # Strings that MUST NOT appear in any social draft. Validator hard-fails.
+  - "AI OS"
+  - "governance platform"
+  - "one workspace for every AI coding assistant"
+  - "5 capability domains"
+  - "Jamsons OS"
+  - "Delimit OS"
+  - "186 tools"
+
+banned_surface_patterns:
+  # Tool-count hero language patterns — match by regex in validator.
+  - "\\d+ tools"
+  - "\\d+ capability domains"
+
+required_canonical_phrases:
+  # At least one of these MUST appear in any draft that mentions Delimit's
+  # product. If draft mentions Delimit by name and references no canonical
+  # phrase, validator warns (does not hard-fail).
+  - "merge gate"
+  - "signed, replayable attestation"
+  - "AI-written code"
+  - "AI-assisted merge"

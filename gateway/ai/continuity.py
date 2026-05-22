@@ -27,7 +27,25 @@ from typing import Any, Dict, Optional
 
 logger = logging.getLogger("delimit.continuity")
 
-DELIMIT_HOME = Path.home() / ".delimit"
+def _resolve_delimit_home() -> Path:
+    """LED-1188: env-var-aware resolver for the private-state directory.
+
+    Resolution order:
+      1. $DELIMIT_HOME            (preferred — explicit, single source of truth)
+      2. $DELIMIT_NAMESPACE_ROOT  (gateway-compat — predates LED-1188)
+      3. <homedir>/.delimit       (default)
+
+    Mirrors lib/delimit-home.js on the npm side so install-time relocation
+    works identically across the JS CLI and the Python gateway.
+    """
+    for env_key in ("DELIMIT_HOME", "DELIMIT_NAMESPACE_ROOT"):
+        val = os.environ.get(env_key, "").strip()
+        if val:
+            return Path(val)
+    return Path.home() / ".delimit"
+
+
+DELIMIT_HOME = _resolve_delimit_home()
 VENTURES_FILE = DELIMIT_HOME / "ventures.json"
 
 # Directories that hold private continuity state (must never be git-tracked or published)
@@ -410,7 +428,14 @@ def _check_for_leaks(namespace_root: str) -> list:
             )
 
     # Check 3: verify .gitignore coverage in the gateway repo
-    gateway_gitignore = Path("/home/delimit/delimit-gateway/.gitignore")
+    # LED-2107: env-resolved so containers/CI runners outside ~/delimit-gateway work.
+    gateway_root = Path(
+        os.environ.get(
+            "DELIMIT_GATEWAY_ROOT",
+            "/home/delimit/delimit-gateway",
+        )
+    )
+    gateway_gitignore = gateway_root / ".gitignore"
     if gateway_gitignore.exists():
         content = gateway_gitignore.read_text()
         if ".delimit/" not in content and ".delimit/ledger/" not in content:
@@ -427,7 +452,14 @@ def verify_npm_exclusion() -> Dict[str, Any]:
     Checks .npmignore in the npm package for coverage of state dirs.
     Returns a report.
     """
-    npmignore = Path("/home/delimit/npm-delimit/.npmignore")
+    # LED-2107: env-resolved so containers/CI runners outside ~/npm-delimit work.
+    npm_root = Path(
+        os.environ.get(
+            "DELIMIT_NPM_ROOT",
+            "/home/delimit/npm-delimit",
+        )
+    )
+    npmignore = npm_root / ".npmignore"
     result: Dict[str, Any] = {
         "npmignore_exists": npmignore.exists(),
         "covered": [],
@@ -455,8 +487,9 @@ def get_namespace_root() -> Path:
     """Return the current namespace root from env or default.
 
     Other modules can call this instead of hardcoding Path.home() / ".delimit".
+
+    LED-1188 (2026-04-28): now also honors $DELIMIT_HOME (preferred) so the
+    npm CLI and the gateway resolve to the same path under env-var override.
+    Resolution chain matches _resolve_delimit_home() above.
     """
-    env_root = os.environ.get("DELIMIT_NAMESPACE_ROOT", "")
-    if env_root:
-        return Path(env_root)
-    return DELIMIT_HOME
+    return _resolve_delimit_home()

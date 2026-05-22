@@ -32,7 +32,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 # -- Data paths ---------------------------------------------------------------
 
-DELIMIT_HOME = Path.home() / ".delimit"
+# LED-1188: route through the canonical resolver so $DELIMIT_HOME /
+# $DELIMIT_NAMESPACE_ROOT overrides apply uniformly across npm + gateway.
+from .continuity import get_namespace_root  # noqa: E402
+
+DELIMIT_HOME = get_namespace_root()
 LEDGER_DIR = DELIMIT_HOME / "ledger"
 SWARM_DIR = DELIMIT_HOME / "swarm"
 MEMORY_DIR = DELIMIT_HOME / "memory"
@@ -721,7 +725,7 @@ class GovernanceBar(Static):
         bar = self.query_one("#gov-bar", Static)
         ledger_count = len(_load_ledger_items("open", 999))
         swarm = _load_swarm_status()
-        mode_file = Path.home() / ".delimit" / "enforcement_mode"
+        mode_file = DELIMIT_HOME / "enforcement_mode"
         mode = mode_file.read_text().strip() if mode_file.exists() else "default"
 
         # Notification badge

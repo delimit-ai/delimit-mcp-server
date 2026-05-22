@@ -1,0 +1,167 @@
+# PRO_TOOLS single source of truth — LED-1410.
+#
+# This file is the canonical list of every Delimit MCP tool that
+# requires a Pro license. Codegen propagates it into:
+#
+#   - ai/license_core.py    : PRO_TOOLS + FREE_TRIAL_LIMITS (gets
+#                             compiled to .so for paying customers)
+#   - ai/license.py         : Python fallback PRO_TOOLS for customers
+#                             whose platform has no .so, AND the
+#                             extension frozenset that fills in tools
+#                             added after the last compiled build
+#   - ai/rate_limiter.py    : PRO_TOOLS (filtered to non-deliberation
+#                             tools, since DELIBERATION_TOOLS has its
+#                             own tier in rate_limiter)
+#
+# To add or remove a Pro tool:
+#   1. Edit this file
+#   2. Run: python3 scripts/gen_pro_tools.py
+#   3. Commit the regenerated .py files alongside the YAML change
+#
+# CI runs scripts/check_pro_tools_drift.py on every push and fails if
+# any of the three generated files diverge from this manifest.
+#
+# DO NOT add an "extension set" in license.py by hand — that was the
+# class of bug that LED-1260 caught (compiled set diverged from
+# fallback set; customers with the binary got tools free while
+# customers without paid). One YAML, three regenerated callers.
+
+version: 1
+
+# Tools tagged `kind: deliberation` go into the DELIBERATION_TOOLS
+# frozenset in rate_limiter.py (separate rate-limit tier). They are
+# ALSO Pro, but they're not in rate_limiter's PRO_TOOLS frozenset
+# (that one is "pro non-deliberation").
+#
+# `in_compiled` controls whether the tool appears in license_core.py's
+# baked-in PRO_TOOLS set (which gets compiled into the .so customers
+# receive). License.py's fallback + extension sets always include
+# every tool here regardless of in_compiled, so the gate is consistent
+# for non-binary customers. The split exists because:
+#   - true  → tool is gated by gate_tool() (the function that ships
+#             in the .so). Binary customers see this tool as Pro.
+#   - false → tool is in the fallback set but NOT in the compiled set.
+#             Binary customers' gate_tool() returns None (not gated).
+#             Non-binary customers see the tool as Pro via the fallback.
+# The `false` entries are a historical leak — LED-1260 surfaced this
+# class of bug and added the affected tools to the extension/fallback
+# but did NOT close the gate-side gap. The codegen here preserves the
+# current behavior verbatim; closing the gap requires founder
+# ratification per CLAUDE.md "What Constitutes a Breaking Change for
+# Users" (changes default behavior for paying customers). Track at
+# LED-1454 (PR-B follow-up).
+#
+# `free_trial_limit` lets a tool be called N times before requiring a
+# license (used by license_core's FREE_TRIAL_LIMITS dict). Only set
+# this on tools where a free trial makes operational sense; most Pro
+# tools should NOT be partially-free.
+
+tools:
+  # ── Deliberation (separate rate tier) ────────────────────────────
+  - {name: delimit_deliberate,           kind: deliberation, free_trial_limit: 3}
+  # LED-1260 leaky-gap (in_compiled: false) — landed AFTER the
+  # compiled set was last built. LED-1454 ratifies the closure.
+  - {name: delimit_security_deliberate,  kind: deliberation, in_compiled: false}
+
+  # ── Governance (deep) ────────────────────────────────────────────
+  - {name: delimit_gov_evaluate,         kind: pro, category: governance}
+  - {name: delimit_gov_policy,           kind: pro, category: governance}
+  - {name: delimit_gov_run,              kind: pro, category: governance}
+  - {name: delimit_gov_verify,           kind: pro, category: governance}
+  # LED-1260 caught this missing from compiled; in_compiled stays false
+  # until LED-1454 closes the leaky-gate gap with founder ratification.
+  - {name: delimit_gov_new_task,         kind: pro, category: governance, in_compiled: false}
+
+  # ── OS layer ─────────────────────────────────────────────────────
+  - {name: delimit_os_plan,              kind: pro, category: os}
+  - {name: delimit_os_status,            kind: pro, category: os}
+  - {name: delimit_os_gates,             kind: pro, category: os}
+
+  # ── Deploy pipeline ──────────────────────────────────────────────
+  - {name: delimit_deploy_plan,          kind: pro, category: deploy}
+  - {name: delimit_deploy_build,         kind: pro, category: deploy}
+  - {name: delimit_deploy_publish,       kind: pro, category: deploy}
+  - {name: delimit_deploy_verify,        kind: pro, category: deploy}
+  - {name: delimit_deploy_rollback,      kind: pro, category: deploy}
+  - {name: delimit_deploy_status,        kind: pro, category: deploy}
+  - {name: delimit_deploy_site,          kind: pro, category: deploy}
+  - {name: delimit_deploy_npm,           kind: pro, category: deploy}
+
+  # ── Memory (note: store + recent are FREE; only search is Pro) ───
+  - {name: delimit_memory_search,        kind: pro, category: memory}
+
+  # ── Vault ────────────────────────────────────────────────────────
+  - {name: delimit_vault_search,         kind: pro, category: vault}
+  - {name: delimit_vault_snapshot,       kind: pro, category: vault}
+  - {name: delimit_vault_health,         kind: pro, category: vault}
+
+  # ── Evidence ─────────────────────────────────────────────────────
+  - {name: delimit_evidence_collect,     kind: pro, category: evidence}
+  - {name: delimit_evidence_verify,      kind: pro, category: evidence}
+
+  # ── Models (provider configuration surface) ──────────────────────
+  - {name: delimit_models,               kind: pro, category: models}
+
+  # ── Observability ────────────────────────────────────────────────
+  - {name: delimit_obs_metrics,          kind: pro, category: observability}
+  - {name: delimit_obs_logs,             kind: pro, category: observability}
+  - {name: delimit_obs_status,           kind: pro, category: observability}
+
+  # ── Release ──────────────────────────────────────────────────────
+  - {name: delimit_release_plan,         kind: pro, category: release}
+  - {name: delimit_release_status,       kind: pro, category: release}
+  - {name: delimit_release_sync,         kind: pro, category: release}
+
+  # ── Cost ─────────────────────────────────────────────────────────
+  - {name: delimit_cost_analyze,         kind: pro, category: cost}
+  - {name: delimit_cost_optimize,        kind: pro, category: cost}
+  - {name: delimit_cost_alert,           kind: pro, category: cost}
+
+  # ── Social ───────────────────────────────────────────────────────
+  - {name: delimit_social_post,          kind: pro, category: social}
+  - {name: delimit_social_generate,      kind: pro, category: social}
+  - {name: delimit_social_history,       kind: pro, category: social}
+  # LED-1260 caught this missing from compiled; in_compiled stays
+  # false until LED-1454 closes the leaky-gate gap.
+  - {name: delimit_social_approve,       kind: pro, category: social, in_compiled: false}
+
+  # ── Security orchestrator ────────────────────────────────────────
+  # LED-1260 leaky-gap (in_compiled: false) — see LED-1454.
+  - {name: delimit_security_ingest,      kind: pro, category: security, in_compiled: false}
+
+  # ── Repo deep ────────────────────────────────────────────────────
+  # LED-1260 leaky-gap on all four repo_* tools (in_compiled: false) —
+  # binary customers got these tools free while non-binary customers
+  # paid via the fallback set. LED-1454 ratifies the closure.
+  - {name: delimit_repo_analyze,         kind: pro, category: repo, in_compiled: false}
+  - {name: delimit_repo_config_audit,    kind: pro, category: repo, in_compiled: false}
+  - {name: delimit_repo_config_validate, kind: pro, category: repo, in_compiled: false}
+  - {name: delimit_repo_diagnose,        kind: pro, category: repo, in_compiled: false}
+
+  # ── Test ─────────────────────────────────────────────────────────
+  # LED-1260 leaky-gap (in_compiled: false) — see LED-1454.
+  - {name: delimit_test_coverage,        kind: pro, category: test, in_compiled: false}
+
+  # ── Screen capture (browser automation) ──────────────────────────
+  - {name: delimit_screen_record,        kind: pro, category: capture}
+  - {name: delimit_screenshot,           kind: pro, category: capture}
+
+  # ── Notifications ────────────────────────────────────────────────
+  - {name: delimit_notify,               kind: pro, category: notify}
+
+  # ── Agent orchestration ──────────────────────────────────────────
+  - {name: delimit_agent_dispatch,       kind: pro, category: agent}
+  - {name: delimit_agent_status,         kind: pro, category: agent}
+  - {name: delimit_agent_complete,       kind: pro, category: agent}
+  - {name: delimit_agent_handoff,        kind: pro, category: agent}
+
+  # ── Autonomous build loop ────────────────────────────────────────
+  # LED-1260 leaky-gap on all four (in_compiled: false) — these landed
+  # AFTER the compiled set was last built. LED-1454 ratifies closure.
+  - {name: delimit_next_task,            kind: pro, category: build_loop, in_compiled: false}
+  - {name: delimit_task_complete,        kind: pro, category: build_loop, in_compiled: false}
+  - {name: delimit_loop_status,          kind: pro, category: build_loop, in_compiled: false}
+  - {name: delimit_loop_config,          kind: pro, category: build_loop, in_compiled: false}
+
+  # ── Worker Pool v2 executor (LED-981) ────────────────────────────
+  - {name: delimit_executor,             kind: pro, category: agent}

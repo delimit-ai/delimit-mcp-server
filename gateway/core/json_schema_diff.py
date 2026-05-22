@@ -15,7 +15,7 @@ general across any single-file JSON Schema.
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 
 class JSONSchemaChangeType(Enum):
@@ -107,6 +107,11 @@ class JSONSchemaDiffEngine:
         self.changes: List[JSONSchemaChange] = []
         self._old_defs: Dict[str, Any] = {}
         self._new_defs: Dict[str, Any] = {}
+        # LED-1395: cycle guard. Self-referential schemas (tree nodes,
+        # linked lists, recursive $refs) would otherwise stack-overflow
+        # the recursion in _compare_schema. Mirrors oasdiff v1.15.3's
+        # mergeProps/resolveItems/resolveContains pointer-dedup.
+        self._seen_pairs: Set[Tuple[int, int]] = set()
 
     # ------------------------------------------------------------------
     # public API
@@ -114,6 +119,7 @@ class JSONSchemaDiffEngine:
 
     def compare(self, old_schema: Dict[str, Any], new_schema: Dict[str, Any]) -> List[JSONSchemaChange]:
         self.changes = []
+        self._seen_pairs = set()
         old_schema = old_schema or {}
         new_schema = new_schema or {}
         self._old_defs = old_schema.get("definitions", {}) or {}
@@ -156,6 +162,17 @@ class JSONSchemaDiffEngine:
     def _compare_schema(self, old: Any, new: Any, path: str) -> None:
         if not isinstance(old, dict) or not isinstance(new, dict):
             return
+        # LED-1395: cycle guard. Track the pre-resolve identity pair so
+        # recursive $ref shapes (tree.children → tree, linked-list
+        # node.next → node) terminate after one visit instead of
+        # stack-overflowing. Identity-based — if the SAME old node is
+        # paired with the SAME new node again at a deeper path, every
+        # comparison further down would be redundant by definition.
+        pair_key = (id(old), id(new))
+        if pair_key in self._seen_pairs:
+            return
+        self._seen_pairs.add(pair_key)
+
         old = self._resolve(old, self._old_defs)
         new = self._resolve(new, self._new_defs)
 
@@ -307,6 +324,13 @@ class JSONSchemaDiffEngine:
             self._add(JSONSchemaChangeType.ADDITIONAL_PROPERTIES_LOOSENED, path,
                       {"old": old_ap, "new": new_ap},
                       f"additionalProperties loosened at {path or '/'}: {old_ap} → {new_ap}")
+        # Typed-map class (Dict[str, Model] / FastAPI + Pydantic default):
+        # `additionalProperties` is itself a schema. Recurse so required-field
+        # add/remove, property changes, and type widening inside the value
+        # schema are not silently invisible. Closes the same long-missed
+        # class oasdiff fixed in v1.15.3 (2026-05-14).
+        if isinstance(old_ap, dict) and isinstance(new_ap, dict):
+            self._compare_schema(old_ap, new_ap, f"{path}/additionalProperties")
 
     def _compare_required(self, old: Dict, new: Dict, path: str) -> None:
         old_req = set(old.get("required", []) or [])

@@ -36,6 +36,11 @@ DLQ_AUTO_PAUSE_THRESHOLD = 20
 TASK_TYPE_ROUTER = {
     # Outreach and social work — Gemini Flash is fast and cheap
     "outreach": "gemini",
+    # LED-2214b: substantive github outreach gets the same default
+    # routing as generic outreach (cheap, fast drafter) but is named
+    # distinctly so a regression that resurrects the generic dispatch
+    # path does not silently land here.
+    "outreach_substantive": "gemini",
     "social": "gemini",
     "content": "gemini",
     "sensor": "gemini",
@@ -160,6 +165,42 @@ def dispatch_task(
     priority = priority.upper().strip() if priority else "P1"
     if priority not in VALID_PRIORITIES:
         return {"error": f"priority must be one of: {', '.join(sorted(VALID_PRIORITIES))}"}
+
+    # LED-1279: anti-duplicate gate. If the title/description/context tags an
+    # LED that's already been shipped (i.e. there's a commit on main mentioning
+    # the LED with date >= LED.created_at), refuse the dispatch and auto-close
+    # the LED. Yesterday's AGT-65A61AD5 wasted three subagent cycles on
+    # LED-1208/9/10, all of which had been shipped in commit 014fb5c on
+    # 2026-05-03. This gate prevents that class of duplicate.
+    try:
+        from ai.dispatch_gate import evaluate_dispatch, extract_led_id, lookup_led_created_at
+
+        led_id_for_gate = extract_led_id(title, description, context)
+        if led_id_for_gate:
+            led_created_at = lookup_led_created_at(led_id_for_gate)
+            refusal = evaluate_dispatch(
+                title=title,
+                description=description,
+                context=context,
+                led_created_at=led_created_at,
+            )
+            if refusal is not None:
+                _append_audit({
+                    "action": "dispatch_refused_shipped",
+                    "title": stripped,
+                    "led_id": refusal.get("led_id"),
+                    "shipped_in": refusal.get("shipped_in", {}).get("short_sha"),
+                    "shipped_repo": refusal.get("shipped_in", {}).get("repo"),
+                })
+                return refusal
+    except Exception as e:  # pragma: no cover — gate must never crash dispatch
+        # If the gate itself blows up, log it and proceed — losing a dispatch
+        # to a gate bug is a worse failure mode than the duplicate it would
+        # have caught.
+        _append_audit({
+            "action": "dispatch_gate_error",
+            "error": str(e)[:200],
+        })
 
     tasks = _load_tasks()
 

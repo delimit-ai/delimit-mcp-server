@@ -1,0 +1,59 @@
+# Delimit self-repair mode config — DRAFT for founder review
+# Once approved, this file moves to ~/.delimit/self_repair.yaml
+#
+# Mode ladder (low → high intensity):
+#   off        — no self-repair; function runs as-is
+#   alert      — KPI watcher emits notify on breach; no diagnose/deliberate/fix
+#   diagnose   — alert + auto-diagnose; evidence emailed; no deliberation
+#   deliberate — alert + diagnose + deliberate; verdict emailed for approval; no auto-apply (BOOTSTRAP)
+#   assist     — above + auto-apply for prompt-rewrite tier (post-graduation)
+#   full       — above + rule-first triage; deliberation only on novel/repeated/cross-function
+#
+# Pause overrides: DELIMIT_SELF_REPAIR_PAUSE=1 (env) or `pause: true` (per-function)
+
+version: 1
+
+# Default mode for any function not explicitly listed below.
+# Conservative-by-default: customers get nothing automatic until they opt in.
+# Note: `off` is quoted because YAML 1.1 parses unquoted `off` as boolean false.
+default_mode: "off"
+
+# Global pause flag (overrides everything when true).
+pause: false
+
+# Per-function mode overrides.
+# Add new functions here as they declare KPIs.
+functions:
+
+  # PILOT (founder-direction 2026-04-30): social outreach starts at `deliberate`
+  # to seed the knowledge base. All fixes still require founder approval.
+  marketing.social_outreach:
+    mode: deliberate
+    pause: false
+    rate_limits:
+      max_deliberations_per_week: 3
+      # LED-1210: per-KPI cap. Without this, a single multi-KPI breach
+      # cycle (e.g. all 7 LED-216 platform floors flatlining at once)
+      # eats the function-wide weekly budget on one pass. 1/week per
+      # KPI keeps unique signals visible while preventing the same KPI
+      # from re-deliberating itself into the budget.
+      max_deliberations_per_kpi_per_week: 1
+      max_auto_applied_fixes_per_week: 1
+    notify:
+      on_breach: true
+      on_diagnose: true
+      on_deliberate_verdict: true
+      on_apply: true
+      on_verify: true
+
+  # All other corp functions start `off` until founder raises them individually.
+  # Listed here for visibility; the absence of an entry would also default `off`.
+  # `off` is quoted because YAML 1.1 parses unquoted `off` as boolean false.
+  engineering.code_quality:
+    mode: "off"
+  sensing.outreach_signals:
+    mode: "off"
+  customer_success.inbox:
+    mode: "off"
+  observability.system_health:
+    mode: "off"

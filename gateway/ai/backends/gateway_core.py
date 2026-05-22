@@ -8,6 +8,8 @@ Adapter Boundary Contract v1.0:
 - No schema forking (gateway types are canonical)
 """
 
+import os
+import re
 import sys
 import json
 import logging
@@ -15,6 +17,58 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("delimit.ai.gateway_core")
+
+
+# LED-1265: identity-string redaction filter for changelog output. Patterns are
+# loaded from the DELIMIT_CHANGELOG_REDACT_PATTERNS env var (semicolon-separated
+# regex|replacement pairs, e.g. "FOO|[redacted];BAR|[redacted]"), NOT hardcoded.
+# Why env-var-driven: hardcoding the patterns inline would itself constitute the
+# leak the filter exists to prevent — the patterns must match the strings being
+# redacted, so committing them to source recreates the leak. When the env var is
+# unset (customer machines), this is a no-op pass-through. The internal gateway
+# sets the env var at process start with the exact patterns to scrub before any
+# auto-generated changelog reaches a public surface.
+
+
+def _load_redaction_patterns() -> List[tuple]:
+    """Parse DELIMIT_CHANGELOG_REDACT_PATTERNS env var into compiled patterns.
+
+    Format: semicolon-separated `regex|replacement` pairs. Empty / unset returns [].
+    Invalid regexes are warned and skipped (filter is fail-open: better to skip a
+    bad pattern than block all output).
+    """
+    raw = os.environ.get("DELIMIT_CHANGELOG_REDACT_PATTERNS", "").strip()
+    if not raw:
+        return []
+    patterns = []
+    for entry in raw.split(";"):
+        entry = entry.strip()
+        if not entry or "|" not in entry:
+            continue
+        pat, _, repl = entry.partition("|")
+        try:
+            patterns.append((re.compile(pat), repl))
+        except re.error as exc:
+            logger.warning("ignoring invalid changelog redaction pattern %r: %s", pat, exc)
+    return patterns
+
+
+_IDENTITY_STRING_PATTERNS = _load_redaction_patterns()
+
+
+def _redact_identity_strings(text: str) -> str:
+    """Apply env-var-loaded redaction patterns to text. No-op when env var unset.
+
+    Defensive filter for changelog generation: immutable commit messages on
+    public repos may contain identity strings the auto-generated CHANGELOG would
+    re-leak to a fresh public surface. The filter is opt-in per gateway
+    deployment via env var; customers don't need to set it.
+    """
+    if not text or not _IDENTITY_STRING_PATTERNS:
+        return text
+    for pattern, replacement in _IDENTITY_STRING_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text
 
 # Add gateway root to path so we can import core modules
 GATEWAY_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -582,6 +636,11 @@ def run_changelog_from_git(
                     ctype = cat
                     break
 
+        # LED-1265: redact founder-holdco identity strings from the commit
+        # subject (msg) and author before they enter any output path.
+        msg = _redact_identity_strings(msg)
+        author = _redact_identity_strings(author)
+
         bucket = ctype if ctype in categories else "other"
         entry = {"sha": sha[:8], "message": msg, "author": author, "category": bucket}
         categories[bucket].append(entry)
@@ -641,9 +700,11 @@ def run_changelog_from_git(
                                     continue
                             except (ValueError, TypeError):
                                 pass  # If parsing fails, include the item
+                        # LED-1265: ledger titles may contain identity strings
+                        # (e.g. LED items filed before the doctrine bound).
                         ledger_items.append({
                             "id": item_id,
-                            "title": item.get("title", ""),
+                            "title": _redact_identity_strings(item.get("title", "")),
                             "priority": item.get("priority", ""),
                         })
         except Exception:
