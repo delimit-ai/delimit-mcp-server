@@ -20,7 +20,7 @@ import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 logger = logging.getLogger("delimit.workers")
 
@@ -121,7 +121,7 @@ class Worker(ABC):
         Must return a WorkerResult with an artifact (work order).
         Must NOT modify any state — output only.
         """
-        ...
+        raise NotImplementedError("Subclasses must implement execute()")
 
     def run(self, ledger_item: Dict[str, Any]) -> WorkerResult:
         """Run the worker with timing + audit trail."""

@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger("delimit.ai.loop_engine")
 
 # ── Configuration ────────────────────────────────────────────────────
-ROOT_LEDGER_PATH = Path("/root/.delimit")
+ROOT_LEDGER_PATH = Path("/root")
 BUILD_SAFE_TYPES = ["feat", "fix", "task"]
 SOCIAL_SAFE_TYPES = ["social", "outreach", "content", "sensor", "strategy"]
 SIGNAL_TYPES = ["strategy"]  # Web scanner signals eligible for triage
@@ -292,7 +292,7 @@ def triage_web_signals(session: Dict[str, Any], max_signals: int = 5) -> List[Di
     """
     from ai.ledger_manager import list_items, add_item, update_item
 
-    result = list_items(status="open", project_path=str(ROOT_LEDGER_PATH))
+    result = list_items(status="open", )
     items = []
     for ledger_items in result.get("items", {}).values():
         items.extend(ledger_items)
@@ -326,11 +326,10 @@ def triage_web_signals(session: Dict[str, Any], max_signals: int = 5) -> List[Di
             try:
                 new_item = add_item(
                     title=classification["title"],
-                    item_type=classification["build_type"],
+                    type=classification["build_type"],
                     priority=classification["priority"],
                     description=classification["description"],
                     venture=classification.get("venture", "delimit"),
-                    project_path=str(ROOT_LEDGER_PATH),
                     tags=["web-signal", f"from:{classification.get('source_signal', '')}"],
                 )
                 actions.append({
@@ -360,7 +359,7 @@ def triage_web_signals(session: Dict[str, Any], max_signals: int = 5) -> List[Di
                 item_id=signal["id"],
                 status="done",
                 note=f"Triaged by build loop → {classification['action']}",
-                project_path=str(ROOT_LEDGER_PATH),
+                
             )
         except Exception as e:
             logger.warning("Failed to mark signal %s as triaged: %s", signal.get("id"), e)
@@ -376,22 +375,62 @@ def next_task(venture: str = "", max_risk: str = "", session_id: str = "") -> Di
     task = get_next_build_task(session)
     if task is None:
         from ai.ledger_manager import list_items
-        result = list_items(status="open", project_path=str(ROOT_LEDGER_PATH))
+        result = list_items(status="open", )
         open_count = sum(len(v) for v in result.get("items", {}).values())
         return {"action": "CONSENSUS", "reason": f"No build-safe items found ({open_count} open items, none actionable)", "remaining_items": open_count, "session": session}
     return {"action": "BUILD", "task": task, "remaining_items": 0, "session": session}
 
 
 def get_next_build_task(session: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Select the next build-safe item from the authoritative root ledger."""
-    from ai.ledger_manager import list_items
-    
-    # Authoritative root ledger check
-    result = list_items(status="open", project_path=str(ROOT_LEDGER_PATH))
-    items = []
-    for ledger_items in result.get("items", {}).values():
-        items.extend(ledger_items)
-        
+    """Select the next build-safe item across all registered ventures.
+
+    LED-2225: items can live in multiple per-venture ledger files (e.g. a
+    P0 wire-report task with a "delimit" venture mirror that gets updated
+    by the dispatched-handler while the wire-report copy stays open). To
+    avoid looping on the same task forever, collect items WITHOUT a status
+    filter, deduplicate by id keeping the most-recently-updated state,
+    THEN filter status=="open". This guarantees we honor in_progress
+    written by any venture's update path.
+    """
+    from ai.ledger_manager import list_items, list_ventures
+
+    ventures = list_ventures().get("ventures", {})
+    v_names = ["root"] + [v for v in ventures.keys() if v != "root"]
+
+    # LED-2225 step 1: collect ALL items (any status) across all ventures,
+    # tagging each with its source venture for traceability.
+    all_items = []
+    for v_name in v_names:
+        v_path = ventures.get(v_name, {}).get("path", ".")
+        # No status filter: we need to see in_progress / blocked / etc. so
+        # we can detect when a different venture's mirror has been updated.
+        result = list_items(project_path=v_path)
+        for ledger_items in result.get("items", {}).values():
+            for item in ledger_items:
+                item["venture"] = v_name
+                item["_project_path"] = v_path  # Save for update
+                all_items.append(item)
+
+    # LED-2225 step 2: deduplicate by id. When the same task_id appears in
+    # multiple ventures, keep the entry with the latest updated_at — the
+    # one with the freshest state change wins. Falls back to created_at
+    # when updated_at is missing.
+    def _ts(item):
+        return item.get("updated_at") or item.get("created_at") or ""
+    deduped = {}
+    for item in all_items:
+        iid = item.get("id")
+        if not iid:
+            continue
+        existing = deduped.get(iid)
+        if existing is None or _ts(item) > _ts(existing):
+            deduped[iid] = item
+    items = list(deduped.values())
+
+    # LED-2225 step 3: NOW filter to status="open" — items marked
+    # in_progress / blocked / done in any ledger are correctly excluded.
+    items = [i for i in items if i.get("status") == "open"]
+
     # Filter build-safe items only
     actionable = []
     for item in items:
@@ -401,7 +440,7 @@ def get_next_build_task(session: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         # Legacy items without a kind default to 'work' so the cutover is
         # backwards-compatible. Sensed observations are tagged kind='signal'
         # and physically live in ai/sensing/; this is defense-in-depth.
-        if item.get("kind", "work") != "work":
+        if item.get("kind") is not None and item.get("kind") != "work":
             continue
         # Skip items that explicitly require owner action or are not for AI
         tags = item.get("tags", [])
@@ -416,14 +455,34 @@ def get_next_build_task(session: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if "social-target" in tags or "strategy-signal" in tags:
             continue
         actionable.append(item)
-        
+
     if not actionable:
         return None
-        
+
     # Sort by priority
     priority_map = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
     actionable.sort(key=lambda x: priority_map.get(x.get("priority", "P2"), 9))
-    
+
+    # LED-2231 defense-in-depth: when the same task_id is the previous
+    # tick's pick AND there are other eligible candidates, rotate the
+    # previous pick to the END of the actionable list. Prevents the
+    # daemon from infinitely re-picking the same item when update_item
+    # silently writes to a ledger that get_next_build_task's per-venture
+    # reconstruction can't see (the v1/v2 ledger-path misalignment).
+    # If the previous pick is genuinely the only option, we still pick
+    # it — never deadlock.
+    last_completed = session.get("tasks_completed") or []
+    if last_completed and len(actionable) > 1:
+        last_id = last_completed[-1].get("id")
+        last_status = last_completed[-1].get("status")
+        # Only rotate when the prior tick already dispatched / handled
+        # this id — i.e. when re-picking it would be a stuck-loop signal.
+        # Don't rotate on "failed" so genuine retries still surface fast.
+        if last_id and last_status in {"dispatched", "in_progress", "blocked"}:
+            head = actionable[0]
+            if head.get("id") == last_id:
+                actionable = actionable[1:] + [head]
+
     return actionable[0]
 
 # ── Social Loop Task Selection ────────────────────────────────────────
@@ -432,7 +491,7 @@ def get_next_social_task(session: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Select the next social/outreach item from the root ledger."""
     from ai.ledger_manager import list_items
 
-    result = list_items(status="open", project_path=str(ROOT_LEDGER_PATH))
+    result = list_items(status="open", )
     items = []
     for ledger_items in result.get("items", {}).values():
         items.extend(ledger_items)
@@ -443,7 +502,7 @@ def get_next_social_task(session: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             continue
         # LED-877: same allowlist applies to the social loop path — sensed
         # observations never get pulled as work, even here.
-        if item.get("kind", "work") != "work":
+        if item.get("kind") is not None and item.get("kind") != "work":
             continue
         tags = item.get("tags", [])
         if "manual" in tags:
@@ -500,52 +559,94 @@ def run_social_iteration(session_id: str, scan_budget: int = 0, run_strategy: bo
     iteration_start = time.time()
     _write_heartbeat(session_id, "iteration_start", {"iteration": session["iterations"] + 1})
 
-    # 1. Scan all platforms via social_target pipeline (scan + draft + ledger)
-    # LED-788: wall-clock timeout prevents a hung platform from eating the session
-    def _do_scan_and_process():
-        from ai.social_target import scan_targets, process_targets
-        _targets = scan_targets(
+    # 1. LED-216 Phase 2: scan-vs-draft architecture split.
+    # The legacy ``social_scan_and_process`` stage bundled both phases under
+    # a single 180s budget; Reddit's 480-post fetch routinely burned the
+    # whole budget and starved every other platform's drafts. The panel
+    # voted (Q1+Q9, 2026-05-02) to split the stages so each gets its own
+    # deadline and one platform timing out does NOT block the drafter
+    # consuming targets enqueued by the other platforms.
+    #
+    # Stage timing budgets:
+    #   social_scan  ~120s — Reddit-bounded (per-platform timeouts inside
+    #                        scan_phase enforce per-scanner deadlines).
+    #   social_draft  ~60s — LLM-call bounded (drafter pulls from queue
+    #                        instead of in-memory targets list).
+    SOCIAL_SCAN_STAGE_TIMEOUT = int(os.environ.get("DELIMIT_SOCIAL_SCAN_STAGE_TIMEOUT", "150"))
+    SOCIAL_DRAFT_STAGE_TIMEOUT = int(os.environ.get("DELIMIT_SOCIAL_DRAFT_STAGE_TIMEOUT", "90"))
+    # When the caller passes scan_budget>0 (e.g. run_full_cycle does), use
+    # it as the SCAN stage budget; the draft stage stays on its own clock.
+    if scan_budget > 0:
+        SOCIAL_SCAN_STAGE_TIMEOUT = scan_budget
+
+    def _do_scan_phase():
+        from ai.social_target import scan_phase
+        return scan_phase(
             platforms=SOCIAL_SCAN_PLATFORMS,
             ventures=SOCIAL_SCAN_VENTURES,
             limit=10,
         )
-        _processed = None
-        if _targets:
-            _processed = process_targets(_targets, draft_replies=True, create_ledger=True)
-        return _targets, _processed
 
-    _effective_scan_timeout = scan_budget if scan_budget > 0 else SOCIAL_SCAN_TIMEOUT
+    def _do_draft_phase():
+        from ai.social_target import draft_phase
+        return draft_phase(limit=10, create_ledger=True)
+
     scan_result = _run_stage_with_timeout(
-        "social_scan_and_process",
-        _do_scan_and_process,
-        _effective_scan_timeout,
+        "social_scan",
+        _do_scan_phase,
+        SOCIAL_SCAN_STAGE_TIMEOUT,
         session_id=session_id,
     )
-    results["stage_timings"]["scan_and_process"] = scan_result["elapsed_seconds"]
+    results["stage_timings"]["scan"] = scan_result["elapsed_seconds"]
+
+    targets: List[Dict[str, Any]] = []
     if scan_result["ok"]:
-        targets, processed = scan_result["value"]
+        targets = scan_result["value"] or []
         results["scans"] = [
             {"platform": t.get("platform"), "title": t.get("title", "")[:80]}
             for t in targets[:5]
         ]
         results["targets_found"] = len(targets)
-        if processed:
-            drafted_list = processed.get("drafted", []) or []
-            ledger_list = processed.get("ledger_items", []) or []
-            notifs_sent = sum(1 for d in drafted_list if d.get("notification_sent"))
-            results["processed"] = {
-                "drafts": len(drafted_list),
-                "drafts_ready": notifs_sent,
-                "drafts_suppressed": sum(1 for d in drafted_list if d.get("suppressed_reason")),
-                "ledger_items": len(ledger_list),
-                "notifications": notifs_sent,
-            }
-            results["drafts_sent"] = notifs_sent
     else:
         logger.error("Social scan failed: %s", scan_result.get("error"))
         session["errors"] += 1
         results["scan_error"] = scan_result.get("error")
         results["scan_timed_out"] = scan_result.get("timed_out", False)
+
+    # Run draft_phase even when scan_phase failed/timed-out — the queue may
+    # have targets persisted from a prior cycle, so the drafter is not
+    # starved by a single bad scan.
+    draft_result = _run_stage_with_timeout(
+        "social_draft",
+        _do_draft_phase,
+        SOCIAL_DRAFT_STAGE_TIMEOUT,
+        session_id=session_id,
+    )
+    results["stage_timings"]["draft"] = draft_result["elapsed_seconds"]
+    # Backwards-compat alias so callers/dashboards still see the old key.
+    results["stage_timings"]["scan_and_process"] = (
+        scan_result.get("elapsed_seconds", 0) + draft_result.get("elapsed_seconds", 0)
+    )
+    if draft_result["ok"]:
+        processed = draft_result["value"] or {}
+        drafted_list = processed.get("drafted", []) or []
+        ledger_list = processed.get("ledger_items", []) or []
+        notifs_sent = sum(1 for d in drafted_list if d.get("notification_sent"))
+        results["processed"] = {
+            "drafts": len(drafted_list),
+            "drafts_ready": notifs_sent,
+            "drafts_suppressed": sum(1 for d in drafted_list if d.get("suppressed_reason")),
+            "ledger_items": len(ledger_list),
+            "notifications": notifs_sent,
+            "queue_stats": processed.get("queue_stats"),
+            "claimed": processed.get("claimed", 0),
+        }
+        results["drafts_sent"] = notifs_sent
+    else:
+        logger.error("Social draft failed: %s", draft_result.get("error"))
+        session["errors"] += 1
+        results["draft_error"] = draft_result.get("error")
+        results["draft_timed_out"] = draft_result.get("timed_out", False)
 
     # 3. Triage web signals (think→build pipeline)
     _write_heartbeat(session_id, "triage_web_signals")
@@ -566,7 +667,7 @@ def run_social_iteration(session_id: str, scan_budget: int = 0, run_strategy: bo
                 item_id=social_task["id"],
                 status="in_progress",
                 note="Picked up by think loop",
-                project_path=str(ROOT_LEDGER_PATH),
+                
             )
         except Exception:
             pass
@@ -630,7 +731,15 @@ def run_social_iteration(session_id: str, scan_budget: int = 0, run_strategy: bo
 # ── Strategy Deliberation (think cycle) ───────────────────────────────
 
 STRATEGY_LEDGER = Path("/root/.delimit/ledger/strategy.jsonl")
-DELIBERATION_DIR = Path("/home/delimit/delimit-private/decisions")
+# LED-2107: env-resolved so containers/CI runners outside ~/delimit-private work.
+# DELIMIT_PRIVATE_ROOT (preferred) overrides the founder-local default; otherwise
+# the existing /home/delimit/delimit-private path is preserved for backward compat.
+DELIBERATION_DIR = Path(
+    os.environ.get(
+        "DELIMIT_PRIVATE_ROOT",
+        "/home/delimit/delimit-private",
+    )
+) / "decisions"
 
 
 def _strategy_gate_open(session: Dict[str, Any]) -> bool:
@@ -776,7 +885,6 @@ def _run_strategy_cycle(session: Dict[str, Any]) -> Dict[str, Any]:
                     item_id=item["id"],
                     status="done",
                     note=f"Deliberated in think loop. Transcript: {save_path}",
-                    project_path=str(ROOT_LEDGER_PATH),
                 )
                 result["items_closed"] += 1
             except Exception:
@@ -814,7 +922,6 @@ def _run_strategy_cycle(session: Dict[str, Any]) -> Dict[str, Any]:
                     description=f"Auto-generated by strategy deliberation. Source: {save_path}",
                     source=f"strategy_deliberation:{titles}",
                     tags=["strategy-generated", "auto-seeded"],
-                    project_path=str(ROOT_LEDGER_PATH),
                     context=f"Created from strategy cycle deliberation of {titles}.",
                     estimated_complexity="medium",
                 )
@@ -849,6 +956,179 @@ DEPLOY_QUEUE_DIR = Path.home() / ".delimit" / "loop" / "deploy-queue"
 def _ensure_deploy_queue():
     DEPLOY_QUEUE_DIR.mkdir(parents=True, exist_ok=True)
 
+
+
+_AUTONOMOUS_BUILDER_MODELS = {
+    # Map of model-name → CLI invocation config for the autonomous build agent.
+    # The shim CLI handles OAuth-authenticated invocation; env-key fallback is
+    # only used when the shim itself reads it (e.g. claude w/o saved OAuth).
+    "claude": {
+        "cli": "/root/.delimit/shims/claude",
+        "argv_template": ["-p", "{instruction}", "--permission-mode", "auto"],
+        "secret_name": "ANTHROPIC_API_KEY",
+        "env_key": "ANTHROPIC_API_KEY",
+    },
+    "gemini": {
+        "cli": "/root/.delimit/shims/gemini",
+        "argv_template": ["-p", "{instruction}"],
+        # Gemini CLI uses Vertex AI ambient auth via service account; no env
+        # injection needed unless a customer explicitly overrides.
+        "secret_name": None,
+        "env_key": None,
+    },
+    "codex": {
+        "cli": "/root/.delimit/shims/codex",
+        "argv_template": ["exec", "{instruction}"],
+        "secret_name": "OPENAI_API_KEY",
+        "env_key": "OPENAI_API_KEY",
+    },
+}
+
+_AUTONOMOUS_BUILDER_DEFAULT = "gemini"
+
+
+def _resolve_autonomous_builder_model() -> str:
+    """Pick the autonomous-builder model from env, falling back to default.
+
+    AUTONOMOUS_BUILDER_MODEL env var selects among {claude, gemini, codex}.
+    Unset / unknown values fall back to _AUTONOMOUS_BUILDER_DEFAULT.
+    """
+    import os as _os
+    requested = (_os.environ.get("AUTONOMOUS_BUILDER_MODEL") or "").strip().lower()
+    if requested and requested not in _AUTONOMOUS_BUILDER_MODELS:
+        logger.warning(
+            "AUTONOMOUS_BUILDER_MODEL=%r not in {claude, gemini, codex}; falling back to %s",
+            requested, _AUTONOMOUS_BUILDER_DEFAULT,
+        )
+        return _AUTONOMOUS_BUILDER_DEFAULT
+    return requested or _AUTONOMOUS_BUILDER_DEFAULT
+
+
+def _act_auto_build(task: Dict[str, Any], ctx: Dict[str, str]) -> Dict[str, Any]:
+    """Actually build a task using subagent + propose_pr primitive (LED-1146).
+
+    Model-agnostic builder (LED-2177): the CLI invoked is selected by the
+    AUTONOMOUS_BUILDER_MODEL env var; default is gemini. Supported values:
+    claude, gemini, codex. See _AUTONOMOUS_BUILDER_MODELS for the per-model
+    CLI invocation config.
+    """
+    import subprocess
+    import os
+    from ai.workers.executor import _act_propose_pr
+
+    task_id = task.get("id", "task")
+    title = task.get("title", "")
+    desc = task.get("description", "")
+    project_path = ctx.get("path", "/home/delimit/delimit-gateway")
+
+    instruction = f"Implement build task {task_id}: {title}\n\nGoal: {desc}\n\nUpdate the code but DO NOT COMMIT. I will handle the commit."
+
+    model_name = _resolve_autonomous_builder_model()
+    model_cfg = _AUTONOMOUS_BUILDER_MODELS[model_name]
+
+    env = os.environ.copy()
+    if model_cfg["secret_name"]:
+        from ai.secrets_broker import get_secret
+        sec = get_secret(name=model_cfg["secret_name"], agent_type="daemon", tool="auto_build")
+        env[model_cfg["env_key"]] = sec.get("value", "")
+
+    logger.info("Auto-build: %s implementation phase for %s...", model_name, task_id)
+    cmd = [model_cfg["cli"]] + [
+        arg.replace("{instruction}", instruction) for arg in model_cfg["argv_template"]
+    ]
+
+    # LED-2232 part 1: refuse to run gemini/claude/codex on top of
+    # pre-existing uncommitted work. The model would otherwise mix its
+    # output with whatever was already dirty, and we'd be unable to
+    # tell which lines are auto-build's vs the founder's WIP. The
+    # `git restore` step at the end of the auto-build flow would also
+    # blow that WIP away if we proceeded.
+    pre_status = subprocess.run(
+        ["git", "-C", project_path, "status", "--porcelain"],
+        capture_output=True, text=True,
+    )
+    if pre_status.returncode != 0:
+        return {"status": "failed", "error": f"pre-check git status failed: {pre_status.stderr[:300]}"}
+    if pre_status.stdout.strip():
+        return {
+            "status": "failed",
+            "error": (
+                "pre-existing uncommitted work in repo — refusing to run "
+                "auto-build on top of dirty tree:\n" + pre_status.stdout[:500]
+            ),
+        }
+
+    try:
+        subprocess.run(cmd, cwd=project_path, env=env, capture_output=True, text=True, timeout=1200)
+
+        diff_cmd = ["git", "-C", project_path, "status", "--porcelain"]
+        diff_proc = subprocess.run(diff_cmd, capture_output=True, text=True)
+        changed_files = []
+        for line in diff_proc.stdout.splitlines():
+            if line.strip():
+                path_only = line[3:].strip()
+                f_path = os.path.join(project_path, path_only)
+                if os.path.exists(f_path):
+                    with open(f_path, "r") as f_in:
+                        content_file = f_in.read()
+                    changed_files.append({"path": path_only, "content": content_file})
+
+        if not changed_files:
+            return {"status": "noop", "reason": "No files were changed"}
+
+        # LED-2232 part 2: clean the working tree BEFORE calling
+        # _act_propose_pr. The propose_pr safety check refuses on any
+        # dirty file — including the auto-build's own output that we
+        # just captured into `changed_files`. propose_pr writes the
+        # captured contents to a fresh branch from clean main, so the
+        # working-tree changes are redundant by the time we hand off.
+        # Restore here (not after) so propose_pr sees a clean tree.
+        restore_result = subprocess.run(
+            ["git", "-C", project_path, "restore", "."],
+            capture_output=True, text=True,
+        )
+        if restore_result.returncode != 0:
+            return {
+                "status": "failed",
+                "error": (
+                    f"git restore failed before propose_pr handoff: "
+                    f"{restore_result.stderr[:300]}"
+                ),
+            }
+
+        # LED-2244: `git restore .` only touches tracked files; if the
+        # model created new files (e.g. tests, scaffolds), they remain
+        # in the worktree and propose_pr's "dirty tree" check then
+        # rejects the handoff. The orphan files would also poison the
+        # next iteration's pre-check. `git clean -fd` removes them so
+        # propose_pr sees a fully clean tree and the next iteration
+        # can run.
+        clean_result = subprocess.run(
+            ["git", "-C", project_path, "clean", "-fd"],
+            capture_output=True, text=True,
+        )
+        if clean_result.returncode != 0:
+            return {
+                "status": "failed",
+                "error": (
+                    f"git clean -fd failed before propose_pr handoff: "
+                    f"{clean_result.stderr[:300]}"
+                ),
+            }
+
+        pr_params = {
+            "repo_path": project_path,
+            "branch": f"delimit/auto-{task_id.lower()}",
+            "title": f"build: {title}",
+            "body": f"Autonomous build for {task_id}.\n\n{desc}",
+            "files": changed_files,
+            "tests_cmd": "python3 -m pytest tests/",
+            "draft": True
+        }
+        res = _act_propose_pr(pr_params)
+        return {"status": "completed", "summary": f"Built and proposed PR: {res.get('pr_url')}"}
+    except Exception as e:
+        return {"status": "failed", "error": str(e)}
 
 def _notify_deploy_loop(task: Dict[str, Any], venture: str, project_path: str,
                         session_id: str = "") -> Dict[str, Any]:
@@ -1002,10 +1282,16 @@ def run_governed_iteration(session_id: str, hardening: Optional[Any] = None) -> 
     """
     from datetime import datetime, timezone
     import importlib
+    import ai.reaper
     import ai.swarm as _swarm_mod
     importlib.reload(_swarm_mod)
     from ai.swarm import dispatch_task
 
+    
+    # 0. Reap finished agent tasks (Plan-C)
+    reaped = ai.reaper.reap_agent_tasks(project_path=str(ctx["path"]) if "ctx" in locals() else "/home/delimit/delimit-gateway")
+    if reaped:
+        logger.info("Reaped %d finished tasks", len(reaped))
     # 1. Load Session & Check Safeguards
     path = SESSION_DIR / f"{session_id}.json"
     if not path.exists():
@@ -1076,7 +1362,7 @@ def run_governed_iteration(session_id: str, hardening: Optional[Any] = None) -> 
             dispatch_result = hardened_dispatch(
                 hardening, dispatch_task,
                 tool_name="dispatch_task",
-                **dispatch_kwargs,
+                **dispatch_kwargs
             )
             # hardened_dispatch may return a control dict (debounced/circuit_open)
             if isinstance(dispatch_result, dict) and dispatch_result.get("status") in ("debounced", "circuit_open"):
@@ -1089,7 +1375,11 @@ def run_governed_iteration(session_id: str, hardening: Optional[Any] = None) -> 
                 return {"status": dispatch_result["status"], "task_id": task["id"], "detail": dispatch_result}
         else:
             # Original path: direct dispatch, no hardening
-            dispatch_result = dispatch_task(**dispatch_kwargs)
+            # LED-1146: Finish autonomous build machine — actually build P2/tagged tasks
+            if task.get("priority") == "P2" or "autonomous-build" in (task.get("tags") or []):
+                dispatch_result = _act_auto_build(task, ctx)
+            else:
+                dispatch_result = dispatch_task(**dispatch_kwargs)
 
         # 5. Update State & Ledger
         duration = time.time() - start_time
@@ -1104,13 +1394,25 @@ def run_governed_iteration(session_id: str, hardening: Optional[Any] = None) -> 
         # "dispatched" = swarm handed the task to an agent; the ledger stays
         # in_progress until the agent reports back via delimit_agent_complete.
         # Both are success outcomes from the loop's perspective.
-        if dispatch_status == "completed":
+        if dispatch_status in ["completed", "noop"]:
+            note = f"Completed via governed build loop. Result: {dispatch_result.get('summary', 'OK')}"
+            if dispatch_status == "noop":
+                note = f"Marked done via loop: {dispatch_result.get('reason', 'already implemented')}"
+            
             update_item(
                 item_id=task["id"],
                 status="done",
-                note=f"Completed via governed build loop. Result: {dispatch_result.get('summary', 'OK')}",
-                project_path=str(ROOT_LEDGER_PATH)
+                project_path=task.get("_project_path", "."),
+                note=note
             )
+            
+            if dispatch_status == "noop":
+                session["tasks_completed"].append({
+                    "id": task["id"], "status": "noop", "duration": duration, "cost": cost
+                })
+                _save_session(session)
+                return {"status": "continued", "task_id": task["id"], "result": dispatch_result}
+
             session["tasks_completed"].append({
                 "id": task["id"],
                 "status": "success",
@@ -1129,16 +1431,25 @@ def run_governed_iteration(session_id: str, hardening: Optional[Any] = None) -> 
                 logger.warning("Failed to notify deploy loop for %s: %s", task.get("id"), e)
         elif dispatch_status == "dispatched":
             # Async handoff: mark ledger in_progress, leave closure to the agent.
+            # LED-2231: pass project_path so the update lands in the SAME ledger
+            # the item was pulled from (matching the completed/noop branch above).
+            # Without this, update_item falls back to the first venture whose
+            # ledger happens to contain the item id — potentially a stale mirror
+            # that diverges from the venture the daemon is iterating. Effect:
+            # the dispatched item appears `in_progress` in the wrong ledger, the
+            # right ledger still shows it `open`, and the daemon re-picks it
+            # every tick. See LED-2225 (cross-ledger dedup fix) for the
+            # complementary read-side guard.
             dispatched_task_id = dispatch_result.get("task_id", "")
             try:
                 update_item(
                     item_id=task["id"],
                     status="in_progress",
+                    project_path=task.get("_project_path", "."),
                     note=(
                         f"Dispatched to swarm agent via governed build loop "
                         f"(swarm task_id={dispatched_task_id}). Awaiting agent completion."
                     ),
-                    project_path=str(ROOT_LEDGER_PATH),
                 )
             except Exception as e:
                 logger.warning("Failed to mark %s in_progress after dispatch: %s", task.get("id"), e)
@@ -1184,6 +1495,7 @@ def run_governed_iteration(session_id: str, hardening: Optional[Any] = None) -> 
 CYCLE_THINK_TIMEOUT = int(os.environ.get("DELIMIT_CYCLE_THINK_TIMEOUT", "300"))
 CYCLE_STRATEGY_TIMEOUT = int(os.environ.get("DELIMIT_CYCLE_STRATEGY_TIMEOUT", "600"))  # 10 min for 4-model × 2-round deliberation
 CYCLE_BUILD_TIMEOUT = int(os.environ.get("DELIMIT_CYCLE_BUILD_TIMEOUT", "300"))
+CYCLE_EXECUTE_TIMEOUT = int(os.environ.get("DELIMIT_CYCLE_EXECUTE_TIMEOUT", "180"))  # 2026-04-29: drain approved WOs
 CYCLE_DEPLOY_TIMEOUT = int(os.environ.get("DELIMIT_CYCLE_DEPLOY_TIMEOUT", "120"))
 
 
@@ -1223,7 +1535,7 @@ def run_full_cycle(session_id: str = "", hardening: Optional[Any] = None,
         if not session_path.exists():
             logger.info(
                 "[%s] session %s not found, creating with caller-provided id",
-                cycle_id, session_id,
+                cycle_id, session_id
             )
             _ensure_session_dir()
             session_path.write_text(json.dumps({
@@ -1286,8 +1598,21 @@ def run_full_cycle(session_id: str = "", hardening: Optional[Any] = None,
 
     if run_build:
         # ── Stage 2: BUILD ──────────────────────────────────────────
-        # Pick the highest-priority build-safe ledger item and dispatch.
+        # Pick the highest-priority build-safe ledger item and dispatch
+        # a work order. Dispatching writes a WO file but does NOT execute
+        # the typed actions inside it.
         _exec_stage("build", lambda: run_governed_iteration(session_id, hardening=hardening), CYCLE_BUILD_TIMEOUT)
+
+        # ── Stage 2b: EXECUTE ───────────────────────────────────────
+        # 2026-04-29 founder directive: the loop must actually execute
+        # work orders, not just dispatch them. Drain any work orders
+        # that are status=approved (founder approved via dashboard or
+        # email reply) by polling the Worker Pool v2 executor with
+        # live=True. Work orders without executable_actions or in any
+        # other status are silently skipped — the executor is bounded
+        # to its whitelist (gh_issue_create / gh_pr_comment /
+        # gh_issue_comment) so this is safe to autonomy.
+        _exec_stage("execute", lambda: _run_execute_stage(session_id), CYCLE_EXECUTE_TIMEOUT)
 
         # ── Stage 3: DEPLOY ─────────────────────────────────────────
         # Consume the deploy queue. Only runs in build modes.
@@ -1351,6 +1676,41 @@ def _expire_stale_deploys():
             for item in kept:
                 f.write(json.dumps(item) + "\n")
         logger.info("Deploy queue: expired %d stale items, %d remaining", len(expired), len(kept))
+
+
+def _run_execute_stage(session_id: str) -> Dict[str, Any]:
+    """2026-04-29: drain approved work orders via the Worker Pool v2
+    executor. Founder can approve work orders via the dashboard
+    "Approve" button or via email reply with explicit-post language;
+    this stage runs whatever's status=approved on each tick.
+
+    Returns a summary {executed, skipped, errors} per tick. Work orders
+    that aren't approved yet are simply left in the queue for a future
+    tick — never auto-approved by this stage. The approval gate stays
+    with the founder; this stage only enforces the polling cadence.
+    """
+    try:
+        from ai.workers.executor import poll_and_execute  # type: ignore
+    except ImportError:
+        # LED-981 worker pool may not be importable in all envs
+        # (e.g. server module loaded without workers). Treat as no-op.
+        return {"status": "skipped", "reason": "workers.executor not available"}
+
+    # Pause-via-touchfile honored by the executor itself; we don't
+    # second-guess it here.
+    try:
+        result = poll_and_execute(live=True, executed_by=f"cycle:{session_id}")
+    except Exception as exc:
+        logger.warning("Execute stage poll_and_execute failed: %s", exc)
+        return {"status": "error", "error": str(exc)}
+
+    return {
+        "status": "executed" if result.get("executed", 0) > 0 else "idle",
+        "executed": result.get("executed", 0),
+        "skipped": result.get("skipped", 0),
+        "errors": result.get("errors", 0),
+        "details": result.get("details", []),
+    }
 
 
 def _run_deploy_stage(session_id: str) -> Dict[str, Any]:
@@ -1471,7 +1831,7 @@ def loop_status(session_id: str = "") -> Dict[str, Any]:
     try:
         from ai.ledger_manager import list_items
         for status_key, count_key in [("open", "open_build_safe"), ("in_progress", "in_progress")]:
-            r = list_items(status=status_key, project_path=str(ROOT_LEDGER_PATH))
+            r = list_items(status=status_key, )
             items = []
             for li in r.get("items", {}).values():
                 items.extend(li)
@@ -1480,7 +1840,7 @@ def loop_status(session_id: str = "") -> Dict[str, Any]:
                 for item in items:
                     if item.get("type") not in BUILD_SAFE_TYPES:
                         continue
-                    if item.get("kind", "work") != "work":
+                    if item.get("kind") is not None and item.get("kind") != "work":
                         continue
                     source = (item.get("source") or "").lower()
                     if source.startswith("social_scan") or source.startswith("social_strategy"):
@@ -1527,7 +1887,6 @@ def task_complete(task_id: str, status: str = "done", note: str = "", session_id
         item_id=task_id,
         status=status,
         note=note or f"Completed via governed build loop",
-        project_path=str(ROOT_LEDGER_PATH),
     )
 
     # Update session if provided

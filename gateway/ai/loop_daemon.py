@@ -146,22 +146,76 @@ def _run_forever(ctx: DaemonContext) -> None:
                 if task_id:
                     ctx.last_task_id = task_id
                     ctx.tasks_pulled += 1
-            ctx.log_tick({
+            # 2026-04-29 wake-7: when result_status != "ok", capture
+            # per-stage detail so partial/error ticks are debuggable
+            # without keeping a full per-cycle artifact tree on disk.
+            tick_log = {
                 "event": "tick",
                 "tick": ctx.ticks_run,
                 "result_status": (result or {}).get("status") if isinstance(result, dict) else None,
                 "task_id": task_id,
                 "interval_seconds": ctx.interval_seconds,
-            })
+            }
+            if isinstance(result, dict) and tick_log["result_status"] in ("partial", "error", "timed_out"):
+                stages = result.get("stages") or {}
+                stage_summary = {}
+                for stage_name, stage_data in stages.items():
+                    if not isinstance(stage_data, dict):
+                        continue
+                    entry = {"ok": stage_data.get("ok"), "elapsed": stage_data.get("elapsed_seconds")}
+                    if stage_data.get("timed_out"):
+                        entry["timed_out"] = True
+                    err = stage_data.get("error")
+                    if err:
+                        entry["error"] = str(err)[:200]
+                    stage_summary[stage_name] = entry
+                if stage_summary:
+                    tick_log["stages"] = stage_summary
+                errs = result.get("errors")
+                if errs:
+                    tick_log["errors"] = [str(e)[:200] for e in errs[:5]]
+            ctx.log_tick(tick_log)
             ctx.persist()
         except Exception as e:
             ctx.log_tick({"event": "tick_error", "error": str(e), "error_type": type(e).__name__})
             ctx.persist()
 
+        # LED-2253: cadence jitter for the social loop.
+        # Panel verdict 2026-05-13 (transcript:
+        # /home/delimit/delimit-private/deliberations/2026-05-13-cli-rotation-jitter-frequency-reduction.md)
+        # ratified this as universal hygiene: randomized delay between
+        # social loop ticks breaks the "fires every N min" fingerprint
+        # that chat-login automation-detection heuristics rely on.
+        # Applies only to loop_type == "social" — build / cycle loops
+        # have different cadence requirements and don't carry the same
+        # TOS-fingerprint surface. Window is uniform [0, max] seconds;
+        # default 0 (no jitter — opt-in via env var so existing
+        # deployments don't suddenly skew their cadence).
+        sleep_target = ctx.interval_seconds
+        if ctx.loop_type == "social":
+            import random as _random
+            jitter_max_raw = os.environ.get("DELIMIT_SOCIAL_JITTER_MAX_SECONDS", "").strip()
+            try:
+                jitter_max = int(jitter_max_raw) if jitter_max_raw else 0
+                if jitter_max < 0:
+                    jitter_max = 0
+            except ValueError:
+                jitter_max = 0
+            if jitter_max > 0:
+                extra = _random.uniform(0, jitter_max)
+                sleep_target = ctx.interval_seconds + extra
+                ctx.log_tick({
+                    "event": "social_jitter",
+                    "base_interval_s": ctx.interval_seconds,
+                    "jitter_max_s": jitter_max,
+                    "extra_s": round(extra, 2),
+                    "effective_sleep_s": round(sleep_target, 2),
+                })
+
         # Sleep in small increments so stop_event can fire responsively
         slept = 0.0
-        while slept < ctx.interval_seconds and not ctx.stop_event.is_set():
-            chunk = min(1.0, ctx.interval_seconds - slept)
+        while slept < sleep_target and not ctx.stop_event.is_set():
+            chunk = min(1.0, sleep_target - slept)
             time.sleep(chunk)
             slept += chunk
 

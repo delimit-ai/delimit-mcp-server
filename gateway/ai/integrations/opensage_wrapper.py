@@ -32,7 +32,10 @@ from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger("delimit.integrations.opensage")
 
-DELIMIT_HOME = Path.home() / ".delimit"
+# LED-1188: env-var-aware home resolution (DELIMIT_HOME / DELIMIT_NAMESPACE_ROOT).
+from ..continuity import get_namespace_root  # noqa: E402
+
+DELIMIT_HOME = get_namespace_root()
 AUDIT_DIR = DELIMIT_HOME / "audit"
 POLICY_FILE = DELIMIT_HOME / "enforcement_mode"
 

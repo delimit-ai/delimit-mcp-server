@@ -64,12 +64,36 @@ _CREDENTIAL_FALSE_POSITIVES = re.compile(
     r"sk-ant-demo|sk-demo|AIza-demo|xai-demo|demo[_-]?(?:key|secret|token)|"
     r"-demo['\"]|"
     # Function-call RHS (reading from parsed JSON, env, getters, slicing strings)
-    r"json\.loads|\.read_text\(|\.slice\(|"
-    r"tokens\.get\(|token\s*=\s*_make_token|"
+    r"json\.loads|\.read_text\(|\.slice\(|\.split\(|"
+    r"\w+\.get\(|token\s*=\s*_make_token|"
     # RHS that is a parameter reference like token=tokens.get("access_token"...
-    r"=\s*tokens\.get\(|"
+    r"=\s*\w+\.get\(|"
     # Dict index dereference: token_data["token"], result["secret"], etc.
-    r"_data\[|_result\[)",
+    r"_data\[|_result\[|"
+    # LED-1278 (b): function-call RHS with leading underscore (e.g. _load_token())
+    r"=\s*_\w+\(|"
+    # LED-1278 (c) [2026-05-22]: naked function-call RHS without leading
+    # underscore. Matches the common shape `const token = readCurrentToken();`
+    # in bin/delimit-cli.js — the token is being READ from somewhere, not
+    # hardcoded. Tightened with `\s*;?\s*$` to require end-of-statement so
+    # we don't suppress `token = realLeak("AKIAIOSFODNN7EXAMPLE")` shapes
+    # where the call argument is itself a literal secret.
+    r"=\s*\w+\([^)]{0,40}\)\s*;?\s*$|"
+    # LED-1278 (c) [2026-05-22]: parenthesized property-access fallback chain
+    # like `const token = (options.token || process.env.TOKEN)`. Common shape
+    # for CLI option parsing where the RHS reads from a known input source,
+    # never a literal. Requires the open-paren to be followed by a word + dot
+    # (property access) so we don't match `token = ("AKIA..." || "")` shapes.
+    r"=\s*\(\s*\w+\.\w+|"
+    # LED-1278 (b): documentation/example placeholders in angle brackets
+    r"<[^>]*?(?:long|same|random|your|placeholder|example|secret|token|key)[^>]*?>|"
+    # Bare `if not <var>:` and similar control-flow lines that mention
+    # the credential variable name but contain no value.
+    r"if\s+not\s+\w+:|"
+    # Python control-flow block-opener: a colon immediately followed by
+    # a newline (no quoted value on the same line). Such a colon is an
+    # if/while/def/class block-opener, not a key-value separator.
+    r":\s*\n)",
     re.IGNORECASE,
 )
 
@@ -90,6 +114,82 @@ SCAN_EXTENSIONS = {".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".rb", ".java", "
 
 # Skip directories
 SKIP_DIRS = {"node_modules", ".git", "__pycache__", ".venv", "venv", ".tox", "dist", "build", ".next", ".nuxt", "vendor"}
+
+# LED-1278 (a): test-tree path patterns excluded by default. The scanner walks  # nosec
+# test directories with prod rules, so test fixtures (placeholder tokens,  # nosec
+# trivial JWT bodies, code-injection demos) get surfaced as critical findings  # nosec
+# on every audit. Default behavior now skips these; callers can pass  # nosec
+# include_tests=True to scan everything.  # nosec
+TEST_PATH_PATTERNS = (
+    re.compile(r"(?:^|[\\/])tests?[\\/]"),         # tests/ or test/ as a path component
+    re.compile(r"(?:^|[\\/])__tests__[\\/]"),      # JS __tests__/
+    re.compile(r"(?:^|[\\/])spec[\\/]"),           # spec/
+    re.compile(r"(?:^|[\\/])fixtures?[\\/]"),      # fixtures/ or fixture/
+    re.compile(r"(?:^|[\\/])test_[^\\/]+\.py$"),   # test_*.py
+    re.compile(r"_test\.(?:py|go|rb|java)$"),       # *_test.py / *_test.go
+    re.compile(r"\.(?:test|spec)\.(?:js|jsx|ts|tsx|mjs|cjs)$"),  # *.test.js, *.spec.tsx
+)
+
+
+def _is_test_path(path: str) -> bool:
+    """Return True if path looks like a test file/dir per TEST_PATH_PATTERNS."""
+    s = str(path)
+    return any(pat.search(s) for pat in TEST_PATH_PATTERNS)
+
+
+# LED-1278 (b): well-known dummy / fixture values. Even when include_tests=True
+# (or when production code intentionally embeds canonical placeholders in
+# docs/examples), these specific shapes should be suppressed as `info` log
+# lines, not raised as critical findings.
+#
+# Each entry: (regex applied to the matched secret text, human label).
+KNOWN_DUMMY_PATTERNS = [
+    # AWS canonical dummy from official AWS documentation.
+    (re.compile(r"AKIAIOSFODNN7EXAMPLE"), "aws_doc_dummy"),
+    # GitHub token placeholders that use the printable-alphabet pattern.
+    (re.compile(r"^gh[pousr]_ABCDEFGHIJKLMNOPQRSTUVWXYZ", re.IGNORECASE), "github_alphabet_dummy"),
+    # Slack tokens with the leading 1234567890 sequence.
+    (re.compile(r"^xox[baprs]-1234567890-"), "slack_seq_dummy"),
+    # JWT with the unsigned-HS256 header + trivial body. We match the literal
+    # eyJhbGciOiJIUzI1NiJ9 header and check the payload separately below.
+    (re.compile(r"^eyJhbGciOiJIUzI1NiJ9\."), "jwt_hs256_trivial"),
+    # Generic dict-credential placeholder values: fake/test/dummy/example/etc.
+    (re.compile(r"['\"](?:fake|test|dummy|example|placeholder|stale|from-)[A-Za-z0-9_\-]*['\"]\s*$", re.IGNORECASE),
+     "generic_placeholder_value"),
+    # Provider test-key shapes: xai-key-123, google-key-7, claude-key-2 etc.
+    (re.compile(r"['\"](?:xai|google|claude|gem|grok|codex|ollama)[-_]?key[-_]?\d+['\"]\s*$", re.IGNORECASE),
+     "provider_test_key"),
+]
+
+
+def _looks_like_known_dummy(secret_name: str, matched_text: str) -> Optional[str]:
+    """Return a label if matched_text is a known-dummy/fixture value, else None.
+
+    Used by the secret scanner to convert what would otherwise be a critical
+    finding into an `info`-level suppressed entry. Keeps the audit-trail
+    visible (so a future regression in the allowlist is detectable) while
+    eliminating the false-positive-storm noise.
+
+    For JWT, additionally checks that the body is the trivial `sub:1234567890`
+    payload — we don't want to suppress real signed JWTs that happen to use
+    HS256.
+    """
+    for pattern, label in KNOWN_DUMMY_PATTERNS:
+        if pattern.search(matched_text):
+            if label == "jwt_hs256_trivial":
+                # Only treat as dummy if the payload is the canonical demo
+                # body (`sub: "1234567890"` or trivial abc123 segment).
+                # The JWT pattern produces something like:
+                #   eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abc123def456ghi789
+                # The middle segment base64-decodes to {"sub":"1234567890"}.
+                if (
+                    "eyJzdWIiOiIxMjM0NTY3ODkwIn0" in matched_text
+                    or re.search(r"\.[A-Za-z0-9_-]*abc123[A-Za-z0-9_-]*$", matched_text)
+                ):
+                    return label
+                continue
+            return label
+    return None
 
 
 def _run_cmd(cmd: List[str], timeout: int = 30, cwd: Optional[str] = None) -> Dict[str, Any]:
@@ -137,8 +237,13 @@ def _bump_semver(version: str, bump: str) -> str:
     return f"{major}.{minor}.{patch}"
 
 
-def _scan_files(target: str) -> List[Path]:
-    """Collect scannable source files under target."""
+def _scan_files(target: str, include_tests: bool = False) -> List[Path]:
+    """Collect scannable source files under target.
+
+    LED-1278 (a): when include_tests=False (the new default), skip files that
+    match TEST_PATH_PATTERNS so test fixtures do not surface as findings.
+    Single-file targets are always scanned regardless (caller asked explicitly).
+    """
     root = Path(target).resolve()
     files = []
     if root.is_file():
@@ -147,10 +252,25 @@ def _scan_files(target: str) -> List[Path]:
         return []
     for dirpath, dirnames, filenames in os.walk(root, onerror=lambda _err: None):
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+        if not include_tests:
+            # Prune obvious test directory names before recursing so we don't
+            # walk huge __tests__/ trees just to discard them later.
+            dirnames[:] = [
+                d for d in dirnames
+                if d not in ("tests", "test", "__tests__", "spec", "fixtures", "fixture")
+            ]
         for filename in filenames:
             p = Path(dirpath) / filename
-            if p.suffix in SCAN_EXTENSIONS:
-                files.append(p)
+            if p.suffix not in SCAN_EXTENSIONS:
+                continue
+            if not include_tests:
+                try:
+                    rel = str(p.relative_to(root))
+                except ValueError:
+                    rel = str(p)
+                if _is_test_path(rel):
+                    continue
+            files.append(p)
             # Cap to avoid scanning massive repos
             if len(files) >= 5000:
                 return files
@@ -159,11 +279,26 @@ def _scan_files(target: str) -> List[Path]:
 
 # ─── 5. security_audit ──────────────────────────────────────────────────
 
-def security_audit(target: str = ".") -> Dict[str, Any]:
+def security_audit(target: str = ".", include_tests: bool = False) -> Dict[str, Any]:
     """Audit security: dependency vulnerabilities + anti-patterns + secret detection.
 
     Default: runs pip-audit/npm-audit, regex scans for secrets and dangerous patterns.
     Optional upgrade: set SNYK_TOKEN or TRIVY_PATH for enhanced scanning.
+
+    LED-1278 fixes:
+      (a) include_tests defaults to False — test directories (tests/, __tests__/,
+          spec/, fixtures/, *_test.py, *.test.tsx, etc.) are skipped so
+          test fixtures don't get raised as critical production findings.
+          Pass include_tests=True to scan everything (legacy behavior).
+      (b) Well-known dummy/placeholder values (AWS canonical example,
+          alphabet-pattern GitHub tokens, leading-1234567890 Slack tokens,
+          trivial JWT, fake/test/dummy/placeholder dict values, provider
+          test-key shapes) are suppressed and recorded as `info`-severity
+          allowlist hits in `suppressed_findings` for audit visibility.
+
+    Args:
+        target: Repository or file path to audit.
+        include_tests: When True, scan test directories (default False).
     """
     target_path = Path(target).resolve()
     if not target_path.exists():
@@ -172,6 +307,7 @@ def security_audit(target: str = ".") -> Dict[str, Any]:
     vulnerabilities = []
     anti_patterns_found = []
     secrets_found = []
+    suppressed_findings: List[Dict[str, Any]] = []  # LED-1278 (b): allowlist log
     tools_used = []
     severity_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
 
@@ -277,8 +413,10 @@ def security_audit(target: str = ".") -> Dict[str, Any]:
             pass
 
     # --- 2. Anti-pattern scan ---
-    files = _scan_files(target)
-    tools_used.append(f"pattern-scanner ({len(files)} files)")
+    files = _scan_files(target, include_tests=include_tests)
+    scan_label = f"pattern-scanner ({len(files)} files"
+    scan_label += ", include_tests=True" if include_tests else ", tests excluded"
+    tools_used.append(scan_label + ")")
 
     for fpath in files:
         try:
@@ -298,6 +436,25 @@ def security_audit(target: str = ".") -> Dict[str, Any]:
                 if secret_name in _FP_FILTERED and _CREDENTIAL_FALSE_POSITIVES.search(matched_text):
                     continue
                 line_num = content[:match.start()].count("\n") + 1
+                # LED-1278 (b): well-known dummy/placeholder values get
+                # suppressed to info-level rather than raised as critical.
+                # Logged in suppressed_findings so a future regression in the
+                # allowlist (e.g. real key matching by accident) is auditable.
+                dummy_label = _looks_like_known_dummy(secret_name, matched_text)
+                if dummy_label:
+                    suppressed_findings.append({
+                        "file": rel,
+                        "line": line_num,
+                        "type": secret_name,
+                        "reason": dummy_label,
+                        "severity": "info",
+                    })
+                    severity_counts["info"] += 1
+                    logger.info(
+                        "security_audit: suppressed known-dummy %s (%s) in %s:%d",
+                        secret_name, dummy_label, rel, line_num,
+                    )
+                    continue
                 # Redact actual secret values in snippet output
                 snippet_raw = content[max(0, match.start() - 10):match.end() + 10].strip()[:80]
                 secrets_found.append({
@@ -351,6 +508,9 @@ def security_audit(target: str = ".") -> Dict[str, Any]:
         "anti_patterns": anti_patterns_found,
         "secrets_detected": len(secrets_found),
         "secrets": secrets_found[:20],  # Cap output to avoid huge responses
+        "suppressed_findings": suppressed_findings[:20],  # LED-1278 (b): allowlist audit log
+        "suppressed_count": len(suppressed_findings),
+        "include_tests": include_tests,  # LED-1278 (a): expose scan scope
         "env_in_git": env_in_git,
         "severity_summary": severity_counts,
         "tools_used": tools_used,
@@ -758,9 +918,9 @@ def release_plan(environment: str = "production", version: str = "", repository:
 
     # Commits since last tag
     if last_tag:
-        r = _run_cmd(["git", "log", f"{last_tag}..HEAD", "--oneline", "--no-decorate"], cwd=cwd)
+        r = _run_cmd(["git", "log", f"{last_tag}..HEAD", "--format=%s"], cwd=cwd)
     else:
-        r = _run_cmd(["git", "log", "--oneline", "--no-decorate", "-50"], cwd=cwd)
+        r = _run_cmd(["git", "log", "--format=%s", "-50"], cwd=cwd)
     commits = [line.strip() for line in r["stdout"].strip().split("\n") if line.strip()] if r["stdout"].strip() else []
     result["commits_since_last_tag"] = len(commits)
     result["commits"] = commits[:30]  # Cap

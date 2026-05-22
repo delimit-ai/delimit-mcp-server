@@ -1,0 +1,18 @@
+{
+  "event_id": "evt-ledger-LED-444",
+  "type": "feature_shipped",
+  "date": "2026-04-24T00:00:00Z",
+  "venture": "delimit",
+  "evidence_refs": ["LED-444"],
+  "claims": [
+    {
+      "claim_id": "CLM-LED-444-inferred",
+      "type": "feature",
+      "text": "Delimit handles all the edge cases.",
+      "evidence_refs": ["LED-444"],
+      "visibility": "internal",
+      "inference_rule": "generalization"
+    }
+  ],
+  "visibility": "internal"
+}

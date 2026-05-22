@@ -35,11 +35,10 @@ import logging
 import os
 import sys
 import threading
-import time
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
 logger = logging.getLogger("delimit.ai.hot_reload")
 
@@ -83,26 +82,151 @@ def _is_function_tool(obj: Any) -> bool:
     return cls.__module__.startswith("fastmcp.") and cls.__name__ == "FunctionTool"
 
 
-def register_module_tools(mcp: Any, module: Any) -> List[str]:
-    """Walk a module's globals and register every FunctionTool against the live mcp.
+def _get_tool_dict(mcp: Any) -> Optional[Dict[str, Any]]:
+    """Return a name → tool dict view of the live FastMCP registry.
 
-    Returns the list of tool keys registered. Existing tools with the same
-    key are *replaced* — that lets edits to a tool's metadata or schema
-    take effect without a restart.
+    Handles three schemas:
+      - fastmcp 2.x:  `mcp._tool_manager._tools`         keys = bare names
+      - fastmcp 3.x:  `mcp._local_provider._components`  keys = "tool:<name>@<scope>"
+      - any future:   probe `_tools` / `tools` attrs directly
+
+    For 3.x the returned dict is a *projected view* — the keys are bare tool
+    names (so callers can do `name in d` against a tool name), but writes
+    through that view propagate to the underlying components dict using the
+    correct namespaced key. That keeps the hot-reload code path unchanged
+    across fastmcp versions.
+
+    Returns None if no compatible registry is found.
+    """
+    # 2.x path
+    tm = getattr(mcp, "_tool_manager", None)
+    if tm is not None and isinstance(getattr(tm, "_tools", None), dict):
+        return tm._tools  # type: ignore[return-value]
+
+    # 3.x path: _local_provider._components is the live registry, but keys
+    # are "tool:<name>@<scope>". Wrap with a projected-name view.
+    lp = getattr(mcp, "_local_provider", None)
+    if lp is not None:
+        comps = getattr(lp, "_components", None)
+        if isinstance(comps, dict):
+            return _LocalProviderToolView(comps)
+
+    # Unknown schemas — try common attribute names directly
+    for attr in ("_tools", "tools"):
+        candidate = getattr(mcp, attr, None)
+        if isinstance(candidate, dict):
+            return candidate
+    for mgr_attr in ("_tool_manager", "tool_manager"):
+        mgr = getattr(mcp, mgr_attr, None)
+        if mgr is None:
+            continue
+        for inner in ("_tools", "tools"):
+            candidate = getattr(mgr, inner, None)
+            if isinstance(candidate, dict):
+                return candidate
+    return None
+
+
+class _LocalProviderToolView(dict):
+    """fastmcp-3.x compatibility shim.
+
+    The 3.x `_local_provider._components` dict stores tools under keys of
+    the form `"tool:<name>@<scope>"`. Hot reload code expects to write
+    `d[name] = tool` and read `name in d` against bare tool names.
+
+    This view sits in front of the components dict and translates between
+    the two schemas. Reads find the matching `tool:NAME@*` key, writes
+    insert under `tool:NAME@<existing_scope_if_any_else_empty>`.
+    """
+
+    def __init__(self, backing: Dict[str, Any]):
+        super().__init__()
+        # Don't store the backing in `super()` storage; just keep a reference.
+        self._backing = backing
+
+    @staticmethod
+    def _bare_name(key: str) -> str:
+        # "tool:foo@scope" -> "foo"; non-tool keys ignored
+        if not key.startswith("tool:"):
+            return ""
+        rest = key[len("tool:"):]
+        return rest.split("@", 1)[0]
+
+    def _find_key(self, name: str) -> Optional[str]:
+        """Find the existing components key for a bare tool name."""
+        for k in self._backing:
+            if self._bare_name(k) == name:
+                return k
+        return None
+
+    def __contains__(self, name: object) -> bool:  # type: ignore[override]
+        return isinstance(name, str) and self._find_key(name) is not None
+
+    def __getitem__(self, name: str) -> Any:
+        k = self._find_key(name)
+        if k is None:
+            raise KeyError(name)
+        return self._backing[k]
+
+    def __setitem__(self, name: str, value: Any) -> None:
+        existing = self._find_key(name)
+        if existing is not None:
+            # Replace in place — preserves any scope suffix the original used.
+            self._backing[existing] = value
+        else:
+            self._backing[f"tool:{name}@"] = value
+
+    def __delitem__(self, name: str) -> None:
+        k = self._find_key(name)
+        if k is None:
+            raise KeyError(name)
+        del self._backing[k]
+
+    def __iter__(self):
+        for k in self._backing:
+            bn = self._bare_name(k)
+            if bn:
+                yield bn
+
+    def __len__(self) -> int:
+        return sum(1 for k in self._backing if k.startswith("tool:"))
+
+
+def register_module_tools(mcp: Any, module: Any) -> List[str]:
+    """Walk a module's globals and ensure every decorated tool is in the live mcp.
+
+    Two schemas in play:
+
+    fastmcp 2.x  — `@mcp.tool()` wraps the decorated function as a
+                   FunctionTool instance and replaces the module global.
+                   We find them in `vars(module)` via `_is_function_tool`
+                   and write them into the live registry dict.
+
+    fastmcp 3.x  — `@mcp.tool()` registers the tool with the server at
+                   decoration time and leaves the module global as a plain
+                   function. By the time `register_module_tools` is called,
+                   the registration has ALREADY happened. Our job is just
+                   to enumerate the resulting tool names.
+
+    Returns the list of tool keys registered.
     """
     if mcp is None or module is None:
         return []
     registered: List[str] = []
     try:
-        tool_manager = getattr(mcp, "_tool_manager", None)
-        if tool_manager is None or not hasattr(tool_manager, "_tools"):
+        tool_dict = _get_tool_dict(mcp)
+        if tool_dict is None:
             return []
+
+        # 2.x path: explicit FunctionTool instances in the module globals
+        any_function_tool_found = False
         for name, value in list(vars(module).items()):
             if not _is_function_tool(value):
                 continue
+            any_function_tool_found = True
             try:
                 key = getattr(value, "key", name)
-                tool_manager._tools[key] = value
+                tool_dict[key] = value
                 registered.append(key)
             except Exception as e:
                 _log({
@@ -111,6 +235,22 @@ def register_module_tools(mcp: Any, module: Any) -> List[str]:
                     "name": name,
                     "error": str(e),
                 })
+
+        # 3.x fallback: no FunctionTool in module globals; the decorator
+        # already registered the tools. Walk module globals for plain
+        # functions whose name appears in the registry.
+        if not any_function_tool_found:
+            for name, value in list(vars(module).items()):
+                if name.startswith("_"):
+                    continue
+                if not callable(value):
+                    continue
+                # Skip imports — only count things actually defined in this module
+                value_mod = getattr(value, "__module__", "")
+                if value_mod and value_mod != module.__name__:
+                    continue
+                if name in tool_dict:
+                    registered.append(name)
     except Exception as e:  # noqa: BLE001
         _log({
             "event": "register_module_tools_failed",

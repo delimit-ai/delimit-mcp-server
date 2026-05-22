@@ -1,0 +1,9 @@
+{
+  "event_id": "evt-ledger-LED-999",
+  "type": "feature_shipped",
+  "date": "2026-04-24T00:00:00Z",
+  "venture": "delimit",
+  "evidence_refs": [],
+  "claims": [],
+  "visibility": "internal"
+}

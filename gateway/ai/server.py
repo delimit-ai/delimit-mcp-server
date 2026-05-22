@@ -325,8 +325,11 @@ CRITICAL_RISK_TOOLS = {
     'deploy_rollback', 'data_migrate',
 }
 
-# Rate limits per tool per hour - prevents runaway loops
-_TOOL_RATE_LIMITS = {
+# Rate limits per tool per hour - prevents runaway loops in autonomous
+# code paths. Defaults are conservative; founder-operator sessions set
+# DELIMIT_RATE_LIMITS_DISABLED=1 (global bypass) or
+# DELIMIT_RATE_LIMIT_<TOOL>=N (per-tool override) to lift the cap.
+_DEFAULT_TOOL_RATE_LIMITS = {
     'social_post': 10,
     'social_target': 20,
     'social_approve': 10,
@@ -336,6 +339,35 @@ _TOOL_RATE_LIMITS = {
     'ledger_add': 30,
 }
 
+
+def _resolve_rate_limit(clean_tool_name: str) -> Optional[int]:
+    """Resolve the per-hour rate limit for a tool, in order:
+    1. DELIMIT_RATE_LIMITS_DISABLED=1 → None (no limit)
+    2. DELIMIT_RATE_LIMIT_<TOOL>=N → N (per-tool override; 0 = no limit)
+    3. _DEFAULT_TOOL_RATE_LIMITS[clean_tool_name] → default
+    4. None (no limit for unconfigured tools)
+
+    The env-var bypass exists so the founder's interactive sessions can
+    call delimit_deliberate freely while autonomous loops keep the 5/hour
+    safety cap. Set the env var at MCP-server-process startup time.
+    """
+    if os.environ.get("DELIMIT_RATE_LIMITS_DISABLED", "").lower() in ("1", "true", "yes"):
+        return None
+    env_key = f"DELIMIT_RATE_LIMIT_{clean_tool_name.upper()}"
+    override = os.environ.get(env_key, "").strip()
+    if override:
+        try:
+            n = int(override)
+            return n if n > 0 else None
+        except ValueError:
+            pass  # malformed override → fall through to default
+    return _DEFAULT_TOOL_RATE_LIMITS.get(clean_tool_name)
+
+
+# Back-compat: callers that introspect _TOOL_RATE_LIMITS still see the
+# raw defaults. Use _resolve_rate_limit() for the env-aware value.
+_TOOL_RATE_LIMITS = dict(_DEFAULT_TOOL_RATE_LIMITS)
+
 _tool_call_counts: Dict[str, list] = {}
 _tool_rate_lock = threading.Lock()
 
@@ -343,7 +375,7 @@ _tool_rate_lock = threading.Lock()
 def _check_rate_limit(tool_name: str) -> Optional[Dict]:
     """Enforce per-tool rate limits. Returns error dict if over limit, None if allowed."""
     clean = tool_name.replace('delimit_', '')
-    limit = _TOOL_RATE_LIMITS.get(clean)
+    limit = _resolve_rate_limit(clean)
     if not limit:
         return None
 
@@ -357,7 +389,9 @@ def _check_rate_limit(tool_name: str) -> Optional[Dict]:
             return {
                 "status": "rate_limited",
                 "reason": f"Tool '{tool_name}' called {len(calls)} times in the last hour (limit: {limit}). "
-                          f"This prevents runaway loops. Wait or check your scan configuration.",
+                          f"This prevents runaway loops. Wait, or in an operator session set "
+                          f"DELIMIT_RATE_LIMITS_DISABLED=1 (global bypass) or "
+                          f"DELIMIT_RATE_LIMIT_{clean.upper()}=N (per-tool override) and restart the MCP server.",
                 "calls_this_hour": len(calls),
                 "limit": limit,
             }
@@ -2587,6 +2621,118 @@ def delimit_external_pr_check(
 
 
 @mcp.tool()
+def delimit_substantive_content_check(
+    body: str,
+    proposed_action: str = "comment",
+    repo: str = "",
+    repo_description: str = "",
+    repo_topics: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """Pre-submit gate for autonomous github outreach (LED-2214b).
+
+    When to use: as the LAST step before any agent submits a comment,
+    issue body, or PR description to a third-party github repo via
+    the outreach_substantive task path. Mandatory under CLAUDE.md
+    SHIFT-1; bypass requires explicit founder approval.
+    When NOT to use: for internal repo content, for posts on
+    platforms other than github, or for non-outreach submissions
+    (use the surface's own validators instead).
+
+    Sibling contrast: delimit_external_pr_check guards PR
+    duplication; this guards the substantive-content boundary itself.
+    For a PR submission the agent calls BOTH — this one first to
+    refuse covert-commercial drafts, then external_pr_check to
+    refuse duplicates.
+
+    Side effects: read-only. Pure validator over the body string and
+    target metadata; no network, no ledger writes, no notifications.
+
+    The gate runs in two stages:
+
+      1. Target-side veto — if repo / repo_description / repo_topics
+         contain a banking / fintech / regulator-adjacent keyword,
+         the gate blocks regardless of content quality (SHIFT-1 hard
+         veto; KYC would deanonymize the operating account).
+      2. Content shape — bans forbidden phrases (incl. our own
+         product names), requires at least one technical anchor
+         (commit hash, issue number, CVE, spec path, source file
+         path), enforces minimum body length.
+
+    Args:
+        body: The draft body to validate. Required.
+        proposed_action: "comment", "issue", or "pr". Default
+            "comment".
+        repo: Target "owner/name" if known (used in target veto).
+        repo_description: Repo description string (target veto).
+        repo_topics: List of repo topic tags (target veto).
+
+    Returns:
+        Dict with verdict ("allow" | "block"), reason, violations
+        list, anchors dict, stage ("target" | "content"), and
+        next_steps.
+    """
+    from ai.outreach_substantive import evaluate_substantive_payload
+
+    result = evaluate_substantive_payload(
+        body=body,
+        proposed_action=proposed_action,
+        repo=repo,
+        repo_description=repo_description,
+        repo_topics=repo_topics,
+    )
+    return _with_next_steps("substantive_content_check", result)
+
+
+@mcp.tool()
+def delimit_outreach_loop_tick(
+    venture: str = "delimit",
+    max_dispatch: int = 3,
+    max_monitor: int = 50,
+) -> Dict[str, Any]:
+    """Run one tick of the autonomous github-outreach loop (LED-2214b).
+
+    When to use: from an external scheduler (cron, loop_daemon) or
+    for an ad-hoc manual cycle. The tick monitors existing outreach
+    LEDs for new activity AND scans for new substantive candidates.
+    When NOT to use: as a backfill for thousands of stale items —
+    the per-tick caps are intentional. Multiple ticks at the
+    scheduler interval is the right pattern.
+
+    Sibling contrast: delimit_social_target scans a broader platform
+    set; this is github-only and dispatches via the substantive-
+    outreach path (with the SHIFT-1 gates). delimit_sensor_github_
+    issue watches a single issue; this orchestrates the sensor over
+    every open outreach LED.
+
+    Side effects: reads ledger, network reads (gh CLI) for the
+    monitor phase, writes new intel-class LEDs + dispatches new
+    substantive tasks for the scan phase. Honours the
+    DELIMIT_GITHUB_OUTREACH_DISABLED env var and the
+    ~/.delimit/outreach_pause sentinel file as kill switches.
+
+    Args:
+        venture: Sourcing venture (default "delimit").
+        max_dispatch: Per-tick substantive-dispatch cap (default 3).
+            Targets beyond the cap still file intel LEDs but are
+            not dispatched on this tick.
+        max_monitor: Per-tick monitor-call cap (default 50).
+
+    Returns:
+        Dict with venture, started_at, ended_at, kill_switch,
+        monitor records, scan summary, dispatch_count, status, and
+        next_steps.
+    """
+    from ai.outreach_loop_daemon import tick
+
+    result = tick(
+        venture=venture,
+        max_dispatch=max_dispatch,
+        max_monitor=max_monitor,
+    )
+    return _with_next_steps("outreach_loop_tick", result)
+
+
+@mcp.tool()
 def delimit_tdqs_lint(
     target_file: Annotated[str, Field(description="Path to a Python file with @mcp.tool() decorators. Default \"ai/server.py\", resolved against cwd.")] = "ai/server.py",
     human: Annotated[bool, Field(description="If True, include a human-readable \"report\" string in the response. Default False (JSON-only is cheaper for CI pipes).")] = False,
@@ -3016,6 +3162,24 @@ def _deploy_plan_chain(app: str = "", env: str = "", git_ref: Optional[str] = No
     from backends.deploy_bridge import plan as deploy_plan_fn
 
     chain: Dict[str, Any] = {"id": "deploy_plan_chain", "steps": []}
+
+    # Step 0 (LED-1418): worktree-sanity precheck. If the deploy target
+    # is a corrupt worktree (LED-1401 class — bare-mode .git/config +
+    # stranded sibling worktree) then security_audit and the build steps
+    # below would all read from misleading state. Halt before any chain
+    # step runs.
+    from backends.git_health import check_worktree_sanity
+    worktree_target = app if app and ("/" in app or app == "." or app.startswith(".")) else "."
+    health = check_worktree_sanity(worktree_target)
+    chain["steps"].append({"step": "worktree_precheck", "ok": health["ok"]})
+    if not health["ok"]:
+        chain["status"] = "blocked_worktree_unhealthy"
+        return _with_next_steps("deploy_plan", {
+            "status": "blocked",
+            "reason": f"Deploy plan halted: worktree unhealthy ({health['reason']})",
+            "worktree_health": health,
+            "chain": chain,
+        })
 
     # Step 1: Security audit preflight
     audit_target = app if app else "."
@@ -4566,7 +4730,10 @@ def delimit_siem(action: Annotated[str, Field(description="One of \"status\" (de
 
 
 @mcp.tool()
-def delimit_security_audit(target: Annotated[str, Field(description="Repository or file path to audit. Default \".\" (cwd).")] = ".") -> Dict[str, Any]:
+def delimit_security_audit(
+    target: Annotated[str, Field(description="Repository or file path to audit. Default \".\" (cwd).")] = ".",
+    include_tests: Annotated[bool, Field(description="When True, scan test directories (tests/, __tests__/, spec/, fixtures/, etc.). Default False — test trees are skipped to avoid the canonical fixture-credential FP class (LED-1278).")] = False,
+) -> Dict[str, Any]:
     """Audit security and auto-chain evidence + governance on critical findings.
 
     When to use: as the deploy gate / pre-release security check —
@@ -4585,6 +4752,14 @@ def delimit_security_audit(target: Annotated[str, Field(description="Repository 
     this one runs the audit AND auto-chains evidence collection,
     governance task creation, and notification on criticals.
 
+    LED-1278: by default the scanner skips test directories (tests/,
+    __tests__/, spec/, fixtures/, *_test.py, *.test.tsx, etc.) and
+    suppresses well-known dummy values (AWS canonical example,
+    alphabet-pattern GitHub tokens, leading-1234567890 Slack tokens,
+    trivial JWTs, generic placeholder dict values). Pass
+    include_tests=True to scan test trees too — useful for repos that
+    ship real secrets in fixture files (rare, but legitimate).
+
     Side effects: writes an evidence bundle (always, best-effort).
     On critical findings, creates a governance task via the governance
     engine and sends a webhook notification. Optional: SNYK_TOKEN or
@@ -4592,6 +4767,7 @@ def delimit_security_audit(target: Annotated[str, Field(description="Repository 
 
     Args:
         target: Repository or file path to audit. Default "." (cwd).
+        include_tests: When True, scan test directories (default False).
 
     Returns:
         Dict with audit findings, attached evidence bundle, chain step
@@ -4603,7 +4779,7 @@ def delimit_security_audit(target: Annotated[str, Field(description="Repository 
     chain: Dict[str, Any] = {"id": "security_audit_chain", "steps": []}
 
     # Step 1: Core audit
-    audit_result = _safe_call(security_audit, target=target)
+    audit_result = _safe_call(security_audit, target=target, include_tests=include_tests)
     chain["steps"].append({"step": "security_audit", "ok": not audit_result.get("error")})
 
     if audit_result.get("error"):
@@ -4624,16 +4800,79 @@ def delimit_security_audit(target: Annotated[str, Field(description="Repository 
         audit_result["chain"] = chain
         return _with_next_steps("security_audit", audit_result)
 
+    # LED-1278 (c): build a populated description for the auto-stub so
+    # orchestrators don't have to re-run the audit just to triage a P0
+    # ledger entry. Includes severity summary, top-3 files by finding count,
+    # audit timestamp, and the evidence bundle id (if collection succeeded).
+    summary = audit_result.get("severity_summary", {}) or {}
+    severity_line = (
+        f"Severity: {summary.get('critical', 0)} critical, "
+        f"{summary.get('high', 0)} high, "
+        f"{summary.get('medium', 0)} medium, "
+        f"{summary.get('low', 0)} low"
+    )
+
+    file_counts: Dict[str, int] = {}
+    for f in (audit_result.get("secrets") or []):
+        if isinstance(f, dict) and f.get("file"):
+            file_counts[f["file"]] = file_counts.get(f["file"], 0) + 1
+    for f in (audit_result.get("anti_patterns") or []):
+        if isinstance(f, dict) and f.get("file"):
+            file_counts[f["file"]] = file_counts.get(f["file"], 0) + 1
+    top_files = sorted(file_counts.items(), key=lambda kv: -kv[1])[:3]
+    if top_files:
+        top_files_line = "Top files: " + ", ".join(f"{name} ({n})" for name, n in top_files)
+    else:
+        top_files_line = "Top files: (no per-file breakdown — vulnerabilities only)"
+
+    audit_ts = audit_result.get("timestamp", "")
+    bundle_id = ""
+    if isinstance(evidence_result, dict):
+        bundle_id = (
+            evidence_result.get("bundle_id")
+            or evidence_result.get("id")
+            or (evidence_result.get("bundle") or {}).get("id", "")
+            if isinstance(evidence_result.get("bundle"), dict) else ""
+        ) or evidence_result.get("bundle_id", "") or ""
+    audit_chain_line = f"Audit: {audit_ts}, evidence bundle: {bundle_id or 'n/a'}"
+    repro_line = f"Run `mcp__delimit__delimit_security_audit target={target}` to reproduce."
+
+    stub_description = "\n".join([
+        severity_line,
+        top_files_line,
+        audit_chain_line,
+        repro_line,
+    ])
+
     # Step 3: Critical findings -- create governance task
+    stub_title = f"Security: {critical_count} critical finding(s) in {target}"
     gov_result = _delimit_gov_impl(
         action="new_task",
-        title=f"Security: {critical_count} critical finding(s) in {target}",
+        title=stub_title,
         scope=target,
         risk_level="critical",
         repo=".",
     )
     chain["steps"].append({"step": "gov_new_task", "ok": not _chain_is_error(gov_result)})
     audit_result["gov_task"] = gov_result
+
+    # Step 3b: LED-1278 (c) — also populate a ledger stub with the
+    # full description so orchestrators see context, not an opaque stub.
+    try:
+        from ai.ledger_manager import add_item
+        ledger_result = _chain_call(
+            "security_audit", "ledger_add", add_item, required=False,
+            title=stub_title,
+            ledger="ops",
+            type="fix",
+            priority="P0",
+            description=stub_description,
+            source="chain:security_audit:critical",
+        )
+        chain["steps"].append({"step": "ledger_add", "ok": not _chain_is_error(ledger_result)})
+        audit_result["ledger_stub"] = ledger_result
+    except Exception as exc:  # pragma: no cover — best-effort
+        chain["steps"].append({"step": "ledger_add", "ok": False, "error": str(exc)[:120]})
 
     # Step 4: Notify (best-effort)
     from ai.notify import send_notification
@@ -4680,6 +4919,23 @@ def delimit_evidence_collect(target: Annotated[str, Field(description="Repositor
     gate = require_premium("evidence_collect")
     if gate:
         return gate
+
+    # LED-1411 / LED-1418: worktree-sanity precheck. Evidence bundles
+    # written against a corrupt worktree (bare-mode .git + stranded
+    # sibling worktree) capture stale state that can mislead a future
+    # evidence_verify call. Same precheck as delimit_test_smoke.
+    from backends.git_health import check_worktree_sanity
+    health = check_worktree_sanity(target)
+    if not health["ok"]:
+        return _with_next_steps("evidence_collect", {
+            "error": "worktree_unhealthy",
+            "reason": health["reason"],
+            "detail": health["detail"],
+            "path": health["path"],
+            "tool": "evidence.collect",
+            "status": "blocked_worktree_unhealthy",
+        })
+
     from backends.repo_bridge import evidence_collect
     options = {}
     if evidence_type:
@@ -5514,6 +5770,60 @@ def delimit_obs_status() -> Dict[str, Any]:
     return _delimit_obs_impl(action="status")
 
 
+@mcp.tool()
+def delimit_heartbeat_check(
+    heartbeat_dir: Annotated[Optional[str], Field(description="Override the heartbeat directory. Default: $DELIMIT_HEARTBEAT_DIR env var or ~/.delimit/heartbeats/.")] = None,
+) -> Dict[str, Any]:
+    """Walk the heartbeat directory and report which scheduled services are stale (LED-1412).
+
+    When to use: as part of the session-start ritual to surface silent
+    daemon staleness before it becomes a customer-visible incident. The
+    2026-05-15 incident — `delimit-reddit-proxy.service` inactive for 13
+    days, all reddit scans 429-failing silently, founder noticing only
+    via "3 day old posts" — is the failure mode this prevents. Each
+    scheduled task writes `~/.delimit/heartbeats/<service>.json` after
+    every run; this tool walks the dir and classifies each service.
+    When NOT to use: for one-off liveness checks (just read the file
+    yourself) or for full-host metrics (delimit_obs_status). Phase 2
+    will add an external deadman ping for full-host outages —
+    heartbeats here are local-only.
+
+    Sibling contrast: delimit_obs_status reports composed runtime
+    observability metrics; this reports per-service liveness based on
+    last_run timestamps written by each daemon. delimit_gov_health
+    reports the kernel layer.
+
+    Side effects: read-only on the heartbeat directory. No network, no
+    write, no ledger, no notification.
+
+    Classification (most-severe-first):
+      - parse_error: heartbeat file unreadable
+      - failed: status='failed' in the record
+      - stale: last_run older than service-specific threshold
+      - degraded: status='degraded' in the record
+      - never_seen: configured service has no heartbeat file yet
+      - unknown_age: heartbeat exists but timestamp won't parse
+      - ok: status='ok' AND last_run within threshold
+
+    Per-service thresholds default to sensible values (reddit/social-loop
+    2h, inbox 30min, daily timers 36h). Override via
+    `<dir>/_thresholds.json` — JSON map of {service_name: seconds}.
+
+    Args:
+        heartbeat_dir: optional override of the directory to scan.
+
+    Returns:
+        Dict with checked_at, summary {ok/stale/degraded/failed/parse_error/never_seen/unknown_age},
+        services (list of per-service classifications), and stale_services
+        (convenience list of names needing attention).
+    """
+    from ai.heartbeat import check_staleness
+    return _with_next_steps(
+        "heartbeat_check",
+        _safe_call(check_staleness, heartbeat_dir=heartbeat_dir),
+    )
+
+
 # ─── DesignSystem (UI Tooling) ──────────────────────────────────────────
 
 @mcp.tool()
@@ -5897,6 +6207,23 @@ def delimit_test_smoke(project_path: Annotated[str, Field(description="Project p
     Returns:
         Dict with pass/fail/error counts, framework detected, output.
     """
+    # LED-1411: worktree-sanity precheck. The LED-1403/LED-1401 incident
+    # showed delimit_test_smoke can run against a corrupt worktree
+    # (bare-mode .git + stranded sibling) and report phantom failures
+    # against stale code. Fail fast with actionable remediation BEFORE
+    # invoking the test runner so the caller knows the report is real.
+    from backends.git_health import check_worktree_sanity
+    health = check_worktree_sanity(project_path)
+    if not health["ok"]:
+        return _with_next_steps("test_smoke", {
+            "error": "worktree_unhealthy",
+            "reason": health["reason"],
+            "detail": health["detail"],
+            "path": health["path"],
+            "tool": "test.smoke",
+            "status": "blocked_worktree_unhealthy",
+        })
+
     from backends.ui_bridge import test_smoke
     return _with_next_steps("test_smoke", _safe_call(test_smoke, project_path=project_path, test_suite=test_suite))
 
@@ -5998,113 +6325,20 @@ async def delimit_sensor_github_issue(
         Dict with new comments, issue state, severity classification,
         next_steps. Returns {error: ...} on validation failure.
     """
-    import re as _re
-    # Validate inputs — defense-in-depth even though subprocess.run with
-    # list argv (no shell=True) makes classic injection inert. See #40.
-    if not _re.match(r'^[\w.-]+/[\w.-]+$', repo):
-        return _with_next_steps("sensor_github_issue", {"error": f"Invalid repo format: {repo}. Use owner/repo."})
-    if '..' in repo:
-        return _with_next_steps("sensor_github_issue", {"error": f"Invalid repo: path traversal sequences not allowed"})
-    if not isinstance(issue_number, int) or issue_number <= 0:
-        return _with_next_steps("sensor_github_issue", {"error": f"Invalid issue number: {issue_number}"})
-
-    # LED-881 / #40 confused-deputy guard
-    refusal = _check_repo_allowlist(repo)
-    if refusal is not None:
-        return _with_next_steps("sensor_github_issue", refusal)
-
-    try:
-        # Fetch comments
-        comments_jq = (
-            "[.[] | {id: .id, author: .user.login, "
-            "created_at: .created_at, body: (.body | .[0:500])}]"
-        )
-        comments_proc = subprocess.run(
-            [
-                "gh", "api",
-                f"repos/{repo}/issues/{issue_number}/comments",
-                "--jq", comments_jq,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if comments_proc.returncode != 0:
-            return _with_next_steps("sensor_github_issue", {
-                "error": f"gh api comments failed: {comments_proc.stderr.strip()}",
-                "has_new_activity": False,
-            })
-
-        all_comments = json.loads(comments_proc.stdout) if comments_proc.stdout.strip() else []
-
-        # Filter to new comments only
-        new_comments = [c for c in all_comments if c["id"] > since_comment_id]
-
-        # Fetch issue state
-        issue_jq = "{state: .state, labels: [.labels[].name], reactions: .reactions.total_count}"
-        issue_proc = subprocess.run(
-            [
-                "gh", "api",
-                f"repos/{repo}/issues/{issue_number}",
-                "--jq", issue_jq,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if issue_proc.returncode != 0:
-            return _with_next_steps("sensor_github_issue", {
-                "error": f"gh api issue failed: {issue_proc.stderr.strip()}",
-                "has_new_activity": False,
-            })
-
-        issue_info = json.loads(issue_proc.stdout) if issue_proc.stdout.strip() else {}
-        issue_state = issue_info.get("state", "unknown")
-
-        # Determine severity
-        severity = "green"
-
-        # Check for negative signals in new comments
-        combined_body = " ".join(c.get("body", "") for c in new_comments).lower()
-        has_negative = any(kw in combined_body for kw in _NEGATIVE_KEYWORDS)
-
-        if has_negative:
-            severity = "red"
-        elif issue_state == "closed" and len(all_comments) == 0:
-            # Closed with no engagement at all
-            severity = "amber"
-        elif issue_state == "closed":
-            # Closed but had some engagement -- could be resolved or rejected
-            severity = "amber"
-
-        latest_comment_id = max((c["id"] for c in all_comments), default=since_comment_id)
-
-        repo_key = repo.replace("/", "_")
-        return _with_next_steps("sensor_github_issue", {
-            "repo": repo,
-            "issue_number": str(issue_number),
-            "signal": {
-                "id": f"sensor:github_issue:{repo_key}:{issue_number}",
-                "venture": "delimit",
-                "metric": "outreach_issue_activity",
-                "source": f"https://github.com/{repo}/issues/{issue_number}",
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "severity": severity,
-            },
-            "issue_state": issue_state,
-            "new_comments": new_comments,
-            "latest_comment_id": latest_comment_id,
-            "total_comments": len(all_comments),
-            "has_new_activity": len(new_comments) > 0,
-        })
-
-    except subprocess.TimeoutExpired:
-        return _with_next_steps("sensor_github_issue", {"error": "gh command timed out after 30s", "has_new_activity": False})
-    except json.JSONDecodeError as e:
-        return _with_next_steps("sensor_github_issue", {"error": f"Failed to parse gh output: {e}", "has_new_activity": False})
-    except Exception as e:
-        logger.error("Sensor error: %s\n%s", e, traceback.format_exc())
-        return _with_next_steps("sensor_github_issue", {"error": str(e), "has_new_activity": False})
+    # LED-2214b-followup: delegate to the shared sync impl in
+    # ai.governance so the outreach daemon's monitor_phase can use the
+    # same logic via a normal Python import (no MCP wrapper). The MCP
+    # tool's return schema is unchanged — we just wrap the impl's raw
+    # dict with _with_next_steps as before.
+    from ai.governance import _sensor_github_issue_impl
+    return _with_next_steps(
+        "sensor_github_issue",
+        _sensor_github_issue_impl(
+            repo=repo,
+            issue_number=issue_number,
+            since_comment_id=since_comment_id,
+        ),
+    )
 
 
 # --- STR-062: Migration Pattern Detector ---
@@ -7680,7 +7914,13 @@ def delimit_ledger_update(
 
 
 @mcp.tool()
-def delimit_ledger_done(item_id: Annotated[str, Field(description="Ledger item id (e.g. \"LED-001\"). Required.")], note: Annotated[str, Field(description="Optional completion note.")] = "", venture: Annotated[str, Field(description="Project name or path. Empty = auto-detect.")] = "") -> Dict[str, Any]:
+def delimit_ledger_done(
+    item_id: Annotated[str, Field(description="Ledger item id (e.g. \"LED-001\"). Required.")],
+    note: Annotated[str, Field(description="Optional completion note. If the note contains a GitHub PR URL, it will be auto-extracted as ship proof.")] = "",
+    venture: Annotated[str, Field(description="Project name or path. Empty = auto-detect.")] = "",
+    commit_sha: Annotated[str, Field(description="LED-1408: optional merge-commit SHA proving the fix shipped. Recorded as ship_proof on the event; verified=True flag set on the item.")] = "",
+    pr_url: Annotated[str, Field(description="LED-1408: optional GitHub PR URL proving the fix shipped. Parsed into pr_owner/pr_repo/pr_number; verified=True flag set on the item.")] = "",
+) -> Dict[str, Any]:
     """Mark a ledger item as done (convenience wrapper).
 
     When to use: to close out a ledger item with one call instead of
@@ -7692,19 +7932,33 @@ def delimit_ledger_done(item_id: Annotated[str, Field(description="Ledger item i
     this is the close-out shortcut.
 
     Side effects: writes status="done" + optional note via
-    ai.ledger_manager.update_item.
+    ai.ledger_manager.update_item. LED-1408 Phase 1: when commit_sha or
+    pr_url is provided (or a PR URL is detected in the note), attaches
+    a ship_proof block to the event with verified=True. Future audits
+    use this flag to distinguish trustworthy-done from
+    marked-done-but-never-verified. Phase 2 will tighten enforcement.
 
     Args:
         item_id: Ledger item id (e.g. "LED-001"). Required.
-        note: Optional completion note.
+        note: Optional completion note. PR URLs in the note are auto-extracted.
         venture: Project name or path. Empty = auto-detect.
+        commit_sha: Optional merge-commit SHA (LED-1408 ship proof).
+        pr_url: Optional GitHub PR URL (LED-1408 ship proof).
 
     Returns:
-        Dict with the update result and next_steps.
+        Dict with the update result (including ship_proof when proof was
+        supplied) and next_steps.
     """
     from ai.ledger_manager import update_item
     project = _resolve_venture(venture)
-    result = update_item(item_id=item_id, status="done", note=note, project_path=project)
+    result = update_item(
+        item_id=item_id,
+        status="done",
+        note=note,
+        project_path=project,
+        commit_sha=commit_sha or None,
+        pr_url=pr_url or None,
+    )
     return _with_next_steps("ledger_done", result)
 
 
@@ -13249,6 +13503,22 @@ def delimit_handoff_list(
 
 async def run_mcp_server(server, server_name="delimit"):
     """Run the MCP server."""
+    # LED-2087 Phase 1a: log proprietary-module compilation status once
+    # at startup so ops can see when license_core / deliberation /
+    # governance are on the Python source-fallback path. Silent on the
+    # native happy path (INFO with native-only list); warns if any
+    # module fell back to source.
+    try:
+        from ai._compile_status import log_compilation_status_on_startup
+        log_compilation_status_on_startup()
+    except Exception as _compile_status_exc:
+        # The status log MUST NOT block server startup. Anything weird
+        # here gets swallowed with a DEBUG note and the server proceeds.
+        import logging as _logging
+        _logging.getLogger("delimit.ai").debug(
+            "LED-2087 compile-status logger failed (non-fatal): %s",
+            _compile_status_exc,
+        )
     await server.run_stdio_async()
 
 

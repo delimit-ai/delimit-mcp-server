@@ -20,12 +20,77 @@ try:
         PRO_TOOLS as _CORE_PRO_TOOLS,
         FREE_TRIAL_LIMITS,
     )
-    # Extend compiled PRO_TOOLS with tools added after last binary build
+    # Extend compiled PRO_TOOLS with tools added after last binary build.
+    # LED-1260: keep this in lockstep with the fallback set below — any tool
+    # in the fallback PRO_TOOLS that's NOT in the compiled set must be added
+    # here, otherwise customers with the binary get those tools FREE while
+    # customers without the binary pay for them (regression-on-success).
+    # The runtime test in tests/test_license.py asserts both sets are
+    # equal. LED-1410 makes this stronger: the extension set below is
+    # CODEGEN from ai/pro_tools.yaml (same SSoT as the compiled
+    # set), so the two are equal by construction. The | union with
+    # _CORE_PRO_TOOLS is preserved so OLDER compiled .so files that
+    # were built before a YAML addition still pick up the new tool
+    # at runtime.
     PRO_TOOLS = _CORE_PRO_TOOLS | frozenset({
-        "delimit_social_approve",
-        # Autonomous build loop
-        "delimit_next_task", "delimit_task_complete",
-        "delimit_loop_status", "delimit_loop_config",
+        # CODEGEN-START: EXTENSION_PRO_TOOLS
+    "delimit_agent_complete",
+    "delimit_agent_dispatch",
+    "delimit_agent_handoff",
+    "delimit_agent_status",
+    "delimit_cost_alert",
+    "delimit_cost_analyze",
+    "delimit_cost_optimize",
+    "delimit_deliberate",
+    "delimit_deploy_build",
+    "delimit_deploy_npm",
+    "delimit_deploy_plan",
+    "delimit_deploy_publish",
+    "delimit_deploy_rollback",
+    "delimit_deploy_site",
+    "delimit_deploy_status",
+    "delimit_deploy_verify",
+    "delimit_evidence_collect",
+    "delimit_evidence_verify",
+    "delimit_executor",
+    "delimit_gov_evaluate",
+    "delimit_gov_new_task",
+    "delimit_gov_policy",
+    "delimit_gov_run",
+    "delimit_gov_verify",
+    "delimit_loop_config",
+    "delimit_loop_status",
+    "delimit_memory_search",
+    "delimit_models",
+    "delimit_next_task",
+    "delimit_notify",
+    "delimit_obs_logs",
+    "delimit_obs_metrics",
+    "delimit_obs_status",
+    "delimit_os_gates",
+    "delimit_os_plan",
+    "delimit_os_status",
+    "delimit_release_plan",
+    "delimit_release_status",
+    "delimit_release_sync",
+    "delimit_repo_analyze",
+    "delimit_repo_config_audit",
+    "delimit_repo_config_validate",
+    "delimit_repo_diagnose",
+    "delimit_screen_record",
+    "delimit_screenshot",
+    "delimit_security_deliberate",
+    "delimit_security_ingest",
+    "delimit_social_approve",
+    "delimit_social_generate",
+    "delimit_social_history",
+    "delimit_social_post",
+    "delimit_task_complete",
+    "delimit_test_coverage",
+    "delimit_vault_health",
+    "delimit_vault_search",
+    "delimit_vault_snapshot",
+        # CODEGEN-END: EXTENSION_PRO_TOOLS
     })
 except ImportError:
     # license_core not available — three known cases:
@@ -50,49 +115,69 @@ except ImportError:
 
     LICENSE_FILE = Path.home() / ".delimit" / "license.json"
 
+    # LED-1410: CODEGEN from ai/pro_tools.yaml — same SSoT as the
+    # compiled set above. Memory note preserved here for source readers:
+    # delimit_memory_store + delimit_memory_recent are FREE (LED-193).
+    # Only delimit_memory_search is Pro.
     PRO_TOOLS = frozenset({
-        # Governance deep
-        "delimit_gov_evaluate", "delimit_gov_policy", "delimit_gov_run", "delimit_gov_verify",
-        "delimit_gov_new_task",
-        # OS layer
-        "delimit_os_plan", "delimit_os_status", "delimit_os_gates",
-        # Deploy pipeline
-        "delimit_deploy_plan", "delimit_deploy_build", "delimit_deploy_publish",
-        "delimit_deploy_verify", "delimit_deploy_rollback", "delimit_deploy_status",
-        "delimit_deploy_site", "delimit_deploy_npm",
-        # Memory (search is Pro; store + recent are free)
-        "delimit_memory_search",
-        "delimit_vault_search", "delimit_vault_snapshot", "delimit_vault_health",
-        # Evidence
-        "delimit_evidence_collect", "delimit_evidence_verify",
-        # Deliberation + Models
-        "delimit_deliberate", "delimit_models",
-        # Security orchestrator
-        "delimit_security_ingest", "delimit_security_deliberate",
-        # Observability
-        "delimit_obs_metrics", "delimit_obs_logs", "delimit_obs_status",
-        # Release
-        "delimit_release_plan", "delimit_release_status", "delimit_release_sync",
-        # Cost
-        "delimit_cost_analyze", "delimit_cost_optimize", "delimit_cost_alert",
-        # Social
-        "delimit_social_post", "delimit_social_generate", "delimit_social_history",
-        "delimit_social_approve",
-        # Repo deep
-        "delimit_repo_analyze", "delimit_repo_config_audit", "delimit_repo_config_validate",
-        "delimit_repo_diagnose",
-        # Test
-        "delimit_test_coverage",
-        # Screen recording
-        "delimit_screen_record", "delimit_screenshot",
-        # Notifications
-        "delimit_notify",
-        # Agent orchestration
-        "delimit_agent_dispatch", "delimit_agent_status",
-        "delimit_agent_complete", "delimit_agent_handoff",
-        # Autonomous build loop
-        "delimit_next_task", "delimit_task_complete",
-        "delimit_loop_status", "delimit_loop_config",
+        # CODEGEN-START: FALLBACK_PRO_TOOLS
+    "delimit_agent_complete",
+    "delimit_agent_dispatch",
+    "delimit_agent_handoff",
+    "delimit_agent_status",
+    "delimit_cost_alert",
+    "delimit_cost_analyze",
+    "delimit_cost_optimize",
+    "delimit_deliberate",
+    "delimit_deploy_build",
+    "delimit_deploy_npm",
+    "delimit_deploy_plan",
+    "delimit_deploy_publish",
+    "delimit_deploy_rollback",
+    "delimit_deploy_site",
+    "delimit_deploy_status",
+    "delimit_deploy_verify",
+    "delimit_evidence_collect",
+    "delimit_evidence_verify",
+    "delimit_executor",
+    "delimit_gov_evaluate",
+    "delimit_gov_new_task",
+    "delimit_gov_policy",
+    "delimit_gov_run",
+    "delimit_gov_verify",
+    "delimit_loop_config",
+    "delimit_loop_status",
+    "delimit_memory_search",
+    "delimit_models",
+    "delimit_next_task",
+    "delimit_notify",
+    "delimit_obs_logs",
+    "delimit_obs_metrics",
+    "delimit_obs_status",
+    "delimit_os_gates",
+    "delimit_os_plan",
+    "delimit_os_status",
+    "delimit_release_plan",
+    "delimit_release_status",
+    "delimit_release_sync",
+    "delimit_repo_analyze",
+    "delimit_repo_config_audit",
+    "delimit_repo_config_validate",
+    "delimit_repo_diagnose",
+    "delimit_screen_record",
+    "delimit_screenshot",
+    "delimit_security_deliberate",
+    "delimit_security_ingest",
+    "delimit_social_approve",
+    "delimit_social_generate",
+    "delimit_social_history",
+    "delimit_social_post",
+    "delimit_task_complete",
+    "delimit_test_coverage",
+    "delimit_vault_health",
+    "delimit_vault_search",
+    "delimit_vault_snapshot",
+        # CODEGEN-END: FALLBACK_PRO_TOOLS
     })
     FREE_TRIAL_LIMITS = {"delimit_deliberate": 3}
 

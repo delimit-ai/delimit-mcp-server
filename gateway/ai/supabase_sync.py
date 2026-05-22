@@ -488,8 +488,20 @@ def sync_social_draft(draft: dict):
             client.table("social_drafts").upsert(row).execute()
 
         # ntfy on NEW pending drafts only, dedupe via the WO sent-marker file
-        # (reused — scoped by draft_id vs wo_id so no collision)
-        if row["status"] == "pending":
+        # (reused — scoped by draft_id vs wo_id so no collision).
+        # LED-216 Phase 1: suppress ntfy for capability-drift drafts and the
+        # existing rule-blocked / placeholder buckets — the row still lands
+        # in Supabase for audit, but the founder is NOT paged on a draft
+        # we already know to be unfit for posting.
+        _quality = (row.get("quality") or "").lower()
+        _suppressed_qualities = {
+            "rejected_capability_drift",
+            "placeholder",
+        }
+        if (
+            row["status"] == "pending"
+            and _quality not in _suppressed_qualities
+        ):
             try:
                 _push_draft_notification(row)
             except Exception as exc:

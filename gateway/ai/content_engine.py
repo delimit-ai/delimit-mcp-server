@@ -988,11 +988,10 @@ def post_next_tweet() -> Dict[str, Any]:
     Checks the day-typed tweet schedule first. Falls back to the flat queue
     if no scheduled tweet is available for today.
     """
-    from ai.social import post_tweet, should_post_today
+    from ai.social import post_tweet, should_post_now
 
-    if not should_post_today():
-        daily_limit = int(os.environ.get("DELIMIT_DAILY_TWEETS", "8"))
-        return {"status": "skipped", "reason": f"Daily posting limit reached ({daily_limit}/day)"}
+    if not should_post_now():
+        return {"status": "skipped", "reason": "Rate cap hit (2/hr or 24/day)"}
 
     # --- Try day-typed schedule first ---
     scheduled = get_scheduled_tweet()

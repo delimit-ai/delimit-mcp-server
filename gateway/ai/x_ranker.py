@@ -1,4 +1,4 @@
-"""X engagement ranker (LED-216 Phase 2, Q4 of the 2026-05-02 distribution panel).
+"""X engagement ranker (LED-216 Phase 2 + LED-1240 part B selectivity bar).
 
 Filters and orders X (Twitter) candidate posts so we reply to the highest-
 yield originals only. The score formula and the 7-day author dedupe are the
@@ -15,7 +15,19 @@ Filter pipeline applied in order:
     2. ``lang == 'en'`` → drop non-English (US/UK builder community is the wedge)
     3. ``is_retweet == False`` → drop retweets
     4. dedupe authors we replied to in the last ``replied_authors_window_hours``
-    5. sort by score DESC
+    5. **Engagement-score floor** (LED-1240 part B) — drop low-yield threads
+       outright. Configured via ``MIN_ENGAGEMENT_SCORE`` (default 1.5, was 0).
+    6. **Delimit-fit floor** (LED-1240 part B) — drop threads that don't
+       match Delimit-domain or orbit-with-context signals. High-engagement
+       threads above ``HIGH_ENGAGEMENT_OPPORTUNITY_COST`` pass through but
+       are flagged ``_human_only=True`` so callers do NOT auto-draft.
+    7. **Topic-coverage cooldown** (LED-1240 part B) — drop threads whose
+       matched signals overlap topics we drafted on inside the last 7 days.
+    8. sort by score DESC
+
+Rejected candidates are logged to ``~/.delimit/x_rejected_targets.jsonl``
+(append-only, one JSON line per rejection) so we can audit the bar over
+time without changing the return shape.
 
 Tolerant defaults: any field missing on a target is treated as "do not drop"
 so partial Twttr241 payloads still rank instead of being silently filtered.
@@ -32,8 +44,28 @@ logger = logging.getLogger(__name__)
 
 
 SOCIAL_LOG = Path.home() / ".delimit" / "social_log.jsonl"
+REJECTED_TARGETS_LOG = Path.home() / ".delimit" / "x_rejected_targets.jsonl"
 
 DEFAULT_WINDOW_HOURS = 24 * 7  # 7 days, per founder's anti-spammy directive
+
+# LED-1240 part B selectivity bar.
+# Founder directive 2026-05-05: raise the engagement floor and add a fit
+# floor BEFORE we waste LLM tokens drafting for noise-grade threads.
+#
+# Raising MIN_ENGAGEMENT_SCORE from 0 → 1.5 cuts the long tail of
+# ``_rank_score=0.0`` candidates we observed in the recent X target log
+# (every recent X target with 0 likes / 0 retweets had score=0.0). The
+# threshold is conservative — a single-hour-old post with 1.5 likes still
+# passes — but eliminates the zero-engagement floor.
+MIN_ENGAGEMENT_SCORE = 1.5
+
+# Threads above this score pass the Delimit-fit floor even without a
+# keyword match, but are flagged ``_human_only=True`` so the caller does
+# NOT auto-draft. The orchestrator decides whether to surface them.
+HIGH_ENGAGEMENT_OPPORTUNITY_COST = 50.0
+
+# Topic-coverage cooldown — same window as author dedupe (7 days).
+DEFAULT_COOLDOWN_DAYS = 7
 
 
 # ---------------------------------------------------------------------------
@@ -125,7 +157,6 @@ def _replied_authors_within(window_hours: int, log_path: Optional[Path] = None) 
                 # X reply text starts when the client appends the reply prefix.
                 text = (entry.get("text") or "").lstrip()
                 if text.startswith("@"):
-                    # nosec — strips leading @ from Twitter handle, not a credential
                     token = text.split()[0][1:]
                     token = "".join(c for c in token if c.isalnum() or c == "_").lower()
                     if token:
@@ -214,10 +245,44 @@ def _is_retweet(target: Dict[str, Any]) -> bool:
     return False
 
 
+def _log_rejection(target: Dict[str, Any], score: float, reason: str,
+                   extra: Optional[Dict[str, Any]] = None,
+                   log_path: Optional[Path] = None) -> None:
+    """Append a single JSON line to the rejected-targets audit log.
+
+    Best-effort — never raises into the caller's pipeline.
+    """
+    p = log_path or REJECTED_TARGETS_LOG
+    snippet = (target.get("content_snippet") or target.get("text") or "")[:200]
+    payload: Dict[str, Any] = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "tweet_id": target.get("source_id") or target.get("id_str") or target.get("id") or "",
+        "fingerprint": target.get("fingerprint") or "",
+        "author": target.get("author") or "",
+        "score": round(float(score), 4),
+        "snippet": snippet,
+        "reason": reason,
+    }
+    if extra:
+        payload.update(extra)
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(p, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except OSError as exc:  # pragma: no cover — best-effort logging
+        logger.warning("x_ranker: failed to write rejection log %s: %s", p, exc)
+
+
 def rank_x_targets(
     targets: Iterable[Dict[str, Any]],
     replied_authors_window_hours: int = DEFAULT_WINDOW_HOURS,
     replied_authors: Optional[Set[str]] = None,
+    min_engagement_score: float = MIN_ENGAGEMENT_SCORE,
+    high_engagement_floor: float = HIGH_ENGAGEMENT_OPPORTUNITY_COST,
+    cooldown_days: int = DEFAULT_COOLDOWN_DAYS,
+    recent_topics: Optional[Set[str]] = None,
+    enable_fit_floor: bool = True,
+    log_rejections: bool = True,
 ) -> List[Dict[str, Any]]:
     """Filter and sort X targets by engagement.
 
@@ -228,17 +293,54 @@ def rank_x_targets(
         replied_authors: explicit author set (lowercase, no leading ``@``).
             When ``None``, the set is read from ``~/.delimit/social_log.jsonl``.
             Tests inject an explicit set to avoid touching disk.
+        min_engagement_score: hard floor on the engagement-rate score.
+            Threads below this are dropped before fit-floor evaluation.
+            Default ``MIN_ENGAGEMENT_SCORE`` (1.5).
+        high_engagement_floor: score above which a thread can pass the
+            fit floor without a keyword match (flagged ``_human_only=True``).
+        cooldown_days: topic-coverage cooldown window in days.
+        recent_topics: explicit set of topic fingerprints already drafted on.
+            ``None`` reads from ``social_log.jsonl``. Tests inject directly.
+        enable_fit_floor: kill switch for the LED-1240 part B gates. False
+            preserves the legacy behavior (no fit floor, no min-score, no
+            cooldown) — used by tests that target the legacy filter chain
+            in isolation. Default True.
+        log_rejections: when True, append rejection records to
+            ``~/.delimit/x_rejected_targets.jsonl``. Tests disable this to
+            keep the founder's audit log clean.
 
     Returns:
         A new list sorted by engagement score DESC. Each item gets a
         ``_rank_score`` key for downstream observability. Filtered items are
         dropped (not kept with score=0) so the caller can blindly slice the
-        first N.
+        first N. High-engagement-but-off-topic items survive with
+        ``_human_only=True`` so the caller can route them to human review
+        without auto-drafting.
     """
     if replied_authors is None:
         replied_authors = _replied_authors_within(replied_authors_window_hours)
     else:
         replied_authors = {_normalize_handle(a) for a in replied_authors}
+
+    if enable_fit_floor and recent_topics is None:
+        try:
+            from ai.social_capability.fit_floor import _recent_topic_fingerprints, topics_for_scope
+            # LED-1356: _recent_topic_fingerprints now returns Dict[scope, Set[str]].
+            # X targets share the 'x' scope (twitter platform also normalizes to 'x').
+            recent_topics_dict = _recent_topic_fingerprints(cooldown_days=cooldown_days)
+            recent_topics = topics_for_scope(recent_topics_dict, "x")
+        except Exception as exc:  # pragma: no cover — tolerant fallback
+            logger.warning("x_ranker: cooldown bootstrap failed (%s) — proceeding without", exc)
+            recent_topics = set()
+    elif recent_topics is None:
+        recent_topics = set()
+    elif isinstance(recent_topics, dict):
+        # Caller passed the new dict shape; pick the X scope.
+        try:
+            from ai.social_capability.fit_floor import topics_for_scope
+            recent_topics = topics_for_scope(recent_topics, "x")
+        except Exception:
+            recent_topics = set()
 
     survivors: List[Dict[str, Any]] = []
     for t in targets or []:
@@ -261,17 +363,65 @@ def rank_x_targets(
         if author_norm and author_norm in replied_authors:
             continue
 
+        score = round(score_target(t), 4)
+
+        # 5. engagement-score floor (LED-1240 part B). Off by default for
+        # legacy callers that pass enable_fit_floor=False.
+        if enable_fit_floor and score < min_engagement_score:
+            if log_rejections:
+                _log_rejection(
+                    t, score, "below_engagement_floor",
+                    extra={"min_score": min_engagement_score},
+                )
+            continue
+
+        # 6 + 7. Delimit-fit floor + topic cooldown.
         scored = dict(t)
-        scored["_rank_score"] = round(score_target(t), 4)
+        scored["_rank_score"] = score
+
+        if enable_fit_floor:
+            try:
+                from ai.social_capability.fit_floor import evaluate_fit
+            except Exception as exc:  # pragma: no cover — tolerant fallback
+                logger.warning("x_ranker: fit_floor import failed (%s) — passing through", exc)
+                survivors.append(scored)
+                continue
+
+            text = t.get("content_snippet") or t.get("text") or ""
+            verdict = evaluate_fit(
+                text,
+                engagement_score=score,
+                high_engagement_floor=high_engagement_floor,
+                recent_topics=recent_topics,
+            )
+            if not verdict["passed"]:
+                if log_rejections:
+                    _log_rejection(
+                        t, score, verdict["reason"],
+                        extra={
+                            "matched_signals": verdict.get("matched_signals", []),
+                            "topic_fingerprint": verdict.get("topic_fingerprint", []),
+                        },
+                    )
+                continue
+            scored["_fit_reason"] = verdict["reason"]
+            scored["_human_only"] = bool(verdict.get("human_only"))
+            scored["_matched_signals"] = verdict.get("matched_signals", [])
+            scored["_topic_fingerprint"] = verdict.get("topic_fingerprint", [])
+
         survivors.append(scored)
 
-    # 5. sort score DESC, stable
+    # 8. sort score DESC, stable
     survivors.sort(key=lambda x: x.get("_rank_score", 0.0), reverse=True)
     return survivors
 
 
 __all__ = [
     "DEFAULT_WINDOW_HOURS",
+    "DEFAULT_COOLDOWN_DAYS",
+    "MIN_ENGAGEMENT_SCORE",
+    "HIGH_ENGAGEMENT_OPPORTUNITY_COST",
+    "REJECTED_TARGETS_LOG",
     "score_target",
     "rank_x_targets",
 ]

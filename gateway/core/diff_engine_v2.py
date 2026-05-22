@@ -100,6 +100,14 @@ class OpenAPIDiffEngine:
     
     def _compare_paths(self, old_paths: Dict, new_paths: Dict):
         """Compare API paths/endpoints."""
+        # Defend against malformed specs where `paths` is a list rather
+        # than the spec-required dict (Map[string, PathItem]). Same family
+        # as the Kong-class properties-as-list fix; treat as empty rather
+        # than crashing on `.keys()`.
+        if not isinstance(old_paths, dict):
+            old_paths = {}
+        if not isinstance(new_paths, dict):
+            new_paths = {}
         old_set = set(old_paths.keys())
         new_set = set(new_paths.keys())
         
@@ -133,6 +141,12 @@ class OpenAPIDiffEngine:
 
     def _compare_methods(self, path: str, old_methods: Dict, new_methods: Dict):
         """Compare HTTP methods for an endpoint."""
+        # Same defensive pattern as _compare_paths — methods at a path
+        # MUST be a dict per spec, but malformed inputs see real-world.
+        if not isinstance(old_methods, dict):
+            old_methods = {}
+        if not isinstance(new_methods, dict):
+            new_methods = {}
         old_set = set(m for m in old_methods.keys() if m in self.HTTP_METHODS)
         new_set = set(m for m in new_methods.keys() if m in self.HTTP_METHODS)
         
@@ -327,9 +341,11 @@ class OpenAPIDiffEngine:
             ))
         elif old_body and new_body:
             # Compare content types
-            old_content = old_body.get("content", {})
-            new_content = new_body.get("content", {})
-            
+            raw_old_content = old_body.get("content", {})
+            raw_new_content = new_body.get("content", {})
+            old_content = raw_old_content if isinstance(raw_old_content, dict) else {}
+            new_content = raw_new_content if isinstance(raw_new_content, dict) else {}
+
             for content_type in old_content.keys() & new_content.keys():
                 self._compare_schema_deep(
                     f"{operation_id}:request",
@@ -339,6 +355,11 @@ class OpenAPIDiffEngine:
     
     def _compare_responses(self, operation_id: str, old_responses: Dict, new_responses: Dict):
         """Compare response definitions."""
+        # Defend against malformed specs where `responses` is a list.
+        if not isinstance(old_responses, dict):
+            old_responses = {}
+        if not isinstance(new_responses, dict):
+            new_responses = {}
         old_codes = set(old_responses.keys())
         new_codes = set(new_responses.keys())
         
@@ -360,9 +381,11 @@ class OpenAPIDiffEngine:
             new_resp = new_responses[code]
             
             if "content" in old_resp or "content" in new_resp:
-                old_content = old_resp.get("content", {})
-                new_content = new_resp.get("content", {})
-                
+                raw_old_content = old_resp.get("content", {})
+                raw_new_content = new_resp.get("content", {})
+                old_content = raw_old_content if isinstance(raw_old_content, dict) else {}
+                new_content = raw_new_content if isinstance(raw_new_content, dict) else {}
+
                 for content_type in old_content.keys() & new_content.keys():
                     self._compare_schema_deep(
                         f"{operation_id}:{code}",
@@ -414,10 +437,22 @@ class OpenAPIDiffEngine:
 
         # Compare object properties
         if old_type == "object":
-            old_props = old_schema.get("properties", {})
-            new_props = new_schema.get("properties", {})
-            old_required = set(old_schema.get("required", []))
-            new_required = set(new_schema.get("required", []))
+            raw_old_props = old_schema.get("properties", {})
+            raw_new_props = new_schema.get("properties", {})
+            # Defend against malformed specs where `properties` is a list of
+            # field-objects rather than the spec-required dict (Kong-class:
+            # OpenAPI requires `properties: Map[string, Schema]`, but some
+            # generators emit `properties: [{name: "a", type: "string"}, ...]`).
+            # Treat as empty rather than crashing on `.keys()`.
+            old_props = raw_old_props if isinstance(raw_old_props, dict) else {}
+            new_props = raw_new_props if isinstance(raw_new_props, dict) else {}
+            # Defend against malformed specs where `required` is a bool (legal in
+            # parameter objects but not in object schemas — some real-world specs
+            # leak the parameter-style boolean into nested schemas).
+            raw_old_required = old_schema.get("required", [])
+            raw_new_required = new_schema.get("required", [])
+            old_required = set(raw_old_required) if isinstance(raw_old_required, list) else set()
+            new_required = set(raw_new_required) if isinstance(raw_new_required, list) else set()
 
             # Check removed fields
             for prop in set(old_props.keys()) - set(new_props.keys()):

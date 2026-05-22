@@ -13,7 +13,10 @@ This replaces _with_next_steps — governance IS the next step system.
 import json
 import logging
 import os
+import re
+import subprocess
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -824,6 +827,184 @@ def govern(tool_name: str, result: Dict[str, Any], project_path: str = ".") -> D
         governed_result["beta_cta"] = cta
 
     return governed_result
+
+
+# ─────────────────────────────────────────────────────────────────────
+# LED-2214b-followup — sensor_github_issue sync impl
+# ─────────────────────────────────────────────────────────────────────
+#
+# The outreach daemon's monitor_phase needs to call the same logic that
+# delimit_sensor_github_issue (MCP tool) runs, but synchronously and
+# without the _with_next_steps wrapping. Before this extraction the
+# daemon tried to import the impl from two paths that don't exist —
+# `ai.governance._sensor_github_issue_impl` and
+# `backends.governance_bridge.sensor_github_issue` — and silently fell
+# back to "monitor skipped" on every tick, leaving the entire reply-
+# tracking cycle dead.
+#
+# Now both callers share this function. The MCP tool wraps the result
+# with `_with_next_steps`; the daemon consumes the raw dict.
+
+_NEGATIVE_KEYWORDS = (
+    "not interested", "won't be", "will not", "don't need", "do not need",
+    "no thanks", "pass on", "not a fit", "not for us", "closing",
+    "won't adopt", "will not adopt", "reject", "declined",
+)
+
+_REPO_FORMAT_RE = re.compile(r"^[\w.-]+/[\w.-]+$")
+
+# Module-local guard so the warning fires at most once per process.
+_REPO_ALLOWLIST_WARNED = False
+
+
+def _check_repo_allowlist(repo: str) -> Optional[Dict[str, Any]]:
+    """Return a refusal dict if the repo isn't in DELIMIT_ALLOWED_REPOS.
+
+    Duplicates the logic of ai.server._check_repo_allowlist intentionally:
+    importing from ai.server would create a circular import (server.py
+    imports from governance). Mirror with care — both copies must stay
+    in sync until LED-216 splits the allowlist into its own module.
+    """
+    global _REPO_ALLOWLIST_WARNED
+    allowlist_raw = os.environ.get("DELIMIT_ALLOWED_REPOS", "").strip()
+    if not allowlist_raw:
+        if not _REPO_ALLOWLIST_WARNED:
+            logger.warning(
+                "DELIMIT_ALLOWED_REPOS unset — sensor_github_issue calls "
+                "pass through to gh api using the caller's token."
+            )
+            _REPO_ALLOWLIST_WARNED = True
+        return None
+    allowed = {entry.strip().lower() for entry in allowlist_raw.split(",") if entry.strip()}
+    if (repo or "").strip().lower() not in allowed:
+        return {
+            "error": "repo_not_allowlisted",
+            "repo": repo,
+            "allowed": sorted(allowed),
+            "hint": (
+                "Repo not in DELIMIT_ALLOWED_REPOS. Add it or use a tool "
+                "that does not reach external APIs."
+            ),
+        }
+    return None
+
+
+def _sensor_github_issue_impl(
+    repo: str,
+    issue_number: int,
+    since_comment_id: int = 0,
+) -> Dict[str, Any]:
+    """Sync implementation of the sensor_github_issue MCP tool.
+
+    Returns the RAW result dict (no _with_next_steps wrapping). Callers
+    that want the MCP wrapping apply it themselves. Returns
+    ``{"error": ..., "has_new_activity": False}`` on any failure mode
+    rather than raising — the outreach daemon's monitor loop relies on
+    fail-soft behavior so one bad LED doesn't kill the whole tick.
+
+    Result schema (success path):
+      {
+        "repo": str, "issue_number": str,
+        "signal": {id, venture, metric, source, timestamp, severity},
+        "issue_state": "open" | "closed" | "unknown",
+        "new_comments": [{id, author, created_at, body}, ...],
+        "latest_comment_id": int,
+        "total_comments": int,
+        "has_new_activity": bool,
+      }
+    """
+    # Validate inputs — defense-in-depth even though subprocess.run with
+    # list argv (no shell=True) makes classic injection inert.
+    if not _REPO_FORMAT_RE.match(repo or ""):
+        return {"error": f"Invalid repo format: {repo!r}. Use owner/repo.",
+                "has_new_activity": False}
+    if ".." in repo:
+        return {"error": "Invalid repo: path traversal sequences not allowed",
+                "has_new_activity": False}
+    if not isinstance(issue_number, int) or issue_number <= 0:
+        return {"error": f"Invalid issue number: {issue_number}",
+                "has_new_activity": False}
+
+    refusal = _check_repo_allowlist(repo)
+    if refusal is not None:
+        refusal.setdefault("has_new_activity", False)
+        return refusal
+
+    try:
+        # Fetch comments
+        comments_jq = (
+            "[.[] | {id: .id, author: .user.login, "
+            "created_at: .created_at, body: (.body | .[0:500])}]"
+        )
+        comments_proc = subprocess.run(
+            ["gh", "api",
+             f"repos/{repo}/issues/{issue_number}/comments",
+             "--jq", comments_jq],
+            capture_output=True, text=True, timeout=30,
+        )
+        if comments_proc.returncode != 0:
+            return {
+                "error": f"gh api comments failed: {(comments_proc.stderr or '').strip()[:200]}",
+                "has_new_activity": False,
+            }
+        all_comments = json.loads(comments_proc.stdout) if comments_proc.stdout.strip() else []
+        new_comments = [c for c in all_comments if c.get("id", 0) > since_comment_id]
+
+        # Fetch issue state
+        issue_jq = "{state: .state, labels: [.labels[].name], reactions: .reactions.total_count}"
+        issue_proc = subprocess.run(
+            ["gh", "api",
+             f"repos/{repo}/issues/{issue_number}",
+             "--jq", issue_jq],
+            capture_output=True, text=True, timeout=30,
+        )
+        if issue_proc.returncode != 0:
+            return {
+                "error": f"gh api issue failed: {(issue_proc.stderr or '').strip()[:200]}",
+                "has_new_activity": False,
+            }
+        issue_info = json.loads(issue_proc.stdout) if issue_proc.stdout.strip() else {}
+        issue_state = issue_info.get("state", "unknown")
+
+        # Severity classification — green default; amber on closed; red on
+        # negative keyword in any new comment body.
+        severity = "green"
+        combined_body = " ".join(c.get("body", "") or "" for c in new_comments).lower()
+        has_negative = any(kw in combined_body for kw in _NEGATIVE_KEYWORDS)
+        if has_negative:
+            severity = "red"
+        elif issue_state == "closed":
+            severity = "amber"
+
+        latest_comment_id = max((c.get("id", 0) for c in all_comments), default=since_comment_id)
+        repo_key = repo.replace("/", "_")
+
+        return {
+            "repo": repo,
+            "issue_number": str(issue_number),
+            "signal": {
+                "id": f"sensor:github_issue:{repo_key}:{issue_number}",
+                "venture": "delimit",
+                "metric": "outreach_issue_activity",
+                "source": f"https://github.com/{repo}/issues/{issue_number}",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "severity": severity,
+            },
+            "issue_state": issue_state,
+            "new_comments": new_comments,
+            "latest_comment_id": latest_comment_id,
+            "total_comments": len(all_comments),
+            "has_new_activity": len(new_comments) > 0,
+        }
+    except subprocess.TimeoutExpired:
+        return {"error": "gh command timed out after 30s",
+                "has_new_activity": False}
+    except json.JSONDecodeError as exc:
+        return {"error": f"Failed to parse gh output: {exc}",
+                "has_new_activity": False}
+    except Exception as exc:  # noqa: BLE001 — sensor must fail soft
+        logger.error("sensor_github_issue impl error: %s", exc)
+        return {"error": str(exc), "has_new_activity": False}
 
 
 def _deep_get(d: Dict, key: str) -> Any:

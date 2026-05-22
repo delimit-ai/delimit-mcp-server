@@ -946,27 +946,45 @@ def hot_reload(reason: str = "update") -> Dict[str, Any]:
     # full subprocess restart.  Modules with global state are skipped.
     reloaded_modules: List[str] = []
     reload_errors: List[str] = []
+    # LED-2071f (2026-04-30): reload LEAVES (modules with no internal
+    # `from ai.X import ...` deps) BEFORE leaves' importers, so when an
+    # importer re-runs its `from` imports during its own reload, it
+    # picks up the freshly-reloaded binding rather than the stale one.
+    # Symptom of the prior order: ai.social_target reloaded before
+    # ai.social, so social_target's `from ai.social import save_draft,
+    # generate_tailored_draft, ...` rebound to the OLD social, then
+    # ai.social reloaded but social_target kept stale fn references.
+    # Fix: ai.social and ai.deliberation (the leaves) come first;
+    # ai.social_target (which imports from social) and ai.loop_engine
+    # (which imports from social_target) come after, in dependency
+    # order.
     HOT_RELOADABLE = [
-        "ai.loop_engine",
-        "ai.social_target",
         "ai.social",
+        "ai.deliberation",  # added 2026-04-09 per LED-805 — CLI stdin fix needed hot reload
         "ai.reddit_scanner",
         "ai.ledger_manager",
-        "ai.deliberation",  # added 2026-04-09 per LED-805 — CLI stdin fix needed hot reload
         "ai.backends.repo_bridge",
         "ai.backends.tools_infra",
         "backends.repo_bridge",  # alias used by server.py lazy imports
+        "ai.social_target",  # depends on ai.social
+        "ai.loop_engine",    # depends on ai.social_target
         "social",  # alias
         "ai.swarm",  # self — reload last
     ]
-    for modname in HOT_RELOADABLE:
-        if modname not in _sys.modules:
-            continue
-        try:
-            importlib.reload(_sys.modules[modname])
-            reloaded_modules.append(modname)
-        except Exception as e:
-            reload_errors.append(f"{modname}: {e}")
+    # Two-pass reload: pass 1 establishes the new leaf modules; pass 2
+    # forces importers to rebind against the now-reloaded leaves. Cheap
+    # (in-process module reload only) but kills the entire stale-binding
+    # class of bugs in one go.
+    for _pass in range(2):
+        for modname in HOT_RELOADABLE:
+            if modname not in _sys.modules:
+                continue
+            try:
+                importlib.reload(_sys.modules[modname])
+                if _pass == 0:
+                    reloaded_modules.append(modname)
+            except Exception as e:
+                reload_errors.append(f"pass{_pass} {modname}: {e}")
 
     # 1. Capture current state for transfer
     state = {

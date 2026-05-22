@@ -1,0 +1,18 @@
+{
+  "event_id": "evt-ledger-LED-1010",
+  "type": "feature_shipped",
+  "date": "2026-04-24T00:00:00Z",
+  "venture": "delimit",
+  "evidence_refs": ["LED-1010", "git:f6597185b72d"],
+  "claims": [
+    {
+      "claim_id": "CLM-LED-1010-title",
+      "type": "feature",
+      "text": "Tailwind-aware extract_tokens emits framework default spacing, typography, and breakpoint scales.",
+      "evidence_refs": ["LED-1010", "git:f6597185b72d"],
+      "visibility": "public"
+    }
+  ],
+  "visibility": "internal",
+  "source": "ledger:feature"
+}

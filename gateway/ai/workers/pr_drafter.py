@@ -10,7 +10,6 @@ Cannot: write files, commit, push, post comments.
 
 from __future__ import annotations
 
-import json
 from typing import Any, Dict
 
 from ai.workers.base import Worker, WorkerResult
