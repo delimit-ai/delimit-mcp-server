@@ -1,6 +1,66 @@
 # Changelog
 
 
+## [4.6.1] - 2026-05-22
+
+Patch release: bundle hygiene + gateway sync carrying 7 upstream improvements.
+
+### Fixed
+
+- **`delimit setup hooks`** (LED-1207, #100): bypass broken `npx` fallback in
+  the pre-commit / pre-push hook generator. Fresh installs now produce hooks
+  that work even when the npm-resolved `delimit` shim is absent from `PATH`
+  (the fallback used to fail silently and produce no-op hooks).
+
+### Improved (carried from the gateway)
+
+These ship inside the gateway/ tree that bundles with delimit-cli. They are
+in effect for anyone running the MCP server from a 4.6.1 install:
+
+- **Cross-post dedup for Reddit drafts** — same-author + same-normalized-title
+  within a 7-day window dedupes manual re-submits across subreddits. Reddit's
+  native `crosspost_parent` field is *also* now captured: when set, an O(1)
+  fingerprint lookup catches the native cross-post case before the heuristic.
+  Two-layer coverage: native UI cross-posts (rare, O(1)) + manual re-submits
+  (common, O(N)).
+
+- **Inline follow-up draft in reply-alert emails** — both Reddit reply-alerts
+  and GitHub outreach-reply-alerts now ship with a pre-composed, voice-matched
+  follow-up reply inside the email body. The original "Draft a follow-up
+  reply and post from mobile" sentinel remains as graceful degradation if
+  the drafter falls through. Designed for mobile copy-paste-and-post flow.
+
+- **STR-195 binding founder decisions auto-injected into `delimit_deliberate`** —
+  when a panel question touches a venture name or decision keyword, matching
+  `feedback_*.md` memories surface as a `BINDING FOUNDER DECISIONS — CANNOT BE
+  RE-LITIGATED` block prepended to the panel context. Closed decisions stop
+  getting re-argued every deliberation. Memory walk is mtime-cached; portfolio
+  anchors can be extended via `~/.delimit/social_target_ventures.json` for
+  Pro users whose ventures aren't in the default delimit-portfolio set.
+
+- **`delimit_security_audit` false-positive elimination** (LED-1278 (c)):
+  token-handling code (`const token = readCurrentToken()`,
+  `const token = (options.token || process.env.X)`) no longer trips the
+  `generic_secret` detector. Provider-specific detectors (aws_access_key,
+  github_token, jwt_token, sk-proj API key) remain fully armed. Verified
+  against a regression-guard test set including real AKIA, ghp_, JWT, and
+  bearer-token literal shapes.
+
+### Chores
+
+- **Excluded dev-only build scripts from the customer tarball** (#101):
+  `build-license-core.sh`, `security-check.sh`, and `test-license-core-so.sh`
+  are publish-time hooks invoked from `prepublishOnly`; they never ran on
+  customer installs. Removed from the published bundle (166 → 163 files,
+  ~10KB unpacked) and closed the meta-leak where the scripts' own
+  leak-detection grep patterns contained the patterns they protected against.
+
+### Documentation
+
+- **Retract incorrect 4.6.0 'known issue' line** (LED-1403): the prior
+  CHANGELOG entry referenced a regression that did not actually ship.
+
+
 ## [4.6.0] - 2026-05-15
 
 ### Added — Codex CLI + Gemini CLI auto-trigger directives (LED-1399)
