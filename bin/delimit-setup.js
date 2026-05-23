@@ -258,18 +258,22 @@ async function main() {
         const venvPy = fs.existsSync(venvPython) ? venvPython : venvPythonWin;
         if (fs.existsSync(reqFile)) {
             execSync(`"${venvPy}" -m pip install --quiet -r "${reqFile}" 2>/dev/null`, { stdio: 'pipe' });
+            // LED-1564: even when reqFile exists, ensure pytest is present.
+            // Older reqFiles (pre-2026-05-22) didn't list it; without pytest
+            // the delimit_test_smoke deploy-gate step fails to run cleanly.
+            execSync(`"${venvPy}" -m pip install --quiet pytest 2>/dev/null`, { stdio: 'pipe' });
         } else {
-            execSync(`"${venvPy}" -m pip install --quiet fastmcp==3.1.0 pyyaml==6.0.3 pydantic==2.12.5 packaging==26.0 2>/dev/null`, { stdio: 'pipe' });
+            execSync(`"${venvPy}" -m pip install --quiet fastmcp==3.1.0 pyyaml==6.0.3 pydantic==2.12.5 packaging==26.0 pytest 2>/dev/null`, { stdio: 'pipe' });
         }
         python = venvPy;  // Use venv python for MCP config
         await logp(`  ${green('✓')} Python dependencies installed (isolated venv)`);
     } catch {
         log(`  ${yellow('!')} venv install failed — trying global pip`);
         try {
-            execSync(`${python} -m pip install --quiet fastmcp==3.1.0 pyyaml==6.0.3 pydantic==2.12.5 packaging==26.0 2>/dev/null`, { stdio: 'pipe' });
+            execSync(`${python} -m pip install --quiet fastmcp==3.1.0 pyyaml==6.0.3 pydantic==2.12.5 packaging==26.0 pytest 2>/dev/null`, { stdio: 'pipe' });
             await logp(`  ${green('✓')} Python dependencies installed (global)`);
         } catch {
-            log(`  ${yellow('!')} pip install failed — run manually: pip install fastmcp pyyaml pydantic packaging`);
+            log(`  ${yellow('!')} pip install failed — run manually: pip install fastmcp pyyaml pydantic packaging pytest`);
         }
     }
 
