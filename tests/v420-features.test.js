@@ -241,3 +241,64 @@ describe('v4.20: remember and recall commands', () => {
         );
     });
 });
+
+// ---------------------------------------------------------------------------
+// FIX A2 \u2014 recall multi-word query (tokenized OR-match + ranking)
+// ---------------------------------------------------------------------------
+describe('recall: tokenized multi-word query (FIX A2)', () => {
+    let tmpHome;
+
+    before(() => {
+        tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'delimit-recall-tok-'));
+        // Two memories chosen so a two-word query ("redis migration") has:
+        //   - one entry containing BOTH tokens (should rank first)
+        //   - one entry containing only ONE token
+        // and crucially: NO entry contains the literal phrase "redis
+        // migration" as a contiguous substring, so the OLD whole-phrase
+        // includes() matcher would have returned ZERO results.
+        run(`remember "Migration of the redis cache was deferred to Q2"`, { env: { HOME: tmpHome } });
+        run(`remember "The auth service uses redis for sessions"`, { env: { HOME: tmpHome } });
+    });
+
+    after(() => {
+        try { fs.rmSync(tmpHome, { recursive: true }); } catch {}
+    });
+
+    it('multi-word query returns >0 matches (regression: old whole-phrase matcher returned 0)', { skip: SKIP_IN_CI }, () => {
+        // Sanity: neither stored memory contains the contiguous phrase.
+        const memDir = path.join(tmpHome, '.delimit', 'memory');
+        const files = fs.readdirSync(memDir).filter(f => f.startsWith('mem-') && f.endsWith('.json'));
+        for (const f of files) {
+            const data = JSON.parse(fs.readFileSync(path.join(memDir, f), 'utf-8'));
+            assert.ok(
+                !data.content.toLowerCase().includes('redis migration'),
+                'test fixture must not contain the literal phrase (so old matcher would 0 out)'
+            );
+        }
+
+        const output = run('recall redis migration', { env: { HOME: tmpHome } });
+        assert.ok(
+            output.includes('redis') && output.includes('Migration of the redis cache'),
+            'tokenized OR-match should surface the entry matching both tokens'
+        );
+        assert.ok(
+            !output.includes('No matching memories found'),
+            'multi-word query must not report zero matches'
+        );
+    });
+
+    it('ranks the entry matching both tokens above the single-token entry', { skip: SKIP_IN_CI }, () => {
+        const output = run('recall redis migration', { env: { HOME: tmpHome } });
+        const bothIdx = output.indexOf('Migration of the redis cache');   // matches redis + migration
+        const oneIdx = output.indexOf('auth service uses redis');          // matches redis only
+        assert.ok(bothIdx !== -1, 'both-token entry should appear');
+        assert.ok(oneIdx !== -1, 'single-token entry should also appear (OR semantics)');
+        assert.ok(bothIdx < oneIdx, 'entry matching both tokens must rank before the single-token entry');
+    });
+
+    it('single-token query still works (parity with old behavior)', { skip: SKIP_IN_CI }, () => {
+        const output = run('recall redis', { env: { HOME: tmpHome } });
+        assert.ok(output.includes('redis'), 'single-token query should still match');
+        assert.ok(!output.includes('No matching memories found'), 'single-token query should return matches');
+    });
+});

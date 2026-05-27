@@ -358,6 +358,12 @@ def run_diff(old_spec: str, new_spec: str) -> Dict[str, Any]:
             }
             for c in changes
         ],
+        # LED-1588: structured side-channel for fail-open skips (unresolvable
+        # refs, malformed nodes) so a clean `changes` list is not mistaken for
+        # "proven safe". Additive — existing keys are unchanged. The JSON
+        # Schema branch above intentionally omits this (engine does not yet
+        # populate advisories; a misleading empty field would imply it checked).
+        "advisories": engine.advisories,
     }
 
 

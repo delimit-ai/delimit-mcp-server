@@ -234,6 +234,101 @@ def get_latest_soul(project_path: str = "") -> Optional[SessionSoul]:
     return None
 
 
+def _soul_sort_key(soul: SessionSoul, fallback_path: Path) -> str:
+    """Sort key for global recency ranking. Prefer the soul's own
+    created_at (ISO-8601, lexically sortable); fall back to the file's
+    mtime when created_at is missing so a malformed/legacy soul still
+    orders sensibly rather than sinking to the bottom unconditionally."""
+    if soul.created_at:
+        return soul.created_at
+    try:
+        # Fall back to the file mtime, rendered as an ISO-8601 string so it
+        # compares lexically against real created_at values on the same
+        # scale. Only reached when created_at is empty.
+        return datetime.fromtimestamp(
+            fallback_path.stat().st_mtime, timezone.utc
+        ).isoformat()
+    except (OSError, ValueError):
+        return ""
+
+
+def find_most_recent_soul_across_projects(
+    exclude_project_path: str = "",
+) -> Optional[Dict[str, Any]]:
+    """Scan every project-hash soul directory under SOULS_BASE_DIR and
+    return the globally-most-recent soul, with its originating project.
+
+    LED-218 FIX D: cross-venture fallback for `revive()` when the current
+    working directory resolves to a project that has no souls (e.g. running
+    from /root). Read-only; never writes. Returns None when no souls exist
+    anywhere.
+
+    Args:
+        exclude_project_path: if set, the soul directory for this project
+            is skipped (it already had no usable soul, so re-scanning it is
+            wasted work and could otherwise re-surface a stale latest.json).
+
+    Returns:
+        {"soul": SessionSoul, "project_hash": str, "project_path": str}
+        for the most recent soul found, or None.
+    """
+    if not SOULS_BASE_DIR.exists():
+        return None
+
+    exclude_hash = _project_hash(exclude_project_path) if exclude_project_path else None
+
+    best: Optional[SessionSoul] = None
+    best_key: str = ""
+    best_hash: str = ""
+
+    for proj_dir in SOULS_BASE_DIR.iterdir():
+        if not proj_dir.is_dir():
+            continue
+        if exclude_hash and proj_dir.name == exclude_hash:
+            continue
+
+        # Prefer the per-project latest.json; fall back to scanning the
+        # timestamped soul files if latest.json is absent/corrupt.
+        candidate: Optional[SessionSoul] = None
+        candidate_path: Optional[Path] = None
+
+        latest = proj_dir / "latest.json"
+        if latest.exists():
+            candidate = _load_soul(latest)
+            candidate_path = latest
+
+        if candidate is None:
+            soul_files = sorted(
+                [f for f in proj_dir.iterdir()
+                 if f.name != "latest.json" and f.suffix == ".json"],
+                key=lambda f: f.name,
+                reverse=True,
+            )
+            for f in soul_files:
+                candidate = _load_soul(f)
+                if candidate is not None:
+                    candidate_path = f
+                    break
+
+        if candidate is None or candidate_path is None:
+            continue
+
+        key = _soul_sort_key(candidate, candidate_path)
+        if best is None or key > best_key:
+            best = candidate
+            best_key = key
+            best_hash = proj_dir.name
+
+    if best is None:
+        return None
+
+    return {
+        "soul": best,
+        "project_hash": best_hash,
+        "project_path": best.project_path,
+    }
+
+
 def _format_revival(soul: SessionSoul) -> str:
     """Format a soul into a readable context string for any AI model."""
     lines = []
@@ -339,6 +434,32 @@ def revive(project_path: str = "", soul_id: str = "") -> Dict[str, Any]:
     # Get latest
     soul = get_latest_soul(project_path)
     if not soul:
+        # FIX D — cross-venture fallback. The current working directory
+        # resolved to a project with no soul (common when reviving from a
+        # neutral dir like /root). Rather than dead-ending at "no_souls",
+        # surface the globally-most-recent soul from any other venture /
+        # project so the operator still gets continuity. Clearly labeled
+        # via `recovered_from_venture` so the caller knows it came from a
+        # different project. This ADDITIVE path only fires when the
+        # resolved project itself is empty AND no explicit soul_id was
+        # given, so existing single-project users see no change.
+        fallback = find_most_recent_soul_across_projects(
+            exclude_project_path=project_path
+        )
+        if fallback:
+            recovered = fallback["soul"]
+            return {
+                "status": "revived",
+                "soul": asdict(recovered),
+                "context": _format_revival(recovered),
+                "recovered_from_venture": recovered.project_path
+                or fallback.get("project_hash", ""),
+                "recovered_project_hash": fallback.get("project_hash", ""),
+                "note": (
+                    f"No soul for {project_path}; recovered the most recent "
+                    f"soul from {recovered.project_path or fallback.get('project_hash', '')}."
+                ),
+            }
         return {
             "status": "no_souls",
             "message": f"No session souls found for {project_path}. Nothing to revive.",

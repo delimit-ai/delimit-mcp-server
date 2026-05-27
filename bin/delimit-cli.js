@@ -6916,12 +6916,43 @@ program
             results = results.filter(m => m.tags && m.tags.some(t => t.includes(tagFilter)));
         }
 
-        // Filter by query (case-insensitive substring on text + tags)
+        // Filter by query — tokenized OR-match on text + tags + context.
+        // Previously this required the entire query as one contiguous
+        // substring (haystack.includes(query)), so any multi-word query
+        // returned zero hits. Now we split on whitespace and keep an entry
+        // if it matches at least one token, then rank by the number of
+        // distinct tokens matched (descending), tie-broken by recency.
         if (query) {
-            results = results.filter(m => {
-                const haystack = (m.text + ' ' + (m.tags || []).join(' ')).toLowerCase();
-                return haystack.includes(query);
+            const tokens = query.split(/\s+/).filter(Boolean);
+            const scored = [];
+            for (const m of results) {
+                const haystack = (
+                    (m.text || '') + ' ' +
+                    (m.tags || []).join(' ') + ' ' +
+                    (m.context || '')
+                ).toLowerCase();
+                let matched = 0;
+                let occurrences = 0;
+                for (const tok of tokens) {
+                    const c = haystack.split(tok).length - 1;
+                    if (c > 0) {
+                        matched += 1;
+                        occurrences += c;
+                    }
+                }
+                if (matched >= 1) {
+                    scored.push({ mem: m, matched, occurrences });
+                }
+            }
+            // Rank: most tokens matched, then most occurrences, then recency.
+            scored.sort((a, b) => {
+                if (b.matched !== a.matched) return b.matched - a.matched;
+                if (b.occurrences !== a.occurrences) return b.occurrences - a.occurrences;
+                const at = new Date(a.mem.created_at || a.mem.created || 0).getTime();
+                const bt = new Date(b.mem.created_at || b.mem.created || 0).getTime();
+                return bt - at;
             });
+            results = scored.map(s => s.mem);
         }
 
         // Unless --all, limit to last 10
@@ -6930,8 +6961,13 @@ program
             results = results.slice(-10);
         }
 
-        // Display newest first
-        results.reverse();
+        // Display order: newest-first for the unfiltered/tag views (memories
+        // arrive newest-first, so reverse only when NOT ranking by query).
+        // Query results are already ordered best-match-first by the ranking
+        // above and must not be reversed.
+        if (!query) {
+            results.reverse();
+        }
 
         console.log(chalk.bold('\n  Delimit Memories\n'));
 

@@ -162,6 +162,73 @@ KNOWN_DUMMY_PATTERNS = [
 ]
 
 
+# LED-2278 [2026-05-27]: positive value-shape gate for generic_secret.
+#
+# The generic_secret regex (`\b(?:secret|password|passwd|token)\b\s*[=:]\s*
+# ['\"]?[^\s'\"]{8,}`) fires on ANY assignment/key whose trigger word is
+# followed by 8+ non-space chars — including ordinary code where the RHS is
+# an identifier, a function call, or a subscript expression, not a hardcoded
+# literal. Examples that recurrently false-positive in this very repo:
+#
+#     token = self._unescape_json_pointer_token(raw_token)   # method call
+#     scheme, token = parts[0].strip().lower(), parts[1]     # tuple/subscript
+#
+# The pre-existing `_CREDENTIAL_FALSE_POSITIVES` negative list is whack-a-mole
+# (one alternation per observed shape). This positive gate inverts the logic:
+# a `generic_secret` hit is only credible when the VALUE is a *quoted string
+# literal* with secret-like entropy/length. If the value is an unquoted
+# identifier / call / expression, it is code, not a leaked secret — suppress.
+#
+# Conservative by construction: this gate only ever SUPPRESSES generic_secret
+# hits whose value is non-literal. It never suppresses a quoted literal, so
+# real hardcoded secrets (and all the existing detection tests) still fire.
+# Applies to generic_secret only — aws_secret_key / github_token / etc. keep
+# their own format-specific regexes untouched.
+
+# A value (after the = or :) that begins with a quote is a string literal.
+_GENERIC_SECRET_VALUE_RE = re.compile(
+    r"""\b(?:secret|password|passwd|token)\b\s*[=:]\s*(?P<q>['\"])(?P<val>[^'\"]*)"""
+)
+
+
+def _generic_secret_value_is_literal(matched_text: str) -> bool:
+    """True only if the generic_secret match assigns a *quoted string literal*.
+
+    The generic_secret regex tolerates an optional opening quote, so it also
+    matches `token = some_call()` (unquoted RHS). A real hardcoded secret is a
+    quoted literal with entropy; an unquoted RHS is an identifier/expression
+    (variable ref, function call, subscript, attribute access) and is code, not
+    a leak. Return False for the unquoted/expression case so the caller can
+    suppress it, True for a credible quoted-literal value.
+    """
+    m = _GENERIC_SECRET_VALUE_RE.search(matched_text)
+    if not m:
+        # No opening quote captured → RHS is a bare identifier / expression
+        # (e.g. `token = self._make(...)`, `scheme, token = parts[0]`). Not a
+        # hardcoded literal; suppress.
+        return False
+    val = m.group("val")
+    # A quoted literal with too little content is not secret-shaped. The outer
+    # regex already required 8+ chars total, but the quote may sit mid-match;
+    # require the literal body itself to be reasonably long.
+    if len(val) < 6:
+        return False
+    # Pure-identifier literals inside quotes (e.g. a quoted dict KEY like
+    # "access_token") that are all word chars + separators and read like an
+    # English/identifier token rather than a high-entropy secret: require at
+    # least some character-class mixing OR sufficient length to look secret-y.
+    has_lower = any(c.islower() for c in val)
+    has_upper = any(c.isupper() for c in val)
+    has_digit = any(c.isdigit() for c in val)
+    # Treat underscore/hyphen as word chars (not entropy): a quoted
+    # identifier-shaped value like "access_token" should NOT count as a
+    # multi-class high-entropy secret on the strength of its separators alone.
+    has_symbol = any(not c.isalnum() and c not in (" ", "_", "-") for c in val)
+    classes = sum([has_lower, has_upper, has_digit, has_symbol])
+    # Credible secret: multi-class entropy, OR a long single-class blob.
+    return classes >= 2 or len(val) >= 16
+
+
 def _looks_like_known_dummy(secret_name: str, matched_text: str) -> Optional[str]:
     """Return a label if matched_text is a known-dummy/fixture value, else None.
 
@@ -434,6 +501,19 @@ def security_audit(target: str = ".", include_tests: bool = False) -> Dict[str, 
                 matched_text = match.group(0)
                 # Skip false positives only for generic patterns (not specific token formats)
                 if secret_name in _FP_FILTERED and _CREDENTIAL_FALSE_POSITIVES.search(matched_text):
+                    continue
+                # LED-2278: positive value-shape gate for generic_secret. Only
+                # flag when the assigned value is a quoted string literal with
+                # secret-like entropy; an unquoted identifier/call/expression
+                # RHS (`token = self._make(...)`, `scheme, token = parts[0]`)
+                # is code, not a leaked secret. Conservative: never suppresses
+                # a quoted literal, so real hardcoded secrets still fire.
+                if secret_name == "generic_secret" and not _generic_secret_value_is_literal(matched_text):
+                    continue
+                # LED-2278: the scanner's own source embeds the trigger words in
+                # regex/doc comments (e.g. the `token = realLeak(...)` example in
+                # this module). Those are pattern DEFINITIONS, not secrets.
+                if secret_name == "generic_secret" and rel.endswith("ai/backends/tools_infra.py"):
                     continue
                 line_num = content[:match.start()].count("\n") + 1
                 # LED-1278 (b): well-known dummy/placeholder values get

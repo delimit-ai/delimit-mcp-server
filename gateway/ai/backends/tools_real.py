@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -364,18 +365,63 @@ def test_smoke(project_path: str, test_suite: Optional[str] = None) -> Dict[str,
             return {"tool": "test.smoke", "status": "error", "error": f"Invalid test_suite: {test_suite}"}
         cmd_list.append(test_suite)
 
-    # Detect the right Python executable
+    # Detect the right Python executable.
+    #
+    # Resolution order (LED-1564 follow-up, 2026-05-22):
+    #   1. Project's own venv (most isolated; honors project's own deps).
+    #   2. System python3 on PATH — where projects typically install deps
+    #      when they don't ship a local venv. Tested for pytest availability
+    #      so we don't fall through to a Python that can't run pytest.
+    #   3. sys.executable (= MCP server's runner venv) as last resort.
+    #
+    # The pre-fix order was (1) → (3), which broke for projects that have
+    # their deps installed system-wide but no project-local venv: pytest
+    # itself might exist in the delimit venv, but project-specific imports
+    # like `pika` (caught by codex against wirereport 2026-05-22) raise
+    # ModuleNotFoundError because the delimit venv is stripped to the MCP
+    # server's deps only.
     if framework == "pytest":
-        python_found = False
+        import sys as _sys
+
+        chosen = None
+        # (1) Project-local venv.
         for venv_dir in ["venv", ".venv", "env"]:
             venv_python = project / venv_dir / "bin" / "python"
             if venv_python.exists():
-                cmd_list[0] = str(venv_python)
-                python_found = True
+                chosen = str(venv_python)
                 break
-        if not python_found:
-            import sys as _sys
-            cmd_list[0] = _sys.executable
+
+        # (2) System python3 if it has pytest. Probe with a fast import-
+        # check so we don't pick a python that can't actually run pytest.
+        if chosen is None:
+            for candidate in ("python3", "python"):
+                exe = shutil.which(candidate)
+                if not exe:
+                    continue
+                # Skip only when the candidate path is literally the same
+                # interpreter entrypoint as the MCP runner. In deployments
+                # where the venv python is a symlink to /usr/bin/python3,
+                # comparing resolved paths collapses the system interpreter
+                # and the venv interpreter into the same target and prevents
+                # the intended fallback to system python3.
+                if Path(exe) == Path(_sys.executable):
+                    continue
+                try:
+                    probe = subprocess.run(
+                        [exe, "-c", "import pytest"],
+                        capture_output=True, timeout=10,
+                    )
+                    if probe.returncode == 0:
+                        chosen = exe
+                        break
+                except (subprocess.TimeoutExpired, OSError):
+                    continue
+
+        # (3) sys.executable (= MCP server's runner venv) as last resort.
+        if chosen is None:
+            chosen = _sys.executable
+
+        cmd_list[0] = chosen
 
     try:
         result = subprocess.run(
