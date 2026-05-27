@@ -26,17 +26,42 @@ class SemverBump(Enum):
 
 # ── Change-type buckets ──────────────────────────────────────────────
 
+# LED-1600: this bucket MUST stay aligned with diff_engine_v2.Change.is_breaking.
+# Previously it listed only 10 of the engine's breaking types, so a
+# PARAM_REQUIRED_CHANGED, RESPONSE_TYPE_CHANGED, SECURITY_REMOVED,
+# SECURITY_SCOPE_REMOVED, MAX_LENGTH_DECREASED, MIN_LENGTH_INCREASED or
+# PARAM_TYPE_CHANGED — all of which the engine flags `is_breaking=True` — was
+# silently classified MINOR instead of MAJOR. That is the exact "silent semver
+# minor->major leak" this LED closes: a breaking change slipping through as
+# non-breaking is the worst failure mode for a merge gate. The context-
+# sensitive field types (FIELD_REMOVED / REQUIRED_FIELD_ADDED /
+# FIELD_REQUIREMENT_RELAXED) are NOT listed here as unconditional — their
+# breaking-ness depends on request/response direction and is read per-Change
+# via `is_breaking` in classify() below.
 BREAKING_TYPES = frozenset({
     ChangeType.ENDPOINT_REMOVED,
     ChangeType.METHOD_REMOVED,
     ChangeType.REQUIRED_PARAM_ADDED,
     ChangeType.PARAM_REMOVED,
     ChangeType.RESPONSE_REMOVED,
-    ChangeType.REQUIRED_FIELD_ADDED,
-    ChangeType.FIELD_REMOVED,
     ChangeType.TYPE_CHANGED,
     ChangeType.FORMAT_CHANGED,
     ChangeType.ENUM_VALUE_REMOVED,
+    ChangeType.PARAM_TYPE_CHANGED,
+    ChangeType.PARAM_REQUIRED_CHANGED,
+    ChangeType.RESPONSE_TYPE_CHANGED,
+    ChangeType.SECURITY_REMOVED,
+    ChangeType.SECURITY_SCOPE_REMOVED,
+    ChangeType.MAX_LENGTH_DECREASED,
+    ChangeType.MIN_LENGTH_INCREASED,
+})
+
+# Context-sensitive types whose breaking-ness is decided per-Change by the
+# engine's direction-aware is_breaking, not by membership in BREAKING_TYPES.
+CONTEXT_SENSITIVE_TYPES = frozenset({
+    ChangeType.FIELD_REMOVED,
+    ChangeType.REQUIRED_FIELD_ADDED,
+    ChangeType.FIELD_REQUIREMENT_RELAXED,
 })
 
 ADDITIVE_TYPES = frozenset({
@@ -65,7 +90,14 @@ def classify(changes: List[Change]) -> SemverBump:
     has_additive = False
 
     for change in changes:
-        if change.type in BREAKING_TYPES:
+        # LED-1600: the engine's is_breaking is the single source of truth.
+        # For context-sensitive types it already encodes request/response
+        # direction; for everything else it matches BREAKING_TYPES membership.
+        # Using it here closes the gap where a breaking change (e.g. an
+        # optional->required param, or a response field removal) was bucketed
+        # MINOR. `getattr` keeps the function working for duck-typed Change-
+        # likes that may not carry the property.
+        if _is_breaking(change):
             has_breaking = True
             break  # short-circuit — can't go higher than MAJOR
         if change.type in ADDITIVE_TYPES:
@@ -78,6 +110,20 @@ def classify(changes: List[Change]) -> SemverBump:
     return SemverBump.PATCH
 
 
+def _is_breaking(change) -> bool:
+    """Authoritative breaking check for a Change.
+
+    Prefers the engine's direction-aware ``is_breaking`` property. Falls back
+    to BREAKING_TYPES membership for objects that don't expose it (e.g. test
+    doubles). Context-sensitive types are only breaking when ``is_breaking``
+    says so; never inferred from the type alone.
+    """
+    val = getattr(change, "is_breaking", None)
+    if isinstance(val, bool):
+        return val
+    return getattr(change, "type", None) in BREAKING_TYPES
+
+
 def classify_detailed(changes: List[Change]) -> Dict[str, Any]:
     """Return a detailed classification with per-category breakdowns.
 
@@ -85,9 +131,9 @@ def classify_detailed(changes: List[Change]) -> Dict[str, Any]:
     """
     bump = classify(changes)
 
-    breaking = [c for c in changes if c.type in BREAKING_TYPES]
-    additive = [c for c in changes if c.type in ADDITIVE_TYPES]
-    patch = [c for c in changes if c.type in PATCH_TYPES]
+    breaking = [c for c in changes if _is_breaking(c)]
+    additive = [c for c in changes if not _is_breaking(c) and c.type in ADDITIVE_TYPES]
+    patch = [c for c in changes if not _is_breaking(c) and c.type in PATCH_TYPES]
 
     return {
         "bump": bump.value,

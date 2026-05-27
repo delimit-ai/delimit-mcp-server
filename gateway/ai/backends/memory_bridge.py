@@ -14,9 +14,129 @@ logger = logging.getLogger("delimit.ai.memory_bridge")
 
 MEMORY_DIR = Path.home() / ".delimit" / "memory"
 
+# Legacy CLI store filename. The npm CLI historically wrote memories as
+# newline-delimited JSON (`memories.jsonl`) using a `text`/`created`/`source`
+# schema, while the MCP store writes one `mem-*.json` file per entry using
+# `content`/`created_at`/`context`. The readers below reconcile both so a
+# customer who created memories via the old CLI still sees them through the
+# MCP tools (FIX C — non-destructive; the .jsonl is never rewritten here).
+LEGACY_JSONL_NAME = "memories.jsonl"
+
 
 def _ensure_dir():
     MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _tokenize(query: str) -> List[str]:
+    """Split a search query into lowercased whitespace-delimited tokens.
+
+    Used by search() for OR-semantics keyword matching: an entry is a hit
+    if it contains at least one token. Empty / whitespace-only queries
+    yield no tokens (callers preserve their own empty-query behavior).
+    """
+    return [t for t in (query or "").lower().split() if t]
+
+
+def _normalize_legacy_entry(raw: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize a legacy `memories.jsonl` record to the MCP entry shape.
+
+    Legacy CLI schema: {id, text, tags, created, source}
+    MCP schema:        {id, content, tags, context, created_at, hot_load}
+
+    Maps text->content and created->created_at without dropping the
+    original keys, and synthesizes a context from `source` when absent so
+    downstream readers behave uniformly. Mirrors the CLI's readMemories
+    normalization (npm-delimit/bin/delimit-cli.js) for cross-tool parity.
+    """
+    entry = dict(raw)
+    if entry.get("text") and not entry.get("content"):
+        entry["content"] = entry["text"]
+    if entry.get("content") and not entry.get("text"):
+        entry["text"] = entry["content"]
+    if entry.get("created") and not entry.get("created_at"):
+        entry["created_at"] = entry["created"]
+    if entry.get("created_at") and not entry.get("created"):
+        entry["created"] = entry["created_at"]
+    if not entry.get("context") and entry.get("source"):
+        entry["context"] = entry["source"]
+    return entry
+
+
+def _read_legacy_jsonl() -> List[Dict[str, Any]]:
+    """Read and normalize legacy `memories.jsonl` entries, if present.
+
+    Defensive by contract: a missing or malformed file yields an empty
+    list and never raises. Malformed individual lines are skipped so one
+    bad line does not lose the rest of the file.
+    """
+    path = MEMORY_DIR / LEGACY_JSONL_NAME
+    entries: List[Dict[str, Any]] = []
+    try:
+        if not path.exists():
+            return entries
+        text = path.read_text()
+    except OSError:
+        return entries
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            raw = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(raw, dict):
+            entries.append(_normalize_legacy_entry(raw))
+    return entries
+
+
+def _load_all_entries() -> List[Dict[str, Any]]:
+    """Load every memory entry from both stores, deduped by id.
+
+    Reads the per-entry `mem-*.json` files (MCP, primary) and the legacy
+    `memories.jsonl` (CLI, backwards-compat). On an id collision the
+    `mem-*.json` entry wins — it is the authoritative MCP store and may
+    carry fields (e.g. hot_load) the legacy record lacks. Entries are
+    returned newest-first by created_at so callers that slice keep the
+    most recent. Fully defensive: unreadable files are skipped.
+
+    FIX C: the legacy `memories.jsonl` is read-only here — never deleted
+    or rewritten — preserving a customer's existing CLI-authored memories.
+    """
+    by_id: Dict[str, Dict[str, Any]] = {}
+    order: List[str] = []
+
+    def _add(entry: Dict[str, Any], key: str, *, overwrite: bool) -> None:
+        if key not in by_id:
+            by_id[key] = entry
+            order.append(key)
+        elif overwrite:
+            by_id[key] = entry
+
+    # Primary store: mem-*.json (authoritative, wins on conflict).
+    for f in MEMORY_DIR.glob("*.json"):
+        try:
+            entry = json.loads(f.read_text())
+        except (OSError, json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(entry, dict):
+            continue
+        entry.setdefault("id", f.stem)
+        _add(entry, entry.get("id") or f.stem, overwrite=True)
+
+    # Legacy jsonl: only fills ids the primary store does not already have.
+    for entry in _read_legacy_jsonl():
+        key = entry.get("id")
+        if not key:
+            # No id to dedupe on — keep it, it cannot collide.
+            order.append(id(entry))  # unique sentinel key
+            by_id[id(entry)] = entry
+            continue
+        _add(entry, key, overwrite=False)
+
+    entries = [by_id[k] for k in order]
+    entries.sort(key=lambda e: e.get("created_at") or e.get("created") or "", reverse=True)
+    return entries
 
 
 def store(
@@ -68,56 +188,97 @@ def store(
 
 
 def search(query: str, limit: int = 10) -> Dict[str, Any]:
-    """Search memories by keyword matching."""
+    """Search memories by keyword matching.
+
+    FIX A: the query is tokenized on whitespace and matched with OR
+    semantics — an entry is a hit if it contains at least one token in its
+    content, tags, or context. Previously the entire query had to appear as
+    one contiguous substring, so any multi-word query returned zero hits.
+
+    Results are ranked by the number of distinct query tokens matched
+    (descending), tie-broken by recency (created_at descending). The
+    `relevance` field is preserved in the return schema and now carries the
+    matched-token count, the primary ranking signal.
+
+    An empty (or whitespace-only) query preserves the previous behavior of
+    returning no results.
+
+    FIX C: reads both the per-entry `mem-*.json` MCP store and the legacy
+    `memories.jsonl` CLI store (deduped, MCP wins on id conflict).
+    """
     _ensure_dir()
-    query_lower = query.lower()
+    tokens = _tokenize(query)
     results = []
 
-    for f in sorted(MEMORY_DIR.glob("*.json"), reverse=True):
-        try:
-            entry = json.loads(f.read_text())
-            content = entry.get("content", "").lower()
-            tags = " ".join(entry.get("tags", [])).lower()
-            context = entry.get("context", "").lower()
+    # Empty / whitespace-only query: preserve prior behavior (no hits).
+    if not tokens:
+        return {"query": query, "results": results, "count": 0}
 
-            # Simple keyword matching
-            if query_lower in content or query_lower in tags or query_lower in context:
-                results.append({
-                    "id": entry.get("id", f.stem),
-                    "content": entry.get("content", "")[:500],
-                    "tags": entry.get("tags", []),
-                    "created_at": entry.get("created_at", ""),
-                    "relevance": content.count(query_lower),
-                })
+    for entry in _load_all_entries():
+        content = (entry.get("content") or "").lower()
+        tags = " ".join(entry.get("tags") or []).lower()
+        context = (entry.get("context") or "").lower()
+        haystacks = (content, tags, context)
 
-            if len(results) >= limit:
-                break
-        except Exception:
-            pass
+        matched_tokens = 0
+        total_occurrences = 0
+        for tok in tokens:
+            hit = False
+            for hay in haystacks:
+                c = hay.count(tok)
+                if c:
+                    hit = True
+                    total_occurrences += c
+            if hit:
+                matched_tokens += 1
 
-    results.sort(key=lambda r: r.get("relevance", 0), reverse=True)
+        if matched_tokens >= 1:
+            results.append({
+                "id": entry.get("id", ""),
+                "content": (entry.get("content") or "")[:500],
+                "tags": entry.get("tags") or [],
+                "created_at": entry.get("created_at") or entry.get("created") or "",
+                # `relevance` preserved in schema; now = matched-token count
+                # (primary ranking signal). _occurrences is an internal
+                # tie-break aid, dropped before return.
+                "relevance": matched_tokens,
+                "_occurrences": total_occurrences,
+            })
+
+    # Rank: most tokens matched first, then most occurrences, then recency.
+    results.sort(
+        key=lambda r: (r["relevance"], r["_occurrences"], r.get("created_at") or ""),
+        reverse=True,
+    )
+    for r in results:
+        r.pop("_occurrences", None)
+
+    results = results[:limit]
     return {"query": query, "results": results, "count": len(results)}
 
 
 def get_recent(limit: int = 5) -> Dict[str, Any]:
-    """Get recent memory entries."""
+    """Get recent memory entries.
+
+    FIX C: reads both the per-entry `mem-*.json` MCP store and the legacy
+    `memories.jsonl` CLI store. Entries are deduped by id (MCP wins) and
+    ordered newest-first by created_at (legacy `created` is normalized to
+    `created_at`). Legacy entries surface `hot_load=False` since the field
+    pre-dates that schema.
+    """
     _ensure_dir()
     entries = []
 
-    for f in sorted(MEMORY_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+    for entry in _load_all_entries():
         if len(entries) >= limit:
             break
-        try:
-            entry = json.loads(f.read_text())
-            entries.append({
-                "id": entry.get("id", f.stem),
-                "content": entry.get("content", "")[:500],
-                "tags": entry.get("tags", []),
-                "created_at": entry.get("created_at", ""),
-                "hot_load": bool(entry.get("hot_load", False)),
-            })
-        except Exception:
-            pass
+        entries.append({
+            "id": entry.get("id", ""),
+            "content": (entry.get("content") or "")[:500],
+            "tags": entry.get("tags") or [],
+            "created_at": entry.get("created_at") or entry.get("created") or "",
+            "hot_load": bool(entry.get("hot_load", False)),
+        })
 
     return {"results": entries, "count": len(entries)}
 
@@ -143,23 +304,19 @@ def list_hot(limit: int = 200) -> Dict[str, Any]:
     _ensure_dir()
     entries = []
 
-    for f in sorted(MEMORY_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+    for entry in _load_all_entries():
         if len(entries) >= limit:
             break
-        try:
-            entry = json.loads(f.read_text())
-            if not entry.get("hot_load"):
-                continue
-            entries.append({
-                "id": entry.get("id", f.stem),
-                "content": entry.get("content", ""),
-                "tags": entry.get("tags", []),
-                "context": entry.get("context", ""),
-                "created_at": entry.get("created_at", ""),
-                "hot_load": True,
-            })
-        except Exception:
-            pass
+        if not entry.get("hot_load"):
+            continue
+        entries.append({
+            "id": entry.get("id", ""),
+            "content": entry.get("content") or "",
+            "tags": entry.get("tags") or [],
+            "context": entry.get("context") or "",
+            "created_at": entry.get("created_at") or entry.get("created") or "",
+            "hot_load": True,
+        })
 
     return {"results": entries, "count": len(entries)}
 
