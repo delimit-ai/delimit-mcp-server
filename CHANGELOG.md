@@ -1,6 +1,28 @@
 # Changelog
 
 
+## [4.7.2] - 2026-06-04
+
+### Fixed
+
+- **Tool-usage telemetry now persists.** `record_call` previously only kept an
+  in-memory per-session counter that vanished on restart, so tool utilization
+  was unobservable. It now appends every call to `~/.delimit/tool_usage.jsonl`
+  (crash-safe, append-only), making utilization and dormancy measurable.
+
+### Added
+
+- **`delimit_toolcard_cache action="usage"`** — durable tool-utilization +
+  dormancy report (per-tool call counts, `last_seen`, and registered tools never
+  called).
+- Additive next-step suggestions wiring under-surfaced tools into the governance
+  loop: `lint → impact`, `agent_dispatch → agent_link`, `deploy_verify →
+  seal_verify`, `evidence_collect → seal_verify`, `os_plan → os_gates`.
+
+Purely additive — no tool signature or behavior changed. Published via OIDC
+trusted publishing with provenance.
+
+
 ## [4.7.1] - 2026-06-03
 
 Release-infrastructure update. No functional changes to the package versus 4.7.0.
