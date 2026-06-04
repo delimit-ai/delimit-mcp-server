@@ -1,6 +1,21 @@
 # Changelog
 
 
+## [4.7.3] - 2026-06-04
+
+Docs + metadata release. No functional changes to the package.
+
+### Changed
+
+- npm README now carries the **"Adopt with minimum privilege"** section
+  (phase-1 read-only tool allowlist, Action SHA-pinning, BYOK vault guidance)
+  that previously only rendered on GitHub.
+- Detection-engine claims corrected to **28 change types (17 breaking,
+  11 non-breaking)** — adds `field_requirement_relaxed` (context-aware
+  severity) to the documented table.
+- `server.json` (MCP registry metadata) version brought current.
+
+
 ## [4.7.2] - 2026-06-04
 
 ### Fixed
