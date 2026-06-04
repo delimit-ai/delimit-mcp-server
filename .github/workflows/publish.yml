@@ -164,8 +164,9 @@ jobs:
         # Node 20 ships npm 10.x, which does not understand the OIDC trusted-
         # publishing handshake. npm >= 11.5.1 is required. We upgrade npm only
         # (rather than bumping the Node version) to leave the Nuitka/license_core
-        # build environment untouched.
-        run: npm install -g npm@latest
+        # build environment untouched. Pinned to ^11 (not @latest) so a future
+        # npm major can't silently change CI publish behavior; 11.x is >= 11.5.1.
+        run: npm install -g npm@^11
 
       - name: Publish (dry run)
         if: github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run == 'true'
