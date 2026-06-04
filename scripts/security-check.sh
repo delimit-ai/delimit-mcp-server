@@ -8,11 +8,32 @@ echo "🔍 Delimit pre-publish security scan..."
 
 FAIL=0
 
-# Pack to temp and scan the actual tarball contents
+# Reconstruct the EXACT set of files npm would publish, then scan them.
+#
+# We deliberately avoid `npm pack` writing a tarball here: when this script
+# runs inside `npm publish` (via prepublishOnly), a nested `npm pack` is
+# unreliable on npm 10.x — it reports a tarball name but persists no file
+# (not to --pack-destination, not to CWD), so the old `ls "$TMPDIR"/*.tgz`
+# failed with exit 2 and blocked every publish. `npm pack --dry-run --json`
+# only ENUMERATES the shipped files (honoring package.json "files" and the
+# "!"-exclusions) and never writes a tarball, so it is re-entrancy-safe.
+# We copy those exact files into TMPDIR/package/ and keep the proven scan
+# blocks below byte-for-byte.
 TMPDIR=$(mktemp -d)
-npm pack --pack-destination "$TMPDIR" --quiet 2>/dev/null
-TARBALL=$(ls "$TMPDIR"/*.tgz)
-tar -xzf "$TARBALL" -C "$TMPDIR"
+mkdir -p "$TMPDIR/package"
+npm pack --dry-run --json 2>/dev/null \
+  | node -e 'const d=JSON.parse(require("fs").readFileSync(0,"utf8"));process.stdout.write((d[0].files||[]).map(f=>f.path).join("\n"))' \
+  | while IFS= read -r f; do
+      [ -n "$f" ] || continue
+      mkdir -p "$TMPDIR/package/$(dirname "$f")"
+      cp "$f" "$TMPDIR/package/$f" 2>/dev/null || true
+    done
+
+if [ -z "$(find "$TMPDIR/package" -type f -print -quit)" ]; then
+    echo "❌ security-check: could not enumerate shipped files (npm pack --dry-run --json returned nothing)"
+    rm -rf "$TMPDIR"
+    exit 1
+fi
 
 # 1. Credential patterns
 echo -n "  Credentials... "
