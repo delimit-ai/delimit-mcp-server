@@ -132,13 +132,17 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
-          # Intentionally NO registry-url: setup-node@v4 + registry-url writes a
-          # temp .npmrc with `always-auth` and a DUMMY NODE_AUTH_TOKEN placeholder
-          # (XXXXX-XXXXX-XXXXX-XXXXX) when no real token env is provided. npm then
-          # authenticates with that garbage token and OIDC trusted publishing is
-          # never attempted -> E404 on publish. npm defaults to registry.npmjs.org
-          # already, and OIDC auth needs no .npmrc token. (v4.7.1 first attempt.)
+          # Node 24 bundles npm >= 11.5.1, which is required for OIDC trusted
+          # publishing. We do NOT rely on a separate `npm install -g npm@^11`
+          # step — a global npm upgrade in one GitHub Actions step does not
+          # reliably carry to a later step, so the publish step could fall back
+          # to Node 20's bundled npm 10.x (no OIDC) and ENEEDAUTH.
+          node-version: '24'
+          # Intentionally NO registry-url: setup-node + registry-url writes a temp
+          # .npmrc with `always-auth` and a DUMMY NODE_AUTH_TOKEN placeholder when
+          # no real token env is provided; npm then authenticates with that garbage
+          # token and OIDC trusted publishing is never attempted -> E404. npm
+          # defaults to registry.npmjs.org and OIDC auth needs no .npmrc token.
 
       - name: Install dependencies
         working-directory: npm-delimit
@@ -165,13 +169,13 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install 'nuitka==2.5.9'
 
-      - name: Upgrade npm for OIDC trusted publishing (>= 11.5.1)
-        # Node 20 ships npm 10.x, which does not understand the OIDC trusted-
-        # publishing handshake. npm >= 11.5.1 is required. We upgrade npm only
-        # (rather than bumping the Node version) to leave the Nuitka/license_core
-        # build environment untouched. Pinned to ^11 (not @latest) so a future
-        # npm major can't silently change CI publish behavior; 11.x is >= 11.5.1.
-        run: npm install -g npm@^11
+      - name: Verify npm >= 11.5.1 for OIDC trusted publishing
+        # Node 24 bundles npm >= 11.5.1 already. Print versions so the run log
+        # proves which npm the publish step uses (OIDC needs >= 11.5.1). Same
+        # Node/PATH as the publish step, so this version == the publish version.
+        run: |
+          echo "node: $(node --version)"
+          echo "npm:  $(npm --version)"
 
       - name: Publish (dry run)
         if: github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run == 'true'
