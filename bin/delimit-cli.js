@@ -69,7 +69,7 @@ function normalizeNaturalLanguageArgs(argv) {
     const explicitCommands = new Set([
         'install', 'mode', 'status', 'session', 'build', 'ask', 'policy', 'auth', 'audit',
         'explain-decision', 'uninstall', 'proxy', 'hook', 'version', 'vault', 'deliberate',
-        'remember', 'recall', 'forget', 'report', 'signin', 'signout', 'activate', 'seal-verify'
+        'remember', 'recall', 'forget', 'report', 'signin', 'signout', 'activate'
     ]);
     if (explicitCommands.has((raw[0] || '').toLowerCase())) {
         return raw;
@@ -6997,56 +6997,6 @@ program
         } else {
             console.log(chalk.red(`\n  No memory found with ID: ${id}\n`));
             process.exit(1);
-        }
-    });
-
-program
-    .command('seal-verify <receipt_path>')
-    .description('Verify a Delimit Seal receipt (Ed25519 signature + content-pin) against the bundled constitution')
-    .option('--json', 'Output the full verification result as JSON')
-    .action((receiptPath, options) => {
-        const resolved = path.resolve(receiptPath);
-        if (!fs.existsSync(resolved)) {
-            console.error(chalk.red(`\n  Receipt not found: ${resolved}\n`));
-            process.exit(1);
-        }
-        const verifier = homeSubpath('server', 'ai', 'seal', 'verifier.py');
-        if (!fs.existsSync(verifier)) {
-            console.error(chalk.yellow('\n  Seal verifier not installed. Run: ') + chalk.cyan('delimit setup') + '\n');
-            process.exit(1);
-        }
-        try {
-            const escaped = resolved.replace(/'/g, "\\'");
-            const pyCmd = `python3 -c "
-import sys, os, json
-sys.path.insert(0, os.path.dirname('${verifier}'))
-from verifier import verify_receipt
-print(json.dumps(verify_receipt('${escaped}'), default=str))
-"`;
-            const out = execSync(pyCmd, {
-                encoding: 'utf-8',
-                timeout: 30000,
-                env: { ...process.env, PYTHONPATH: path.dirname(verifier) },
-            });
-            const r = JSON.parse(out.trim().split('\n').pop());
-            if (options.json) {
-                console.log(JSON.stringify(r, null, 2));
-            } else {
-                console.log(chalk.bold('\n  Delimit Seal — receipt verification\n'));
-                console.log('  ' + (r.valid ? chalk.green('✅ VERIFIED') : chalk.red('❌ FAILED')) +
-                            chalk.gray(`  (${(r.layer0_seed_id || '').slice(0, 20)}…)`));
-                if (r.checks) {
-                    for (const [k, v] of Object.entries(r.checks)) {
-                        console.log(`    [${v ? chalk.green('✓') : chalk.red('✗')}] ${k}`);
-                    }
-                }
-                if (r.error) console.log(chalk.yellow(`    ${r.error}`));
-                console.log(chalk.gray('  Proves the governed process ran — not factual correctness or goodness.\n'));
-            }
-            process.exitCode = r.valid ? 0 : 1;
-        } catch (e) {
-            console.error(chalk.red(`\n  Verification error: ${e.message}\n`));
-            process.exitCode = 2;
         }
     });
 

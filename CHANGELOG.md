@@ -1,26 +1,6 @@
 # Changelog
 
 
-## [4.7.0] - 2026-06-03
-
-Feature release: fold the open-core Delimit Seal verifier into delimit-cli.
-
-### Added
-
-- **`delimit seal-verify <receipt.json>`** + MCP tool **`delimit_seal_verify`**
-  (Free tier): verify a Delimit Seal receipt's Ed25519 signature and content-pin
-  against the bundled, content-hashed Layer-0 constitution — with no access to the
-  engine or the signing key. Bundles `gateway/ai/seal/` (verifier, constitution,
-  public key, sample receipt). Honest about what it does NOT attest.
-- The verifier **lazy-imports `cryptography` and fails closed** if it is absent
-  (returns verification_unavailable) — it never blocks install or any other tool.
-  To enable seal verification: `pip install cryptography`.
-
-### Notes
-
-- Purely additive — no existing tool, command, or behavior changed.
-
-
 ## [4.6.1] - 2026-05-22
 
 Patch release: bundle hygiene + gateway sync carrying 7 upstream improvements.
