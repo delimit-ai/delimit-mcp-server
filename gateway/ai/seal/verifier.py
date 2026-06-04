@@ -19,7 +19,7 @@ import os
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _DEFAULT_CONSTITUTION = os.path.join(_HERE, "constitution.json")
-_DEFAULT_PUBKEY = os.path.join(_HERE, "public.key")
+_DEFAULT_PUBKEY = os.path.join(_HERE, "seal_pubkey.ed25519")
 
 
 def _seed_id_from_rules(frozen_rules):
