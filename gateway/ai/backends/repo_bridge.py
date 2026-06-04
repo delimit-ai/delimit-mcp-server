@@ -318,3 +318,25 @@ def security_audit(target: str = ".", options: Optional[Dict] = None) -> Dict[st
         return _fallback_security_result(target=target, tool_label="security.audit")
     return _call("securitygate", "create_securitygate_server", "_tool_audit",
                  {"target": target, "authorization_token": _INTERNAL_TOKEN, **(options or {})}, "security.audit")
+
+
+def seal_verify(receipt_path: str, options: Optional[Dict] = None) -> Dict[str, Any]:
+    """Verify a Delimit Seal receipt (Free, open-core).
+
+    Delegates to ai.seal.verifier.verify_receipt against the bundled,
+    content-hashed Layer-0 constitution + published Ed25519 public key.
+    The `cryptography` dependency is optional and lazy-imported inside the
+    verifier; a missing wheel returns verification_unavailable, never raises.
+    """
+    try:
+        from ai.seal.verifier import verify_receipt
+    except Exception as e:  # import guard — never break the caller
+        return {"valid": False, "seal_valid": False,
+                "error": f"seal verifier unavailable: {e}"}
+    opts = options or {}
+    return verify_receipt(
+        receipt_path,
+        constitution_path=opts.get("constitution_path"),
+        pubkey_path=opts.get("pubkey_path"),
+        verbose=bool(opts.get("verbose", False)),
+    )

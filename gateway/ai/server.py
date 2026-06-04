@@ -882,6 +882,7 @@ NEXT_STEPS_REGISTRY: Dict[str, List[Dict[str, Any]]] = {
         {"tool": "delimit_evidence_verify", "reason": "Verify evidence bundle integrity", "suggested_args": {}, "is_premium": True},
     ],
     "evidence_verify": [],
+    "seal_verify": [],
     "security_audit": [
         {"tool": "delimit_security_scan", "reason": "Run deeper security scan on flagged areas", "suggested_args": {}, "is_premium": True},
         {"tool": "delimit_evidence_collect", "reason": "Collect evidence of security findings", "suggested_args": {}, "is_premium": True},
@@ -4974,6 +4975,35 @@ def delimit_evidence_verify(bundle_id: Annotated[Optional[str], Field(descriptio
         return gate
     from backends.repo_bridge import evidence_verify
     return _with_next_steps("evidence_verify", _safe_call(evidence_verify, bundle_id=bundle_id, bundle_path=bundle_path))
+
+
+@mcp.tool()
+def delimit_seal_verify(receipt_path: Annotated[str, Field(description="Path to a Delimit Seal receipt JSON file. Required.")]) -> Dict[str, Any]:
+    """Verify a Delimit Seal receipt against the bundled Layer-0 constitution (Free).
+
+    When to use: to check that a signed governed-output receipt has not
+    been tampered with — content-pin to the published constitution, a
+    valid Ed25519 signature, and a well-formed structure. Free tier.
+    When NOT to use: to verify an evidence bundle (use
+    delimit_evidence_verify) or to query the ledger (delimit_ledger).
+
+    Sibling contrast: delimit_evidence_verify checks an evidence bundle's
+    hash chain; this checks an open-core Seal receipt's signature +
+    content-pin with no access to the engine or the signing key.
+
+    Side effects: read-only. Calls backends.repo_bridge.seal_verify. The
+    'cryptography' dependency is optional + lazy-imported: if absent, it
+    returns verification_unavailable rather than failing. No license gate.
+
+    Args:
+        receipt_path: Path to a Delimit Seal receipt JSON file. Required.
+
+    Returns:
+        Dict with the verdict (valid, seal_valid, per-check results),
+        what it does_not_attest, and next_steps.
+    """
+    from backends.repo_bridge import seal_verify
+    return _with_next_steps("seal_verify", _safe_call(seal_verify, receipt_path=receipt_path))
 
 
 # ═══════════════════════════════════════════════════════════════════════
