@@ -133,7 +133,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-          registry-url: 'https://registry.npmjs.org'
+          # Intentionally NO registry-url: setup-node@v4 + registry-url writes a
+          # temp .npmrc with `always-auth` and a DUMMY NODE_AUTH_TOKEN placeholder
+          # (XXXXX-XXXXX-XXXXX-XXXXX) when no real token env is provided. npm then
+          # authenticates with that garbage token and OIDC trusted publishing is
+          # never attempted -> E404 on publish. npm defaults to registry.npmjs.org
+          # already, and OIDC auth needs no .npmrc token. (v4.7.1 first attempt.)
 
       - name: Install dependencies
         working-directory: npm-delimit
