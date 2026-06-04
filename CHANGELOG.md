@@ -1,6 +1,21 @@
 # Changelog
 
 
+## [4.7.1] - 2026-06-03
+
+Release-infrastructure update. No functional changes to the package versus 4.7.0.
+
+### Changed
+
+- Published via **npm Trusted Publishing (OIDC)** from GitHub Actions — this
+  release carries a **sigstore provenance attestation** (the 4.7.0 build was
+  published manually and did not). Future releases publish tokenlessly with
+  provenance.
+
+The free `delimit seal-verify` command and `delimit_seal_verify` MCP tool from
+4.7.0 are unchanged.
+
+
 ## [4.7.0] - 2026-06-03
 
 Feature release: fold the open-core Delimit Seal verifier into delimit-cli.
