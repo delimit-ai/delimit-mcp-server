@@ -95,6 +95,7 @@ TOOL_TIERS: Dict[str, Tier] = {
     "delimit_secret_list": "public",
     "delimit_secret_revoke": "public",
     "delimit_secret_access_log": "public",
+    "delimit_seal_verify": "public",  # open-core Seal receipt verifier (Free tier)
 
     # === Ship domain (public + experimental) ===
     "delimit_deploy_plan": "public",
