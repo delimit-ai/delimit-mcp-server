@@ -226,6 +226,40 @@ That's it. Delimit auto-fetches the base branch spec, diffs it, and posts a PR c
 
 ---
 
+## Adopt with minimum privilege
+
+You don't have to trust a large tool surface on day one. The safe on-ramp:
+
+**Phase 1 — read-only governance (free, no account).** Start with the tools that
+only read your repo and write reports: `delimit_lint`, `delimit_diff`,
+`delimit_semver`, `delimit_policy`, `delimit_explain`, `delimit_scan`, and
+`delimit_seal_verify`. If your MCP client supports per-tool allowlists, grant
+exactly those. Nothing in this set executes, deploys, or posts anywhere.
+
+**Phase 2 — opt into side effects deliberately.** Tools that write evidence
+bundles, open PR comments, or run deploys (`delimit_security_audit`,
+`delimit_deploy_*`, agent orchestration) are tier-gated; enable them once
+phase 1 has earned its keep in your CI.
+
+**Pin the Action to a commit SHA.** `@v1` is a floating tag. For
+supply-chain-sensitive pipelines, pin the exact commit and bump on review:
+
+```yaml
+- uses: delimit-ai/delimit-action@<commit-sha>   # gh api repos/delimit-ai/delimit-action/git/refs/tags/v1
+```
+
+**Keep BYOK keys out of plaintext config.** If you bring your own model keys
+for deliberation, store them with `delimit_secret_store` (encrypted vault,
+access-logged via `delimit_secret_access_log`) rather than in dotfiles.
+
+Our own releases ship under the same discipline: every release carries a
+signed, replayable Seal receipt (see the latest
+[release assets](https://github.com/delimit-ai/delimit-mcp-server/releases) —
+verify with `npx delimit-cli seal-verify <receipt.json>` or at its
+`delimit.ai/att/<id>` replay URL), plus SLSA provenance on npm.
+
+---
+
 ## CLI commands
 
 ```bash
