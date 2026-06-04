@@ -324,7 +324,7 @@ When installed into your AI coding assistant, Delimit provides tools across two 
 
 ## What It Detects
 
-27 change types (17 breaking, 10 non-breaking) -- deterministic rules, not AI inference. Same input always produces the same result.
+28 change types (17 breaking, 11 non-breaking) -- deterministic rules, not AI inference. Same input always produces the same result.
 
 ### Breaking Changes
 
@@ -362,6 +362,7 @@ When installed into your AI coding assistant, Delimit provides tools across two 
 | 25 | `security_added` | API key security scheme added |
 | 26 | `deprecated_added` | `GET /v1/users` marked as deprecated |
 | 27 | `default_changed` | Default value for `page_size` changed from 10 to 20 |
+| 28 | `field_requirement_relaxed` | Required field `nickname` became optional (context-aware severity) |
 
 ---
 
@@ -401,7 +402,7 @@ rules:
 
 **How does this compare to Obsidian Mind?**
 
-Obsidian Mind is a great Obsidian vault template for Claude Code users who want persistent memory via markdown files. Delimit takes a different approach: it's an MCP server that works across Claude Code, Codex, Gemini CLI, and Cursor. Your memory, ledger, and governance travel with you when you switch models. Delimit also adds API governance (27-type breaking change detection), CI gates, git hooks, and policy enforcement that Obsidian Mind doesn't cover. Use Obsidian Mind if you're all-in on Claude + Obsidian. Use Delimit if you switch between models or need governance.
+Obsidian Mind is a great Obsidian vault template for Claude Code users who want persistent memory via markdown files. Delimit takes a different approach: it's an MCP server that works across Claude Code, Codex, Gemini CLI, and Cursor. Your memory, ledger, and governance travel with you when you switch models. Delimit also adds API governance (28-type breaking change detection), CI gates, git hooks, and policy enforcement that Obsidian Mind doesn't cover. Use Obsidian Mind if you're all-in on Claude + Obsidian. Use Delimit if you switch between models or need governance.
 
 **Does this work without Claude Code?**
 
