@@ -964,6 +964,8 @@ def hot_reload(reason: str = "update") -> Dict[str, Any]:
         "ai.reddit_scanner",
         "ai.ledger_manager",
         "ai.backends.repo_bridge",
+        "ai.backends.governance_bridge",
+        "backends.governance_bridge",
         "ai.backends.tools_infra",
         "backends.repo_bridge",  # alias used by server.py lazy imports
         "ai.social_target",  # depends on ai.social

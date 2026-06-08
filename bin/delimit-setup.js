@@ -8,17 +8,14 @@
  * 3. Installs default agents into ~/.claude/agents/
  * 4. Prints next steps
  */
-
 const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
 const os = require('os');
-
 const DELIMIT_HOME = path.join(os.homedir(), '.delimit');
 const MCP_CONFIG = path.join(os.homedir(), '.mcp.json');
 const CLAUDE_DIR = path.join(os.homedir(), '.claude');
 const AGENTS_DIR = path.join(CLAUDE_DIR, 'agents');
-
 // Colors
 const green = (s) => `\x1b[32m${s}\x1b[0m`;
 const yellow = (s) => `\x1b[33m${s}\x1b[0m`;
@@ -28,12 +25,10 @@ const magenta = (s) => `\x1b[1;35m${s}\x1b[0m`;
 const orange = (s) => `\x1b[1;33m${s}\x1b[0m`;
 const dim = (s) => `\x1b[2m${s}\x1b[0m`;
 const bold = (s) => `\x1b[1m${s}\x1b[0m`;
-
 function log(msg) { console.log(msg); }
 function step(n, msg) { log(`\n${blue(`[${n}]`)} ${msg}`); }
 function pause(ms = 150) { return new Promise(r => setTimeout(r, ms)); }
 async function logp(msg, ms = 180) { console.log(msg); await pause(ms); }
-
 function findGitDir(startDir) {
     let dir = startDir;
     while (dir !== path.dirname(dir)) {
@@ -51,7 +46,6 @@ function findGitDir(startDir) {
     }
     return null;
 }
-
 /**
  * Recursively find OpenAPI/Swagger spec files, ignoring node_modules.
  */
@@ -72,7 +66,6 @@ function findSpecFiles(dir, depth = 0) {
     } catch {}
     return results;
 }
-
 async function main() {
     // Self-update check: ensure we're running the latest version (skip if already re-execed)
     const _pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf-8'));
@@ -87,7 +80,6 @@ async function main() {
             }
         } catch { /* offline or timeout — continue with current version */ }
     }
-
     log('');
     log(purple('    ____  ________    ______  _____________'));
     log(purple('   / __ \\/ ____/ /   /  _/  |/  /  _/_  __/'));
@@ -98,10 +90,8 @@ async function main() {
     const _pkgNow = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf-8'));
     log(dim(`  v${_pkgNow.version}`));
     log('');
-
     // Step 1: Check prerequisites
     step(1, 'Checking prerequisites...');
-
     // Python 3.9+
     let python = null;
     for (const cmd of ['python3', 'python']) {
@@ -119,7 +109,6 @@ async function main() {
         log(`  ${yellow('✗')} Python 3.9+ not found. Install Python first.`);
         process.exit(1);
     }
-
     // Check if Claude Code is available
     let hasClaude = false;
     try {
@@ -129,7 +118,6 @@ async function main() {
     } catch {
         log(`  ${yellow('!')} Claude Code not detected — MCP config will still be created`);
     }
-
     // Show what we're about to do and ask for confirmation
     log('');
     log(`  ${blue('What Delimit will do:')}`);
@@ -145,7 +133,6 @@ async function main() {
     log('');
     log(`  ${dim('Undo anytime:')} rm -rf ~/.delimit && delimit uninstall`);
     log('');
-
     const inquirerTop = (() => { try { return require('inquirer'); } catch { return null; } })();
     if (inquirerTop && process.stdin.isTTY) {
         try {
@@ -162,17 +149,14 @@ async function main() {
         } catch {}
     }
     log('');
-
     // Step 2: Install Delimit MCP server
     step(2, 'Installing Delimit MCP server...');
-
     // Create ~/.delimit directory
     fs.mkdirSync(path.join(DELIMIT_HOME, 'server', 'core', 'zero_spec'), { recursive: true });
     fs.mkdirSync(path.join(DELIMIT_HOME, 'server', 'tasks'), { recursive: true });
     fs.mkdirSync(path.join(DELIMIT_HOME, 'deploys'), { recursive: true });
     fs.mkdirSync(path.join(DELIMIT_HOME, 'ledger'), { recursive: true });
     fs.mkdirSync(path.join(DELIMIT_HOME, 'evidence'), { recursive: true });
-
     // Copy the gateway core from our bundled copy
     // Skip if server dirs are symlinks (dev machine using gateway source directly)
     const serverAiDir = path.join(DELIMIT_HOME, 'server', 'ai');
@@ -193,13 +177,11 @@ async function main() {
             log(`  ${yellow('!')} Could not download. Clone manually: git clone https://github.com/delimit-ai/delimit-gateway.git ~/.delimit/server`);
         }
     }
-
     // Copy the MCP server file
     const serverSource = path.join(__dirname, '..', 'mcp-server.py');
     if (fs.existsSync(serverSource)) {
         fs.copyFileSync(serverSource, path.join(DELIMIT_HOME, 'server', 'mcp-server.py'));
     }
-
     // Download compiled Pro modules (platform-specific)
     const proDir = path.join(DELIMIT_HOME, 'server', 'ai');
     const pyVer = (() => { try { return execSync(`${python} -c "import sys; print(f'cp{sys.version_info.major}{sys.version_info.minor}')"`, { encoding: 'utf-8' }).trim(); } catch { return 'cp310'; } })();
@@ -209,7 +191,6 @@ async function main() {
     const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf-8'));
     const proVersion = pkg.proModuleVersion || '3.8.2';
     const proUrl = `https://delimit.ai/releases/v${proVersion}/delimit-pro-${artifact}.tar.gz`;
-
     try {
         const proTarball = path.join(DELIMIT_HOME, 'pro.tar.gz');
         execSync(`curl -sL "${proUrl}" -o "${proTarball}" --fail`, { stdio: 'pipe', timeout: 30000 });
@@ -219,13 +200,11 @@ async function main() {
     } catch {
         log(`  ${dim('  Pro modules not available for ${artifact} — free tools work fine')}`);
     }
-
     // Re-copy gateway source AFTER Pro modules to ensure full files aren't overwritten by stubs
     // Skip if dev symlinks are in place
     if (fs.existsSync(gatewaySource) && !isDevSymlink) {
         copyDir(gatewaySource, path.join(DELIMIT_HOME, 'server'));
     }
-
     // Remove stale .so binaries that shadow updated .py source files
     // Python loads .so before .py, so old compiled stubs block new source
     const aiDir = path.join(DELIMIT_HOME, 'server', 'ai');
@@ -244,7 +223,6 @@ async function main() {
             }
         } catch { /* ignore cleanup errors */ }
     }
-
     // Install Python deps into isolated venv with pinned versions
     log(`  ${dim('  Installing Python dependencies...')}`);
     const venvDir = path.join(DELIMIT_HOME, 'venv');
@@ -276,7 +254,6 @@ async function main() {
             log(`  ${yellow('!')} pip install failed — run manually: pip install fastmcp pyyaml pydantic packaging pytest`);
         }
     }
-
     // LED-1084 week 2: build the content-grounding feature whitelist.
     // Populates ~/.delimit/content/grounding/features.json with every
     // @mcp.tool() entry + every CLI subcommand we ship. Drafters then
@@ -299,10 +276,8 @@ async function main() {
         // which makes the gate strict but doesn't break anything. Customers
         // can rebuild manually later: `python -m ai.content_grounding.features build`.
     }
-
     // Step 3: Configure Claude Code MCP
     step(3, 'Configuring Claude Code MCP...');
-
     const configuredTools = [];
     let mcpConfig = {};
     if (fs.existsSync(MCP_CONFIG)) {
@@ -311,14 +286,11 @@ async function main() {
         } catch {}
     }
     if (!mcpConfig.mcpServers) mcpConfig.mcpServers = {};
-
     const serverPath = path.join(DELIMIT_HOME, 'server', 'ai', 'server.py');
     const serverPathAlt = path.join(DELIMIT_HOME, 'server', 'mcp-server.py');
     const actualServer = fs.existsSync(serverPath) ? serverPath : serverPathAlt;
-
     // Always update paths to match this machine's directory structure
     const delimitMcp = {
-        type: 'stdio',
         command: python,
         args: [actualServer],
         cwd: path.join(DELIMIT_HOME, 'server'),
@@ -337,7 +309,6 @@ async function main() {
         await logp(`  ${green('✓')} Added delimit to ${MCP_CONFIG}`);
         configuredTools.push('Claude Code');
     }
-
     // Auto-approve all Delimit tools in Claude Code settings.json
     const CLAUDE_SETTINGS = path.join(CLAUDE_DIR, 'settings.json');
     try {
@@ -356,7 +327,6 @@ async function main() {
     } catch (e) {
         log(`  ${yellow('!')} Could not set Claude Code permissions: ${e.message}`);
     }
-
     // Step 3b: Configure Codex MCP (if installed)
     const CODEX_CONFIG = path.join(os.homedir(), '.codex', 'config.toml');
     // Create config.toml if .codex dir exists or codex is in PATH
@@ -379,7 +349,6 @@ async function main() {
             const serverDir = path.join(DELIMIT_HOME, 'server');
             // approval_policy = "never" means auto-approve all tools from this server (no per-prompt confirmations)
             const correctEntry = `\n[mcp_servers.delimit]\ncommand = "${python}"\nargs = ["${actualServer}"]\ncwd = "${serverDir}"\napproval_policy = "never"\n\n[mcp_servers.delimit.env]\nPYTHONPATH = "${serverDir}:${path.join(serverDir, 'ai')}"\n`;
-
             // Remove ALL existing delimit MCP entries (prevents duplicates)
             const existed = toml.includes('mcp_servers.delimit');
             const lines = toml.split('\n');
@@ -410,7 +379,6 @@ async function main() {
             log(`  ${yellow('!')} Could not configure Codex: ${e.message}`);
         }
     }
-
     // Step 3c: Configure Cursor MCP (if installed)
     const CURSOR_CONFIG = path.join(os.homedir(), '.cursor', 'mcp.json');
     if (fs.existsSync(path.join(os.homedir(), '.cursor'))) {
@@ -439,7 +407,6 @@ async function main() {
             log(`  ${yellow('!')} Could not configure Cursor: ${e.message}`);
         }
     }
-
     // Step 3d: Configure Gemini CLI (if installed)
     const GEMINI_DIR = path.join(os.homedir(), '.gemini');
     const GEMINI_CONFIG = path.join(GEMINI_DIR, 'settings.json');
@@ -480,7 +447,45 @@ async function main() {
             log(`  ${yellow('!')} Could not configure Gemini CLI: ${e.message}`);
         }
     }
-
+    // Step 3e: Configure Antigravity CLI (if installed)
+    const ANTIGRAVITY_DIR = path.join(os.homedir(), '.gemini', 'antigravity-cli');
+    const ANTIGRAVITY_CONFIG = path.join(ANTIGRAVITY_DIR, 'settings.json');
+    if (fs.existsSync(ANTIGRAVITY_DIR)) {
+        try {
+            let antigravityConfig = {};
+            if (fs.existsSync(ANTIGRAVITY_CONFIG)) {
+                antigravityConfig = JSON.parse(fs.readFileSync(ANTIGRAVITY_CONFIG, 'utf-8'));
+            }
+            if (!antigravityConfig.mcpServers) antigravityConfig.mcpServers = {};
+            const antigravityExisted = !!antigravityConfig.mcpServers.delimit;
+            antigravityConfig.mcpServers.delimit = {
+                type: 'stdio',
+                command: python,
+                args: [actualServer],
+                cwd: path.join(DELIMIT_HOME, 'server'),
+                env: { PYTHONPATH: path.join(DELIMIT_HOME, 'server') }
+            };
+            if (!antigravityConfig.general) antigravityConfig.general = {};
+            if (!antigravityConfig.general.defaultApprovalMode) {
+                antigravityConfig.general.defaultApprovalMode = 'auto_edit';
+            }
+            fs.writeFileSync(ANTIGRAVITY_CONFIG, JSON.stringify(antigravityConfig, null, 2));
+            if (antigravityExisted) {
+                await logp(`  ${green('✓')} Updated Delimit paths in Antigravity CLI config`);
+                configuredTools.push('Antigravity CLI');
+            } else {
+                await logp(`  ${green('✓')} Added delimit to Antigravity CLI (${ANTIGRAVITY_CONFIG})`);
+                configuredTools.push('Antigravity CLI');
+            }
+            // Add governance instructions
+            if (!antigravityConfig.customInstructions || !antigravityConfig.customInstructions.includes('delimit_ledger_context')) {
+                antigravityConfig.customInstructions = 'Delimit MCP is installed. On every session start: (1) call delimit_ledger_context for open tasks, (2) call delimit_gov_health, (3) call delimit_inbox_daemon(action="start") to start email polling. If new project, call delimit_scan. Track all work via the ledger. IMPORTANT: Always auto-trigger delimit_social_post and delimit_notify when drafting content or identifying actions. Never ask permission — draft and send, the founder reviews via email.';
+                fs.writeFileSync(ANTIGRAVITY_CONFIG, JSON.stringify(antigravityConfig, null, 2));
+            }
+        } catch (e) {
+            log(`  ${yellow('!')} Could not configure Antigravity CLI: ${e.message}`);
+        }
+    }
     // Checkpoint: MCP is configured, now ask before modifying project files
     log('');
     log(`  ${green('✓')} MCP server installed and configured`);
@@ -490,7 +495,6 @@ async function main() {
     log(`    • Update CLAUDE.md with Delimit instructions`);
     log(`    • Optional: governance wrapping + hooks`);
     log('');
-
     const inquirerMid = (() => { try { return require('inquirer'); } catch { return null; } })();
     if (inquirerMid && process.stdin.isTTY) {
         try {
@@ -507,12 +511,9 @@ async function main() {
             }
         } catch {}
     }
-
     // Step 4: Install default agents
     step(4, 'Installing governance agents...');
-
     fs.mkdirSync(AGENTS_DIR, { recursive: true });
-
     const agents = {
         'lint.md': `---
 name: lint
@@ -528,9 +529,7 @@ tools:
   - mcp__delimit__delimit_impact
   - mcp__delimit__delimit_ledger
 ---
-
 # Lint Agent
-
 Run API governance checks. Use delimit_lint to compare specs, delimit_policy to check rules, delimit_impact for downstream analysis.
 `,
         'engineering.md': `---
@@ -548,9 +547,7 @@ tools:
   - mcp__delimit__delimit_test_generate
   - mcp__delimit__delimit_test_coverage
 ---
-
 # Engineering Agent
-
 Execute code directives. Use delimit_test_coverage to verify coverage targets. Use delimit_lint to check API compatibility after changes.
 `,
         'governance.md': `---
@@ -570,13 +567,10 @@ tools:
   - mcp__delimit__delimit_repo_analyze
   - mcp__delimit__delimit_repo_config_validate
 ---
-
 # Governance Agent
-
 Run full governance compliance checks. Verify security, policy compliance, evidence collection, and repo health.
 `
     };
-
     let installed = 0;
     for (const [filename, content] of Object.entries(agents)) {
         const agentPath = path.join(AGENTS_DIR, filename);
@@ -586,7 +580,6 @@ Run full governance compliance checks. Verify security, policy compliance, evide
         }
     }
     await logp(`  ${green('✓')} ${installed} agents installed (${Object.keys(agents).length - installed} already existed)`);
-
     // Step 4b: Install Git hooks if inside a git repository
     const gitDir = findGitDir(process.cwd());
     if (gitDir) {
@@ -621,10 +614,8 @@ Run full governance compliance checks. Verify security, policy compliance, evide
     } else {
         log(`  ${dim('  Not inside a git repo — git hooks will be installed on next delimit setup inside a repo')}`);
     }
-
     // Step 5: Create/update CLAUDE.md and platform instruction files
     step(5, 'Setting up AI instruction files...');
-
     const claudeMd = path.join(os.homedir(), 'CLAUDE.md');
     const claudeResult = upsertDelimitSection(claudeMd);
     if (claudeResult.action === 'created') {
@@ -636,7 +627,6 @@ Run full governance compliance checks. Verify security, policy compliance, evide
     } else {
         log(`  ${dim('  CLAUDE.md already up to date')}`);
     }
-
     // Codex instructions: AGENTS.md is the file Codex CLI auto-loads
     // ("from CWD up to the root", per Codex binary spec). The previous
     // ~/.codex/instructions.md write was dead code — Codex never read it.
@@ -660,7 +650,6 @@ Run full governance compliance checks. Verify security, policy compliance, evide
             log(`  ${dim('  AGENTS.md already up to date')}`);
         }
     }
-
     // Gemini CLI: GEMINI.md is the auto-loaded instruction file
     // (~/.gemini/GEMINI.md is the user-global tier per Gemini CLI bundle).
     // LED-1399: install when Gemini CLI is present so governance triggers
@@ -685,7 +674,27 @@ Run full governance compliance checks. Verify security, policy compliance, evide
             log(`  ${dim('  GEMINI.md already up to date')}`);
         }
     }
-
+    // Antigravity CLI: ANTIGRAVITY.md is the auto-loaded instruction file.
+    // We install it when antigravity/agy is present, or when ~/.gemini/antigravity-cli exists.
+    const antigravityHome = path.join(os.homedir(), '.gemini', 'antigravity-cli');
+    let hasAntigravity = fs.existsSync(antigravityHome);
+    if (!hasAntigravity) {
+        try { execSync('which agy 2>/dev/null', { stdio: 'pipe' }); hasAntigravity = true; } catch {}
+        try { execSync('which antigravity 2>/dev/null', { stdio: 'pipe' }); hasAntigravity = true; } catch {}
+    }
+    if (hasAntigravity) {
+        const antigravityMd = path.join(os.homedir(), 'ANTIGRAVITY.md');
+        const antigravityResult = upsertDelimitSection(antigravityMd);
+        if (antigravityResult.action === 'created') {
+            await logp(`  ${green('✓')} Created ${antigravityMd} (Antigravity CLI instructions)`);
+        } else if (antigravityResult.action === 'updated') {
+            await logp(`  ${green('✓')} Updated Delimit section in ${antigravityMd}`);
+        } else if (antigravityResult.action === 'appended') {
+            await logp(`  ${green('✓')} Appended Delimit section to ${antigravityMd} (user content preserved)`);
+        } else {
+            log(`  ${dim('  ANTIGRAVITY.md already up to date')}`);
+        }
+    }
     // Cursor rules (legacy .cursorrules + new .cursor/rules/ directory)
     const cursorRules = path.join(os.homedir(), '.cursorrules');
     if (fs.existsSync(path.join(os.homedir(), '.cursor'))) {
@@ -704,7 +713,6 @@ Run full governance compliance checks. Verify security, policy compliance, evide
             log(`  ${dim('  Could not install .cursor/rules: ' + e.message)}`);
         }
     }
-
     // Silent: auto-detect API keys and configure models.json (no output)
     const modelsPath = path.join(DELIMIT_HOME, 'models.json');
     if (!fs.existsSync(modelsPath)) {
@@ -726,7 +734,6 @@ Run full governance compliance checks. Verify security, policy compliance, evide
             fs.writeFileSync(modelsPath, JSON.stringify(models, null, 2));
         }
     }
-
     // Step 6: Governance wrapping (shims)
     step(6, 'Governance wrapping...');
     log('');
@@ -746,18 +753,14 @@ Run full governance compliance checks. Verify security, policy compliance, evide
     log(`  ${dim('Adds ~/.delimit/shims to your shell PATH.')}`);
     log(`  ${dim('Disable anytime: delimit shims disable')}`);
     log('');
-
     // Check if shims already installed
     const shimsDir = path.join(DELIMIT_HOME, 'shims');
     const shimsInstalled = fs.existsSync(shimsDir) && fs.readdirSync(shimsDir).length > 0;
-
     let enableShims = shimsInstalled; // Auto-yes if already installed (just update)
-
     if (!shimsInstalled) {
         // First install — prompt
         const inquirer = (() => { try { return require('inquirer'); } catch { return null; } })();
         enableShims = true;
-
         if (inquirer && process.stdin.isTTY) {
             try {
                 const answer = await inquirer.prompt([{
@@ -772,11 +775,9 @@ Run full governance compliance checks. Verify security, policy compliance, evide
             }
         }
     }
-
         if (enableShims) {
             // Create/update shims with latest template
             fs.mkdirSync(shimsDir, { recursive: true });
-
             const shimTemplate = (toolName, displayName) => `#!/bin/sh
 # Delimit Governance Shim for ${displayName}
 PURPLE='\\033[35m'; MAGENTA='\\033[91m'; ORANGE='\\033[33m'; GREEN='\\033[32m'
@@ -792,6 +793,14 @@ if [ "$DELIMIT_WRAPPED" = "true" ] || [ ! -t 1 ]; then
     for c in /usr/bin/${toolName} /usr/local/bin/${toolName} $HOME/.local/bin/${toolName}; do
         [ -x "$c" ] && exec "$c" "$@"
     done
+    # Fallback checks for Antigravity/agy compatibility
+    if [ "${toolName}" = "antigravity" ] || [ "${toolName}" = "agy" ]; then
+        for alt in agy antigravity; do
+            for c in /usr/bin/\$alt /usr/local/bin/\$alt \$HOME/.local/bin/\$alt; do
+                [ -x "\$c" ] && exec "\$c" "\$@"
+            done
+        done
+    fi
 fi
 # Record session start for exit screen
 SESSION_START=\$(date +%s)
@@ -827,7 +836,6 @@ printf "  \${MAGENTA}\${BOLD}[Delimit]\${RESET} \${MAGENTA}═══════
 sleep 0.08
 printf "  \${GREEN}\${BOLD}[Delimit]\${RESET} \${GREEN}✓ Allowed\${RESET}\\n"
 echo ""
-
 # --- Exit screen: session summary after AI exits ---
 delimit_exit_screen() {
     _EXIT_CODE=\$1
@@ -911,37 +919,46 @@ delimit_exit_screen() {
     printf "  \${MAGENTA}\${BOLD}[Delimit]\${RESET} \${MAGENTA}═══════════════════════════════════════════\${RESET}\\n"
     echo ""
 }
-
 # Run real binary and show exit screen (replaces exec to allow post-exit code)
 delimit_run_and_exit() {
     "\$@"
     _RC=\$?
-    delimit_exit_screen \$_RC
+    [ "$DELIMIT_QUIET" != "true" ] && delimit_exit_screen \$_RC
     exit \$_RC
 }
-
 # Find real binary by stripping shim dir from PATH.
 # We rely on PATH ordering ($HOME/.delimit/shims first) — no rename hack,
 # no race with npm reinstalls. Previously we used mv tool→tool-real + cp shim,
 # which broke whenever npm/brew clobbered the binary mid-operation.
 REAL=$(PATH=$(echo "$PATH" | tr ':' '\\n' | grep -v '.delimit/shims' | tr '\\n' ':') command -v ${toolName} 2>/dev/null)
+if [ -z "$REAL" ]; then
+    if [ "${toolName}" = "antigravity" ] || [ "${toolName}" = "agy" ]; then
+        REAL=$(PATH=$(echo "$PATH" | tr ':' '\\n' | grep -v '.delimit/shims' | tr '\\n' ':') command -v agy 2>/dev/null || PATH=$(echo "$PATH" | tr ':' '\\n' | grep -v '.delimit/shims' | tr '\\n' ':') command -v antigravity 2>/dev/null)
+    fi
+fi
 [ -x "$REAL" ] && delimit_run_and_exit "$REAL" "$@"
 echo "[Delimit] ${toolName} not found in PATH" >&2
 case "${toolName}" in
-  claude) echo "  Install: npm install -g @anthropic-ai/claude-code" >&2 ;;
-  codex)  echo "  Install: npm install -g @openai/codex" >&2 ;;
-  gemini) echo "  Install: npm install -g @google/gemini-cli" >&2 ;;
-  *)      echo "  Install ${toolName} first" >&2 ;;
+  claude)      echo "  Install: npm install -g @anthropic-ai/claude-code" >&2 ;;
+  codex)       echo "  Install: npm install -g @openai/codex" >&2 ;;
+  gemini)      echo "  Install: npm install -g @google/gemini-cli" >&2 ;;
+  antigravity) echo "  Install: npm install -g @google-deepmind/antigravity" >&2 ;;
+  agy)         echo "  Install: npm install -g @google-deepmind/antigravity" >&2 ;;
+  *)           echo "  Install ${toolName} first" >&2 ;;
 esac
 exit 127
 `;
-
-            for (const [tool, display] of [['claude', 'Claude'], ['codex', 'Codex'], ['gemini', 'Gemini CLI']]) {
+            for (const [tool, display] of [
+                ['claude', 'Claude'],
+                ['codex', 'Codex'],
+                ['gemini', 'Gemini CLI'],
+                ['antigravity', 'Antigravity'],
+                ['agy', 'Antigravity']
+            ]) {
                 const shimPath = path.join(shimsDir, tool);
                 fs.writeFileSync(shimPath, shimTemplate(tool, display));
                 fs.chmodSync(shimPath, '755');
             }
-
             // Governance is enforced via PATH ordering — $HOME/.delimit/shims
             // is prepended to PATH (see below), so `claude`/`codex`/`gemini`
             // resolve to our shim first, and the shim then PATH-strips itself
@@ -953,7 +970,6 @@ exit 127
             // symlink), leaving users with "[Delimit] claude not found in PATH"
             // when the rename ran but the shim copy failed or the symlink got
             // re-created mid-operation. PATH ordering is the durable contract.
-
             // Add to PATH in shell rc files (create if missing)
             const pathLine = `export PATH="${shimsDir}:$PATH"  # Delimit governance wrapping`;
             let pathWritten = false;
@@ -987,13 +1003,11 @@ exit 127
                     fs.writeFileSync(profileD, `# Delimit governance wrapping\n${pathLine}\n`);
                 }
             } catch { /* not writable, skip */ }
-
             if (shimsInstalled) {
                 await logp(`  ${green('✓')} Governance shims updated`);
             } else {
                 log(`  ${green('✓')} Governance wrapping enabled`);
             }
-
             // Check if shims are already in current PATH
             const currentPath = process.env.PATH || '';
             if (!currentPath.includes('.delimit/shims')) {
@@ -1010,20 +1024,16 @@ exit 127
             log(`  ${dim('  Skipped. Enable later: delimit shims enable')}`);
         }
     log('');
-
     // Step 7: Install cross-model governance hooks (LED-202)
     step(7, 'Installing AI assistant hooks...');
-
     try {
         const crossModelHooks = require('../lib/cross-model-hooks');
         const hookConfig = crossModelHooks.loadHookConfig();
         const detected = crossModelHooks.detectAITools();
-
         if (detected.length === 0) {
             log(`  ${dim('  No AI assistants detected -- hooks will be installed when tools are found')}`);
         } else {
             log(`  ${dim('  Detected: ' + detected.map(t => t.name).join(', '))}`);
-
             // Install hooks (auto-accept in non-interactive or prompt if TTY)
             let installHooks = true;
             const inq = (() => { try { return require('inquirer'); } catch { return null; } })();
@@ -1040,7 +1050,6 @@ exit 127
                     installHooks = true;
                 }
             }
-
             if (installHooks) {
                 for (const tool of detected) {
                     const result = crossModelHooks.installHooksForTool(tool, hookConfig);
@@ -1058,10 +1067,8 @@ exit 127
         log(`  ${dim('  Hook installation skipped: ' + e.message)}`);
     }
     log('');
-
     // Step 8: Local dashboard API server
     step(8, 'Local dashboard API...');
-
     const localServerPath = path.join(DELIMIT_HOME, 'server', 'ai', 'local_server.py');
     if (fs.existsSync(localServerPath)) {
         log(`  ${green('✓')} Local API server available on port 7823`);
@@ -1071,10 +1078,8 @@ exit 127
         log(`  ${dim('  Local API server not found — dashboard will use cloud sync')}`);
     }
     log('');
-
     // Step 9: Post-install config validation (LED-098)
     step(9, 'Validating config integrity...');
-
     let validationIssues = 0;
     const configFiles = [
         { path: MCP_CONFIG, name: 'Claude Code', format: 'json' },
@@ -1082,7 +1087,6 @@ exit 127
         { path: CURSOR_CONFIG, name: 'Cursor', format: 'json' },
         { path: GEMINI_CONFIG, name: 'Gemini CLI', format: 'json' },
     ];
-
     for (const cfg of configFiles) {
         if (!fs.existsSync(cfg.path)) continue;
         try {
@@ -1096,7 +1100,6 @@ exit 127
                     const cmd = delimitEntry.command || '';
                     const args = delimitEntry.args || [];
                     const serverArg = args[0] || '';
-
                     // Check command is python (not arbitrary binary)
                     if (!cmd.includes('python') && !cmd.includes('venv')) {
                         log(`  ${yellow('⚠')} ${cfg.name}: delimit command is not python: ${cmd}`);
@@ -1130,7 +1133,6 @@ exit 127
             validationIssues++;
         }
     }
-
     // Verify server file exists and is our code
     if (fs.existsSync(actualServer)) {
         const serverContent = fs.readFileSync(actualServer, 'utf-8').substring(0, 500);
@@ -1141,7 +1143,6 @@ exit 127
             validationIssues++;
         }
     }
-
     // Check directory permissions
     try {
         const stat = fs.statSync(DELIMIT_HOME);
@@ -1153,24 +1154,20 @@ exit 127
             log(`  ${green('✓')} Directory permissions OK`);
         }
     } catch {}
-
     if (validationIssues === 0) {
         log(`  ${green('✓')} All config validations passed`);
     } else {
         log(`  ${yellow(`⚠ ${validationIssues} issue(s) found — review above`)}`);
     }
     log('');
-
     // Step 10: Auto-detect OpenAPI specs
     step(10, 'Scanning for API specs...');
-
     let detectedSpecs = [];
     try {
         const { minimatch } = (() => { try { return require('minimatch'); } catch { return { minimatch: null }; } })();
         // Simple recursive glob for spec files
         detectedSpecs = findSpecFiles(process.cwd());
     } catch {}
-
     if (detectedSpecs.length > 0) {
         log(`  ${green('✓')} Found ${detectedSpecs.length} API spec(s):`);
         detectedSpecs.forEach(s => log(`    ${s}`));
@@ -1180,10 +1177,8 @@ exit 127
         log(`  ${dim('  No OpenAPI/Swagger specs found in current directory')}`);
     }
     log('');
-
     // Step 11: Social target scanning config
     step(11, 'Configuring social target scanner...');
-
     const socialConfigPath = path.join(DELIMIT_HOME, 'social_target_config.json');
     const socialDefaultConfig = {
         platforms: {
@@ -1199,7 +1194,6 @@ exit 127
         scan_limit: 10,
         min_engagement: { score: 1, comments: 2 },
     };
-
     if (!fs.existsSync(socialConfigPath)) {
         fs.mkdirSync(path.dirname(socialConfigPath), { recursive: true });
         fs.writeFileSync(socialConfigPath, JSON.stringify(socialDefaultConfig, null, 2) + '\n');
@@ -1207,7 +1201,6 @@ exit 127
     } else {
         log(`  ${dim('  Config already exists:')} ${socialConfigPath}`);
     }
-
     // Auto-detect available platforms
     const detectedPlatforms = {};
     // HN and Dev.to are always available (public APIs)
@@ -1228,13 +1221,11 @@ exit 127
     } else {
         detectedPlatforms['x'] = 'unavailable (no API key)';
     }
-
     for (const [plat, status] of Object.entries(detectedPlatforms)) {
         const icon = status.startsWith('available') ? green('\u2713') : yellow('\u2717');
         log(`  ${icon} ${plat}: ${dim(status)}`);
     }
     log('');
-
     // Step 12: Done
     step(12, 'Done!');
     log('');
@@ -1245,14 +1236,11 @@ exit 127
     for (const t of tools) {
         log(`  ${green('✓')} ${t}`);
     }
-
     log('');
-
     // Project scan — show what Delimit already knows (STR-046)
     log(`  ${bold('Your project:')}`);
     const cwd = process.cwd();
     let projectFindings = 0;
-
     // Detect framework
     const frameworks = [
         { file: 'package.json', check: 'express', label: 'Express API' },
@@ -1274,7 +1262,6 @@ exit 127
             }
         } catch {}
     }
-
     // Detect OpenAPI specs
     const specPatterns = ['openapi.yaml', 'openapi.yml', 'openapi.json', 'swagger.yaml', 'swagger.json', 'api.yaml'];
     let specFound = false;
@@ -1289,7 +1276,6 @@ exit 127
     if (!specFound) {
         await logp(`  ${dim('  No API spec found — run')} ${blue('delimit-cli lint')} ${dim('to detect one')}`);
     }
-
     // Count tests
     const testDirs = ['tests', 'test', '__tests__', 'spec'];
     for (const td of testDirs) {
@@ -1305,7 +1291,6 @@ exit 127
             } catch {}
         }
     }
-
     // Check git status
     try {
         const gitStatus = execSync('git log --oneline -1 2>/dev/null', { encoding: 'utf-8', timeout: 3000 }).trim();
@@ -1314,7 +1299,6 @@ exit 127
             projectFindings++;
         }
     } catch {}
-
     // Check for existing .delimit context
     const ledgerDir = path.join(os.homedir(), '.delimit', 'ledger');
     if (fs.existsSync(ledgerDir)) {
@@ -1333,7 +1317,6 @@ exit 127
             }
         } catch {}
     }
-
     // Check for sessions
     const sessionsDir = path.join(os.homedir(), '.delimit', 'sessions');
     if (fs.existsSync(sessionsDir)) {
@@ -1345,13 +1328,10 @@ exit 127
             }
         } catch {}
     }
-
     if (projectFindings === 0) {
         log(`  ${dim('  New project — run')} ${blue('delimit-cli demo')} ${dim('to see governance in action')}`);
     }
-
     log('');
-
     // Suggested next action based on findings
     log(`  ${bold("What's next:")}`);
     if (specFound) {
@@ -1370,7 +1350,6 @@ exit 127
     log('');
     log(`  ${bold('Keep Building.')}`);
     log('');
-
     // Show governance banner preview
     const shimFile = path.join(DELIMIT_HOME, 'shims', 'claude');
     if (fs.existsSync(shimFile)) {
@@ -1409,14 +1388,11 @@ exit 127
         log('');
     }
 }
-
 // LED-213: Import canonical template from shared module
 const { getDelimitSection } = require('../lib/delimit-template');
-
 function getClaudeMdContent() {
     return getDelimitSection() + '\n';
 }
-
 /**
  * Upsert the Delimit section in a file using <!-- delimit:start --> / <!-- delimit:end --> markers.
  *
@@ -1435,18 +1411,15 @@ function upsertDelimitSection(filePath) {
     const newSection = getDelimitSection();
     const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf-8'));
     const version = pkg.version || '0.0.0';
-
     if (!fs.existsSync(filePath)) {
         fs.writeFileSync(filePath, newSection + '\n');
         return { action: 'created' };
     }
-
     const rawExisting = fs.readFileSync(filePath, 'utf-8');
     // Strip a UTF-8 BOM if present so the start-of-line anchor still matches
     // the very first line of the file. We write back the stripped form to keep
     // serialization deterministic.
     const existing = rawExisting.replace(/^\uFEFF/, '');
-
     // Check if managed markers already exist.
     // Markers MUST be on their own line — anchored with the multiline flag — so
     // that documentation prose that quotes the markers (e.g. inside backticks,
@@ -1460,7 +1433,6 @@ function upsertDelimitSection(filePath) {
     const endMatch = existing.match(endMarkerRe);
     const hasStart = !!startMatch;
     const hasEnd = !!endMatch;
-
     if (hasStart && hasEnd) {
         // Extract current version from the marker (also anchored, allows indent)
         const versionMatch = existing.match(/^[ \t]*<!-- delimit:start v([^ ]+) -->[ \t]*$/m);
@@ -1476,7 +1448,6 @@ function upsertDelimitSection(filePath) {
         fs.writeFileSync(filePath, before + newSection + after);
         return { action: 'updated' };
     }
-
     // No markers present — append the managed section at the bottom.
     // User content at the top is preserved verbatim. Markers get added so future
     // upgrades can update just the managed region.
@@ -1484,7 +1455,6 @@ function upsertDelimitSection(filePath) {
     fs.writeFileSync(filePath, existing + separator + newSection + '\n');
     return { action: 'appended' };
 }
-
 function copyDir(src, dest) {
     fs.mkdirSync(dest, { recursive: true });
     for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
@@ -1498,7 +1468,6 @@ function copyDir(src, dest) {
         }
     }
 }
-
 main().catch(err => {
     console.error('Setup failed:', err.message);
     process.exit(1);

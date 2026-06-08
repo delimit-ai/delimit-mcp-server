@@ -209,8 +209,71 @@ class ToolcardCache:
         }
 
     def record_call(self, tool_name: str) -> None:
-        """Record that a tool was called in the current session."""
+        """Record that a tool was called: in-memory (session) AND durably.
+
+        The prior implementation only kept an in-memory counter that vanished on
+        process restart, so tool utilization was never observable across sessions
+        (usage.json stayed empty and dormancy was unmeasurable). We now also
+        append to a crash-safe, append-only JSONL event log so utilization is
+        measurable over time. Append is O(1) with no read-modify-write race.
+        Analytics must never break a tool call, so all failures are swallowed.
+        """
         self._session_calls[tool_name] = self._session_calls.get(tool_name, 0) + 1
+        try:
+            usage_log = self._cache_file.parent / "tool_usage.jsonl"
+            usage_log.parent.mkdir(parents=True, exist_ok=True)
+            with open(usage_log, "a") as f:
+                f.write(json.dumps({
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "tool": tool_name,
+                }) + "\n")
+        except Exception:
+            pass
+
+    def usage_summary(self, registry: Optional[List[str]] = None) -> Dict[str, Any]:
+        """Aggregate the durable usage log into per-tool counts + dormancy.
+
+        Reads tool_usage.jsonl (written by record_call). When `registry` (the
+        full list of registered tool names) is provided, tools that appear in
+        the registry but never in the log are reported as `dormant`.
+        """
+        usage_log = self._cache_file.parent / "tool_usage.jsonl"
+        counts: Dict[str, int] = {}
+        last_seen: Dict[str, str] = {}
+        total = 0
+        try:
+            with open(usage_log, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except Exception:
+                        continue
+                    name = rec.get("tool")
+                    if not name:
+                        continue
+                    counts[name] = counts.get(name, 0) + 1
+                    ts = rec.get("ts")
+                    if ts and (name not in last_seen or ts > last_seen[name]):
+                        last_seen[name] = ts
+                    total += 1
+        except FileNotFoundError:
+            pass
+        result: Dict[str, Any] = {
+            "total_calls": total,
+            "distinct_tools_used": len(counts),
+            "counts": dict(sorted(counts.items(), key=lambda x: x[1], reverse=True)),
+            "last_seen": last_seen,
+            "usage_log": str(usage_log),
+        }
+        if registry is not None:
+            used = set(counts)
+            result["registry_size"] = len(registry)
+            result["dormant"] = sorted(t for t in registry if t not in used)
+            result["dormant_count"] = len(result["dormant"])
+        return result
 
     def get_stats(self) -> Dict[str, Any]:
         """Return cache stats: total tools, cached, cache hit rate, token savings."""

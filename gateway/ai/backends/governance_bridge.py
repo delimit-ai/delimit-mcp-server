@@ -169,6 +169,58 @@ def evaluate_trigger(action: str, context: Optional[Dict] = None, repo: str = ".
     if not _is_initialized(repo):
         return _not_init_response("gov.evaluate", action=action, repo=repo)
 
+    
+    # LED-3012: execution_plan gate
+    if action == "execution_plan":
+        plan = (context or {}).get("plan", {})
+        if not plan:
+            return {
+                "tool": "gov.evaluate",
+                "status": "evaluated",
+                "action": action,
+                "verdict": "missing_input",
+                "error": "execution_plan action requires context.plan",
+            }
+        
+        # Policy: Execution plans for 'strategic' or 'production' targets 
+        # MUST have risk_level='high' or 'critical'.
+        target = plan.get("target", "unknown")
+        risk = plan.get("risk_level", "low")
+        is_strategic = any(k in target.lower() for k in ("strat", "prod", "deploy"))
+        
+        if is_strategic and risk not in ("high", "critical"):
+            return {
+                "tool": "gov.evaluate",
+                "status": "evaluated",
+                "action": action,
+                "verdict": "gate",
+                "reason": "Strategic execution plan requires 'high' or 'critical' risk level for manual review.",
+                "next_action": "Elevate risk_level to 'high' or 'critical' and re-evaluate.",
+            }
+        
+        # Policy: Execution plans MUST have at least 3 steps if complexity is 'large'.
+        complexity = plan.get("complexity", "medium")
+        steps = plan.get("steps", [])
+        if complexity == "large" and len(steps) < 3:
+            return {
+                "tool": "gov.evaluate",
+                "status": "evaluated",
+                "action": action,
+                "verdict": "gate",
+                "reason": "Large complexity plan must have at least 3 detailed execution steps.",
+                "next_action": "Expand plan steps to include implementation, testing, and validation.",
+            }
+        
+        # Default: Allow plan
+        return {
+            "tool": "gov.evaluate",
+            "status": "evaluated",
+            "action": action,
+            "verdict": "allow",
+            "message": "Execution plan passes policy checks.",
+        }
+
+
     # Pre-flight: external PR submission must check for duplicates first
     if action == "external_pr":
         target_repo = (context or {}).get("target_repo")

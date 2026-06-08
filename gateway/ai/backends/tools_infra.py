@@ -115,6 +115,36 @@ SCAN_EXTENSIONS = {".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".rb", ".java", "
 # Skip directories
 SKIP_DIRS = {"node_modules", ".git", "__pycache__", ".venv", "venv", ".tox", "dist", "build", ".next", ".nuxt", "vendor"}
 
+# LED-1680/3008: default repo/root scans must not recurse through local
+# assistant state stores. Those dirs routinely contain credentials, historical
+# backups, chat transcripts, and plugin caches; scanning them as source creates
+# noisy governance tasks and can leak secret snippets into audit output. Explicit
+# scans of one of these directories, or of a single file inside one, still work.
+OPERATIONAL_STATE_DIRS = {
+    ".delimit",
+    ".claude",
+    ".codex",
+    ".gemini",
+    ".agents",
+    ".config",
+    ".local",
+    ".cache",
+    ".cloudflared",
+}
+OPERATIONAL_STATE_FILES = {".delimit.json", ".delimit-mcp.json"}
+# Google service-account key files sometimes sit in the operator home root.
+# Skip this filename shape only for broad home scans; repo scans still catch it.
+HOME_OPERATIONAL_FILE_PATTERNS = (
+    re.compile(r"^[a-z][a-z0-9-]+-[0-9a-f]{12}\.json$", re.IGNORECASE),
+)
+
+
+def _is_home_operational_file(filename: str, root: Path) -> bool:
+    return root == Path.home().resolve() and any(
+        pattern.match(filename) for pattern in HOME_OPERATIONAL_FILE_PATTERNS
+    )
+
+
 # LED-1278 (a): test-tree path patterns excluded by default. The scanner walks  # nosec
 # test directories with prod rules, so test fixtures (placeholder tokens,  # nosec
 # trivial JWT bodies, code-injection demos) get surfaced as critical findings  # nosec
@@ -156,6 +186,9 @@ KNOWN_DUMMY_PATTERNS = [
     # Generic dict-credential placeholder values: fake/test/dummy/example/etc.
     (re.compile(r"['\"](?:fake|test|dummy|example|placeholder|stale|from-)[A-Za-z0-9_\-]*['\"]\s*$", re.IGNORECASE),
      "generic_placeholder_value"),
+    # Common documentation placeholder: token = "YOUR_DISCORD_BOT_TOKEN".
+    (re.compile(r"YOUR_[A-Z0-9_]*(?:TOKEN|SECRET|KEY)", re.IGNORECASE),
+     "your_token_placeholder"),
     # Provider test-key shapes: xai-key-123, google-key-7, claude-key-2 etc.
     (re.compile(r"['\"](?:xai|google|claude|gem|grok|codex|ollama)[-_]?key[-_]?\d+['\"]\s*$", re.IGNORECASE),
      "provider_test_key"),
@@ -317,8 +350,12 @@ def _scan_files(target: str, include_tests: bool = False) -> List[Path]:
         return [root]
     if not root.is_dir():
         return []
+    skip_operational_state = root.name not in OPERATIONAL_STATE_DIRS
     for dirpath, dirnames, filenames in os.walk(root, onerror=lambda _err: None):
-        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+        skipped_dirs = set(SKIP_DIRS)
+        if skip_operational_state:
+            skipped_dirs.update(OPERATIONAL_STATE_DIRS)
+        dirnames[:] = [d for d in dirnames if d not in skipped_dirs]
         if not include_tests:
             # Prune obvious test directory names before recursing so we don't
             # walk huge __tests__/ trees just to discard them later.
@@ -327,6 +364,10 @@ def _scan_files(target: str, include_tests: bool = False) -> List[Path]:
                 if d not in ("tests", "test", "__tests__", "spec", "fixtures", "fixture")
             ]
         for filename in filenames:
+            if skip_operational_state and filename in OPERATIONAL_STATE_FILES:
+                continue
+            if skip_operational_state and _is_home_operational_file(filename, root):
+                continue
             p = Path(dirpath) / filename
             if p.suffix not in SCAN_EXTENSIONS:
                 continue
@@ -591,6 +632,7 @@ def security_audit(target: str = ".", include_tests: bool = False) -> Dict[str, 
         "suppressed_findings": suppressed_findings[:20],  # LED-1278 (b): allowlist audit log
         "suppressed_count": len(suppressed_findings),
         "include_tests": include_tests,  # LED-1278 (a): expose scan scope
+        "operational_state_excluded": target_path.name not in OPERATIONAL_STATE_DIRS,
         "env_in_git": env_in_git,
         "severity_summary": severity_counts,
         "tools_used": tools_used,

@@ -19,6 +19,7 @@ import sys
 from ai.inbox_daemon import start_daemon as start_inbox, stop_daemon as stop_inbox
 from ai.social_daemon import start_daemon as start_social, stop_daemon as stop_social
 from ai.self_repair_daemon import start_daemon as start_self_repair, stop_daemon as stop_self_repair
+from ai.route_daemon import start_daemon as start_route, stop_daemon as stop_route
 
 logging.basicConfig(
     level=logging.INFO,
@@ -40,6 +41,10 @@ def _handle_sigterm(signum, frame):
         stop_self_repair()
     except Exception as e:
         logger.error(f"Error stopping self_repair: {e}")
+    try:
+        stop_route()
+    except Exception as e:
+        logger.error(f"Error stopping route_daemon: {e}")
     sys.exit(0)
 
 def main():
@@ -56,6 +61,9 @@ def main():
     
     repair_res = start_self_repair()
     logger.info(f"Self-repair daemon: {repair_res.get('status')}")
+    
+    route_res = start_route()
+    logger.info(f"Route daemon: {route_res.get('status')}")
 
     try:
         while True:

@@ -16,6 +16,11 @@ from typing import Any, Dict, List, Optional
 
 RELEASE_CONFIG = Path.home() / ".delimit" / "release.json"
 
+# Known on-host location of the delimit.ai Next.js site (app-router). The
+# UI lives outside the home dir on the build host; kept as a module-level
+# constant so the site-title check can find it and so tests can patch it.
+SITE_ROOT_FALLBACK = Path("/home/delimit/delimit-ui")
+
 DEFAULT_CONFIG = {
     "product_name": "Delimit",
     "tagline": "Governance toolkit for AI coding assistants",
@@ -98,6 +103,16 @@ def audit(config: Optional[Dict] = None) -> Dict[str, Any]:
     cfg = config or get_release_config()
     tagline = cfg.get("tagline", "")
     description = cfg.get("description", "")
+    # Optional per-surface expected values. Maps a surface label to the
+    # expected description (or substring). Surfaces without an entry fall
+    # back to the tagline. Backward compatible: configs without this key
+    # behave exactly as before (every surface expects the tagline).
+    surface_expectations = cfg.get("surface_expectations", {}) or {}
+
+    def _expected_for(surface: str) -> str:
+        """Per-surface expected value, falling back to the tagline."""
+        return surface_expectations.get(surface, tagline)
+
     results = []
 
     # 1. npm package.json
@@ -132,6 +147,7 @@ def audit(config: Optional[Dict] = None) -> Dict[str, Any]:
         ("delimit-ai/delimit-action", "GitHub: delimit-action repo"),
         ("delimit-ai/delimit-quickstart", "GitHub: quickstart repo"),
     ]:
+        expected = _expected_for(surface)
         try:
             r = subprocess.run(
                 ["gh", "api", f"repos/{repo}", "--jq", ".description"],
@@ -139,10 +155,10 @@ def audit(config: Optional[Dict] = None) -> Dict[str, Any]:
             )
             if r.returncode == 0:
                 desc = r.stdout.strip()
-                if tagline.lower() in desc.lower() or "governance" in desc.lower():
+                if expected.lower() in desc.lower():
                     results.append({"surface": surface, "status": "ok", "current": desc[:100]})
                 else:
-                    results.append({"surface": surface, "status": "stale", "current": desc[:100], "expected": tagline})
+                    results.append({"surface": surface, "status": "stale", "current": desc[:100], "expected": expected})
             else:
                 results.append({"surface": surface, "status": "error", "detail": "gh API failed"})
         except Exception:
@@ -160,16 +176,35 @@ def audit(config: Optional[Dict] = None) -> Dict[str, Any]:
     except Exception:
         results.append({"surface": "GitHub: org description", "status": "skipped"})
 
-    # 5. delimit.ai meta tags
-    for layout_path in [
-        Path.home() / "delimit-ui" / "app" / "layout.tsx",
-    ]:
+    # 5. delimit.ai meta title (Next.js app-router root layout).
+    # Verify the site title/metadata mentions the product name. Soft check:
+    # skip with a reason if the layout file is genuinely absent. Path is
+    # tolerant of both app/ and src/app/ project layouts, and overridable
+    # via cfg["site_layout_path"].
+    product_name = cfg.get("product_name", "Delimit")
+    layout_candidates = []
+    configured = cfg.get("site_layout_path") or os.environ.get("DELIMIT_SITE_LAYOUT")
+    if configured:
+        layout_candidates.append(Path(configured))
+    # Search a few known site roots (this host keeps the UI under
+    # /home/delimit/delimit-ui, but a customer install may keep it under
+    # the home dir). For each root, try both app-router layouts.
+    site_roots = [
+        Path.home() / "delimit-ui",
+        SITE_ROOT_FALLBACK,
+    ]
+    for site_root in site_roots:
+        layout_candidates += [
+            site_root / "app" / "layout.tsx",
+            site_root / "src" / "app" / "layout.tsx",
+        ]
+    for layout_path in layout_candidates:
         if layout_path.exists():
             layout = layout_path.read_text()
-            results.append(_check_contains(layout, tagline, "delimit.ai meta title"))
+            results.append(_check_contains(layout, product_name, "delimit.ai meta title"))
             break
     else:
-        results.append({"surface": "delimit.ai meta title", "status": "skipped", "detail": "layout.tsx not found"})
+        results.append({"surface": "delimit.ai meta title", "status": "skipped", "detail": "layout.tsx not found (tried app/ and src/app/)"})
 
     # 6. Gateway version
     for pyproject_path in [

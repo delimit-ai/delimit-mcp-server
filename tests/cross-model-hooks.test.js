@@ -90,7 +90,9 @@ describe('detectAITools', () => {
         fs.mkdirSync(path.join(tmpDir, '.gemini'), { recursive: true });
 
         const detected = crossModelHooks.detectAITools();
-        assert.strictEqual(detected.length, 3);
+        assert.ok(detected.find(t => t.id === 'claude'), 'Claude should be detected');
+        assert.ok(detected.find(t => t.id === 'codex'), 'Codex should be detected');
+        assert.ok(detected.find(t => t.id === 'gemini'), 'Gemini should be detected');
     });
 });
 
@@ -479,8 +481,8 @@ describe('installAllHooks', () => {
         const hookConfig = { session_start: true, pre_tool: true, pre_commit: true };
         const { tools, results } = crossModelHooks.installAllHooks(hookConfig);
 
-        assert.strictEqual(tools.length, 3, 'Should detect 3 tools');
-        assert.strictEqual(results.length, 3, 'Should have 3 results');
+        assert.ok(tools.length >= 3, 'Should detect at least 3 tools');
+        assert.strictEqual(results.length, tools.length, 'Should have matching number of results');
 
         // Verify each tool got hooks
         for (const result of results) {

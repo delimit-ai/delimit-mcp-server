@@ -183,6 +183,18 @@ def evidence_collect(target: str = ".", options: Optional[Dict] = None) -> Dict[
     if evidence_type:
         evidence["evidence_type"] = evidence_type
 
+    
+    # LED-3012: asset provenance support
+    if evidence_type == "asset":
+        asset_meta = opts.get("asset_meta", {})
+        if asset_meta:
+            evidence["asset_provenance"] = asset_meta
+            # Basic validation
+            required = ["asset_id", "hash", "source_prompt", "model", "rights_declaration"]
+            missing = [f for f in required if f not in asset_meta]
+            if missing:
+                evidence["provenance_warning"] = f"Missing required asset provenance fields: {', '.join(missing)}"
+
     if is_remote:
         # Remote/reference target — no filesystem walk, just record metadata.
         evidence["target_type"] = "remote"

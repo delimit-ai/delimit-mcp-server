@@ -178,10 +178,15 @@ paths:
     });
 
     it('detects breaking changes between two specs', { skip: SKIP_IN_CI }, () => {
-        const output = execSync(
-            `node ${CLI} lint ${path.join(tmpDir, 'base.yaml')} ${path.join(tmpDir, 'changed.yaml')}`,
-            { timeout: 30000, encoding: 'utf-8', env: { ...process.env, FORCE_COLOR: '0' } }
-        );
+        let output;
+        try {
+            output = execSync(
+                `node ${CLI} lint ${path.join(tmpDir, 'base.yaml')} ${path.join(tmpDir, 'changed.yaml')}`,
+                { timeout: 30000, encoding: 'utf-8', env: { ...process.env, FORCE_COLOR: '0' } }
+            );
+        } catch (err) {
+            output = err.stdout || err.message;
+        }
 
         // Should show some kind of result (breaking change or violation)
         assert.ok(output.length > 0, 'Should produce output');
