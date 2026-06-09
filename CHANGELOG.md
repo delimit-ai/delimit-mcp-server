@@ -1,6 +1,29 @@
 # Changelog
 
 
+## [4.7.7] - 2026-06-09
+
+`delimit chat` resilience.
+
+### Fixed
+
+- **No more false "out of quota" on Claude.** The model health-probe killed
+  `claude -p` after 6s, but a cold start (Claude Code + MCP load + API
+  round-trip) routinely takes longer; the shim exits 143 on that timeout and
+  the classifier mislabeled it as a quota failure. Now: 12s probe;
+  timeout/SIGTERM/143 are treated as "slow — proceeding", and "out of quota"
+  is only reported when the probe output actually says so.
+- **Auto-Phoenix now actually preserves context on model switch.** The
+  migration soul-capture hardcoded a dev-only `sys.path`, so the import failed
+  silently and "Soul captured" was printed even though nothing was saved.
+  Context is now captured via the bundled server (with an installed-server
+  fallback) and success is only claimed when the capture truly succeeds.
+
+### Changed
+
+- Boot banner is now **DELIMIT CHAT** (ANSI-shadow art) with the version read
+  live from `package.json`, so it never shows a stale release number again.
+
 ## [4.7.6] - 2026-06-09
 
 Session-lifecycle release: never lose context on quota exhaustion or crash.
