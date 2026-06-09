@@ -6295,7 +6295,13 @@ def delimit_test_coverage(project_path: Annotated[str, Field(description="Path t
 
 
 @mcp.tool()
-def delimit_test_smoke(project_path: Annotated[str, Field(description="Project path. Required.")], test_suite: Annotated[Optional[str], Field(description="Optional specific test suite or pattern.")] = None) -> Dict[str, Any]:
+def delimit_test_smoke(
+    project_path: Annotated[str, Field(description="Project path. Required.")],
+    test_suite: Annotated[Optional[str], Field(description="Optional specific test suite or pattern.")] = None,
+    timeout_seconds: Annotated[Optional[int], Field(description="Optional execution timeout in seconds. Default is 120.")] = 120,
+    extra_args: Annotated[Optional[List[str]], Field(description="Optional extra arguments to pass to the test runner.")] = None,
+    fail_fast: Annotated[Optional[bool], Field(description="Stop execution immediately on first failure.")] = False,
+) -> Dict[str, Any]:
     """Run smoke tests for a project.
 
     When to use: as a pre-commit / pre-deploy gate to confirm tests
@@ -6314,6 +6320,9 @@ def delimit_test_smoke(project_path: Annotated[str, Field(description="Project p
     Args:
         project_path: Project path. Required.
         test_suite: Optional specific test suite or pattern.
+        timeout_seconds: Optional execution timeout in seconds. Default is 120.
+        extra_args: Optional extra arguments to pass to the test runner.
+        fail_fast: Stop execution immediately on first failure.
 
     Returns:
         Dict with pass/fail/error counts, framework detected, output.
@@ -6336,7 +6345,7 @@ def delimit_test_smoke(project_path: Annotated[str, Field(description="Project p
         })
 
     from backends.ui_bridge import test_smoke
-    return _with_next_steps("test_smoke", _safe_call(test_smoke, project_path=project_path, test_suite=test_suite))
+    return _with_next_steps("test_smoke", _safe_call(test_smoke, project_path=project_path, test_suite=test_suite, timeout_seconds=timeout_seconds, extra_args=extra_args, fail_fast=fail_fast))
 
 
 # ─── Docs (Real implementations) ─────────────────────────────────────
@@ -8784,30 +8793,30 @@ def delimit_soul_capture(
 
 
 @mcp.tool()
-def delimit_revive(project_path: Annotated[str, Field(description="Project path to revive. Empty = auto-detect from cwd.")] = "", soul_id: Annotated[str, Field(description="Specific soul id to revive. Empty = latest.")] = "") -> Dict[str, Any]:
+def delimit_revive(project_path: Annotated[str, Field(description="Project path to revive. Empty = auto-detect from cwd.")] = "", soul_id: Annotated[str, Field(description="Specific soul id to revive. Empty = latest.")] = "", scope: Annotated[str, Field(description="Optional handoff/receipt id. When set, revives ONLY that scoped handoff context (for dispatched subagents) instead of the global session soul. Empty = full soul (default).")] = "") -> Dict[str, Any]:
     """Revive the last session's captured soul in any model (Pro).
 
-    When to use: at the start of a new session, to load the previous
-    session's "soul" (active task, decisions, blockers, next steps).
-    When NOT to use: to capture a new soul (use delimit_soul_capture)
-    or to read recent memories (delimit_memory_recent).
+    When to use: at session start, to load the prior session's soul
+    (active task, decisions, blockers, next steps).
+    When NOT to use: to capture a soul (delimit_soul_capture) or read
+    recent memories (delimit_memory_recent).
 
     Sibling contrast: delimit_soul_capture writes the soul; this reads
-    and applies it. Works across Claude Code, Codex, Gemini CLI, and
-    Cursor.
+    and applies it (cross-model: Claude, Codex, Gemini, Cursor).
 
-    Side effects: read-only on the soul store; calls
-    ai.session_phoenix.revive. Does not write a new soul.
+    Side effects: read-only; calls ai.session_phoenix.revive.
 
     Args:
-        project_path: Project path to revive. Empty = auto-detect from cwd.
-        soul_id: Specific soul id to revive. Empty = latest.
+        project_path: Project path. Empty = auto-detect from cwd.
+        soul_id: Specific soul id. Empty = latest.
+        scope: Handoff/receipt id. When set, revives only that scoped
+            handoff (for subagents), not the global soul. Empty = full soul.
 
     Returns:
         Dict with the resurrected soul state and next_steps.
     """
     from ai.session_phoenix import revive as _revive
-    result = _revive(project_path=project_path, soul_id=soul_id)
+    result = _revive(project_path=project_path, soul_id=soul_id, scope=scope)
     return _with_next_steps("revive", result)
 
 
