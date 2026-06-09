@@ -17,6 +17,7 @@ const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
 const { execSync } = require('child_process');
+const { gitEnv } = require('./_git-hermetic');
 
 const {
     runWrap,
@@ -37,12 +38,18 @@ function setupSandboxRepo() {
     fs.mkdirSync(ATT_HOME, { recursive: true });
     // Use a tmp HOME so we don't touch the user's real ~/.delimit/attestations
     process.env.HOME = ATT_HOME;
+    // LED-1716: hermetic git env — explicit cwd + sanitized env so these
+    // git/git-config writes can NEVER walk up to (or otherwise touch) the
+    // package checkout's .git/config. GIT_CEILING_DIRECTORIES + redirected
+    // global/system config make escape impossible even if SANDBOX is wrong.
+    const env = gitEnv(SANDBOX);
+    const git = (cmd) => execSync(cmd, { cwd: SANDBOX, env, stdio: ['ignore', 'pipe', 'pipe'] });
     // Fresh git repo
-    execSync('git init -q', { cwd: SANDBOX });
-    execSync('git config user.email "test@delimit.test"', { cwd: SANDBOX });
-    execSync('git config user.name "delimit-test"', { cwd: SANDBOX });
+    git('git init -q');
+    git('git config user.email "test@delimit.test"');
+    git('git config user.name "delimit-test"');
     fs.writeFileSync(path.join(SANDBOX, 'README.md'), '# sandbox\n');
-    execSync('git add . && git commit -qm init', { cwd: SANDBOX });
+    git('git add . && git commit -qm init');
 }
 
 function teardownSandbox() {
