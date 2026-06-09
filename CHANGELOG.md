@@ -1,6 +1,21 @@
 # Changelog
 
 
+## [4.7.9] - 2026-06-09
+
+Control plane (LED-1709) — one interactive surface over the work that matters.
+
+### Added
+
+- **`delimit control`** — an interactive CLI that browses a single unified
+  queue across **attestations, approvals, sensing, and ops**, drills into any
+  item, and **approves/rejects** founder-approval items inline. Approving here
+  writes the *same* ack as replying "ship it" by email (no parallel store).
+- **`delimit_control` MCP tool** (`list`/`get`/`approve`/`reject`) — the shared
+  API behind both the CLI and the web dashboard (no split-brain): CLI calls it
+  directly, the dashboard via the existing MCP-over-HTTP route. Read-only
+  aggregation; the attestation lane is kept distinct from the sensing firehose.
+
 ## [4.7.8] - 2026-06-09
 
 ### Fixed

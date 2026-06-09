@@ -13047,6 +13047,72 @@ def delimit_agent_dashboard() -> Dict[str, Any]:
 
 
 @mcp.tool()
+def delimit_control(
+    action: Annotated[str, Field(description="\"list\" (default), \"get\", \"approve\", or \"reject\". list/get are read-only; approve/reject act ONLY on approval-class items and mirror the email \"ship it\" ack loop.")] = "list",
+    class_filter: Annotated[str, Field(description="Lane filter: \"\" (all), \"attestation\", \"approval\", \"sensing\", or \"ops\".")] = "",
+    state_filter: Annotated[str, Field(description="State filter, e.g. \"open\", \"pending\", \"awaiting_approval\", \"done\". \"\" = all.")] = "",
+    item_id: Annotated[str, Field(description="Required for \"get\", \"approve\", \"reject\": the normalized item id (e.g. \"att_…\", \"STR-437\", \"LED-1709\", \"WO-…\", \"DIR-…\").")] = "",
+    limit: Annotated[int, Field(description="Max items for action=\"list\" (default 100).")] = 100,
+    note: Annotated[str, Field(description="Optional note recorded as the ack result for action=\"approve\"/\"reject\".")] = "",
+) -> Dict[str, Any]:
+    """Aggregate all governance lanes into one queue; approve/reject approvals (LED-1709).
+
+    When to use: as the shared queue the CLI and web dashboard both render —
+    attestations, approvals, sensing (STR-*), ops (LED-*) — and to
+    approve/reject founder-approval items from that same surface.
+    When NOT to use: to act on attestation/sensing/ops items; approve/reject
+    are approval-class only in Phase 1 (mutate those via their owning tool).
+
+    Sibling contrast: delimit_agent_dashboard is dispatch-only,
+    delimit_ledger_context is one-venture-only, delimit_notify_inbox is
+    inbox-only; this unifies all four into one lane-aware view.
+
+    Side effects: list/get are READ-ONLY. approve/reject append the same
+    `founder_directive_completed` ack the email "ship it" loop writes to the
+    EXISTING store (~/.delimit/inbox_routing.jsonl); reject stamps
+    disposition="rejected". No new store; idempotent re-approve no-ops.
+
+    Args:
+        action: "list" (default), "get", "approve", or "reject" (approve/reject
+            are approval-class only).
+        class_filter: lane, e.g. "" (all), attestation, approval, sensing, ops.
+        state_filter: state (e.g. open, awaiting_approval); "" = all.
+        item_id: required for get/approve/reject.
+        limit: max list items (default 100); empty class_filter balances lanes.
+        note: optional ack result note for approve/reject.
+
+    Returns:
+        list: {queue, counts_by_class, counts_by_state}; get: {item} or
+        {item: None}; approve/reject: {status, item_id, action, subject?}.
+    """
+    from ai import control_plane
+
+    act = (action or "list").strip().lower()
+    if act == "get":
+        item = _safe_call(control_plane.get_item, item_id=item_id)
+        # _safe_call wraps non-dict returns; normalize to {item: ...}.
+        if isinstance(item, dict) and item.get("error"):
+            return _with_next_steps("control", item)
+        return _with_next_steps("control", {"item": item})
+
+    if act in ("approve", "reject"):
+        verb = control_plane.approve if act == "approve" else control_plane.reject
+        res = _safe_call(verb, item_id=item_id, note=note)
+        return _with_next_steps("control", res)
+
+    queue = control_plane.build_queue(
+        class_filter=class_filter, state_filter=state_filter, limit=limit
+    )
+    counts = control_plane.counts(queue)
+    result = {
+        "queue": queue,
+        "counts_by_class": counts["counts_by_class"],
+        "counts_by_state": counts["counts_by_state"],
+    }
+    return _with_next_steps("control", result)
+
+
+@mcp.tool()
 def delimit_agent_policy(model: Annotated[str, Field(description="AI model name — \"claude\", \"codex\", \"gemini\", \"cursor\". Empty = list all.")] = "", ledger: Annotated[str, Field(description="Ledger access level.")] = "", memory: Annotated[str, Field(description="Memory access level.")] = "",
                           deploy: Annotated[str, Field(description="Allow deploys (\"true\"/\"false\").")] = "", evidence: Annotated[str, Field(description="Evidence access level.")] = "",
                           secrets: Annotated[str, Field(description="Allow secret access (\"true\"/\"false\").")] = "", custom_constraints: Annotated[str, Field(description="Comma-separated constraints, e.g. \"no-deploy,no-publish\".")] = "") -> Dict[str, Any]:
