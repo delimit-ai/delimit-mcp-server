@@ -1,6 +1,39 @@
 # Changelog
 
 
+## [4.7.6] - 2026-06-09
+
+Session-lifecycle release: never lose context on quota exhaustion or crash.
+
+### Added
+
+- **Deterministic session-end capture.** The Stop hook now writes a
+  `source="deterministic", quality="floor"` handoff (git state + ledger tail
+  + transcript tail, no LLM, time-boxed) when a session ends without a richer
+  model-authored capture — so a hard `/quit` no longer drops context. Skips
+  when a fresh (<5 min) model capture already exists.
+- **Crash recovery.** On SessionStart, if the previous session was SIGKILLed
+  (no clean Stop), its orphaned transcript is salvaged into a floor handoff —
+  excluding the current session's transcript, guarded against double-salvage.
+- **Scoped revive** (`delimit_revive(scope=…)`): dispatched subagents revive
+  only their own handoff context, never the orchestrator's global soul.
+
+### Fixed
+
+- `delimit_revive` output no longer trips delimit's own prompt-injection
+  detector (Markdown headers replace rule-delimiter runs).
+- Transcript-tail parser now falls back to `thinking` blocks, so floor
+  handoffs carry the session's narrative instead of "(no final assistant text)".
+- Pre-push test gate clears inherited `GIT_DIR`/`GIT_WORK_TREE`, so test
+  fixtures no longer operate on the real repo.
+
+## [4.7.5] - 2026-06-08
+
+Interactive `delimit chat` TUI + setup wizard + CLI config flags, and
+Antigravity CLI integration (stdio config, chat-permission alignment). _(This
+release was published to npm but its source reconciliation to the public repo
+landed retroactively; recorded here for an honest history.)_
+
 ## [4.7.3] - 2026-06-04
 
 Docs + metadata release. No functional changes to the package.
