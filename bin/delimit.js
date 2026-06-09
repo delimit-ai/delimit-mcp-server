@@ -211,28 +211,13 @@ if (command === 'pre-commit-check' || command === 'pre-commit') {
     execSync(`node ${path.join(__dirname, '../../scripts/install-governance.js')}`);
     
 } else {
-    // Default help
-    console.log(`
-${BLUE}${BOLD}Delimit - Unavoidable AI Governance Layer${RESET}
-═══════════════════════════════════════════════════════
-
-Usage: delimit [command]
-
-Commands:
-  status              Check governance status
-  install/integrate      Install governance layer system-wide
-  
-Internal Commands (called by hooks/shims):
-  pre-commit-check    Run pre-commit governance
-  pre-push-check      Run pre-push governance  
-  proxy               Proxy AI tool commands
-
-After installation, Delimit will:
-  • Intercept all AI tool commands (claude, gemini, codex)
-  • Validate all Git commits and pushes
-  • Record evidence of all AI-assisted development
-  • Make ungoverned development impossible
-
-Version: 1.0.0
-`);
+    // Fall back to the full CLI wrapper for all other commands
+    const cliPath = path.join(__dirname, 'delimit-cli.js');
+    try {
+        const result = spawnSync('node', [cliPath, ...args], { stdio: 'inherit' });
+        process.exit(result.status || 0);
+    } catch (e) {
+        error('Failed to execute delimit-cli: ' + e.message);
+        process.exit(1);
+    }
 }

@@ -255,13 +255,14 @@ args = ["other.js"]
 });
 
 describe('setup matrix: support matrix validation', () => {
-    it('all 4 assistants use the same server file path pattern', () => {
+    it('all 5 assistants use the same server file path pattern', () => {
         const serverPattern = /server\.py$/;
         const configs = [
             { name: 'Claude Code', args: ['server.py'] },
             { name: 'Codex', args: ['server.py'] },
             { name: 'Cursor', args: ['server.py'] },
             { name: 'Gemini CLI', args: ['server.py'] },
+            { name: 'Antigravity CLI', args: ['server.py'] },
         ];
         for (const cfg of configs) {
             assert.ok(
@@ -279,6 +280,7 @@ describe('setup matrix: support matrix validation', () => {
             'Codex (JSON)': path.join(HOME, '.codex', 'config.json'),
             'Cursor': path.join(HOME, '.cursor', 'mcp.json'),
             'Gemini CLI': path.join(HOME, '.gemini', 'settings.json'),
+            'Antigravity CLI': path.join(HOME, '.gemini', 'antigravity-cli', 'settings.json'),
         };
 
         // Verify path construction is correct

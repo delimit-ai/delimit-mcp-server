@@ -159,6 +159,64 @@ def _http_patch(table: str, query: str, data: dict) -> bool:
         return False
 
 
+def _http_upload_storage(
+    bucket: str,
+    object_path: str,
+    body: bytes,
+    content_type: str = "application/json",
+) -> bool:
+    """Upload one object to Supabase Storage using the REST API."""
+    import urllib.parse
+    import urllib.request
+    try:
+        safe_bucket = urllib.parse.quote(bucket.strip("/"), safe="")
+        safe_object = urllib.parse.quote(object_path.strip("/"), safe="/")
+        url = f"{SUPABASE_URL.rstrip('/')}/storage/v1/object/{safe_bucket}/{safe_object}"
+        req = urllib.request.Request(url, data=body, method="POST")
+        req.add_header("Content-Type", content_type)
+        req.add_header("Cache-Control", "3600")
+        req.add_header("apikey", SUPABASE_KEY)
+        req.add_header("Authorization", f"Bearer {SUPABASE_KEY}")
+        req.add_header("x-upsert", "true")
+        urllib.request.urlopen(req, timeout=5)
+        return True
+    except Exception as e:
+        logger.debug(f"Supabase Storage upload failed for {bucket}/{object_path}: {e}")
+        return False
+
+
+def sync_attestation_bundle(
+    bundle_path: str,
+    attestation_id: str = "",
+    bucket: str = "",
+) -> bool:
+    """Best-effort mirror of a signed attestation JSON bundle to Supabase Storage.
+
+    Local files remain the source of truth. This only makes /att/<id> and the
+    dashboard index able to discover bundles without committing static JSON.
+    """
+    try:
+        client = _get_client()
+        if client is None:
+            return False
+        if not bundle_path:
+            return False
+        path = Path(bundle_path)
+        if not path.exists() or not path.is_file():
+            return False
+
+        object_id = attestation_id or path.stem
+        object_path = f"{object_id}.json" if not object_id.endswith(".json") else object_id
+        storage_bucket = bucket or os.environ.get(
+            "DELIMIT_ATTESTATION_BUCKET",
+            "attestations",
+        )
+        return _http_upload_storage(storage_bucket, object_path, path.read_bytes())
+    except Exception as e:
+        logger.debug(f"Attestation bundle sync failed: {e}")
+        return False
+
+
 def sync_event(event: dict):
     """Sync an event to Supabase (fire-and-forget).
 

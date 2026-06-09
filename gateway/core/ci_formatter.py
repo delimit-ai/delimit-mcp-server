@@ -100,89 +100,117 @@ class CIFormatter:
         decision = result.get("decision", "unknown")
         violations = result.get("violations", [])
         summary = result.get("summary", {})
-        semver = result.get("semver")  # optional dict from semver_classifier
+        semver = result.get("semver")
+        all_changes = result.get("all_changes", [])
+        migration = result.get("migration")
 
-        # Header — include semver badge when available
-        bump_badge = ""
-        if semver:
-            bump = semver.get("bump", "unknown")
-            bump_badge = {"major": " `MAJOR`", "minor": " `MINOR`", "patch": " `PATCH`", "none": ""}.get(bump, "")
+        bc = summary.get("breaking_changes", 0)
+        total = summary.get("total_changes", 0)
+        additive = total - bc
 
-        if decision == "fail":
-            lines.append(f"## 🚨 Delimit: Breaking Changes{bump_badge}\n")
-        elif decision == "warn":
-            lines.append(f"## ⚠️ Delimit: Potential Issues{bump_badge}\n")
+        errors = [v for v in violations if v.get("severity") == "error"]
+        warnings = [v for v in violations if v.get("severity") == "warning"]
+
+        if bc == 0:
+            # ── GREEN PATH ──
+            bump_label = "NONE"
+            if semver:
+                bump_label = semver.get("bump", "none").upper()
+            lines.append("\U0001f6e1\ufe0f **Governance Passed**\n")
+            if total > 0:
+                lines.append(
+                    f"> **No breaking API changes detected.** "
+                    f"{additive} additive change{'s' if additive != 1 else ''} "
+                    f"found \u2014 Semver: **{bump_label}**\n"
+                )
+            else:
+                lines.append("> **No breaking API changes detected.**\n")
+
+            # Additive changes
+            safe_changes = [c for c in all_changes if not c.get("is_breaking")]
+            if safe_changes and len(safe_changes) <= 15:
+                lines.append("<details>")
+                lines.append(f"<summary>\u2705 New additions ({len(safe_changes)})</summary>\n")
+                for c in safe_changes:
+                    lines.append(f"- `{c.get('path', '')}` \u2014 {c.get('message', '')}")
+                lines.append("</details>\n")
         else:
-            lines.append(f"## ✅ API Changes Look Good{bump_badge}\n")
+            # ── RED PATH ──
+            lines.append("\U0001f6e1\ufe0f **Breaking API Changes Detected**\n")
 
-        # Semver + summary table
-        lines.append("| Metric | Value |")
-        lines.append("|--------|-------|")
-        if semver:
-            lines.append(f"| Semver bump | `{semver.get('bump', 'unknown')}` |")
-            if semver.get("next_version"):
-                lines.append(f"| Next version | `{semver['next_version']}` |")
-        lines.append(f"| Total changes | {summary.get('total_changes', 0)} |")
-        lines.append(f"| Breaking | {summary.get('breaking_changes', 0)} |")
-        if summary.get("violations", 0) > 0:
-            lines.append(f"| Policy violations | {summary['violations']} |")
-        lines.append("")
+            # Summary card
+            parts = [f"\U0001f534 **{bc} breaking change{'s' if bc != 1 else ''}**"]
+            parts.append("Semver: **MAJOR**")
+            if semver and semver.get("next_version"):
+                parts.append(f"Next: `{semver['next_version']}`")
+            separator = " \u00b7 "
+            lines.append(f"> {separator.join(parts)}\n")
 
-        # Violations table
-        if violations:
-            errors = [v for v in violations if v.get("severity") == "error"]
-            warnings = [v for v in violations if v.get("severity") == "warning"]
+            # Stats table
+            lines.append("| | Count |")
+            lines.append("|---|---|")
+            lines.append(f"| Total changes | {total} |")
+            lines.append(f"| Breaking | {bc} |")
+            lines.append(f"| Additive | {additive} |")
+            if len(warnings) > 0:
+                lines.append(f"| Warnings | {len(warnings)} |")
+            if summary.get("violations", 0) > 0:
+                lines.append(f"| Policy violations | {summary['violations']} |")
+            lines.append("")
 
+            # Violations table
             if errors or warnings:
-                lines.append("### Violations\n")
-                lines.append("| Severity | Rule | Description | Location |")
-                lines.append("|----------|------|-------------|----------|")
+                lines.append("### Breaking Changes\n")
+                lines.append("| Severity | Change | Location |")
+                lines.append("|----------|--------|----------|")
 
                 for v in errors:
-                    rule = v.get("name", v.get("rule", "Unknown"))
                     desc = v.get("message", "Unknown violation")
                     location = v.get("path", "-")
-                    lines.append(f"| 🔴 **Error** | {rule} | {desc} | `{location}` |")
+                    lines.append(f"| \U0001f534 Critical | {desc} | `{location}` |")
 
                 for v in warnings:
-                    rule = v.get("name", v.get("rule", "Unknown"))
                     desc = v.get("message", "Unknown warning")
                     location = v.get("path", "-")
-                    lines.append(f"| 🟡 Warning | {rule} | {desc} | `{location}` |")
+                    lines.append(f"| \U0001f7e1 Warning | {desc} | `{location}` |")
 
                 lines.append("")
 
-        # Detailed changes
-        all_changes = result.get("all_changes", [])
-        if all_changes and len(all_changes) <= 10:
-            lines.append("<details>")
-            lines.append("<summary>All changes</summary>\n")
-            lines.append("```")
-            for change in all_changes:
-                breaking = "BREAKING" if change.get("is_breaking") else "safe"
-                lines.append(f"[{breaking}] {change.get('message', 'Unknown change')}")
-            lines.append("```")
-            lines.append("</details>\n")
+            # Migration guidance
+            if migration and decision == "fail":
+                lines.append("<details>")
+                lines.append("<summary>\U0001f4cb Migration guide</summary>\n")
+                lines.append(migration)
+                lines.append("\n</details>\n")
+            elif errors and decision == "fail":
+                lines.append("<details>")
+                lines.append("<summary>\U0001f4cb Migration guide</summary>\n")
+                lines.append("1. **Restore removed endpoints** \u2014 deprecate before removing")
+                lines.append("2. **Make parameters optional** \u2014 don't add required params")
+                lines.append("3. **Use versioning** \u2014 create `/v2/` for breaking changes")
+                lines.append("4. **Gradual migration** \u2014 provide guides and time")
+                lines.append("\n</details>\n")
 
-        # Migration guidance (from explainer) when available
-        migration = result.get("migration")
-        if migration and decision == "fail":
-            lines.append("<details>")
-            lines.append("<summary>Migration guide</summary>\n")
-            lines.append(migration)
-            lines.append("\n</details>\n")
+            # Additive changes
+            safe_changes = [c for c in all_changes if not c.get("is_breaking")]
+            if safe_changes and len(safe_changes) <= 15:
+                lines.append("<details>")
+                lines.append(f"<summary>\u2705 New additions ({len(safe_changes)})</summary>\n")
+                for c in safe_changes:
+                    lines.append(f"- `{c.get('path', '')}` \u2014 {c.get('message', '')}")
+                lines.append("</details>\n")
 
-        # Remediation
-        if violations and decision == "fail" and not migration:
-            lines.append("### 💡 How to Fix\n")
-            lines.append("1. **Restore removed endpoints** — deprecate before removing")
-            lines.append("2. **Make parameters optional** — don't add required params")
-            lines.append("3. **Use versioning** — create `/v2/` for breaking changes")
-            lines.append("4. **Gradual migration** — provide guides and time")
-            lines.append("")
+            lines.append("> **Fix locally:** `npx delimit-cli lint`\n")
 
         lines.append("---")
-        lines.append("*Generated by [Delimit](https://github.com/delimit-ai/delimit) — ESLint for API contracts*")
+        lines.append(
+            "Powered by [Delimit](https://delimit.ai) \u00b7 "
+            "[Docs](https://delimit.ai/docs) \u00b7 "
+            "[Install](https://github.com/marketplace/actions/delimit-api-governance)"
+        )
+
+        if bc == 0:
+            lines.append("\nKeep Building.")
 
         return "\n".join(lines)
     

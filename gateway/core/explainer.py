@@ -263,62 +263,95 @@ def _render_pr_comment(ctx: Dict) -> str:
     total = ctx["counts"]["total"]
     additive_count = ctx["counts"]["additive"]
 
-    # Header with semver badge
-    badge = {"major": "🔴 MAJOR", "minor": "🟡 MINOR", "patch": "🟢 PATCH", "none": "⚪ NONE"}
-    badge_text = badge.get(bump, bump.upper())
+    if bc == 0:
+        # ── GREEN PATH ──
+        semver_label = bump.upper() if bump != "none" else "NONE"
+        lines.append("## \U0001f6e1\ufe0f Governance Passed")
+        lines.append("")
+        if total > 0:
+            lines.append(
+                f"> **No breaking API changes detected.** "
+                f"{additive_count} additive change{'s' if additive_count != 1 else ''} "
+                f"found \u2014 Semver: **{semver_label}**"
+            )
+        else:
+            lines.append("> **No breaking API changes detected.**")
+        lines.append("")
 
-    if bc > 0:
-        lines.append(f"## {badge_text} — Breaking Changes Detected")
+        # Additive changes (collapsed)
+        additive = ctx["additive_changes"]
+        if additive:
+            lines.append("<details>")
+            lines.append(f"<summary>\u2705 New additions ({len(additive)})</summary>")
+            lines.append("")
+            for c in additive:
+                lines.append(f"- `{c['path']}` \u2014 {c['message']}")
+            lines.append("")
+            lines.append("</details>")
+            lines.append("")
     else:
-        lines.append(f"## {badge_text} — API Changes Look Good")
-    lines.append("")
+        # ── RED PATH ──
+        lines.append("## \U0001f6e1\ufe0f Breaking API Changes Detected")
+        lines.append("")
 
-    # Summary line
-    parts = [f"**{total}** change{'s' if total != 1 else ''}"]
-    if bc > 0:
-        parts.append(f"**{bc}** breaking")
-    if additive_count > 0:
-        parts.append(f"**{additive_count}** additive")
-    lines.append(" · ".join(parts))
-    lines.append("")
+        # Summary card
+        parts = [f"\U0001f534 **{bc} breaking change{'s' if bc != 1 else ''}**"]
+        parts.append("Semver: **MAJOR**")
+        separator = " \u00b7 "
+        lines.append(f"> {separator.join(parts)}")
+        lines.append("")
 
-    # Breaking changes table
-    if bc > 0:
+        # Stats table
+        lines.append("| | Count |")
+        lines.append("|---|---|")
+        lines.append(f"| Total changes | {total} |")
+        lines.append(f"| Breaking | {bc} |")
+        lines.append(f"| Additive | {additive_count} |")
+        lines.append("")
+
+        # Breaking changes table
         lines.append("### Breaking Changes")
         lines.append("")
-        lines.append("| Change | Location | Severity |")
-        lines.append("|--------|----------|----------|")
+        lines.append("| Severity | Change | Location |")
+        lines.append("|----------|--------|----------|")
         for c in ctx["breaking_changes"]:
             change_type = c.get("type", "breaking")
             severity = _pr_severity(change_type)
-            lines.append(f"| {c['message']} | `{c['path']}` | {severity} |")
+            lines.append(f"| {severity} | {c['message']} | `{c['path']}` |")
         lines.append("")
 
         # Migration guidance
         lines.append("<details>")
-        lines.append("<summary>📋 Migration guide</summary>")
+        lines.append("<summary>\U0001f4cb Migration guide</summary>")
         lines.append("")
         for i, c in enumerate(ctx["breaking_changes"], 1):
-            lines.append(f"**{i}. {c['path']}**")
-            lines.append(f"- {_pr_migration_hint(c)}")
+            lines.append(f"**{i}. `{c['path']}`**")
+            lines.append(f"{_pr_migration_hint(c)}")
             lines.append("")
         lines.append("</details>")
         lines.append("")
 
-    # Additive changes
-    additive = ctx["additive_changes"]
-    if additive:
-        lines.append("<details>")
-        lines.append(f"<summary>✅ New additions ({len(additive)})</summary>")
-        lines.append("")
-        for c in additive:
-            lines.append(f"- `{c['path']}` — {c['message']}")
-        lines.append("")
-        lines.append("</details>")
+        # Additive changes
+        additive = ctx["additive_changes"]
+        if additive:
+            lines.append("<details>")
+            lines.append(f"<summary>\u2705 New additions ({len(additive)})</summary>")
+            lines.append("")
+            for c in additive:
+                lines.append(f"- `{c['path']}` \u2014 {c['message']}")
+            lines.append("")
+            lines.append("</details>")
+            lines.append("")
+
+        lines.append("> **Fix locally:** `npx delimit-cli lint`")
         lines.append("")
 
     lines.append("---")
-    lines.append("*[Delimit](https://github.com/delimit-ai/delimit) · API governance for CI/CD*")
+    lines.append(
+        "Powered by [Delimit](https://delimit.ai) \u00b7 "
+        "[Docs](https://delimit.ai/docs) \u00b7 "
+        "[Install](https://github.com/marketplace/actions/delimit-api-governance)"
+    )
     return "\n".join(lines)
 
 

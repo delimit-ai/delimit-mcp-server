@@ -24,6 +24,7 @@ from textual.binding import Binding
 import json
 import os
 import subprocess
+import sqlite3
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -134,6 +135,51 @@ def _load_daemon_state() -> Dict[str, Any]:
         return json.loads(DAEMON_STATE_FILE.read_text())
     except (json.JSONDecodeError, OSError):
         return {"status": "unknown"}
+
+
+
+def _load_pending_approvals(limit: int = 20) -> List[Dict]:
+    """Load pending drafts from the SQLite registry (LED-1129)."""
+    db_path = DELIMIT_HOME / "drafts.db"
+    if not db_path.exists():
+        return []
+    
+    approvals = []
+    try:
+        # Connect read-only to avoid locking issues with the daemon
+        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute(
+                "SELECT * FROM drafts WHERE status IN ('pending', 'waiting_for_approval') "
+                "ORDER BY created_at DESC LIMIT ?",
+                (limit,)
+            )
+            for row in cursor:
+                d = dict(row)
+                # Parse target_json for a summary
+                try:
+                    target = json.loads(d.get("target_json", "{}"))
+                    d["target_summary"] = target.get("repo", target.get("venture", "unknown"))
+                    if "issue" in target:
+                        d["target_summary"] += f" #{target['issue']}"
+                except:
+                    d["target_summary"] = "unknown"
+                
+                # Calculate age
+                created_at = d.get("created_at", 0)
+                if created_at:
+                    diff = int(time.time()) - created_at
+                    if diff < 60: d["age_str"] = f"{diff}s"
+                    elif diff < 3600: d["age_str"] = f"{diff//60}m"
+                    elif diff < 86400: d["age_str"] = f"{diff//3600}h"
+                    else: d["age_str"] = f"{diff//86400}d"
+                else:
+                    d["age_str"] = "n/a"
+                
+                approvals.append(d)
+    except Exception:
+        pass
+    return approvals
 
 
 def _load_process_list() -> List[Dict[str, Any]]:
@@ -488,6 +534,91 @@ def _channel_color(channel: str) -> str:
     return colors.get(channel, "white")
 
 
+
+class ApprovalsPanel(Static):
+    """Pending approvals view -- shows items from drafts.db."""
+
+    BINDINGS = [
+        Binding("y", "approve", "Approve", key_display="Y"),
+        Binding("n", "reject", "Reject", key_display="N"),
+    ]
+
+    def compose(self) -> ComposeResult:
+        yield DataTable(id="approvals-table")
+
+    def on_mount(self) -> None:
+        table = self.query_one("#approvals-table", DataTable)
+        table.add_columns("ID", "Kind", "Target", "Status", "Age")
+        table.cursor_type = "row"
+        self._refresh_data()
+        self.set_interval(10, self._refresh_data)
+
+    def _refresh_data(self) -> None:
+        table = self.query_one("#approvals-table", DataTable)
+        table.clear()
+        self.items = _load_pending_approvals(25)
+        for item in self.items:
+            table.add_row(
+                item.get("draft_id", "")[:12],
+                item.get("draft_kind", ""),
+                item.get("target_summary", "")[:40],
+                item.get("status", ""),
+                item.get("age_str", ""),
+            )
+
+    def action_approve(self) -> None:
+        self._handle_action("approve")
+
+    def action_reject(self) -> None:
+        self._handle_action("reject")
+
+    def _handle_action(self, action: str) -> None:
+        table = self.query_one("#approvals-table", DataTable)
+        cursor_row = table.cursor_row
+        if cursor_row is None or not hasattr(self, "items") or cursor_row >= len(self.items):
+            self.app.notify("No draft selected.", severity="warning")
+            return
+
+        item = self.items[cursor_row]
+        draft_id = item.get("draft_id")
+        current_status = item.get("status")
+
+        if not draft_id or not current_status:
+            self.app.notify("Invalid draft data selected.", severity="error")
+            return
+
+        from .inbox_drafts import transition
+        db_path = DELIMIT_HOME / "drafts.db"
+        new_status = "approved" if action == "approve" else "cancelled"
+
+        try:
+            success = transition(
+                draft_id,
+                expected=current_status,
+                new=new_status,
+                db_path=db_path
+            )
+            if success:
+                self.app.notify(
+                    f"Draft {draft_id[:12]} {action}d successfully!",
+                    title="Action Succeeded",
+                    severity="information"
+                )
+                self._refresh_data()
+            else:
+                self.app.notify(
+                    f"Failed to {action} draft {draft_id[:12]}: state mismatch.",
+                    title="Action Failed",
+                    severity="warning"
+                )
+        except Exception as e:
+            self.app.notify(
+                f"Error performing {action}: {e}",
+                title="System Error",
+                severity="error"
+            )
+
+
 class FilesystemPanel(Static):
     """Filesystem browser -- navigate .delimit/ directory tree."""
 
@@ -774,6 +905,7 @@ class DelimitOS(App):
     BINDINGS = [
         Binding("q", "quit", "Quit", key_display="Q"),
         Binding("l", "focus_ledger", "Ledger", key_display="L"),
+        Binding("a", "focus_approvals", "Approvals", key_display="A"),
         Binding("s", "focus_swarm", "Swarm", key_display="S"),
         Binding("n", "focus_notifications", "Notifications", key_display="N"),
         Binding("f", "focus_files", "Files", key_display="F"),
@@ -788,6 +920,8 @@ class DelimitOS(App):
     def compose(self) -> ComposeResult:
         yield GovernanceBar()
         with TabbedContent():
+            with TabPane("Approvals", id="tab-approvals"):
+                yield ApprovalsPanel()
             with TabPane("Ledger", id="tab-ledger"):
                 yield LedgerPanel()
             with TabPane("Swarm", id="tab-swarm"):
@@ -805,6 +939,13 @@ class DelimitOS(App):
         yield Footer()
 
     # -- Tab focus actions -----------------------------------------------------
+
+    def action_focus_approvals(self) -> None:
+        self.query_one(TabbedContent).active = "tab-approvals"
+        try:
+            self.query_one("#approvals-table", DataTable).focus()
+        except Exception:
+            pass
 
     def action_focus_ledger(self) -> None:
         self.query_one(TabbedContent).active = "tab-ledger"
@@ -831,6 +972,8 @@ class DelimitOS(App):
 
     def action_refresh(self) -> None:
         """Refresh all panels."""
+        for panel in self.query(ApprovalsPanel):
+            panel._refresh_data()
         for panel in self.query(LedgerPanel):
             panel._refresh_data()
         for panel in self.query(SwarmPanel):

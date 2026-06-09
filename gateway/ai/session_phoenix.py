@@ -62,6 +62,9 @@ class SessionSoul:
     tokens_used: int = 0
     context_fullness: float = 0.0
 
+    # Pointer to the last immutable ledger entry for Auto-Phoenix replay
+    ledger_pointer: str = ""
+
 
 def _project_hash(project_path: str) -> str:
     """Stable hash for a project path, used as directory name."""
@@ -72,6 +75,45 @@ def _project_hash(project_path: str) -> str:
 def _project_dir(project_path: str) -> Path:
     """Return the soul storage directory for a project."""
     return SOULS_BASE_DIR / _project_hash(project_path)
+
+
+def _get_latest_ledger_pointer() -> str:
+    """Find the latest entry hash/ID from the operations ledger."""
+    ledger_path = Path.home() / ".delimit" / "ledger" / "operations.jsonl"
+    if not ledger_path.exists():
+        return ""
+    
+    try:
+        # Read the last line (most recent event)
+        with open(ledger_path, 'rb') as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            if size == 0:
+                return ""
+            
+            # Find last non-empty line
+            pos = size - 1
+            while pos > 0:
+                f.seek(pos)
+                if f.read(1) != b'\n':
+                    break
+                pos -= 1
+            
+            # Now find the start of this line
+            while pos > 0:
+                f.seek(pos - 1)
+                if f.read(1) == b'\n':
+                    break
+                pos -= 1
+            
+            f.seek(pos)
+            line = f.readline().decode('utf-8').strip()
+            if line:
+                data = json.loads(line)
+                return data.get('hash') or data.get('id') or ""
+    except (OSError, json.JSONDecodeError):
+        pass
+    return ""
 
 
 def _run_git(args: List[str], cwd: str = "") -> str:
@@ -154,6 +196,7 @@ def capture_soul(
         uncommitted_changes=git_state["uncommitted_changes"],
         tokens_used=tokens_used,
         context_fullness=context_fullness,
+        ledger_pointer=_get_latest_ledger_pointer(),
     )
 
     _store_soul(soul)
@@ -235,16 +278,10 @@ def get_latest_soul(project_path: str = "") -> Optional[SessionSoul]:
 
 
 def _soul_sort_key(soul: SessionSoul, fallback_path: Path) -> str:
-    """Sort key for global recency ranking. Prefer the soul's own
-    created_at (ISO-8601, lexically sortable); fall back to the file's
-    mtime when created_at is missing so a malformed/legacy soul still
-    orders sensibly rather than sinking to the bottom unconditionally."""
+    """Sort key for global recency ranking."""
     if soul.created_at:
         return soul.created_at
     try:
-        # Fall back to the file mtime, rendered as an ISO-8601 string so it
-        # compares lexically against real created_at values on the same
-        # scale. Only reached when created_at is empty.
         return datetime.fromtimestamp(
             fallback_path.stat().st_mtime, timezone.utc
         ).isoformat()
@@ -255,28 +292,11 @@ def _soul_sort_key(soul: SessionSoul, fallback_path: Path) -> str:
 def find_most_recent_soul_across_projects(
     exclude_project_path: str = "",
 ) -> Optional[Dict[str, Any]]:
-    """Scan every project-hash soul directory under SOULS_BASE_DIR and
-    return the globally-most-recent soul, with its originating project.
-
-    LED-218 FIX D: cross-venture fallback for `revive()` when the current
-    working directory resolves to a project that has no souls (e.g. running
-    from /root). Read-only; never writes. Returns None when no souls exist
-    anywhere.
-
-    Args:
-        exclude_project_path: if set, the soul directory for this project
-            is skipped (it already had no usable soul, so re-scanning it is
-            wasted work and could otherwise re-surface a stale latest.json).
-
-    Returns:
-        {"soul": SessionSoul, "project_hash": str, "project_path": str}
-        for the most recent soul found, or None.
-    """
+    """Scan every project-hash soul directory and return the globally-most-recent soul."""
     if not SOULS_BASE_DIR.exists():
         return None
 
     exclude_hash = _project_hash(exclude_project_path) if exclude_project_path else None
-
     best: Optional[SessionSoul] = None
     best_key: str = ""
     best_hash: str = ""
@@ -287,8 +307,6 @@ def find_most_recent_soul_across_projects(
         if exclude_hash and proj_dir.name == exclude_hash:
             continue
 
-        # Prefer the per-project latest.json; fall back to scanning the
-        # timestamped soul files if latest.json is absent/corrupt.
         candidate: Optional[SessionSoul] = None
         candidate_path: Optional[Path] = None
 
@@ -341,152 +359,99 @@ def _format_revival(soul: SessionSoul) -> str:
     lines.append(f"Captured:     {soul.created_at}")
     lines.append(f"Source Model: {soul.source_model}")
     lines.append(f"Project:      {soul.project_path}")
+    
+    if soul.ledger_pointer:
+        lines.append(f"Ledger Anchor: {soul.ledger_pointer}")
+        lines.append("")
+        lines.append("AUTO-PHOENIX INSTRUCTIONS:")
+        lines.append(f"1. Replay history from ledger checkpoint '{soul.ledger_pointer}'.")
+        lines.append("2. Verify current state matches the replayed audit trail.")
+        lines.append("3. Continue the task from the identified next steps.")
+        lines.append("")
+
+    lines.append("-" * 30)
+    lines.append(f"TASK:   {soul.active_task}")
+    lines.append(f"STATUS: {soul.task_status}")
+    lines.append("-" * 30)
     lines.append("")
 
-    # Current task
-    lines.append("--- ACTIVE TASK ---")
-    if soul.active_task:
-        lines.append(f"  {soul.active_task}")
-        lines.append(f"  Status: {soul.task_status}")
-    else:
-        lines.append("  (none recorded)")
-    lines.append("")
-
-    # Decisions
     if soul.decisions:
-        lines.append("--- KEY DECISIONS ---")
+        lines.append("DECISIONS MADE:")
         for d in soul.decisions:
-            lines.append(f"  - {d}")
+            lines.append(f" - {d}")
         lines.append("")
 
-    # Files
     if soul.files_modified or soul.files_created:
-        lines.append("--- FILES CHANGED ---")
+        lines.append("FILES CHANGED:")
         for f in soul.files_modified:
-            lines.append(f"  M {f}")
+            lines.append(f" M {f}")
         for f in soul.files_created:
-            lines.append(f"  + {f}")
+            lines.append(f" A {f}")
         lines.append("")
 
-    # Context
     if soul.key_context:
-        lines.append("--- KEY CONTEXT ---")
+        lines.append("KEY CONTEXT:")
         for c in soul.key_context:
-            lines.append(f"  - {c}")
+            lines.append(f" - {c}")
         lines.append("")
 
-    # Blockers
     if soul.blockers:
-        lines.append("--- BLOCKERS ---")
+        lines.append("BLOCKERS:")
         for b in soul.blockers:
-            lines.append(f"  ! {b}")
+            lines.append(f" - {b}")
         lines.append("")
 
-    # Next steps
     if soul.next_steps:
-        lines.append("--- NEXT STEPS ---")
-        for i, s in enumerate(soul.next_steps, 1):
-            lines.append(f"  {i}. {s}")
+        lines.append("NEXT STEPS:")
+        for n in soul.next_steps:
+            lines.append(f" - {n}")
         lines.append("")
 
-    # Git state
-    lines.append("--- GIT STATE ---")
-    lines.append(f"  Branch: {soul.git_branch or '(unknown)'}")
-    lines.append(f"  SHA:    {soul.git_sha or '(unknown)'}")
-    lines.append(f"  Uncommitted changes: {soul.uncommitted_changes}")
+    lines.append("-" * 30)
+    lines.append(f"GIT: branch={soul.git_branch}, sha={soul.git_sha}")
+    lines.append(f"UNCOMMITTED CHANGES: {soul.uncommitted_changes}")
+    lines.append("-" * 30)
     lines.append("")
+    lines.append("=== END OF REVIVED CONTEXT ===")
 
-    # Token stats
-    if soul.tokens_used or soul.context_fullness:
-        lines.append("--- SESSION STATS ---")
-        if soul.tokens_used:
-            lines.append(f"  Tokens used: ~{soul.tokens_used:,}")
-        if soul.context_fullness:
-            lines.append(f"  Context fullness: {soul.context_fullness:.0%}")
-        lines.append("")
-
-    lines.append("=" * 60)
     return "\n".join(lines)
 
 
 def revive(project_path: str = "", soul_id: str = "") -> Dict[str, Any]:
-    """Revive the latest session soul for this project.
-
-    Returns a structured dict with both the raw soul data and a
-    formatted context string that can be injected into any model.
-    """
+    """Resurrect the session state."""
     project_path = project_path or os.getcwd()
 
-    if soul_id:
-        # Search for a specific soul by ID
-        for soul in list_souls(project_path):
-            if soul.soul_id == soul_id:
-                return {
-                    "status": "revived",
-                    "soul": asdict(soul),
-                    "context": _format_revival(soul),
-                }
-        return {
-            "status": "not_found",
-            "message": f"No soul with ID '{soul_id}' found for project {project_path}",
-        }
+    soul: Optional[SessionSoul] = None
 
-    # Get latest
-    soul = get_latest_soul(project_path)
-    if not soul:
-        # FIX D — cross-venture fallback. The current working directory
-        # resolved to a project with no soul (common when reviving from a
-        # neutral dir like /root). Rather than dead-ending at "no_souls",
-        # surface the globally-most-recent soul from any other venture /
-        # project so the operator still gets continuity. Clearly labeled
-        # via `recovered_from_venture` so the caller knows it came from a
-        # different project. This ADDITIVE path only fires when the
-        # resolved project itself is empty AND no explicit soul_id was
-        # given, so existing single-project users see no change.
-        fallback = find_most_recent_soul_across_projects(
-            exclude_project_path=project_path
-        )
-        if fallback:
-            recovered = fallback["soul"]
-            return {
-                "status": "revived",
-                "soul": asdict(recovered),
-                "context": _format_revival(recovered),
-                "recovered_from_venture": recovered.project_path
-                or fallback.get("project_hash", ""),
-                "recovered_project_hash": fallback.get("project_hash", ""),
-                "note": (
-                    f"No soul for {project_path}; recovered the most recent "
-                    f"soul from {recovered.project_path or fallback.get('project_hash', '')}."
-                ),
-            }
+    if soul_id:
+        proj_dir = _project_dir(project_path)
+        # Try both direct match and timestamped filename search
+        for f in proj_dir.glob("*.json"):
+            if soul_id in f.name:
+                soul = _load_soul(f)
+                break
+    else:
+        soul = get_latest_soul(project_path)
+
+    # LED-218 FIX D: cross-venture fallback
+    source_project = project_path
+    if soul is None:
+        cross_soul = find_most_recent_soul_across_projects(exclude_project_path=project_path)
+        if cross_soul:
+            soul = cross_soul["soul"]
+            source_project = cross_soul["project_path"]
+
+    if soul is None:
         return {
-            "status": "no_souls",
-            "message": f"No session souls found for {project_path}. Nothing to revive.",
-            "hint": "Use delimit_soul_capture to save session state before ending.",
+            "status": "failed",
+            "error": f"No captured soul found for project at {project_path}",
+            "hint": "Run delimit_soul_capture before leaving a session.",
         }
 
     return {
         "status": "revived",
         "soul": asdict(soul),
-        "context": _format_revival(soul),
+        "revival_text": _format_revival(soul),
+        "source_project": source_project,
+        "message": f"Soul {soul.soul_id} resurrected from {source_project}.",
     }
-
-
-def should_auto_capture(
-    context_fullness: float = 0.0,
-    session_age_minutes: int = 0,
-    last_capture_minutes_ago: int = -1,
-) -> bool:
-    """Determine if we should auto-capture a soul.
-
-    Triggers:
-    - Context > 70% full
-    - Session > 30 minutes old with no capture in the last 15 minutes
-    - Explicit session end (handled by caller, not this function)
-    """
-    if context_fullness >= 0.7:
-        return True
-    if session_age_minutes >= 30 and (last_capture_minutes_ago < 0 or last_capture_minutes_ago >= 15):
-        return True
-    return False

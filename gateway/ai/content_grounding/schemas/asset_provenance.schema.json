@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://delimit.ai/schemas/grounding/asset_provenance.schema.json",
+  "title": "AssetProvenance",
+  "description": "Metadata for AI-generated creative assets (UI, Video, Media) to track lineage and policy compliance.",
+  "type": "object",
+  "required": ["asset_id", "hash", "source_prompt", "model", "venture", "rights_declaration"],
+  "properties": {
+    "asset_id": { "type": "string", "pattern": "^ast-[a-z]+-.+" },
+    "hash": { "type": "string", "description": "SHA-256 hash of the asset content." },
+    "source_prompt": { "type": "string", "description": "The prompt used to generate the asset." },
+    "model": { 
+      "type": "object",
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "type": "string" },
+        "version": { "type": "string" },
+        "provider": { "type": "string" }
+      }
+    },
+    "venture": { "type": "string" },
+    "references": {
+      "type": "array",
+      "items": { "type": "string", "description": "External URLs (e.g. Figma, Vercel, DAM)." }
+    },
+    "rights_declaration": {
+      "type": "object",
+      "required": ["license_type", "owner"],
+      "properties": {
+        "license_type": { "type": "string", "enum": ["proprietary", "open-source", "creative-commons", "unknown"] },
+        "owner": { "type": "string" },
+        "attributions": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "policy_results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "checker": { "type": "string" },
+          "verdict": { "type": "string", "enum": ["pass", "fail", "warn"] },
+          "message": { "type": "string" }
+        }
+      }
+    },
+    "approval_state": {
+      "type": "object",
+      "properties": {
+        "status": { "type": "string", "enum": ["pending", "approved", "rejected"] },
+        "approved_by": { "type": "string" },
+        "approved_at": { "type": "string", "format": "date-time" }
+      }
+    }
+  }
+}

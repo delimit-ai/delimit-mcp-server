@@ -63,6 +63,15 @@ _CONTAMINATION_MARKERS = (
 # back: "AGREE" / "DISAGREE" / "REMEDIATE" / "AGREE WITH MODIFICATIONS"
 # all appear in real responses even when the trailing VERDICT line is
 # omitted by a chatty model.
+# LED-1415: specific patterns for common provider-side blocks (rate limits, caps)
+_PROVIDER_BLOCK_RE = re.compile(
+    r"\b("
+    r"weekly\s+limit|monthly\s+spend\s+limit|rate\s+limit|too\s+many\s+requests|"
+    r"quota\s+exhausted|insufficient\s+balance|billing\s+account\s+not\s+active"
+    r")\b",
+    re.IGNORECASE,
+)
+
 _VERDICT_HINT_RE = re.compile(
     r"\b(VERDICT:|AGREE|DISAGREE|REMEDIATE|APPROVE|REJECT)\b",
     re.IGNORECASE,
@@ -144,6 +153,9 @@ def validate_cli_contract(
 
     # 3. Verdict hint — at least one of VERDICT:/AGREE/DISAGREE/REMEDIATE/
     # APPROVE/REJECT must appear. Skip when expect_verdict_hint=False.
+    if _PROVIDER_BLOCK_RE.search(scrubbed):
+        failures.append("provider_rate_limit_or_cap")
+    
     if expect_verdict_hint and not _VERDICT_HINT_RE.search(scrubbed):
         failures.append("no_verdict_hint")
 
