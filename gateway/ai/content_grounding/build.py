@@ -37,7 +37,9 @@ logger = logging.getLogger("delimit.ai.content_grounding")
 # Default paths — overridable via env for testing.
 LEDGER_DIR = Path(os.environ.get("DELIMIT_LEDGER_DIR", str(Path.home() / ".delimit" / "ledger")))
 ATTESTATIONS_DIR = Path(os.environ.get("DELIMIT_ATTESTATIONS_DIR", str(Path.home() / ".delimit" / "attestations")))
-GATEWAY_REPO = Path(os.environ.get("DELIMIT_GATEWAY_REPO", "/home/delimit/delimit-gateway"))
+# LED-1715: portable gateway root (env override or __file__-relative), not a dev-path literal.
+from ai._paths import GATEWAY_REPO as _GATEWAY_REPO
+GATEWAY_REPO = Path(_GATEWAY_REPO)
 GROUNDING_OUT = Path(os.environ.get("DELIMIT_GROUNDING_OUT", str(Path.home() / ".delimit" / "content" / "grounding")))
 
 

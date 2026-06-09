@@ -5,12 +5,18 @@ import time
 import os
 import re
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
+
+from ai._paths import GATEWAY_REPO
 
 logger = logging.getLogger("delimit.reaper")
 
-def reap_agent_tasks(project_path: str = "/home/delimit/delimit-gateway") -> List[str]:
+def reap_agent_tasks(project_path: Optional[str] = None) -> List[str]:
     """Reap completed agent arms by checking for commits and merging."""
+    # LED-1715: portable default. None -> env-resolved / __file__-relative
+    # gateway root (was a hardcoded dev path that broke customer installs).
+    if project_path is None:
+        project_path = GATEWAY_REPO
     from ai.agent_dispatch import get_agent_status, complete_task
     from ai.ledger_manager import update_item
     

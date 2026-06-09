@@ -25,6 +25,8 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from ai._paths import GATEWAY_REPO
+
 logger = logging.getLogger("delimit.continuity")
 
 def _resolve_delimit_home() -> Path:
@@ -429,12 +431,8 @@ def _check_for_leaks(namespace_root: str) -> list:
 
     # Check 3: verify .gitignore coverage in the gateway repo
     # LED-2107: env-resolved so containers/CI runners outside ~/delimit-gateway work.
-    gateway_root = Path(
-        os.environ.get(
-            "DELIMIT_GATEWAY_ROOT",
-            "/home/delimit/delimit-gateway",
-        )
-    )
+    # LED-1715: portable fallback (__file__-relative) instead of a dev-path literal.
+    gateway_root = Path(GATEWAY_REPO)
     gateway_gitignore = gateway_root / ".gitignore"
     if gateway_gitignore.exists():
         content = gateway_gitignore.read_text()

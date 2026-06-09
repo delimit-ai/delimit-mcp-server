@@ -40,7 +40,9 @@ from .consume import FEATURES_FILE
 
 logger = logging.getLogger("delimit.ai.content_grounding.features")
 
-GATEWAY_ROOT = Path(os.environ.get("DELIMIT_GATEWAY_REPO", "/home/delimit/delimit-gateway"))
+# LED-1715: portable gateway root (env override or __file__-relative), not a dev-path literal.
+from ai._paths import GATEWAY_REPO as _GATEWAY_REPO
+GATEWAY_ROOT = Path(_GATEWAY_REPO)
 NPM_BIN = Path(os.environ.get("DELIMIT_CLI_BIN", "/home/delimit/npm-delimit/bin/delimit-cli.js"))
 
 

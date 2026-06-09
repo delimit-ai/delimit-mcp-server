@@ -19,6 +19,8 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from ai._paths import GATEWAY_REPO
+
 logger = logging.getLogger("delimit.ai.loop_engine")
 
 # ── Configuration ────────────────────────────────────────────────────
@@ -1019,7 +1021,7 @@ def _act_auto_build(task: Dict[str, Any], ctx: Dict[str, str]) -> Dict[str, Any]
     task_id = task.get("id", "task")
     title = task.get("title", "")
     desc = task.get("description", "")
-    project_path = ctx.get("path", "/home/delimit/delimit-gateway")
+    project_path = ctx.get("path", GATEWAY_REPO)  # LED-1715: portable default
 
     instruction = f"Implement build task {task_id}: {title}\n\nGoal: {desc}\n\nUpdate the code but DO NOT COMMIT. I will handle the commit."
 
@@ -1289,7 +1291,7 @@ def run_governed_iteration(session_id: str, hardening: Optional[Any] = None) -> 
 
     
     # 0. Reap finished agent tasks (Plan-C)
-    reaped = ai.reaper.reap_agent_tasks(project_path=str(ctx["path"]) if "ctx" in locals() else "/home/delimit/delimit-gateway")
+    reaped = ai.reaper.reap_agent_tasks(project_path=str(ctx["path"]) if "ctx" in locals() else GATEWAY_REPO)  # LED-1715: portable default
     if reaped:
         logger.info("Reaped %d finished tasks", len(reaped))
     # 1. Load Session & Check Safeguards
