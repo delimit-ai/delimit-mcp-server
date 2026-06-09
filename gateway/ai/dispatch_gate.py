@@ -34,12 +34,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Optional
 
+from ai._paths import GATEWAY_REPO
+
 logger = logging.getLogger(__name__)
 
 # Default repos to search. Discovered at runtime first via the venture
 # registry; this list is the safety net if discovery returns nothing.
+# LED-1715: gateway root is portable (env / __file__-relative), not a dev path.
 DEFAULT_REPOS = (
-    "/home/delimit/delimit-gateway",
+    GATEWAY_REPO,
     "/home/delimit/delimit-action",
     "/home/delimit/npm-delimit",
     "/home/delimit/delimit-ui",
