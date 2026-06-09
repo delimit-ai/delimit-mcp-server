@@ -1,10 +1,16 @@
-"""Unified control-plane queue aggregator (LED-1709, Phase 0).
+"""Unified control-plane queue aggregator (LED-1709, Phase 0 + Phase 1).
 
-READ-ONLY pure data layer. This module is the single shared backend that
-BOTH the CLI (direct MCP via ``delimit_control``) and the web dashboard
-(delimit-ui ``app/api/mcp`` route, MCP-over-HTTP) render. It therefore has
-NO CLI- or web-specific coupling: it only reads on-disk ``~/.delimit`` stores
-and returns plain dicts.
+The aggregation layer (build_queue / get_item / counts) is READ-ONLY. This
+module is the single shared backend that BOTH the CLI (direct MCP via
+``delimit_control``) and the web dashboard (delimit-ui ``app/api/mcp`` route,
+MCP-over-HTTP) render. It therefore has NO CLI- or web-specific coupling: it
+only reads on-disk ``~/.delimit`` stores and returns plain dicts.
+
+Phase 1 adds two WRITE verbs — ``approve`` and ``reject`` — that act ONLY on
+class="approval" items and route through the SAME founder-approval ack store
+the email "ship it" loop uses (``inbox_routing.jsonl``,
+``founder_directive_completed`` events). They write no new/parallel store.
+See the "Write verbs" section near the bottom of this file.
 
 It aggregates four existing storage sources into ONE normalized queue:
 
@@ -583,6 +589,167 @@ def get_item(item_id: str) -> Optional[Dict[str, Any]]:
             out["raw"] = it.get("_raw")
             return out
     return None
+
+
+# ── Write verbs (LED-1709 Phase 1) ──────────────────────────────────────-
+#
+# approve/reject ONLY act on class="approval" items, and they route through
+# the SAME founder-approval ack store the email loop uses: they append a
+# `founder_directive_completed` event to ~/.delimit/inbox_routing.jsonl keyed
+# by `directive_subject`. That is byte-equivalent to what
+# ai.inbox_daemon.complete_directive() writes when the founder replies
+# "ship it" by email (inbox_daemon.complete_directive ->
+# _log_routing({"event": "founder_directive_completed",
+#               "directive_subject": subject, "result": result})).
+#
+# We do NOT call inbox_daemon.complete_directive() directly for two reasons:
+#   1. It binds ROUTING_LOG to Path.home()/".delimit" at import time and
+#      ignores DELIMIT_HOME — the same reason _load_approvals does not reuse
+#      get_pending_directives. Routing through it would make the write
+#      untestable and break relocated-home customer installs.
+#   2. It additionally SENDS a confirmation email (the receive-flow's
+#      concern). The CLI/web act-of-approval is the founder acting directly,
+#      not an inbound email being acked, so it must not emit an outbound
+#      email. The DURABLE state — the dedup-by-subject completed event that
+#      removes the directive from the pending queue for BOTH the email loop
+#      and this control plane — is identical.
+#
+# There is NO separate rejected event in the daemon's schema today (the only
+# directive lifecycle is received -> completed, deduped by subject). Per the
+# Phase 1 spec, reject therefore records the same completed event with an
+# explicit `disposition: "rejected"` field (plus the note as `result`),
+# keeping it consistent with the daemon's schema and dedup key.
+
+def _append_routing_event(entry: Dict[str, Any]) -> None:
+    """Append one event to ~/.delimit/inbox_routing.jsonl (DELIMIT_HOME-aware).
+
+    Mirrors ai.inbox_daemon._log_routing's on-disk format (adds `daemon` and
+    `timestamp`) but resolves the path through _delimit_home() so it honors
+    DELIMIT_HOME / DELIMIT_NAMESPACE_ROOT and is testable. This is the ONLY
+    place the control plane writes; there is no parallel approval store.
+    """
+    routing = _delimit_home() / "inbox_routing.jsonl"
+    routing.parent.mkdir(parents=True, exist_ok=True)
+    payload = dict(entry)
+    payload.setdefault("daemon", True)
+    payload["timestamp"] = datetime.now(timezone.utc).isoformat()
+    with open(routing, "a", encoding="utf-8") as f:
+        f.write(json.dumps(payload) + "\n")
+
+
+def _approval_subject_for(item_id: str) -> Optional[str]:
+    """Resolve the underlying directive subject for an approval-class item id.
+
+    Returns the subject string for a still-pending approval item, or None if
+    the id is not an approval-class item (wrong class / not found / already
+    completed and therefore no longer pending).
+    """
+    it = get_item(item_id)
+    if it is None or it.get("class") != "approval":
+        return None
+    raw = it.get("raw") or {}
+    return raw.get("subject") or raw.get("directive_subject") or ""
+
+
+def _is_subject_completed(subject: str) -> bool:
+    """True if a founder_directive_completed event already exists for subject."""
+    routing = _delimit_home() / "inbox_routing.jsonl"
+    for entry in _iter_jsonl(routing):
+        try:
+            if (entry.get("event") == "founder_directive_completed"
+                    and entry.get("directive_subject", "") == subject):
+                return True
+        except AttributeError:
+            continue
+    return False
+
+
+def _ack_directive(item_id: str, action: str, note: str = "") -> Dict[str, Any]:
+    """Shared approve/reject implementation.
+
+    action is "approve" or "reject". Both write the SAME
+    `founder_directive_completed` event (dedup-by-subject) that the email
+    "ship it" loop writes; reject additionally stamps disposition="rejected".
+
+    Idempotent: if the directive is already completed, no-op with a clear
+    status. Non-approval classes return {"status": "unsupported", ...}.
+    """
+    if not item_id:
+        return {"status": "error", "item_id": item_id, "action": action,
+                "reason": "item_id is required"}
+
+    it = get_item(item_id)
+    if it is None:
+        return {"status": "not_found", "item_id": item_id, "action": action,
+                "reason": "no such item in the control-plane queue"}
+
+    if it.get("class") != "approval":
+        return {
+            "status": "unsupported",
+            "item_id": item_id,
+            "action": action,
+            "class": it.get("class"),
+            "reason": "approve/reject only applies to approval-class items in Phase 1",
+        }
+
+    raw = it.get("raw") or {}
+    subject = raw.get("subject") or raw.get("directive_subject") or ""
+    if not subject:
+        return {"status": "error", "item_id": item_id, "action": action,
+                "reason": "approval item has no resolvable directive subject"}
+
+    # Idempotency: a completed event for this subject already routes it out of
+    # the pending queue for both the email loop and this control plane.
+    if _is_subject_completed(subject):
+        return {"status": "noop", "item_id": item_id, "action": action,
+                "subject": subject, "reason": "directive already acked/completed"}
+
+    result = note or ("approved via control plane" if action == "approve"
+                      else "rejected via control plane")
+    event: Dict[str, Any] = {
+        "event": "founder_directive_completed",
+        "directive_subject": subject,
+        "result": result,
+        "source": "control_plane",
+    }
+    if action == "reject":
+        event["disposition"] = "rejected"
+
+    try:
+        _append_routing_event(event)
+    except OSError as exc:
+        return {"status": "error", "item_id": item_id, "action": action,
+                "reason": f"failed to write routing ack: {exc}"}
+
+    return {
+        "status": "approved" if action == "approve" else "rejected",
+        "item_id": item_id,
+        "action": action,
+        "subject": subject,
+        "result": result,
+    }
+
+
+def approve(item_id: str, note: str = "") -> Dict[str, Any]:
+    """Approve an approval-class item (mirror the email "ship it" ack).
+
+    Routes through the existing founder-approval store: appends a
+    `founder_directive_completed` event keyed by the directive subject — the
+    same durable transition the inbox daemon writes on an email approval. Only
+    acts on class="approval" items; idempotent re-approve no-ops.
+    """
+    return _ack_directive(item_id, "approve", note)
+
+
+def reject(item_id: str, note: str = "") -> Dict[str, Any]:
+    """Reject an approval-class item (mirror the email rejection ack).
+
+    Records a `founder_directive_completed` event with disposition="rejected"
+    (the daemon has no distinct rejected event; completed-with-disposition is
+    consistent with its dedup-by-subject schema). Only acts on
+    class="approval" items; idempotent re-reject no-ops.
+    """
+    return _ack_directive(item_id, "reject", note)
 
 
 def counts(items: List[Dict[str, Any]]) -> Dict[str, Dict[str, int]]:

@@ -7201,5 +7201,18 @@ program
         repl.start();
     });
 
+program
+    .command('control')
+    .description('Browse the unified control-plane queue (attestations, approvals, sensing, ops) and approve/reject founder-approval items')
+    .action(async () => {
+        const { run } = require('../lib/control-browser');
+        try {
+            await run();
+        } catch (e) {
+            console.error(require('chalk').red('  control plane error: ' + (e && e.message ? e.message : e)));
+            process.exitCode = 1;
+        }
+    });
+
 const normalizedArgs = normalizeNaturalLanguageArgs(process.argv);
 program.parse([process.argv[0], process.argv[1], ...normalizedArgs]);
