@@ -13047,6 +13047,60 @@ def delimit_agent_dashboard() -> Dict[str, Any]:
 
 
 @mcp.tool()
+def delimit_control(
+    action: Annotated[str, Field(description="\"list\" (default) or \"get\". Phase 0 is READ-ONLY; approve/dispatch/etc. are coming in Phase 1.")] = "list",
+    class_filter: Annotated[str, Field(description="Lane filter: \"\" (all), \"attestation\", \"approval\", \"sensing\", or \"ops\".")] = "",
+    state_filter: Annotated[str, Field(description="State filter, e.g. \"open\", \"pending\", \"awaiting_approval\", \"done\". \"\" = all.")] = "",
+    item_id: Annotated[str, Field(description="For action=\"get\": the normalized item id (e.g. \"att_…\", \"STR-437\", \"LED-1709\", \"WO-…\", \"DIR-…\").")] = "",
+    limit: Annotated[int, Field(description="Max items for action=\"list\" (default 100).")] = 100,
+) -> Dict[str, Any]:
+    """Aggregate all governance lanes into one read-only queue (LED-1709).
+
+    When to use: as the shared queue the CLI and web dashboard both render —
+    attestations, approvals, sensing (STR-*), ops (LED-*/work-orders) in one list.
+    When NOT to use: to ACT on an item; Phase 0 is read-only (approve/dispatch
+    land in Phase 1) — mutate via the owning tool instead.
+
+    Sibling contrast: delimit_agent_dashboard is dispatch-only,
+    delimit_ledger_context is one-venture-only, delimit_notify_inbox is
+    inbox-only; this unifies all four into one lane-aware read view.
+
+    Side effects: READ-ONLY. Reads ~/.delimit stores; never writes.
+
+    Args:
+        action: "list" (default, queue + counts) or "get" (one item + raw).
+        class_filter: lane ("", attestation, approval, sensing, ops).
+        state_filter: state (e.g. open, pending, awaiting_approval); "" = all.
+        item_id: required for "get".
+        limit: max list items (default 100); empty class_filter balances lanes.
+
+    Returns:
+        list: {queue, counts_by_class, counts_by_state}.
+        get:  {item: {...normalized..., raw}} or {item: None}.
+    """
+    from ai import control_plane
+
+    act = (action or "list").strip().lower()
+    if act == "get":
+        item = _safe_call(control_plane.get_item, item_id=item_id)
+        # _safe_call wraps non-dict returns; normalize to {item: ...}.
+        if isinstance(item, dict) and item.get("error"):
+            return _with_next_steps("control", item)
+        return _with_next_steps("control", {"item": item})
+
+    queue = control_plane.build_queue(
+        class_filter=class_filter, state_filter=state_filter, limit=limit
+    )
+    counts = control_plane.counts(queue)
+    result = {
+        "queue": queue,
+        "counts_by_class": counts["counts_by_class"],
+        "counts_by_state": counts["counts_by_state"],
+    }
+    return _with_next_steps("control", result)
+
+
+@mcp.tool()
 def delimit_agent_policy(model: Annotated[str, Field(description="AI model name — \"claude\", \"codex\", \"gemini\", \"cursor\". Empty = list all.")] = "", ledger: Annotated[str, Field(description="Ledger access level.")] = "", memory: Annotated[str, Field(description="Memory access level.")] = "",
                           deploy: Annotated[str, Field(description="Allow deploys (\"true\"/\"false\").")] = "", evidence: Annotated[str, Field(description="Evidence access level.")] = "",
                           secrets: Annotated[str, Field(description="Allow secret access (\"true\"/\"false\").")] = "", custom_constraints: Annotated[str, Field(description="Comma-separated constraints, e.g. \"no-deploy,no-publish\".")] = "") -> Dict[str, Any]:
