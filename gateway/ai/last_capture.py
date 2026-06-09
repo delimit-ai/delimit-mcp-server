@@ -142,12 +142,41 @@ def parse_transcript_tail(
     # Cap on how far back we scan for a real text block when the immediate
     # tail has none. Cheap: a bounded slice, no LLM, no extra IO.
     SCAN_CAP = 40
+    # Read only the trailing window of the transcript: transcripts can be many
+    # MB and this runs in time-boxed paths (Stop hook + SessionStart reconcile).
+    # 64KB comfortably holds the last ~40 lines we ever scan (SCAN_CAP) and
+    # avoids loading a multi-MB file just to read its tail.
+    TAIL_BYTES = 65536
 
     result: Dict[str, Any] = {
         "final_assistant_text": "",
         "tool_calls": [],
         "turns": 0,
     }
+
+    def _read_tail(path: Path) -> str:
+        """Read only the trailing ~TAIL_BYTES of the file (seek-from-end).
+
+        If the read started mid-file (file larger than the window), the first
+        line is a fragment and is dropped. Best-effort: on ANY failure falls
+        back to a full ``read_text`` so correctness never regresses.
+        """
+        try:
+            with open(path, "rb") as fh:
+                fh.seek(0, os.SEEK_END)
+                size = fh.tell()
+                start = max(0, size - TAIL_BYTES)
+                fh.seek(start)
+                chunk = fh.read()
+            text = chunk.decode("utf-8", errors="replace")
+            if start > 0:
+                # Drop the leading partial line — it begins mid-record.
+                nl = text.find("\n")
+                text = text[nl + 1:] if nl != -1 else ""
+            return text
+        except Exception:
+            # Fall back to the whole-file read; never regress correctness.
+            return path.read_text(errors="replace")
 
     def _extract(content: Any, tool_sink: Optional[List[str]]) -> Dict[str, str]:
         """Pull text/thinking out of one message's content blocks.
@@ -200,7 +229,7 @@ def parse_transcript_tail(
         p = Path(transcript_path)
         if not p.exists():
             return result
-        lines = [l for l in p.read_text(errors="replace").splitlines() if l.strip()]
+        lines = [l for l in _read_tail(p).splitlines() if l.strip()]
         tail = lines[-max_turns:] if max_turns > 0 else lines
         result["turns"] = len(tail)
 
