@@ -1,6 +1,18 @@
 # Changelog
 
 
+## [4.7.8] - 2026-06-09
+
+### Fixed
+
+- **Portable gateway paths.** ~8 functional defaults hardcoded the developer's
+  `/home/delimit/delimit-gateway` checkout, which doesn't exist on customer
+  installs (agent reaping, dispatch, loop engine, continuity, content
+  grounding). They now resolve the gateway repo root portably via a new
+  `_paths` resolver (`DELIMIT_GATEWAY_REPO`/`DELIMIT_GATEWAY_ROOT` env override
+  → `__file__`-relative root), with no behavior change where the dev path was
+  already correct.
+
 ## [4.7.7] - 2026-06-09
 
 `delimit chat` resilience.
