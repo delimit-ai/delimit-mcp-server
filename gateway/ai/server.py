@@ -834,6 +834,10 @@ NEXT_STEPS_REGISTRY: Dict[str, List[Dict[str, Any]]] = {
         {"tool": "delimit_gov_status", "reason": "Get detailed governance status", "suggested_args": {}, "is_premium": True},
         {"tool": "delimit_repo_analyze", "reason": "Analyze repository structure and quality", "suggested_args": {}, "is_premium": True},
     ],
+    "handoff_preflight": [
+        {"tool": "delimit_soul_capture", "reason": "Refresh the session-context stamp before handing off if freshness failed", "suggested_args": {}, "is_premium": True},
+        {"tool": "delimit_revive", "reason": "Restore the prior session's context once invariants pass", "suggested_args": {}, "is_premium": False},
+    ],
     "gov_status": [
         {"tool": "delimit_gov_policy", "reason": "Review governance policy configuration", "suggested_args": {}, "is_premium": True},
     ],
@@ -5879,6 +5883,54 @@ def delimit_obs_status() -> Dict[str, Any]:
         {"error": "..."} on backend failure (does not raise).
     """
     return _delimit_obs_impl(action="status")
+
+
+@mcp.tool()
+def delimit_handoff_preflight(
+    project_path: Annotated[str, Field(description="Repository path to inspect. Empty resolves via the gateway resolver, then cwd.")] = "",
+) -> Dict[str, Any]:
+    """Validate cross-agent handoff invariants before switching coding agents (LED-1710).
+
+    When to use: before a session hands off to a different coding agent
+    (claude -> antigravity -> codex -> gemini) or an Auto-Phoenix revive,
+    to confirm the next agent will NOT inherit corrupted state — a
+    `core.bare=true` repo, a junk `test@*`/empty git identity, leaked
+    `GIT_*` env vars that misdirect git subprocesses, a stale
+    `<gitdir>/index.lock`, or a missing/stale `~/.delimit/.last_capture`
+    stamp (next agent starts blind). When NOT to use: to capture or
+    restore session context (use delimit_soul_capture / delimit_revive —
+    this only INSPECTS), or for general repo health (delimit_repo_diagnose).
+
+    Sibling contrast: delimit_revive restores prior context (read+write);
+    delimit_gov_health reports the policy-kernel layer; this is a narrow
+    read-only pre-handoff gate over git + env + capture stamp returning a
+    fail-closed verdict. Phase-1 VALIDATOR only: NOT wired into any live
+    handoff path; auto-remediation is held for a later phase.
+
+    Side effects: READ-ONLY — inspects git config + the process env + the
+    `.last_capture` file via a hermetic git env. NO writes, env mutation,
+    git config changes, network, ledger, or notification; it cannot itself
+    corrupt the state it checks.
+
+    Verdict: `ok=False` if ANY `critical` check fails (fail-closed).
+    Critical: git_identity, not_bare. Warn: no_git_env_leak,
+    no_stale_index_lock, handoff_freshness. Each check is
+    `{name, ok, severity, detail, remediation}`.
+
+    Args:
+        project_path: Repository path to inspect. Empty resolves via the
+            gateway resolver, then the current working directory.
+
+    Returns:
+        Dict with ok (fail-closed on any critical failure), checks
+        (per-invariant records), summary (human verdict), project_path
+        (resolved repo), plus next_steps.
+    """
+    from ai.handoff_preflight import preflight_check
+    return _with_next_steps(
+        "handoff_preflight",
+        _safe_call(preflight_check, project_path=project_path),
+    )
 
 
 @mcp.tool()
