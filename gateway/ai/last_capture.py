@@ -121,18 +121,79 @@ def parse_transcript_tail(
     No LLM call; pure JSONL parsing. Best-effort: returns empty fields on any
     error so callers never have to guard.
 
+    Robust to "thinking-tails": when a session ends mid-work the last few
+    transcript lines are often ``tool_use`` + ``thinking`` blocks with NO
+    ``text`` block. We therefore (a) prefer the last assistant ``text`` block,
+    (b) fall back to the last assistant ``thinking`` block (prefixed
+    ``[thinking] ``) so ``final_assistant_text`` is never empty when assistant
+    turns exist, and (c) widen the scan beyond ``max_turns`` (capped) to recover
+    a real ``text`` block pushed out of the immediate tail by a tool/thinking
+    run. ``tool_calls`` is still extracted from the immediate ``max_turns`` tail.
+
     Args:
         transcript_path: path to the transcript JSONL file.
-        max_turns: how many trailing transcript lines to consider.
+        max_turns: how many trailing transcript lines to consider for
+            ``tool_calls`` and ``turns``. The text/thinking scan may look back
+            further (capped) to recover a real ``text`` block.
 
     Returns:
         {"final_assistant_text": str, "tool_calls": [str, ...], "turns": int}
     """
+    # Cap on how far back we scan for a real text block when the immediate
+    # tail has none. Cheap: a bounded slice, no LLM, no extra IO.
+    SCAN_CAP = 40
+
     result: Dict[str, Any] = {
         "final_assistant_text": "",
         "tool_calls": [],
         "turns": 0,
     }
+
+    def _extract(content: Any, tool_sink: Optional[List[str]]) -> Dict[str, str]:
+        """Pull text/thinking out of one message's content blocks.
+
+        Appends tool_use names to ``tool_sink`` when provided. Returns the
+        joined text and thinking for this message (either may be empty).
+        """
+        text_parts: List[str] = []
+        think_parts: List[str] = []
+        if isinstance(content, list):
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                btype = block.get("type")
+                if btype == "tool_use":
+                    if tool_sink is not None:
+                        name = block.get("name")
+                        if name:
+                            tool_sink.append(str(name))
+                elif btype == "text":
+                    t = block.get("text")
+                    if t:
+                        text_parts.append(str(t))
+                elif btype == "thinking":
+                    # thinking blocks carry their text under "thinking", not "text".
+                    th = block.get("thinking")
+                    if th:
+                        think_parts.append(str(th))
+        elif isinstance(content, str):
+            text_parts.append(content)
+        return {
+            "text": "\n".join(text_parts).strip(),
+            "thinking": "\n".join(think_parts).strip(),
+        }
+
+    def _role_content(obj: Any):
+        """Normalize the (role, content) pair from a transcript line."""
+        msg = obj.get("message") if isinstance(obj, dict) else None
+        if isinstance(msg, dict):
+            role = msg.get("role", "") or (obj.get("type", "") if isinstance(obj, dict) else "")
+            content = msg.get("content")
+        else:
+            role = obj.get("type", "") if isinstance(obj, dict) else ""
+            content = obj.get("content") if isinstance(obj, dict) else None
+        return role, content
+
     try:
         if not transcript_path:
             return result
@@ -145,43 +206,48 @@ def parse_transcript_tail(
 
         tool_calls: List[str] = []
         final_text = ""
+        final_thinking = ""
+
+        # Pass 1: the immediate tail — tool_calls (authoritative here) + the
+        # last text/thinking seen within the tail.
         for raw in tail:
             try:
                 obj = json.loads(raw)
             except Exception:
                 continue
-            # Claude Code transcript shape: {"type": "assistant"/"user",
-            # "message": {"role", "content": [...]}}. Content blocks may be
-            # text blocks or tool_use blocks.
-            msg = obj.get("message") if isinstance(obj, dict) else None
-            role = ""
-            content = None
-            if isinstance(msg, dict):
-                role = msg.get("role", "") or obj.get("type", "")
-                content = msg.get("content")
-            else:
-                role = obj.get("type", "") if isinstance(obj, dict) else ""
-                content = obj.get("content") if isinstance(obj, dict) else None
+            role, content = _role_content(obj)
+            parts = _extract(content, tool_calls)
+            if role == "assistant":
+                if parts["text"]:
+                    final_text = parts["text"]
+                if parts["thinking"]:
+                    final_thinking = parts["thinking"]
 
-            text_parts: List[str] = []
-            if isinstance(content, list):
-                for block in content:
-                    if not isinstance(block, dict):
-                        continue
-                    btype = block.get("type")
-                    if btype == "tool_use":
-                        name = block.get("name")
-                        if name:
-                            tool_calls.append(str(name))
-                    elif btype == "text":
-                        t = block.get("text")
-                        if t:
-                            text_parts.append(str(t))
-            elif isinstance(content, str):
-                text_parts.append(content)
+        # Pass 2 (widen): if the immediate tail had no real text block, look
+        # back further (capped) to recover the last assistant text block that
+        # a tool/thinking run pushed out of the window. Tool calls are NOT
+        # re-collected here — they stay scoped to the immediate tail.
+        if not final_text and (max_turns <= 0 or len(lines) > len(tail)):
+            wide = lines[-SCAN_CAP:] if SCAN_CAP > 0 else lines
+            for raw in wide:
+                try:
+                    obj = json.loads(raw)
+                except Exception:
+                    continue
+                role, content = _role_content(obj)
+                if role != "assistant":
+                    continue
+                parts = _extract(content, None)
+                if parts["text"]:
+                    final_text = parts["text"]
+                # keep tracking thinking too so the fallback uses the latest.
+                if parts["thinking"]:
+                    final_thinking = parts["thinking"]
 
-            if role in ("assistant",) and text_parts:
-                final_text = "\n".join(text_parts).strip()
+        # Prefer real text; fall back to the last thinking block so the field
+        # is never empty when assistant turns exist.
+        if not final_text and final_thinking:
+            final_text = "[thinking] " + final_thinking
 
         result["tool_calls"] = tool_calls
         result["final_assistant_text"] = final_text
