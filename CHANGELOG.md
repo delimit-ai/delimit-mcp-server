@@ -1,6 +1,26 @@
 # Changelog
 
 
+## [4.7.10] - 2026-06-09
+
+Reliability + a new fail-closed handoff guard.
+
+### Added
+
+- **`delimit_handoff_preflight`** — a read-only MCP validator that checks the
+  cross-agent invariant set before a handoff/Auto-Phoenix switch (committer
+  identity not junk, repo not bare, no leaked `GIT_*`, no stale index lock,
+  recent context stamp), fail-closed. The permitted-identity allowlist is
+  configurable via `DELIMIT_GIT_IDENTITIES` (no identity baked into source).
+
+### Fixed
+
+- **Test hygiene** — git-touching tests are now hermetic and a sentinel guards
+  against any test mutating the package's `.git/config` (`core.bare`/identity).
+- **`parse_transcript_tail`** reads only the trailing ~64KB of a transcript
+  (seek-from-end) instead of loading the whole file — cheaper Stop-hook /
+  crash-recovery floor on large transcripts.
+
 ## [4.7.9] - 2026-06-09
 
 Control plane (LED-1709) — one interactive surface over the work that matters.
