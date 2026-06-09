@@ -7214,5 +7214,23 @@ program
         }
     });
 
+program
+    .command('handoff [action] [repoPath]')
+    .description('Check or repair cross-agent handoff invariants (LED-1710). action: check (default) | fix')
+    .action((action, repoPath) => {
+        const hf = require('../lib/handoff-fix');
+        const repo = repoPath || process.cwd();
+        try {
+            if (action === 'fix') {
+                hf.fix(repo);
+            } else {
+                process.exitCode = hf.report(repo);
+            }
+        } catch (e) {
+            console.error(require('chalk').red('  handoff error: ' + (e && e.message ? e.message : e)));
+            process.exitCode = 1;
+        }
+    });
+
 const normalizedArgs = normalizeNaturalLanguageArgs(process.argv);
 program.parse([process.argv[0], process.argv[1], ...normalizedArgs]);

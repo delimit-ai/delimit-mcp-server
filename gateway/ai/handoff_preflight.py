@@ -35,6 +35,7 @@ Keep this dependency-free beyond stdlib + the sibling ``last_capture`` helper.
 """
 
 import os
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -42,14 +43,24 @@ from typing import Any, Dict, List, Optional
 
 # ─── Invariant constants ────────────────────────────────────────────────
 
-# git identities we accept as the legitimate infracore committer. A handoff
-# that inherits anything else (notably the ``test@*`` junk identity that
-# fixture/CI setups leave behind) is corrupted state per the 2026-04-07 +
-# 2026-05-18 incident classes.
-PERMITTED_GIT_EMAILS = (
-    "infracore@delimit.ai",
-    "infracore@users.noreply.github.com",
+# Junk git identities are NEVER valid — the ``test@*`` / example / localhost
+# patterns that fixture/CI setups leave behind (corrupted state per the
+# 2026-04-07 + 2026-05-18 incident classes). An optional strict allowlist can
+# be configured per-environment via DELIMIT_GIT_IDENTITIES (comma-separated) —
+# recommended for org accounts; absent it, any real-looking committer passes.
+# No specific identity is hardcoded in shipped source (SHIFT-1 anonymity).
+_JUNK_EMAIL_RE = re.compile(
+    r"(^test@|@example\.(com|org)\b|@(test\b|localhost\b)|\.local$|\.test$)", re.I
 )
+
+
+def _permitted_git_emails():
+    raw = os.environ.get("DELIMIT_GIT_IDENTITIES", "")
+    return tuple(e.strip() for e in raw.split(",") if e.strip())
+
+
+def _is_junk_email(email):
+    return (not email) or bool(_JUNK_EMAIL_RE.search(email))
 
 # GIT_* env vars that, if leaked across a handoff, would silently redirect the
 # next agent's git subprocesses at the wrong object store / work tree / index.
@@ -138,30 +149,27 @@ def _check(name: str, ok: bool, severity: str, detail: str, remediation: str) ->
 
 
 def _check_git_identity(repo: str) -> Dict[str, Any]:
-    """CRITICAL: configured user.email is a permitted infracore identity."""
+    """CRITICAL: configured user.email is a real committer (not junk), and —
+    if DELIMIT_GIT_IDENTITIES is set — one of the permitted identities."""
+    remediate = "set a real committer: git -C <repo> config user.email <you@org>"
     try:
         r = _git(repo, ["config", "user.email"])
         email = (r.stdout or "").strip()
-        if not email:
+        if _is_junk_email(email):
+            detail = ("git user.email is empty/unset for this repo" if not email
+                      else f"user.email={email!r} looks like a junk/fixture identity")
+            return _check("git_identity", False, "critical", detail, remediate)
+        allow = _permitted_git_emails()
+        if allow and email not in allow:
             return _check(
                 "git_identity", False, "critical",
-                "git user.email is empty/unset for this repo",
-                "git -C <repo> config user.email infracore@users.noreply.github.com",
+                f"user.email={email!r} is not in DELIMIT_GIT_IDENTITIES",
+                "git -C <repo> config user.email <one of DELIMIT_GIT_IDENTITIES>",
             )
-        if email in PERMITTED_GIT_EMAILS:
-            return _check("git_identity", True, "critical", f"user.email={email}", "")
-        return _check(
-            "git_identity", False, "critical",
-            f"user.email={email!r} is not a permitted infracore identity "
-            f"(expected one of {', '.join(PERMITTED_GIT_EMAILS)})",
-            "git -C <repo> config user.email infracore@users.noreply.github.com",
-        )
+        return _check("git_identity", True, "critical", f"user.email={email}", "")
     except Exception as e:  # pragma: no cover - defensive
-        return _check(
-            "git_identity", False, "critical",
-            f"could not read git user.email: {e}",
-            "git -C <repo> config user.email infracore@users.noreply.github.com",
-        )
+        return _check("git_identity", False, "critical",
+                      f"could not read git user.email: {e}", remediate)
 
 
 def _check_not_bare(repo: str) -> Dict[str, Any]:
