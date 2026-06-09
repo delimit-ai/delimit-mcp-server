@@ -247,6 +247,47 @@ def _load_receipt(project_path: str, receipt_id: str) -> Optional[HandoffReceipt
         return None
 
 
+def get_receipt(receipt_id: str, project_path: str = "") -> Optional[HandoffReceipt]:
+    """Look up a single receipt by id.
+
+    Receipts are stored per project-hash, so a bare receipt id has no
+    single canonical directory. When ``project_path`` is given we read the
+    fast path (``_load_receipt`` in that project's dir). Otherwise we scan
+    every project-hash directory under ``RECEIPTS_BASE_DIR`` for a matching
+    ``{receipt_id}.json`` and load the first hit. Read-only; returns None
+    when no receipt with that id exists anywhere.
+    """
+    if not receipt_id:
+        return None
+
+    # Fast path: caller knows the project.
+    if project_path:
+        receipt = _load_receipt(project_path, receipt_id)
+        if receipt is not None:
+            return receipt
+
+    # Global scan across all project-hash dirs.
+    if not RECEIPTS_BASE_DIR.exists():
+        return None
+
+    filename = f"{receipt_id}.json"
+    for proj_dir in RECEIPTS_BASE_DIR.iterdir():
+        if not proj_dir.is_dir():
+            continue
+        filepath = proj_dir / filename
+        if not filepath.exists():
+            continue
+        try:
+            data = json.loads(filepath.read_text())
+            return HandoffReceipt(**{
+                k: v for k, v in data.items()
+                if k in HandoffReceipt.__dataclass_fields__
+            })
+        except (json.JSONDecodeError, TypeError, KeyError, OSError):
+            continue
+    return None
+
+
 def acknowledge_receipt(
     receipt_id: str,
     model: str = "unknown",

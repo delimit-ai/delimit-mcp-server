@@ -1353,6 +1353,18 @@ def session_handoff(
     path = SESSIONS_DIR / f"{session_id}.json"
     path.write_text(json.dumps(handoff, indent=2))
 
+    # LED-1705: stamp the deterministic-floor coordinator so the Stop hook
+    # treats this model-invoked handoff as the fresh, richer artifact and
+    # skips writing a deterministic floor over it.
+    try:
+        try:
+            from ai.last_capture import stamp_capture
+        except ImportError:  # pragma: no cover - flat import layout
+            from last_capture import stamp_capture
+        stamp_capture(source="model", session_id=session_id)
+    except Exception:
+        pass
+
     return {"saved": session_id, "path": str(path), "handoff": handoff}
 
 
