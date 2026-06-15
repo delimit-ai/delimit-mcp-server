@@ -1,0 +1,19 @@
+{
+  "_comment": "SEC-4 canonicalization conformance vectors. The Python verifier (_canonical via json.dumps sort_keys+compact) and the delimit-ui TS pyDumps MUST produce byte-identical canonical output for every vector here. This file is duplicated byte-for-byte in delimit-ui lib/seal/canon_vectors.json; keep them in sync. Each vector's obj is canonicalized (after stripping signature/signatures); both the raw canonical string and its sha256 must match across implementations.",
+  "vectors": [
+    { "name": "empty_object", "obj": {} },
+    { "name": "empty_list_field", "obj": { "model_sequence": [] } },
+    { "name": "unsorted_keys", "obj": { "z": 1, "a": 2, "m": 3 } },
+    { "name": "nested_unsorted", "obj": { "outer": { "b": { "d": 4, "c": 3 }, "a": 1 }, "first": true } },
+    { "name": "booleans_and_null", "obj": { "t": true, "f": false, "n": null } },
+    { "name": "integers", "obj": { "zero": 0, "pos": 42, "neg": -17, "big": 1000000 } },
+    { "name": "floats", "obj": { "half": 0.5, "neg": -2.25, "small": 0.125 } },
+    { "name": "unicode_model_sequence", "obj": { "model_sequence": ["claude-opus", "gémini-2.5", "ä-model", "日本語モデル", "emoji-😀-model"] } },
+    { "name": "unicode_keys", "obj": { "café": 1, "naïve": 2, "straße": 3 } },
+    { "name": "string_escapes", "obj": { "s": "tab\there\nnewline\"quote\\backslash" } },
+    { "name": "control_chars", "obj": { "s": "\u0001\u001f\u007f" } },
+    { "name": "signature_stripped", "obj": { "data": "x", "signature": "ed25519:deadbeef", "signatures": [{ "key_id": "k1", "sig": "ed25519:00" }] } },
+    { "name": "nested_lists", "obj": { "leaves": [{ "kind": "input", "hash": "sha256:aa" }, { "kind": "output", "hash": "sha256:bb" }] } },
+    { "name": "mixed_realistic", "obj": { "schema_version": "0.2", "model_sequence": ["a", "b"], "merkle_root": "sha256:00", "action": "ANNOTATE", "findings": [], "does_not_attest": { "factual_correctness": true } } }
+  ]
+}

@@ -111,22 +111,50 @@ class CIFormatter:
         errors = [v for v in violations if v.get("severity") == "error"]
         warnings = [v for v in violations if v.get("severity") == "warning"]
 
+        # ── HEADERS WITH TEST COMPATIBILITY ──
+        if decision == "fail":
+            lines.append("\U0001f6e1\ufe0f **Breaking API Changes Detected**\n")
+        elif decision == "warn":
+            lines.append("\U0001f6e1\ufe0f **Governance Passed — Potential Issues**\n")
+        else:
+            lines.append("\U0001f6e1\ufe0f **Governance Passed — API Changes Look Good**\n")
+
         if bc == 0:
             # ── GREEN PATH ──
-            bump_label = "NONE"
-            if semver:
-                bump_label = semver.get("bump", "none").upper()
-            lines.append("\U0001f6e1\ufe0f **Governance Passed**\n")
-            if total > 0:
+            if semver and semver.get("bump") != "none":
+                bump_label = f"`{semver.get('bump', 'none').upper()}`"
+                next_label = ""
+                if semver.get("next_version"):
+                    next_label = f" · Next: `{semver['next_version']}`"
+                
                 lines.append(
                     f"> **No breaking API changes detected.** "
                     f"{additive} additive change{'s' if additive != 1 else ''} "
-                    f"found \u2014 Semver: **{bump_label}**\n"
+                    f"found \u2014 Semver: **{bump_label}**{next_label}\n"
                 )
             else:
                 lines.append("> **No breaking API changes detected.**\n")
 
-            # Additive changes
+            # Violations table for warnings/policy issues
+            if errors or warnings:
+                lines.append("### Warnings & Issues\n")
+                lines.append("| Severity | Change | Location |")
+                lines.append("|----------|--------|----------|")
+                for v in errors:
+                    rule = v.get("name", v.get("rule", "Unknown"))
+                    rule_prefix = f"**{rule}**: " if rule else ""
+                    desc = f"{rule_prefix}{v.get('message', 'Unknown violation')}"
+                    location = v.get("path", "-")
+                    lines.append(f"| 🔴 Error | {desc} | `{location}` |")
+                for v in warnings:
+                    rule = v.get("name", v.get("rule", "Unknown"))
+                    rule_prefix = f"**{rule}**: " if rule else ""
+                    desc = f"{rule_prefix}{v.get('message', 'Unknown warning')}"
+                    location = v.get("path", "-")
+                    lines.append(f"| 🟡 Warning | {desc} | `{location}` |")
+                lines.append("")
+
+            # Additive changes (collapsed)
             safe_changes = [c for c in all_changes if not c.get("is_breaking")]
             if safe_changes and len(safe_changes) <= 15:
                 lines.append("<details>")
@@ -136,11 +164,9 @@ class CIFormatter:
                 lines.append("</details>\n")
         else:
             # ── RED PATH ──
-            lines.append("\U0001f6e1\ufe0f **Breaking API Changes Detected**\n")
-
             # Summary card
             parts = [f"\U0001f534 **{bc} breaking change{'s' if bc != 1 else ''}**"]
-            parts.append("Semver: **MAJOR**")
+            parts.append("Semver: **`MAJOR`**")
             if semver and semver.get("next_version"):
                 parts.append(f"Next: `{semver['next_version']}`")
             separator = " \u00b7 "
@@ -165,14 +191,18 @@ class CIFormatter:
                 lines.append("|----------|--------|----------|")
 
                 for v in errors:
-                    desc = v.get("message", "Unknown violation")
+                    rule = v.get("name", v.get("rule", "Unknown"))
+                    rule_prefix = f"**{rule}**: " if rule else ""
+                    desc = f"{rule_prefix}{v.get('message', 'Unknown violation')}"
                     location = v.get("path", "-")
-                    lines.append(f"| \U0001f534 Critical | {desc} | `{location}` |")
+                    lines.append(f"| 🔴 Error | {desc} | `{location}` |")
 
                 for v in warnings:
-                    desc = v.get("message", "Unknown warning")
+                    rule = v.get("name", v.get("rule", "Unknown"))
+                    rule_prefix = f"**{rule}**: " if rule else ""
+                    desc = f"{rule_prefix}{v.get('message', 'Unknown warning')}"
                     location = v.get("path", "-")
-                    lines.append(f"| \U0001f7e1 Warning | {desc} | `{location}` |")
+                    lines.append(f"| 🟡 Warning | {desc} | `{location}` |")
 
                 lines.append("")
 
@@ -191,6 +221,14 @@ class CIFormatter:
                 lines.append("4. **Gradual migration** \u2014 provide guides and time")
                 lines.append("\n</details>\n")
 
+            # Remediation when migration is missing
+            if decision == "fail" and not migration:
+                lines.append("### 💡 How to Fix\n")
+                lines.append("1. **Restore removed endpoints** \u2014 deprecate before removing")
+                lines.append("2. **Make parameters optional** \u2014 don't add required params")
+                lines.append("3. **Use versioning** \u2014 create `/v2/` for breaking changes")
+                lines.append("4. **Gradual migration** \u2014 provide guides and time\n")
+
             # Additive changes
             safe_changes = [c for c in all_changes if not c.get("is_breaking")]
             if safe_changes and len(safe_changes) <= 15:
@@ -202,9 +240,20 @@ class CIFormatter:
 
             lines.append("> **Fix locally:** `npx delimit-cli lint`\n")
 
+        # Detailed changes (test compat)
+        if all_changes and len(all_changes) <= 10:
+            lines.append("<details>")
+            lines.append("<summary>All changes</summary>\n")
+            lines.append("```")
+            for change in all_changes:
+                breaking = "BREAKING" if change.get("is_breaking") else "safe"
+                lines.append(f"[{breaking}] {change.get('message', 'Unknown change')}")
+            lines.append("```")
+            lines.append("</details>\n")
+
         lines.append("---")
         lines.append(
-            "Powered by [Delimit](https://delimit.ai) \u00b7 "
+            "Generated by [Delimit](https://delimit.ai) \u00b7 "
             "[Docs](https://delimit.ai/docs) \u00b7 "
             "[Install](https://github.com/marketplace/actions/delimit-api-governance)"
         )

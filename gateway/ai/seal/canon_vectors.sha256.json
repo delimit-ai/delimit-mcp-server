@@ -1,0 +1,16 @@
+{
+  "booleans_and_null": "22e00dc2f7b01420f940fbdbfbdf34fa0667cc6500186495023ba37722cbd05e",
+  "control_chars": "c8c6a3428954c433eecbc6e325b485f610597b71f35e89effadcecfc3eed65c0",
+  "empty_list_field": "3c2643284db48d4629260c90f921c0b265664fee01fb7ccff09ef094db3c946d",
+  "empty_object": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+  "floats": "09222fc269d520a0fc23bfe380dc12424d4dd56f7fde763985be7f034d2e6b88",
+  "integers": "df45fe87d60780a97affae0b14e193bbf8796e86ce53459722faea82a39b9ed2",
+  "mixed_realistic": "99e3622422efb0ffcf4b865f40a3a4845c7fd60070a5ca99d0e8888943f2bb57",
+  "nested_lists": "78403d0d182daf7e15f55b18ac7cedae93fd8c9c7b983a26abd27f061c09e87d",
+  "nested_unsorted": "1263e7ab647b46e0b8324a1f73371e653be34e281dc986c88a4c40c874377340",
+  "signature_stripped": "dad9f2b7152e4b3e65a68cbca9ff98bffd6af461195cad1f6bfb014a80ec4cb2",
+  "string_escapes": "25bde9c046c12cc40914194cd36c613d1b21cf9e5a0c17c2d509d66906d2b579",
+  "unicode_keys": "5c3cc1f3b2919509b201439f81d4eb3dbb9e94cdb1af5da050bf4bdae4aebe36",
+  "unicode_model_sequence": "51c8e88448de8baebc0fdb6d13a7b8e32cdab549b9b21fb56bb416ee776adb79",
+  "unsorted_keys": "ebba85cfdc0a724b6cc327ecc545faeb38b9fe02eca603b430eb872f5cf75370"
+}

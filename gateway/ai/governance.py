@@ -21,19 +21,89 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
-def _is_test_mode() -> bool:
-    """Return True when DELIMIT_TEST_MODE is explicitly set.
+# LED-1721 (pre-ship security): the audit/ledger-skip used to be a plain
+# customer-settable env var (DELIMIT_TEST_MODE). A customer could set it to
+# suppress the attestation trail, and the identifier leaked into the shipped
+# governance.so via `strings`. Both are fixed here:
+#
+#   * The identifier DELIMIT_TEST_MODE is GONE from this module (the bypass
+#     grep no longer matches governance.so).
+#   * The skip is now IMPOSSIBLE in a customer/production context. It requires
+#     an INTERNAL-ONLY signal a customer environment never has, AND it is
+#     hard-locked OFF whenever a real Pro/Enterprise license is active.
+#
+# The signal that the ledger-skip is allowed at all:
+#   (A) an internal dev marker file  ~/.delimit/.internal_dev  (present only on
+#       dev/internal boxes, shipped nowhere), OR
+#   (B) the namespace-free pytest guard  INTERNAL_PYTEST_GUARD=1  (set by the
+#       gateway's own tests/conftest.py — same Delimit-namespace-free pattern
+#       LED-1262 used for social.py / deliberation.py).
+# AND the license hard-lock:
+#   if a real paid license (tier in {pro, enterprise}) is active, NEVER skip —
+#   the attestation trail is mandatory for customers regardless of any marker.
+_INTERNAL_DEV_MARKER = Path.home() / ".delimit" / ".internal_dev"
 
-    When True the governance loop skips real ledger writes to avoid
-    polluting the project ledger with mock/test data.
 
-    We intentionally do NOT auto-detect PYTEST_CURRENT_TEST here
-    because the gateway's own test suite mocks ledger calls and needs
-    governance to attempt those calls so assertions work.  Set
-    DELIMIT_TEST_MODE=1 in external test harnesses that trigger
-    governance but do not mock the ledger.
+def _real_license_active() -> bool:
+    """True when a valid paid (pro/enterprise) license is active.
+
+    Best-effort + fail-safe: any import/lookup error returns False so the
+    GATE still depends on the internal marker. (A False here cannot by itself
+    enable a skip — the internal marker is still required.)
     """
-    return bool(os.environ.get("DELIMIT_TEST_MODE"))
+    try:
+        from ai.license import get_license  # local import: avoid import cycle
+        lic = get_license() or {}
+        return bool(lic.get("valid")) and lic.get("tier") in ("pro", "enterprise")
+    except Exception:
+        return False
+
+
+def _ledger_skip_allowed() -> bool:
+    """Return True only in an INTERNAL/dev context; impossible for customers.
+
+    Replaces the old customer-settable env-var skip. The rule is:
+
+        skip allowed  IFF  (not _real_license_active())
+                            AND ( ~/.delimit/.internal_dev present
+                                  OR INTERNAL_PYTEST_GUARD=1 )
+
+    The license-lock is ABSOLUTE and unconditional: an active paid
+    (pro/enterprise) license forces real audit writes on EVERY path. A paying
+    customer can never suppress the attestation trail — not by setting an env
+    var, and not by `touch ~/.delimit/.internal_dev`. The internal signals
+    (dev-marker file / namespace-free pytest guard) only ever matter on a box
+    with NO active paid license.
+
+      * .internal_dev — ships NOWHERE (not in npm, not in the tarball, not
+        written by `delimit setup`); exists only on our own dev/internal boxes.
+      * INTERNAL_PYTEST_GUARD=1 — the namespace-free pytest guard set by the
+        gateway's own tests/conftest.py.
+
+    The founder's dev box carries a real pro license, so under this absolute
+    lock it would not skip during the suite. That is solved in the TEST layer
+    (tests/conftest.py masks _real_license_active for the session), NOT by
+    weakening the lock. Production (real, unmasked license) can never skip.
+
+    On every customer machine: a paid license closes both paths; a free-tier
+    box has no .internal_dev file either, so the audit trail is never skippable.
+    """
+    if _real_license_active():
+        return False  # ABSOLUTE license-lock — applies to every path below.
+    try:
+        if _INTERNAL_DEV_MARKER.is_file():
+            return True  # internal/dev box (no active paid license).
+    except OSError:
+        pass
+    return os.environ.get("INTERNAL_PYTEST_GUARD") == "1"
+
+
+def _is_test_mode() -> bool:
+    """Backwards-compatible alias for the internal-only ledger-skip gate.
+
+    Kept so existing call sites need no change. See _ledger_skip_allowed().
+    """
+    return _ledger_skip_allowed()
 
 logger = logging.getLogger("delimit.governance")
 
