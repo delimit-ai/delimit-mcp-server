@@ -186,10 +186,10 @@ def test_coverage(project_path: str, threshold: int = 80) -> Dict[str, Any]:
             "note": "File-count estimate. Run test runner with --coverage for precise line coverage."}
 
 
-def test_smoke(project_path: str, test_suite: Optional[str] = None) -> Dict[str, Any]:
+def test_smoke(project_path: str, test_suite: Optional[str] = None, timeout_seconds: Optional[int] = 120, extra_args: Optional[List[str]] = None, fail_fast: Optional[bool] = False) -> Dict[str, Any]:
     """Run smoke tests for the project using the detected test framework."""
     from .tools_real import test_smoke as _real_test_smoke
-    return _real_test_smoke(project_path=project_path, test_suite=test_suite)
+    return _real_test_smoke(project_path=project_path, test_suite=test_suite, timeout_seconds=timeout_seconds, extra_args=extra_args, fail_fast=fail_fast)
 
 
 # ─── DocsWeaver (Real implementations — tools_real.py) ────────────────

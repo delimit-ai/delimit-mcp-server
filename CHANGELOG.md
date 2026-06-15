@@ -1,3 +1,8 @@
+## [4.9.0] - 2026-06-15
+
+### Added
+- **Hardened v0.2 attestation verification (Delimit Seal).** The bundled open-core verifier now validates `schema_version: 0.2` receipts: required `model_sequence` (non-suppressible model trace), hash-only Merkle payload (`merkle.py`, no raw content), and dual Ed25519 signatures (`signatures[]`, deduped by distinct public key). New `gateway/ai/seal/`: `merkle.py`, `seal_pubkeys.json` (published co-signing key), `HARDENED_SCHEMA.md`, canonicalization conformance vectors. Fully backward compatible — existing v0.1 single-signature receipts still verify unchanged.
+
 # Changelog
 
 

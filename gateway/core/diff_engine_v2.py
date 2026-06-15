@@ -488,6 +488,10 @@ class OpenAPIDiffEngine:
                 return None
         return node if isinstance(node, dict) else None
 
+    def _resolve_ref(self, ref: Optional[str], root: Dict) -> Optional[Dict]:
+        """Backward compatibility alias for tests."""
+        return self._resolve_local_ref(ref, root)
+
     def _advise_unverifiable_ref(self, path: str, ref: str, root: Dict) -> None:
         """Record an advisory for a $ref that could not be resolved."""
         if isinstance(ref, str) and ref.startswith("#/"):
@@ -495,7 +499,7 @@ class OpenAPIDiffEngine:
         else:
             self._add_advisory("external_ref_skipped", path, f"non-local $ref '{ref}' skipped")
 
-    def _resolve_schema(self, schema: Any, root: Dict, path: str) -> Any:
+    def _resolve_schema(self, schema: Any, root: Dict, path: str = "") -> Any:
         """Follow a (possibly chained) local $ref to its concrete schema."""
         if not isinstance(schema, dict) or "$ref" not in schema:
             return schema
@@ -524,9 +528,6 @@ class OpenAPIDiffEngine:
         new_ref = new_schema.get("$ref") if isinstance(new_schema, dict) else None
 
         if old_ref or new_ref:
-            if old_ref and new_ref and old_ref == new_ref:
-                return
-            
             seen_key = (old_ref or "", new_ref or "")
             if seen_key in self._ref_stack:
                 return  # cycle on current path
@@ -537,6 +538,9 @@ class OpenAPIDiffEngine:
             if (old_ref and resolved_old is old_schema and "$ref" in old_schema) or \
                (new_ref and resolved_new is new_schema and "$ref" in new_schema):
                 return # Unresolved ref advisory already added by _resolve_schema
+
+            if old_ref and new_ref and old_ref == new_ref:
+                return
 
             self._ref_stack.add(seen_key)
             try:

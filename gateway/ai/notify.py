@@ -93,8 +93,27 @@ def _load_inbound_email_config() -> Dict[str, str]:
 
 
 # ── Inbound email configuration ──────────────────────────────────────
+# Canonical mail host (matches the hardcoded value in founding_users.py). Used
+# as a last-resort fallback so IMAP_HOST is NEVER empty.
+_DEFAULT_MAIL_HOST = "mail.spacemail.com"
+
+
+def _resolve_imap_host(env_host: str = "", cfg_host: str = "") -> str:
+    """Resolve the IMAP host, guaranteeing a non-empty result.
+
+    An empty host makes imaplib.IMAP4_SSL("", 993) connect to localhost, which
+    is refused — silently killing the inbox daemon (it caches the empty host at
+    import time, then trips its 3-failure circuit breaker and stops, so customer
+    email goes unseen). Falling back to the canonical mail host closes that
+    failure mode: precedence is env override → config → canonical default.
+    """
+    return env_host or cfg_host or _DEFAULT_MAIL_HOST
+
+
 _INBOUND_CFG = _load_inbound_email_config()
-IMAP_HOST = os.environ.get("DELIMIT_IMAP_HOST", "") or _INBOUND_CFG.get("imap_host", "")
+IMAP_HOST = _resolve_imap_host(
+    os.environ.get("DELIMIT_IMAP_HOST", ""), _INBOUND_CFG.get("imap_host", "")
+)
 IMAP_PORT = int(os.environ.get("DELIMIT_IMAP_PORT", "") or _INBOUND_CFG.get("imap_port", "993"))
 IMAP_USER = os.environ.get("DELIMIT_IMAP_USER", "") or _INBOUND_CFG.get("imap_user", "")
 FORWARD_TO = _INBOUND_CFG.get("forward_to", "")

@@ -329,7 +329,7 @@ def _parse_jest_output(stdout: str) -> Dict[str, int]:
     return counts
 
 
-def test_smoke(project_path: str, test_suite: Optional[str] = None) -> Dict[str, Any]:
+def test_smoke(project_path: str, test_suite: Optional[str] = None, timeout_seconds: Optional[int] = 120, extra_args: Optional[List[str]] = None, fail_fast: Optional[bool] = False) -> Dict[str, Any]:
     """Detect test framework and run tests. Returns pass/fail/error counts.
 
     Works by detecting the test framework from project config files,
@@ -364,6 +364,20 @@ def test_smoke(project_path: str, test_suite: Optional[str] = None) -> Dict[str,
         if not re.match(r'^[\w/.\-:*\[\]]+$', test_suite):
             return {"tool": "test.smoke", "status": "error", "error": f"Invalid test_suite: {test_suite}"}
         cmd_list.append(test_suite)
+
+    # Apply fail-fast parameter
+    if fail_fast:
+        if framework == "pytest":
+            cmd_list.append("-x")
+        elif framework in ("jest", "vitest", "mocha"):
+            cmd_list.append("--bail")
+
+    # Apply extra arguments if provided
+    if extra_args:
+        for arg in extra_args:
+            if not re.match(r'^[\w/.\-:=*\[\]]+$', arg):
+                return {"tool": "test.smoke", "status": "error", "error": f"Invalid extra_arg: {arg}"}
+        cmd_list.extend(extra_args)
 
     # Detect the right Python executable.
     #
@@ -423,6 +437,8 @@ def test_smoke(project_path: str, test_suite: Optional[str] = None) -> Dict[str,
 
         cmd_list[0] = chosen
 
+    timeout_val = timeout_seconds if timeout_seconds is not None else 120
+
     try:
         result = subprocess.run(
             cmd_list,
@@ -430,14 +446,14 @@ def test_smoke(project_path: str, test_suite: Optional[str] = None) -> Dict[str,
             cwd=str(project),
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=timeout_val,
             env={**os.environ, "CI": "1", "FORCE_COLOR": "0"},
         )
     except subprocess.TimeoutExpired:
         return {
             "tool": "test.smoke",
             "status": "timeout",
-            "error": "Test execution timed out after 120 seconds",
+            "error": f"Test execution timed out after {timeout_val} seconds",
             "framework_detected": framework,
             "project_path": str(project),
         }
