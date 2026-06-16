@@ -1,3 +1,16 @@
+## [4.10.0] - 2026-06-16
+
+### Changed — Pro tier rebalanced (90-day grace; no existing user is hard-cut)
+- **12 zero-marginal-cost tools moved to FREE**: the agent lifecycle (`delimit_agent_dispatch` / `_status` / `_complete` / `_handoff`), `delimit_notify`, repo inspection (`delimit_repo_analyze`, `delimit_repo_config_audit`, `delimit_repo_config_validate`), and loop/task control (`delimit_loop_config`, `delimit_loop_status`, `delimit_next_task`, `delimit_task_complete`). These are local-state / read tools that anchor the free tier.
+- **12 marginal-cost tools moved to Pro** (LLM calls, outbound network, or background daemons), each behind a **90-day grace window + automatic grandfather** so existing free users are never hard-cut mid-migration: `delimit_audit`, `delimit_build_loop_daemon`, `delimit_vendor_news_scan`, `delimit_vendor_news_draft`, `delimit_content_publish`, `delimit_social_target`, `delimit_github_scan`, `delimit_reddit_scan`, `delimit_inbox_daemon`, `delimit_social_daemon`, `delimit_daemon_run`, `delimit_notify_inbox`.
+
+### Added
+- **scan_bridge precision filter** — a data-grounded gate that cuts ~94% of low-signal strategic auto-promotions; env-tunable and reversible (`DELIMIT_SCAN_PROMO_*`).
+- Tool documentation upgrades (registry tool-score lift), a docstring-quality (TDQS) check, and secrets-broker hardening (honest at-rest field naming + kill-switched scope enforcement).
+
+### Fixed
+- The central Pro entitlement gate is now grace-aware, so newly-Pro tools honor the migration window end-to-end (no hard-block during grace).
+
 ## [4.9.0] - 2026-06-15
 
 ### Added
