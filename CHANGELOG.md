@@ -1,3 +1,8 @@
+## [4.11.1] - 2026-06-17
+
+### Changed — compiled engine bumped to proModuleVersion 3.10.0 (binary-customer parity for LED-1454)
+- Binary (compiled-engine) installs now fetch pro module **v3.10.0**, which carries the LED-1454 leaky-gate closure into the compiled `PRO_TOOLS` set: `delimit_security_deliberate`, `delimit_security_ingest`, `delimit_gov_new_task`, and `delimit_social_approve` now require Pro on the compiled path too (previously free only there due to a set mismatch), and `delimit_repo_diagnose` + `delimit_test_coverage` are free everywhere. The four gated tools carry a **90-day grace + automatic grandfather**, so no existing free user is hard-cut mid-migration. Non-binary (Python-fallback) behavior is unchanged from 4.11.0.
+
 ## [4.11.0] - 2026-06-17
 
 ### Changed
