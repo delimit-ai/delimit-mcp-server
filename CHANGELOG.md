@@ -1,3 +1,15 @@
+## [4.11.0] - 2026-06-17
+
+### Changed
+- **`delimit_repo_diagnose` and `delimit_test_coverage` moved to FREE** (LED-1454). Both are read-only, zero-marginal-cost tools (a quick repo health pass and an `os.walk` test-file-count estimate); they round out the free tier alongside the already-free `delimit_test_smoke` and repo-inspection family. The four Pro security/governance/social tools they were grouped with stay Pro.
+
+### Added
+- **Golden Path** — a "first 10 minutes" merge-gate walkthrough in the README: lint → diff → semver → multi-model deliberation → signed, replayable attestation → persistent memory + ledger.
+
+### Fixed
+- `delimit_security_audit` no longer accumulates duplicate P0 ledger items when the same target is scanned repeatedly (dedup on exact finding title; fail-open).
+- The Twitter auto-post path now enforces a 24h freshness window (parity with the GitHub path), so a stale-approved draft is surfaced for manual posting rather than auto-posting late.
+
 ## [4.10.0] - 2026-06-16
 
 ### Changed — Pro tier rebalanced (90-day grace; no existing user is hard-cut)
