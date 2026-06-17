@@ -1,7 +1,7 @@
 {
   "name": "delimit-cli",
   "mcpName": "io.github.delimit-ai/delimit-mcp-server",
-  "version": "4.11.0",
+  "version": "4.11.1",
   "description": "Unify Claude Code, Codex, Cursor, and Gemini CLI with persistent context, governance, and multi-model debate.",
   "main": "index.js",
   "files": [
@@ -127,7 +127,7 @@
     "js-yaml": "^4.1.0",
     "minimatch": "^5.1.0"
   },
-  "proModuleVersion": "3.9.0",
+  "proModuleVersion": "3.10.0",
   "engines": {
     "node": ">=14.0.0"
   }
