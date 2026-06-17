@@ -41,6 +41,84 @@ For the schema and signing methodology behind every report, see **[delimit.ai/me
 
 ---
 
+## Golden Path — your first 10 minutes
+
+The merge gate for AI-written code, end to end: lint a spec, see exactly what breaks, classify the bump, settle the hard calls with multiple models, and walk away with a signed, replayable attestation. Then keep the context that survives across sessions and models.
+
+### 1. Install
+
+```bash
+npx delimit-cli scan          # discovery: finds your OpenAPI specs, frameworks, security issues, tests
+npx delimit-cli init          # wire up the merge-gate config (--preset strict | default | relaxed)
+```
+
+`scan` (`delimit_scan`) reports what Delimit can do for this repo. `init` (`delimit_init`) drops in the policy preset and merge-gate config. No account, no keys.
+
+### 2. The merge gate, end to end
+
+**Lint the spec change (the gate).** Baseline vs. proposed, with policy applied — one pass/fail verdict.
+
+```bash
+npx delimit-cli lint old.yaml new.yaml       # tool: delimit_lint
+```
+
+**See exactly what breaks.** Pure structural diff — added/removed/modified endpoints, schemas, params, no policy.
+
+```bash
+npx delimit-cli diff old.yaml new.yaml       # tool: delimit_diff
+```
+
+**Classify the bump.** Deterministic MAJOR/MINOR/PATCH/NONE — same input, same answer, every time.
+
+```text
+delimit_semver       → MAJOR/MINOR/PATCH/NONE + next version string
+delimit_impact       → blast radius: scans your dependency manifest for downstream callers (informational)
+```
+
+**Settle the hard calls.** When the gate verdict is a judgment call, put it to multiple models and let them debate to consensus.
+
+```bash
+npx delimit-cli deliberate "Is dropping the deprecated v1 /users field a safe MINOR?"
+#   tool: delimit_deliberate — 3 free, then bring your own key
+```
+
+**Capture the signed, replayable attestation.** After a gate event (deploy / security / test / audit), record the evidence bundle and verify it any time.
+
+```text
+delimit_evidence_collect   → signed evidence bundle for the audit trail        (Pro)
+delimit_evidence_verify    → confirm a bundle hasn't been tampered with         (Pro)
+delimit_seal_verify        → check a Delimit Seal receipt against its bundled   (Free)
+                             Layer-0 constitution — offline-verifiable
+```
+
+Every receipt is offline-verifiable: `npx delimit-cli seal-verify <receipt.json>`, or open its `delimit.ai/att/<id>` replay URL.
+
+### 3. Context that survives sessions and models
+
+Decisions, constraints, and tasks persist across sessions and across AI assistants — switch from Claude Code to Codex, Cursor, or Gemini CLI without losing the thread.
+
+**Memory** — persist and recall the *why*, not just the diff.
+
+```bash
+npx delimit-cli remember "v1 /users field is frozen until Q3 — downstream billing depends on it"
+#   tool: delimit_memory_store
+npx delimit-cli recall billing               # local recall over your saved memories (Free)
+```
+
+For semantic recall by meaning across sessions, the assistant calls `delimit_memory_search` (Pro) directly.
+
+**Ledger** — one task list, shared across every assistant and session.
+
+```text
+delimit_ledger_add        → record a task/bug/feature/strategic item
+delimit_ledger_context    → session-start: top open items by priority (what's queued)
+delimit_ledger_done       → close with a note (auto-captures a PR URL as ship proof)
+```
+
+That's the loop: gate the change, sign the proof, keep the context. Run it once on a real spec and you've used the whole merge gate.
+
+---
+
 ## Think and Build
 
 Beyond the merge gate, Delimit orchestrates multi-model deliberation and autonomous builds. `delimit think` dispatches a strategic question to Claude, Codex, Gemini, and Grok; `delimit build` activates a background daemon that executes ledger tasks through the gate chain. `delimit vault` manages local secrets (AES-256).
