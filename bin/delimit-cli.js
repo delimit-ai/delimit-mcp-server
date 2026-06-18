@@ -4822,21 +4822,22 @@ program
 
         console.log(chalk.bold('\n  Delimit Check\n'));
 
-        // Verify governance is initialized
-        if (!fs.existsSync(policyFile)) {
-            console.log(chalk.yellow('  No governance setup found. Run:'));
-            console.log(chalk.bold('    npx delimit-cli init\n'));
-            process.exitCode = 1;
-            return;
-        }
+        // Zero-config: governance setup is optional. If no policy file exists,
+        // run with deterministic defaults so the gate works out-of-the-box on
+        // any repo — no `init` required. This is the zero-config PR safety gate.
+        const zeroConfig = !fs.existsSync(policyFile);
 
-        // Load policy preset
+        // Load policy preset (deterministic 'default' when zero-config)
         let preset = 'default';
-        try {
-            const policyContent = fs.readFileSync(policyFile, 'utf-8');
-            if (policyContent.includes('action: forbid') && !policyContent.includes('action: warn')) preset = 'strict';
-            else if (!policyContent.includes('action: forbid') && policyContent.includes('action: warn')) preset = 'relaxed';
-        } catch {}
+        if (zeroConfig) {
+            console.log(chalk.gray('  Zero-config mode — deterministic defaults (run `init` to customize policy).\n'));
+        } else {
+            try {
+                const policyContent = fs.readFileSync(policyFile, 'utf-8');
+                if (policyContent.includes('action: forbid') && !policyContent.includes('action: warn')) preset = 'strict';
+                else if (!policyContent.includes('action: forbid') && policyContent.includes('action: warn')) preset = 'relaxed';
+            } catch {}
+        }
 
         // Find changed spec files via git
         const base = opts.base || 'HEAD';
