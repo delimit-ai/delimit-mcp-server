@@ -4878,13 +4878,15 @@ program
             specFiles = candidates.filter(c => fs.existsSync(path.join(projectDir, c)));
         }
 
-        if (specFiles.length === 0) {
-            console.log(chalk.gray('  No API spec files found or changed.'));
-            console.log(chalk.gray('  Point at a spec: npx delimit-cli check --base main\n'));
+        if (specFiles.length === 0 && changedFiles.length === 0) {
+            console.log(chalk.gray('  Nothing to check — no changed files or API specs found.\n'));
             return;
         }
-
-        console.log(chalk.gray(`  Policy: ${preset} | Base: ${base} | Specs: ${specFiles.length}\n`));
+        if (specFiles.length === 0) {
+            console.log(chalk.gray(`  No API specs changed — scanning ${changedFiles.length} changed file(s) for secrets.\n`));
+        } else {
+            console.log(chalk.gray(`  Policy: ${preset} | Base: ${base} | Specs: ${specFiles.length}\n`));
+        }
 
         let totalBreaking = 0;
         let totalWarnings = 0;
@@ -4953,12 +4955,51 @@ program
             }
         }
 
+        // Deterministic secret scan over changed files — high-precision provider
+        // patterns + private-key headers only (near-zero false positives), so the
+        // gate catches a leaked key on ANY repo, not just ones with API specs.
+        // Universal, fast, no LLM noise.
+        const SECRET_PATTERNS = [
+            [/-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----/, 'Private key'],
+            [/AKIA[0-9A-Z]{16}/, 'AWS access key ID'],
+            [/\bghp_[A-Za-z0-9]{36}\b/, 'GitHub personal access token'],
+            [/\bgithub_pat_[A-Za-z0-9_]{82}\b/, 'GitHub fine-grained token'],
+            [/\bsk_live_[A-Za-z0-9]{24,}\b/, 'Stripe live secret key'],
+            [/\bxox[baprs]-[A-Za-z0-9-]{10,48}\b/, 'Slack token'],
+            [/\bAIza[0-9A-Za-z_-]{35}\b/, 'Google API key'],
+            [/\bglpat-[A-Za-z0-9_-]{20}\b/, 'GitLab personal access token'],
+        ];
+        const secretFindings = [];
+        for (const f of changedFiles) {
+            const full = path.join(projectDir, f);
+            try {
+                const st = fs.statSync(full);
+                if (!st.isFile() || st.size > 1024 * 1024) continue; // skip dirs + files >1MB
+                const content = fs.readFileSync(full, 'utf-8');
+                if (content.indexOf(' ') !== -1) continue; // skip binary
+                for (const [re, label] of SECRET_PATTERNS) {
+                    if (re.test(content)) secretFindings.push({ file: f, label });
+                }
+            } catch {}
+        }
+        if (secretFindings.length > 0) {
+            allPassed = false;
+            console.log('');
+            for (const s of secretFindings) {
+                console.log(`  ${chalk.red('X')} ${s.file} ${chalk.red(`— ${s.label} detected`)}`);
+            }
+        }
+
         // Summary
         const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+        const secretCount = secretFindings.length;
         console.log('');
-        if (totalBreaking > 0) {
-            console.log(chalk.red.bold(`  BLOCKED — ${totalBreaking} breaking change(s) across ${specFiles.length} spec(s)`));
-            if (!opts.fix) {
+        if (totalBreaking > 0 || secretCount > 0) {
+            const parts = [];
+            if (totalBreaking > 0) parts.push(`${totalBreaking} breaking change(s)`);
+            if (secretCount > 0) parts.push(`${secretCount} leaked secret(s)`);
+            console.log(chalk.red.bold(`  BLOCKED — ${parts.join(' + ')}`));
+            if (totalBreaking > 0 && !opts.fix) {
                 console.log(chalk.gray('  Run with --fix to see migration guidance'));
             }
             console.log(chalk.gray(`  ${elapsed}s\n`));
@@ -4967,7 +5008,7 @@ program
             console.log(chalk.yellow.bold(`  PASSED with ${totalWarnings} warning(s)`));
             console.log(chalk.gray(`  ${elapsed}s\n`));
         } else {
-            console.log(chalk.green.bold('  PASSED — no breaking changes'));
+            console.log(chalk.green.bold('  PASSED — no breaking changes, no leaked secrets'));
             console.log(chalk.gray(`  ${elapsed}s\n`));
         }
     });
