@@ -4810,10 +4810,11 @@ fi
 // Check command — pre-commit/pre-push governance check
 program
     .command('check')
-    .description('Run a local governance check on staged or modified API specs')
+    .description('Zero-config PR safety gate: deterministic checks (breaking changes + leaked secrets) on staged or modified files')
     .option('--base <ref>', 'Git ref to compare against (default: HEAD)')
     .option('--staged', 'Only check staged files')
     .option('--fix', 'Show migration guidance for violations')
+    .option('--record [file]', 'Write a content-pinned record of this check (precursor to the signed Seal). Default: .delimit/records/check-<ts>.json')
     .action(async (opts) => {
         const startTime = Date.now();
         const projectDir = process.cwd();
@@ -5010,6 +5011,47 @@ program
         } else {
             console.log(chalk.green.bold('  PASSED — no breaking changes, no leaked secrets'));
             console.log(chalk.gray(`  ${elapsed}s\n`));
+        }
+
+        // Content-pinned record (precursor to the signed Seal). Written when
+        // --record is passed: a tamper-evident receipt of this check, re-verifiable
+        // by hash today and dual-signed (seal-primary + cosign-2) once the producer
+        // is wired (LED-3460). signed:false until then — honest, not overclaimed.
+        if (opts.record) {
+            try {
+                const crypto = require('crypto');
+                const recPath = (typeof opts.record === 'string' && opts.record)
+                    ? path.resolve(projectDir, opts.record)
+                    : path.join(projectDir, '.delimit', 'records', `check-${Date.now()}.json`);
+                let headSha = '';
+                try { headSha = execSync('git rev-parse HEAD', { cwd: projectDir, encoding: 'utf-8', timeout: 3000 }).trim(); } catch {}
+                const record = {
+                    schema: 'delimit-check-record',
+                    schema_version: '0',
+                    generated_at: new Date().toISOString(),
+                    tool: 'delimit-cli',
+                    base,
+                    head: headSha,
+                    zero_config: zeroConfig,
+                    policy_preset: preset,
+                    verdict: (totalBreaking > 0 || secretCount > 0) ? 'blocked' : 'passed',
+                    findings: {
+                        breaking_changes: totalBreaking,
+                        warnings: totalWarnings,
+                        leaked_secrets: secretFindings.map(s => ({ file: s.file, label: s.label })),
+                        spec_violations: (totalViolations || []).map(v => ({ message: v.message, severity: v.severity, path: v.path })),
+                    },
+                    signed: false,
+                    note: 'Content-pinned, unsigned. Dual-sign with seal-primary + cosign-2 to attest (LED-3460).',
+                };
+                // Tamper-evident self-hash over the record (before adding the hash field)
+                record.content_sha256 = 'sha256:' + crypto.createHash('sha256').update(JSON.stringify(record)).digest('hex');
+                fs.mkdirSync(path.dirname(recPath), { recursive: true });
+                fs.writeFileSync(recPath, JSON.stringify(record, null, 2));
+                console.log(chalk.gray(`  Record: ${path.relative(projectDir, recPath)} (content-pinned, unsigned)\n`));
+            } catch (e) {
+                console.log(chalk.gray(`  (record not written: ${e.message})\n`));
+            }
         }
     });
 
