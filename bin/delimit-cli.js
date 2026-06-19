@@ -4810,10 +4810,11 @@ fi
 // Check command — pre-commit/pre-push governance check
 program
     .command('check')
-    .description('Run a local governance check on staged or modified API specs')
+    .description('Zero-config PR safety gate: deterministic checks (breaking changes + leaked secrets) on staged or modified files')
     .option('--base <ref>', 'Git ref to compare against (default: HEAD)')
     .option('--staged', 'Only check staged files')
     .option('--fix', 'Show migration guidance for violations')
+    .option('--record [file]', 'Write a content-pinned record of this check (precursor to the signed Seal). Default: .delimit/records/check-<ts>.json')
     .action(async (opts) => {
         const startTime = Date.now();
         const projectDir = process.cwd();
@@ -4822,21 +4823,22 @@ program
 
         console.log(chalk.bold('\n  Delimit Check\n'));
 
-        // Verify governance is initialized
-        if (!fs.existsSync(policyFile)) {
-            console.log(chalk.yellow('  No governance setup found. Run:'));
-            console.log(chalk.bold('    npx delimit-cli init\n'));
-            process.exitCode = 1;
-            return;
-        }
+        // Zero-config: governance setup is optional. If no policy file exists,
+        // run with deterministic defaults so the gate works out-of-the-box on
+        // any repo — no `init` required. This is the zero-config PR safety gate.
+        const zeroConfig = !fs.existsSync(policyFile);
 
-        // Load policy preset
+        // Load policy preset (deterministic 'default' when zero-config)
         let preset = 'default';
-        try {
-            const policyContent = fs.readFileSync(policyFile, 'utf-8');
-            if (policyContent.includes('action: forbid') && !policyContent.includes('action: warn')) preset = 'strict';
-            else if (!policyContent.includes('action: forbid') && policyContent.includes('action: warn')) preset = 'relaxed';
-        } catch {}
+        if (zeroConfig) {
+            console.log(chalk.gray('  Zero-config mode — deterministic defaults (run `init` to customize policy).\n'));
+        } else {
+            try {
+                const policyContent = fs.readFileSync(policyFile, 'utf-8');
+                if (policyContent.includes('action: forbid') && !policyContent.includes('action: warn')) preset = 'strict';
+                else if (!policyContent.includes('action: forbid') && policyContent.includes('action: warn')) preset = 'relaxed';
+            } catch {}
+        }
 
         // Find changed spec files via git
         const base = opts.base || 'HEAD';
@@ -4877,13 +4879,15 @@ program
             specFiles = candidates.filter(c => fs.existsSync(path.join(projectDir, c)));
         }
 
-        if (specFiles.length === 0) {
-            console.log(chalk.gray('  No API spec files found or changed.'));
-            console.log(chalk.gray('  Point at a spec: npx delimit-cli check --base main\n'));
+        if (specFiles.length === 0 && changedFiles.length === 0) {
+            console.log(chalk.gray('  Nothing to check — no changed files or API specs found.\n'));
             return;
         }
-
-        console.log(chalk.gray(`  Policy: ${preset} | Base: ${base} | Specs: ${specFiles.length}\n`));
+        if (specFiles.length === 0) {
+            console.log(chalk.gray(`  No API specs changed — scanning ${changedFiles.length} changed file(s) for secrets.\n`));
+        } else {
+            console.log(chalk.gray(`  Policy: ${preset} | Base: ${base} | Specs: ${specFiles.length}\n`));
+        }
 
         let totalBreaking = 0;
         let totalWarnings = 0;
@@ -4952,12 +4956,51 @@ program
             }
         }
 
+        // Deterministic secret scan over changed files — high-precision provider
+        // patterns + private-key headers only (near-zero false positives), so the
+        // gate catches a leaked key on ANY repo, not just ones with API specs.
+        // Universal, fast, no LLM noise.
+        const SECRET_PATTERNS = [
+            [/-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----/, 'Private key'],
+            [/AKIA[0-9A-Z]{16}/, 'AWS access key ID'],
+            [/\bghp_[A-Za-z0-9]{36}\b/, 'GitHub personal access token'],
+            [/\bgithub_pat_[A-Za-z0-9_]{82}\b/, 'GitHub fine-grained token'],
+            [/\bsk_live_[A-Za-z0-9]{24,}\b/, 'Stripe live secret key'],
+            [/\bxox[baprs]-[A-Za-z0-9-]{10,48}\b/, 'Slack token'],
+            [/\bAIza[0-9A-Za-z_-]{35}\b/, 'Google API key'],
+            [/\bglpat-[A-Za-z0-9_-]{20}\b/, 'GitLab personal access token'],
+        ];
+        const secretFindings = [];
+        for (const f of changedFiles) {
+            const full = path.join(projectDir, f);
+            try {
+                const st = fs.statSync(full);
+                if (!st.isFile() || st.size > 1024 * 1024) continue; // skip dirs + files >1MB
+                const content = fs.readFileSync(full, 'utf-8');
+                if (content.indexOf(' ') !== -1) continue; // skip binary
+                for (const [re, label] of SECRET_PATTERNS) {
+                    if (re.test(content)) secretFindings.push({ file: f, label });
+                }
+            } catch {}
+        }
+        if (secretFindings.length > 0) {
+            allPassed = false;
+            console.log('');
+            for (const s of secretFindings) {
+                console.log(`  ${chalk.red('X')} ${s.file} ${chalk.red(`— ${s.label} detected`)}`);
+            }
+        }
+
         // Summary
         const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+        const secretCount = secretFindings.length;
         console.log('');
-        if (totalBreaking > 0) {
-            console.log(chalk.red.bold(`  BLOCKED — ${totalBreaking} breaking change(s) across ${specFiles.length} spec(s)`));
-            if (!opts.fix) {
+        if (totalBreaking > 0 || secretCount > 0) {
+            const parts = [];
+            if (totalBreaking > 0) parts.push(`${totalBreaking} breaking change(s)`);
+            if (secretCount > 0) parts.push(`${secretCount} leaked secret(s)`);
+            console.log(chalk.red.bold(`  BLOCKED — ${parts.join(' + ')}`));
+            if (totalBreaking > 0 && !opts.fix) {
                 console.log(chalk.gray('  Run with --fix to see migration guidance'));
             }
             console.log(chalk.gray(`  ${elapsed}s\n`));
@@ -4966,8 +5009,49 @@ program
             console.log(chalk.yellow.bold(`  PASSED with ${totalWarnings} warning(s)`));
             console.log(chalk.gray(`  ${elapsed}s\n`));
         } else {
-            console.log(chalk.green.bold('  PASSED — no breaking changes'));
+            console.log(chalk.green.bold('  PASSED — no breaking changes, no leaked secrets'));
             console.log(chalk.gray(`  ${elapsed}s\n`));
+        }
+
+        // Content-pinned record (precursor to the signed Seal). Written when
+        // --record is passed: a tamper-evident receipt of this check, re-verifiable
+        // by hash today and dual-signed (seal-primary + cosign-2) once the producer
+        // is wired (LED-3460). signed:false until then — honest, not overclaimed.
+        if (opts.record) {
+            try {
+                const crypto = require('crypto');
+                const recPath = (typeof opts.record === 'string' && opts.record)
+                    ? path.resolve(projectDir, opts.record)
+                    : path.join(projectDir, '.delimit', 'records', `check-${Date.now()}.json`);
+                let headSha = '';
+                try { headSha = execSync('git rev-parse HEAD', { cwd: projectDir, encoding: 'utf-8', timeout: 3000 }).trim(); } catch {}
+                const record = {
+                    schema: 'delimit-check-record',
+                    schema_version: '0',
+                    generated_at: new Date().toISOString(),
+                    tool: 'delimit-cli',
+                    base,
+                    head: headSha,
+                    zero_config: zeroConfig,
+                    policy_preset: preset,
+                    verdict: (totalBreaking > 0 || secretCount > 0) ? 'blocked' : 'passed',
+                    findings: {
+                        breaking_changes: totalBreaking,
+                        warnings: totalWarnings,
+                        leaked_secrets: secretFindings.map(s => ({ file: s.file, label: s.label })),
+                        spec_violations: (totalViolations || []).map(v => ({ message: v.message, severity: v.severity, path: v.path })),
+                    },
+                    signed: false,
+                    note: 'Content-pinned, unsigned. Dual-sign with seal-primary + cosign-2 to attest (LED-3460).',
+                };
+                // Tamper-evident self-hash over the record (before adding the hash field)
+                record.content_sha256 = 'sha256:' + crypto.createHash('sha256').update(JSON.stringify(record)).digest('hex');
+                fs.mkdirSync(path.dirname(recPath), { recursive: true });
+                fs.writeFileSync(recPath, JSON.stringify(record, null, 2));
+                console.log(chalk.gray(`  Record: ${path.relative(projectDir, recPath)} (content-pinned, unsigned)\n`));
+            } catch (e) {
+                console.log(chalk.gray(`  (record not written: ${e.message})\n`));
+            }
         }
     });
 
