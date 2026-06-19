@@ -35,12 +35,18 @@ npx delimit-cli check
 ```
 
 ```console
-$ delimit check --staged
-✓ breaking changes   none
-✗ leaked secrets     1   api/config.yaml: AWS access key
+$ delimit check
 
-→ 1 issue in staged files
+  Delimit Check
+
+  Policy: default | Base: HEAD | Specs: 1
+
+  + api/openapi.yaml — clean
+
+  PASSED — no breaking changes, no leaked secrets
 ```
+
+When a check finds a breaking change or a leaked secret, it prints the offending file and the issue and exits non-zero — so it drops straight into a pre-commit hook or CI step.
 
 Common options:
 
