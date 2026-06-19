@@ -24,6 +24,35 @@ $ delimit wrap -- claude "fix the flaky test in tests/api.spec.ts"
 
 Every wrapped run emits a `delimit.attestation.v1` bundle: repo head before/after, changed files, gate results, HMAC-SHA256 signature, and a replay URL. Advisory by default; flip to enforcing when you're ready.
 
+---
+
+## Fastest path to value: `delimit check`
+
+Zero-config PR safety gate. No `init`, no setup, no account, no keys — run it on any repo and it applies deterministic checks (breaking API changes + leaked secrets) to your staged or modified files.
+
+```bash
+npx delimit-cli check
+```
+
+```console
+$ delimit check --staged
+✓ breaking changes   none
+✗ leaked secrets     1   api/config.yaml: AWS access key
+
+→ 1 issue in staged files
+```
+
+Common options:
+
+```bash
+delimit check --staged          # only check staged files
+delimit check --base main       # compare against a git ref (default HEAD)
+delimit check --fix             # show migration guidance for violations
+delimit check --record          # write a content-pinned record of this check
+```
+
+`--record` writes a content-pinned record of the check to `.delimit/records/check-<ts>.json` (or a path you name). That record is the precursor to the signed, replayable Seal attestation — the same evidence shape, pinned to the exact content you checked.
+
 <p align="center">
   <a href="https://delimit.ai/methodology/mcp-attestation">Methodology</a> · <a href="https://delimit.ai/reports/cal-com-v2-attestation">cal.com v2 worked example</a> · <a href="https://delimit.ai/docs/workflow">Workflow guide</a> · <a href="https://delimit.ai">Website</a>
 </p>
