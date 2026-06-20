@@ -1,3 +1,11 @@
+## [4.12.1] - 2026-06-20
+
+### Fixed
+- **Gemini governance shim routes to Antigravity (`agy`).** The generated `gemini` shim now prefers the Antigravity CLI before the retired free-tier `gemini-cli` (which returns `IneligibleTierError` as of June 2026), falling through to the real `gemini` if `agy` is not installed. Restores the generation path for users on the deprecated free tier; users without `agy` are unaffected.
+
+### Documentation
+- README now documents the zero-config `delimit check` command — the fastest path to value (PR #140).
+
 ## [4.11.1] - 2026-06-17
 
 ### Changed — compiled engine bumped to proModuleVersion 3.10.0 (binary-customer parity for LED-1454)
