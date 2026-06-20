@@ -785,6 +785,14 @@ WHITE='\\033[97m'; BOLD='\\033[1m'; DIM='\\033[2m'; RESET='\\033[0m'
 # Fix config permissions before anything else
 [ -f "$HOME/.codex/config.toml" ] && chmod 644 "$HOME/.codex/config.toml" 2>/dev/null
 if [ "$DELIMIT_WRAPPED" = "true" ] || [ ! -t 1 ]; then
+    # gemini-cli free tier retired (IneligibleTierError, 2026-06) -> prefer the
+    # Antigravity drop-in (agy) for gemini when installed. Falls through to the
+    # real gemini if agy is absent, so customers without agy are unaffected.
+    if [ "${toolName}" = "gemini" ]; then
+        for c in "$HOME/.local/bin/agy" /usr/local/bin/agy /usr/bin/agy; do
+            [ -x "$c" ] && exec "$c" "$@"
+        done
+    fi
     # Check for renamed binary first (avoids infinite loop when shim IS at /usr/bin/tool)
     for c in /usr/bin/${toolName}-real /usr/local/bin/${toolName}-real $HOME/.local/bin/${toolName}-real; do
         [ -x "$c" ] && exec "$c" "$@"
