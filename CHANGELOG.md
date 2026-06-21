@@ -1,3 +1,8 @@
+## [4.13.1] - 2026-06-21
+
+### Fixed
+- **Corrected the bundled Seal attestation verification key.** 4.13.0 shipped an incorrect `seal_pubkey.ed25519` (a development key accidentally committed in the v0.2 producer work), so genuine signed attestations would not verify against the bundled verifier. 4.13.1 restores the authoritative signing key and its constitution signature; real attestations verify correctly again. No other change from 4.13.0.
+
 ## [4.13.0] - 2026-06-20
 
 ### Changed — Free/Pro tier realignment (LED-1454 / LED-1738 / LED-1740 / LED-1741)
