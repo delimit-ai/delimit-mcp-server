@@ -194,7 +194,7 @@ describe('v4.20: remember and recall commands', () => {
 
     it('remember stores a memory file with hash field', { skip: SKIP_IN_CI }, () => {
         const testText = 'Test memory for v420 hash verification';
-        run(`remember ${testText}`, { env: { HOME: tmpHome } });
+        run(`remember ${testText}`, { env: { HOME: tmpHome, DELIMIT_HOME: path.join(tmpHome, '.delimit') } });
 
         // Find the created memory file
         assert.ok(fs.existsSync(tmpMemoryDir), 'Memory directory should be created');
@@ -208,7 +208,7 @@ describe('v4.20: remember and recall commands', () => {
 
     it('remember stores with source_model field', { skip: SKIP_IN_CI }, () => {
         const testText = 'Test memory for v420 source_model check';
-        run(`remember ${testText}`, { env: { HOME: tmpHome, DELIMIT_MODEL: 'test-model' } });
+        run(`remember ${testText}`, { env: { HOME: tmpHome, DELIMIT_HOME: path.join(tmpHome, '.delimit'), DELIMIT_MODEL: 'test-model' } });
 
         const files = fs.readdirSync(tmpMemoryDir).filter(f => f.startsWith('mem-') && f.endsWith('.json'));
         // Find the file containing our text
@@ -227,9 +227,9 @@ describe('v4.20: remember and recall commands', () => {
 
     it('recall displays integrity badge', { skip: SKIP_IN_CI }, () => {
         // First store a memory so there is something to recall
-        run(`remember "Integrity badge test memory"`, { env: { HOME: tmpHome } });
+        run(`remember "Integrity badge test memory"`, { env: { HOME: tmpHome, DELIMIT_HOME: path.join(tmpHome, '.delimit') } });
 
-        const output = run('recall', { env: { HOME: tmpHome } });
+        const output = run('recall', { env: { HOME: tmpHome, DELIMIT_HOME: path.join(tmpHome, '.delimit') } });
         // The integrity badge is a checkmark character when hash matches
         // displayMemory shows either green checkmark or red X for tampered
         assert.ok(output.length > 0, 'recall should produce output');
@@ -256,8 +256,8 @@ describe('recall: tokenized multi-word query (FIX A2)', () => {
         // and crucially: NO entry contains the literal phrase "redis
         // migration" as a contiguous substring, so the OLD whole-phrase
         // includes() matcher would have returned ZERO results.
-        run(`remember "Migration of the redis cache was deferred to Q2"`, { env: { HOME: tmpHome } });
-        run(`remember "The auth service uses redis for sessions"`, { env: { HOME: tmpHome } });
+        run(`remember "Migration of the redis cache was deferred to Q2"`, { env: { HOME: tmpHome, DELIMIT_HOME: path.join(tmpHome, '.delimit') } });
+        run(`remember "The auth service uses redis for sessions"`, { env: { HOME: tmpHome, DELIMIT_HOME: path.join(tmpHome, '.delimit') } });
     });
 
     after(() => {
@@ -276,7 +276,7 @@ describe('recall: tokenized multi-word query (FIX A2)', () => {
             );
         }
 
-        const output = run('recall redis migration', { env: { HOME: tmpHome } });
+        const output = run('recall redis migration', { env: { HOME: tmpHome, DELIMIT_HOME: path.join(tmpHome, '.delimit') } });
         assert.ok(
             output.includes('redis') && output.includes('Migration of the redis cache'),
             'tokenized OR-match should surface the entry matching both tokens'
@@ -288,7 +288,7 @@ describe('recall: tokenized multi-word query (FIX A2)', () => {
     });
 
     it('ranks the entry matching both tokens above the single-token entry', { skip: SKIP_IN_CI }, () => {
-        const output = run('recall redis migration', { env: { HOME: tmpHome } });
+        const output = run('recall redis migration', { env: { HOME: tmpHome, DELIMIT_HOME: path.join(tmpHome, '.delimit') } });
         const bothIdx = output.indexOf('Migration of the redis cache');   // matches redis + migration
         const oneIdx = output.indexOf('auth service uses redis');          // matches redis only
         assert.ok(bothIdx !== -1, 'both-token entry should appear');
@@ -297,7 +297,7 @@ describe('recall: tokenized multi-word query (FIX A2)', () => {
     });
 
     it('single-token query still works (parity with old behavior)', { skip: SKIP_IN_CI }, () => {
-        const output = run('recall redis', { env: { HOME: tmpHome } });
+        const output = run('recall redis', { env: { HOME: tmpHome, DELIMIT_HOME: path.join(tmpHome, '.delimit') } });
         assert.ok(output.includes('redis'), 'single-token query should still match');
         assert.ok(!output.includes('No matching memories found'), 'single-token query should return matches');
     });
