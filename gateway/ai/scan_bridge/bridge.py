@@ -55,6 +55,191 @@ def _confidence_floor() -> float:
     return 0.85
 
 
+# ── LED-1724 precision layer ──────────────────────────────────────────
+#
+# The flat confidence floor is useless at promotion time: the upstream
+# topic-matcher assigns ~0.95 to anything that hits ~3 generic agent-tool
+# topics, so every promoted record is already 0.90-0.95 and confidence
+# carries no information. The 2026-analysis found ~93% of promoted
+# fingerprints were noise — generic MCP-server repos, Claude/Codex/Cursor
+# dotfiles, skill/plugin managers, OpenAPI->MCP codegen false-friends, and
+# zero-traction throwaways — all matched ONLY on generic agent-tool tokens
+# with no domain fit.
+#
+# This layer adds ONE precision check after classification+confidence:
+# a signal whose text shows NO Delimit-domain relevance AND is dominated
+# by generic agent-tool tokens (or is a known codegen false-friend) is
+# rejected. It is deliberately CONSERVATIVE / recall-favoring: a missed
+# real signal costs a founder-reviewed P2 we never see; a promoted noise
+# item costs one digest line. So the rule is "reject only the clearly
+# noise"; ANY domain keyword, or any non-generic content, PASSES. When
+# uncertain → PASS.
+#
+# Every keyword set + the on/off switch is env-tunable (mirrors
+# _confidence_floor's DELIMIT_SCAN_PROMO_* pattern) so the founder can
+# recalibrate or fully disable the layer without a code change.
+
+# Genuine Delimit-domain relevance markers. ANY one present → PASS the
+# precision layer outright (these are the merge-gate / spec-diff /
+# attestation competitors + real domain discussion we MUST never drop).
+_DOMAIN_KEYWORDS_DEFAULT = (
+    "openapi",
+    "breaking change",
+    "breaking changes",
+    "semver",
+    "semantic version",
+    "migration guide",
+    "api contract",
+    "contract test",
+    "spec diff",
+    "spec-diff",
+    "schema diff",
+    "schema-diff",
+    "diff engine",
+    "api governance",
+    "api diff",
+    "attestation",
+    "provenance",
+    "merge gate",
+    "merge-gate",
+    "spectral",
+    "oasdiff",
+    "openapi-changes",
+    "api versioning",
+    "deprecation",
+    "changelog",
+    "json schema",
+    "graphql schema",
+)
+
+# Generic agent-tool tokens. A signal whose text is dominated by these
+# (and ONLY these) — with no domain keyword above — is the noise class.
+# These mirror the most-common noise rationales: "Claude Code, Codex,
+# Cursor" / "MCP server, MCP servers, Claude Code".
+_GENERIC_TOKENS_DEFAULT = (
+    "claude code",
+    "claude-code",
+    "codex",
+    "cursor",
+    "gemini cli",
+    "gemini-cli",
+    "mcp server",
+    "mcp servers",
+    "mcp-server",
+    "model context protocol",
+    "ai agent",
+    "ai agents",
+    "agent skill",
+    "agent skills",
+    "vibe coding",
+    "dotfiles",
+    "my-claude",
+    "awesome-",
+    "skill manager",
+    "plugin manager",
+    "shared brain",
+    "semantic memory",
+    "persistent memory",
+    "smart home",
+    "wordpress",
+    "splunk",
+)
+
+# Codegen false-friends: snippets that contain "openapi" but are
+# spec->server/CLI generators, NOT spec-diff/governance competitors.
+# When one of these patterns is present we treat the "openapi" domain
+# hit as a FALSE friend and do NOT let it auto-pass.
+_FALSE_FRIEND_PATTERNS_DEFAULT = (
+    "openapi spec into",
+    "openapi into",
+    "openapi to mcp",
+    "openapi -> mcp",
+    "openapi->mcp",
+    "openapi to cli",
+    "openapi -> cli",
+    "spec into an mcp server",
+    "mcp server from openapi",
+    "generate a cli from",
+    "turn any openapi",
+    "convert openapi",
+)
+
+
+def _env_keyword_set(env_name: str, default: Tuple[str, ...]) -> Tuple[str, ...]:
+    """Resolve an env-overridable comma-separated keyword set.
+
+    Mirrors ``_confidence_floor``'s tolerance: empty / unset → the
+    hardcoded default; otherwise split on commas, lowercase, strip, and
+    drop empties. On any failure fall back to the default. This lets the
+    founder retune any keyword list without code changes.
+    """
+    raw = os.environ.get(env_name, "")
+    if not raw:
+        return default
+    try:
+        parts = tuple(p.strip().lower() for p in raw.split(",") if p.strip())
+        return parts or default
+    except Exception:  # pragma: no cover — defensive
+        return default
+
+
+def _precision_enabled() -> bool:
+    """The reversible kill-switch. ``DELIMIT_SCAN_PROMO_PRECISION=off``
+    (or false/0/no/disable) fully disables the precision layer, restoring
+    exact pre-LED-1724 behaviour. Default ON.
+    """
+    raw = os.environ.get("DELIMIT_SCAN_PROMO_PRECISION", "").strip().lower()
+    if raw in {"off", "0", "false", "no", "disable", "disabled"}:
+        return False
+    return True
+
+
+def _passes_precision(signal: Dict[str, Any]) -> Tuple[bool, str]:
+    """LED-1724 precision check. Returns ``(passes, reason)``.
+
+    Conservative: rejects ONLY a signal that (a) has NO domain keyword in
+    its rationale+snippet text, AND (b) is either a codegen false-friend
+    OR is dominated by generic agent-tool tokens. Everything else PASSES
+    (uncertain → pass). Reads raw fields with ``.get`` + safe defaults so
+    it never KeyErrors on an absent / platform-specific field.
+    """
+    # Combine the two always-present text fields the scanner populates.
+    snippet = (signal.get("content_snippet") or "").lower()
+    rationale = (signal.get("rationale") or "").lower()
+    text = f"{snippet}\n{rationale}"
+
+    domain_kws = _env_keyword_set(
+        "DELIMIT_SCAN_PROMO_DOMAIN_KEYWORDS", _DOMAIN_KEYWORDS_DEFAULT
+    )
+    generic_kws = _env_keyword_set(
+        "DELIMIT_SCAN_PROMO_GENERIC_TOKENS", _GENERIC_TOKENS_DEFAULT
+    )
+    false_friends = _env_keyword_set(
+        "DELIMIT_SCAN_PROMO_FALSE_FRIENDS", _FALSE_FRIEND_PATTERNS_DEFAULT
+    )
+
+    is_false_friend = any(ff in text for ff in false_friends)
+    has_domain = any(kw in text for kw in domain_kws)
+
+    # A genuine domain hit that is NOT a codegen false-friend → PASS.
+    # (This is the load-bearing recall guard: oasdiff / openapi-changes /
+    # breaking-change competitors always carry a domain keyword.)
+    if has_domain and not is_false_friend:
+        return True, ""
+
+    has_generic = any(gt in text for gt in generic_kws)
+
+    # No domain relevance, AND the text is a known codegen false-friend
+    # or a generic-agent-tool-only match → this is the noise class.
+    if is_false_friend:
+        return False, "precision: openapi codegen false-friend, no domain fit"
+    if has_generic and not has_domain:
+        return False, "precision: generic agent-tool tokens only, no domain fit"
+
+    # Neither clearly-domain nor clearly-noise → uncertain → PASS.
+    return True, ""
+
+
 # ── Cursor I/O ────────────────────────────────────────────────────────
 
 
@@ -95,6 +280,7 @@ class _FilterStats:
     considered: int = 0
     rejected_classification: int = 0
     rejected_confidence: int = 0
+    rejected_precision: int = 0
     rejected_dedup: int = 0
     promoted: int = 0
 
@@ -117,6 +303,14 @@ def _passes_strict_gate(
     if confidence < confidence_floor:
         stats.rejected_confidence += 1
         return False, f"confidence={confidence:.2f}<{confidence_floor:.2f}"
+    # LED-1724 precision layer — runs only for signals that already
+    # passed classification + confidence, so it sees the smallest,
+    # highest-quality candidate set. Reversible via DELIMIT_SCAN_PROMO_PRECISION=off.
+    if _precision_enabled():
+        ok, reason = _passes_precision(signal)
+        if not ok:
+            stats.rejected_precision += 1
+            return False, reason
     return True, ""
 
 
@@ -435,6 +629,7 @@ def promote_recent_signals(
             "considered": stats.considered,
             "rejected_classification": stats.rejected_classification,
             "rejected_confidence": stats.rejected_confidence,
+            "rejected_precision": stats.rejected_precision,
             "rejected_dedup": stats.rejected_dedup,
             "promoted": stats.promoted,
         },

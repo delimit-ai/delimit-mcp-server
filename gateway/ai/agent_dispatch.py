@@ -28,6 +28,16 @@ VALID_STATUSES = {"dispatched", "in_progress", "done", "handed_off", "failed"}
 # hits this threshold. Prevents runaway dispatch when no workers are pulling.
 DLQ_AUTO_PAUSE_THRESHOLD = 20
 
+# LED-3514: task types whose lifecycle parks them at status=='dispatched' as a
+# long-lived TARGET POOL rather than a worker-consumption queue. These are NOT
+# a dead-letter backlog — they are read in place (e.g. outreach_substantive is
+# the target pool that body-gen + the contributions dashboard consume), so they
+# must be excluded from the DLQ depth or they spuriously trip the circuit
+# breaker and globally pause ALL dispatch. The breaker still protects genuine
+# worker-consumed task types; pool growth is bounded by each pool's own caps
+# (the outreach daemon enforces a per-day dispatch cap + repo cooldown).
+_DLQ_EXEMPT_TASK_TYPES = frozenset({"outreach_substantive"})
+
 # LED-878: router table — resolves assignee='any' to a specific model at
 # dispatch time based on task_type. This eliminates the dead-letter 'any'
 # bucket without requiring a worker process to exist yet. The mapping is
@@ -128,8 +138,15 @@ def dispatch_task(
     # tasks that never moved to in_progress/done/failed) exceeds the threshold,
     # auto-create the pause file and reject. This stops the cycle from growing
     # the queue unboundedly when workers aren't consuming.
+    # LED-3514: exclude pool-lifecycle task types (e.g. outreach_substantive)
+    # from the depth — they live at 'dispatched' by design and are not a stuck
+    # backlog, so counting them spuriously pauses all dispatch.
     existing_tasks = _load_tasks()
-    dlq_depth = sum(1 for t in existing_tasks.values() if t.get("status") == "dispatched")
+    dlq_depth = sum(
+        1 for t in existing_tasks.values()
+        if t.get("status") == "dispatched"
+        and t.get("task_type") not in _DLQ_EXEMPT_TASK_TYPES
+    )
     if dlq_depth >= DLQ_AUTO_PAUSE_THRESHOLD:
         PAUSE_FILE.parent.mkdir(parents=True, exist_ok=True)
         PAUSE_FILE.write_text(

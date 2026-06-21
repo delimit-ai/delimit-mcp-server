@@ -109,6 +109,21 @@ DELIMIT_DOMAIN_SIGNALS = (
     r"\bauditor(?:s)?\b",
     r"\battestation(?:s)?\b",
     r"\baudit[\s-]?trail\b",
+    # AI-written code + the merge gate's surfaces (current positioning). The
+    # canonical product vocabulary, so value-voice takes about reviewing
+    # AI-written code at merge time register as on-topic. Each is specific
+    # enough to stand alone — an off-topic post still matches none of these.
+    # (Founder 2026-06-19: "relevance to delimit mcp tools and actions is key.")
+    r"\bai[\s-]?written[\s-]?code\b",        # locked external-promise canon
+    r"\bai[\s-]?generated[\s-]?code\b",
+    r"\bai[\s-]?assisted[\s-]?merge\b",      # locked artifact-scope canon
+    r"\bai[\s-]?code[\s-]?review\b",
+    r"\bvibe[\s-]?cod(?:e|er|ers|ing)\b",    # the ICP
+    # Delimit's actual product surfaces — the MCP tools + the GitHub Action
+    # that run the merge gate. These ARE the product, so they anchor relevance.
+    r"\bmcp[\s-]?tool(?:s)?\b",
+    r"\bdelimit[\s-]?action\b",
+    r"\bmerge[\s-]?check\b",
 )
 
 # Adjacent / orbit signals — these are common in the AI-coding-assistant

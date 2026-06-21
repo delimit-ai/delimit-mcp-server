@@ -57,6 +57,65 @@ KILL_SWITCH_FILE = Path.home() / ".delimit" / "outreach_pause"
 DEFAULT_MAX_DISPATCH = 3
 DEFAULT_MAX_MONITOR = 50
 
+# LED-3493 followup — spec-aware targeting. The phase-2 issue search in
+# ai.social_target._scan_github matches issues by venture TOPIC, with no
+# guarantee the repo carries an OpenAPI spec. But the substantive draft can
+# only be produced from a repo whose recent PRs touched a spec file (that is
+# exactly what ai.outreach_body_gen._diff_target_spec needs). So an issue on a
+# spec-less repo burns a dispatch slot and surfaces a target that can never
+# become a draft (the 14/16 "skipped_no_diff" pattern from the live queue).
+#
+# We therefore PREFER spec-bearing repos: probe each candidate issue's repo for
+# an OpenAPI spec (the same PR-file signal body-gen uses) and sort spec-bearing
+# issue targets to the front so the per-tick dispatch cap is spent on
+# draftable targets. This is a preference, not a hard filter — if a tick finds
+# no spec-bearing target it still falls through to the prior ordering rather
+# than starving. Toggle off with DELIMIT_OUTREACH_SPEC_PREFER=0.
+_SPEC_PREFER_ENV = "DELIMIT_OUTREACH_SPEC_PREFER"
+# Bound the probe's API cost per tick (each probe is a handful of gh calls).
+_SPEC_PROBE_MAX = int(os.environ.get("DELIMIT_OUTREACH_SPEC_PROBE_MAX", "12") or "12")
+
+
+def _spec_prefer_enabled() -> bool:
+    return (os.environ.get(_SPEC_PREFER_ENV, "1") or "1").strip().lower() not in (
+        "0", "false", "no", "off",
+    )
+
+
+def _target_repo(target: Dict[str, Any]) -> str:
+    """Extract owner/repo from a target's fingerprint.
+
+    github:issue:<owner/repo>:<num>  ->  owner/repo
+    github:repo:<owner/repo>         ->  owner/repo
+    """
+    fp = (target.get("fingerprint") or "")
+    if fp.startswith("github:issue:"):
+        rest = fp[len("github:issue:"):]
+        return rest.rsplit(":", 1)[0] if ":" in rest else rest
+    if fp.startswith("github:repo:"):
+        return fp[len("github:repo:"):]
+    return ""
+
+
+def _repo_has_openapi_spec(repo: str, cache: Dict[str, bool]) -> bool:
+    """True if the repo's recent PRs touched an OpenAPI/Swagger spec file —
+    the same signal ai.outreach_body_gen uses to produce a diff. Cached per
+    repo within a tick; never raises (probe failure → treated as no-spec, so
+    the target just loses its preference, it is not dropped)."""
+    if not repo:
+        return False
+    if repo in cache:
+        return cache[repo]
+    found = False
+    try:
+        from scripts.outreach_report_generator import discover_spec_paths
+        found = bool(discover_spec_paths(repo))
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("spec probe failed for %s: %s", repo, exc)
+        found = False
+    cache[repo] = found
+    return found
+
 # Tag set the intel-class outreach LEDs carry. We use this to retrieve
 # the universe of items the daemon is responsible for monitoring.
 _OUTREACH_INTEL_TAGS = ("intel", "github-scan")
@@ -272,12 +331,54 @@ def _scan_phase(
     # only target shape that can carry technical anchors. Issue-first
     # ordering ensures the dispatch cap doesn't waste budget on
     # repo-discovery targets that will all be rejected as anchor-less.
+    #
+    # LED-3493 followup: within issue targets, PREFER repos that actually
+    # carry an OpenAPI spec — only those can become a substantive draft.
+    # Probe spec presence (bounded, cached) and tag each target so the
+    # spec-bearing issues sort ahead of spec-less ones. This is the lever
+    # that fixes the "14/16 skipped_no_diff" queue: the dispatch cap now
+    # lands on draftable targets first.
+    if _spec_prefer_enabled():
+        spec_cache: Dict[str, bool] = {}
+        probed = 0
+        # Probe issue targets in their current (scanner) order so the cap on
+        # probes favours the targets most likely to be dispatched anyway.
+        for t in targets:
+            fp = (t.get("fingerprint") or "")
+            if not fp.startswith("github:issue:"):
+                continue
+            if probed >= _SPEC_PROBE_MAX:
+                # Unprobed targets keep has_spec=None → they sort after probed
+                # spec-bearing ones but ahead of probed spec-less ones.
+                t.setdefault("repo_has_spec", None)
+                continue
+            repo = _target_repo(t)
+            has_spec = _repo_has_openapi_spec(repo, spec_cache)
+            t["repo_has_spec"] = has_spec
+            probed += 1
+        out["spec_probed"] = probed
+        out["spec_bearing"] = sum(1 for t in targets if t.get("repo_has_spec") is True)
+
+    def _rank(t: Dict[str, Any]) -> Tuple[int, int]:
+        fp = (t.get("fingerprint") or "")
+        is_issue = fp.startswith("github:issue:")
+        if not is_issue:
+            return (2, 0)  # repo-discovery targets last (anchor-less)
+        spec = t.get("repo_has_spec")
+        if spec is True:
+            return (0, 0)  # spec-bearing issue — draftable, dispatch first
+        if spec is None:
+            return (0, 1)  # unprobed issue — still anchor-capable
+        return (1, 0)      # known spec-less issue — after spec-bearing
+
     if dispatch_cap > 0 and len(targets) > dispatch_cap:
         out["cap_hit"] = True
-        targets.sort(
-            key=lambda t: 0 if (t.get("fingerprint", "") or "").startswith("github:issue:") else 1
-        )
+        targets.sort(key=_rank)
         targets = targets[:dispatch_cap]
+    else:
+        # Even when we are not truncating, keep the spec-bearing-first order so
+        # process_targets sees the best candidates first.
+        targets.sort(key=_rank)
 
     try:
         processed = process_targets(

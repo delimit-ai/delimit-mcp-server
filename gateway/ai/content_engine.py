@@ -989,6 +989,25 @@ def post_next_tweet() -> Dict[str, Any]:
     if no scheduled tweet is available for today.
     """
     from ai.social import post_tweet, should_post_now
+    from ai.posting_budget import (
+        DAILY_POST_CAP,
+        cap_reached,
+        category_priority,
+        posts_today,
+    )
+
+    # HARD global daily cap (2026-06-19, founder-ratified): at most
+    # DAILY_POST_CAP brand tweets ACTUALLY POSTED per UTC day, shared across
+    # all three autopost sources (ship_event, vendor_news_riff,
+    # scheduled_original). Counted from the posted-tweet log, not the queue.
+    # This is a backstop ON TOP OF should_post_now's 24/day sliding window.
+    if cap_reached():
+        return {
+            "status": "skipped",
+            "reason": f"Global daily post cap reached ({posts_today()}/{DAILY_POST_CAP})",
+            "posts_today": posts_today(),
+            "daily_post_cap": DAILY_POST_CAP,
+        }
 
     if not should_post_now():
         return {"status": "skipped", "reason": "Rate cap hit (2/hr or 24/day)"}
@@ -1037,21 +1056,32 @@ def post_next_tweet() -> Dict[str, Any]:
                 }
             return result
 
-    # --- Fall back to flat queue ---
+    # --- Fall back to flat queue (priority-ordered) ---
+    # Pick the highest-priority unposted entry: ship_event + vendor_news_riff
+    # are P0, scheduled_original is P2 (panel guardrail). Ties keep insertion
+    # order (stable) so the existing top-of-queue P0 insert still wins within
+    # a category. We index the original list so we mutate/save in place.
     queue = _load_tweet_queue()
-    for i, tweet in enumerate(queue):
-        if not tweet.get("posted"):
-            result = post_tweet(tweet["text"])
-            if "error" not in result:
-                queue[i]["posted"] = True
-                queue[i]["posted_at"] = datetime.now(timezone.utc).isoformat()
-                queue[i]["tweet_id"] = result.get("id")
-                _save_tweet_queue(queue)
-                _log_content_event("tweet_posted", {
-                    "text": tweet["text"][:100],
-                    "tweet_id": result.get("id"),
-                })
-            return result
+    unposted = [
+        (category_priority(t.get("category", "")), idx, t)
+        for idx, t in enumerate(queue)
+        if not t.get("posted")
+    ]
+    if unposted:
+        unposted.sort(key=lambda x: (x[0], x[1]))  # priority, then queue order
+        _prio, i, tweet = unposted[0]
+        result = post_tweet(tweet["text"])
+        if "error" not in result:
+            queue[i]["posted"] = True
+            queue[i]["posted_at"] = datetime.now(timezone.utc).isoformat()
+            queue[i]["tweet_id"] = result.get("id")
+            _save_tweet_queue(queue)
+            _log_content_event("tweet_posted", {
+                "text": tweet["text"][:100],
+                "tweet_id": result.get("id"),
+                "category": tweet.get("category", ""),
+            })
+        return result
 
     return {"status": "empty", "reason": "No scheduled or queued tweets available"}
 

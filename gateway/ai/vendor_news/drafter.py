@@ -189,6 +189,8 @@ def _strip_at_mentions(text: str, no_at_handles: List[str]) -> str:
 def _build_riff_prompt(
     triggered: Dict[str, Any],
     no_at_mention: bool = True,
+    archetype: Optional[Dict[str, str]] = None,
+    recent_posts_for_variety: Optional[List[str]] = None,
 ) -> str:
     """Construct the input prompt for ``generate_tailored_draft``.
 
@@ -197,6 +199,18 @@ def _build_riff_prompt(
     voice / style anchors / the LED-1240 ground-truth feed; we just
     need to feed it the news context + Delimit-POV instructions so it
     has something to riff on.
+
+    Voice rework (2026-06-19, founder-ratified): the riff is HOOK-FIRST and
+    canon-DEMOTED. We lead with the builder's real pain / a plain question /
+    a tiny scenario / the plain factual update, and land the canon (merge
+    gate / signed check / delimit.ai) as the PAYOFF at the end. An archetype
+    is selected per-post for VARIETY with anti-repetition against recent
+    posts (see ai.social_archetypes). For a REAL vendor feature we keep the
+    factual substance and just drop the jargon.
+
+    The capability_validator gate is unchanged: the canon is demoted below
+    the hook, never removed, so a canonical phrase (or matched allowed_claim)
+    + a delimit.ai URL still ship in every riff.
     """
     vendor = triggered.get("vendor") or ""
     products = ", ".join(triggered.get("products") or []) or "(none listed)"
@@ -204,8 +218,27 @@ def _build_riff_prompt(
     raw_text = (triggered.get("text") or "").strip()
     metrics = triggered.get("metrics") or {}
 
+    if archetype is None:
+        try:
+            from ai.social_archetypes import select_archetype
+            archetype = select_archetype()
+        except Exception:  # pragma: no cover — never block on selector
+            archetype = None
+
+    archetype_block = ""
+    if archetype is not None:
+        try:
+            from ai.social_archetypes import build_archetype_prompt_block
+            archetype_block = build_archetype_prompt_block(
+                archetype,
+                recent_posts_for_variety=recent_posts_for_variety,
+            )
+        except Exception:  # pragma: no cover
+            archetype_block = ""
+
     lines = [
-        "VENDOR NEWS RIFF — write a brand-voice Delimit POV that rides this news cycle.",
+        "VENDOR NEWS RIFF — write a punchy brand-voice Delimit POV that rides "
+        "this news cycle. HOOK FIRST, canon as the payoff at the END.",
         "",
         f"Vendor: {vendor}",
         f"Products: {products}",
@@ -214,22 +247,39 @@ def _build_riff_prompt(
         f"{metrics.get('retweet_count', 0)} retweets, "
         f"{metrics.get('quote_count', 0)} quotes",
         "",
-        "What the vendor said (paraphrase only, do NOT quote verbatim):",
+        "What the vendor actually shipped (paraphrase in plain words, KEEP the "
+        "factual substance, do NOT quote verbatim, do NOT flatten a real "
+        "feature into a vibe):",
         f"  {raw_text[:500]}",
         "",
+    ]
+
+    if archetype_block:
+        lines.append(archetype_block)
+        lines.append("")
+
+    lines += [
         "Write ONE original tweet (not a reply, not a quote tweet) that:",
-        f"  * names the vendor by bare name only ({vendor}). "
-        f"NEVER use the @ tag."
-        if no_at_mention
-        else f"  * names the vendor ({vendor}).",
-        "  * paraphrases the news in your own words (one short clause).",
-        "  * ties to a Delimit canonical claim — merge gate for AI-written code, "
-        "signed replayable attestation, or cross-vendor governance.",
-        "  * includes a delimit.ai URL anchor (delimit.ai/methodology, "
-        "delimit.ai/reports, delimit.ai/att, or delimit.ai itself).",
-        "  * stays under 280 characters.",
-        "  * uses brand voice (no first person, no 'I', no 'we'). "
-        "Confident technical, NOT salesy.",
+        (
+            f"  * names the vendor by bare name only ({vendor}). "
+            f"NEVER use the @ tag."
+            if no_at_mention
+            else f"  * names the vendor ({vendor})."
+        ),
+        "  * opens with the HOOK for the chosen archetype (the real pain / a "
+        "plain question / a tiny scenario / the plain factual update / a "
+        "number / a punctured myth). NOT with Delimit, NOT with a feature-spec.",
+        "  * keeps the vendor fact accurate when the archetype is the plain "
+        "update (the fact is the value).",
+        "  * lands the canon as the PAYOFF in the final clause: a merge gate "
+        "for AI-written code, a signed replayable attestation, or a signed "
+        "check that reads the diff before merge.",
+        "  * ends with a delimit.ai URL anchor (delimit.ai, delimit.ai/reports, "
+        "delimit.ai/methodology, or delimit.ai/att).",
+        "  * stays under 280 characters, under 50 words, max 3 sentences.",
+        "  * uses brand voice: NO first person (no 'I', 'we', 'my', 'for me'). "
+        "Second person ('you/your') and third person only. Punchy, not salesy, "
+        "not a jargon feature-spec.",
         "  * does NOT use em dashes or en dashes.",
         "",
         "Output ONLY the tweet text. No preamble, no labels, no quotes around it.",
@@ -411,8 +461,24 @@ def draft_vendor_riff(
         )
         return result
 
-    # 3) Build the prompt + generate.
-    prompt = _build_riff_prompt(triggered_tweet, no_at_mention=no_at_mention)
+    # 3) Build the prompt + generate. Select an archetype for VARIETY with
+    #    anti-repetition against recent posts (2026-06-19 voice rework).
+    chosen_archetype: Optional[Dict[str, Any]] = None
+    recent_for_variety: List[str] = []
+    try:
+        from ai.social_archetypes import select_archetype, recent_posts
+        chosen_archetype = select_archetype()
+        recent_for_variety = recent_posts()
+    except Exception as _arch_exc:  # pragma: no cover — never block on selector
+        logger.debug("vendor_news: archetype selection skipped: %s", _arch_exc)
+        chosen_archetype = None
+
+    prompt = _build_riff_prompt(
+        triggered_tweet,
+        no_at_mention=no_at_mention,
+        archetype=chosen_archetype,
+        recent_posts_for_variety=recent_for_variety,
+    )
     try:
         text = generator(
             prompt,
@@ -534,16 +600,21 @@ def draft_vendor_riff(
         now=cur,
     )
 
-    # Append to history so the rate cap survives queue rotation.
+    # Append to history so the rate cap survives queue rotation. Record the
+    # chosen archetype key so the anti-repetition selector can rotate away
+    # from it on the next post (2026-06-19 voice rework).
+    history_row: Dict[str, Any] = {
+        "ts": cur.isoformat(),
+        "vendor": vendor,
+        "source_id": triggered_tweet.get("id"),
+        "source_url": triggered_tweet.get("url"),
+        "text": text,
+    }
+    if chosen_archetype and chosen_archetype.get("key"):
+        history_row["archetype"] = chosen_archetype["key"]
     _append_jsonl(
         Path(history_log_path) if history_log_path else RIFF_HISTORY_PATH,
-        {
-            "ts": cur.isoformat(),
-            "vendor": vendor,
-            "source_id": triggered_tweet.get("id"),
-            "source_url": triggered_tweet.get("url"),
-            "text": text,
-        },
+        history_row,
     )
 
     result["decision"] = "queue"

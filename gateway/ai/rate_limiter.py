@@ -54,13 +54,25 @@ PRO_TOOLS = frozenset({
     "delimit_release_plan", "delimit_release_status", "delimit_release_sync",
     "delimit_cost_analyze", "delimit_cost_optimize", "delimit_cost_alert",
     "delimit_social_post", "delimit_social_generate", "delimit_social_history",
-    "delimit_repo_analyze", "delimit_repo_config_audit",
-    "delimit_repo_config_validate", "delimit_repo_diagnose",
+    "delimit_repo_diagnose",
     "delimit_test_coverage",
     "delimit_screen_record", "delimit_screenshot",
-    "delimit_notify",
-    "delimit_agent_dispatch", "delimit_agent_status",
-    "delimit_agent_complete", "delimit_agent_handoff",
+    # LED-1743 drift fix (2026-06-16): social_approve is Pro in license.py but
+    # was missing from this mirror — add it to the Pro rate tier.
+    "delimit_social_approve",
+    # LED-1740 staged-12 gating (founder-ratified 2026-06-16): real-marginal-cost
+    # tools moved into Pro — mirror them into the Pro rate-limit tier (20/hr).
+    "delimit_audit",
+    "delimit_build_loop_daemon", "delimit_inbox_daemon", "delimit_social_daemon",
+    "delimit_daemon_run",
+    "delimit_vendor_news_scan", "delimit_vendor_news_draft",
+    "delimit_content_publish",
+    "delimit_social_target", "delimit_github_scan", "delimit_reddit_scan",
+    "delimit_notify_inbox",
+    # notify + agent lifecycle (dispatch/status/complete/handoff) +
+    # repo_analyze/repo_config_audit/repo_config_validate moved to FREE
+    # 2026-06-16 (LED-1741) — removed from the Pro rate-limit tier to keep this
+    # mirror in sync with ai/license.py PRO_TOOLS.
 })
 
 # Per-tool cost estimates (USD).  Tools not listed default to 0.

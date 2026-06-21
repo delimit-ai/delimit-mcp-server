@@ -1,7 +1,7 @@
 {
   "name": "delimit-cli",
   "mcpName": "io.github.delimit-ai/delimit-mcp-server",
-  "version": "4.12.1",
+  "version": "4.13.0",
   "description": "Unify Claude Code, Codex, Cursor, and Gemini CLI with persistent context, governance, and multi-model debate.",
   "main": "index.js",
   "files": [
@@ -32,6 +32,8 @@
     "!gateway/ai/content_grounding/",
     "!gateway/ai/inbox_drafts/",
     "!gateway/ai/inbox_executor.py",
+    "!gateway/ai/outreach_body_gen.py",
+    "!gateway/ai/seal/producer.py",
     "!gateway/ai/license_core.py",
     "gateway/ai/license_core.cpython-*-*.so",
     "scripts/",

@@ -700,11 +700,104 @@ from ai.rate_limiter import limiter, create_cost_controls_response
 
 
 def _check_pro(tool_name: str) -> Optional[Dict]:
-    """Gate Pro tools behind license check. Returns error dict or None."""
+    """Gate Pro tools behind license check. Returns error dict or None.
+
+    Routes through _pro_gate_graced (NOT bare require_premium) so the central
+    gate in _with_next_steps is GRACE-AWARE: tools in _NEWLY_ENFORCED_PRO
+    (LED-1741 G2, LED-1740 staged-12) honor the 90-day grace + grandfather
+    instead of hard-blocking a free user during the migration window. Without
+    this, _with_next_steps would re-gate (grace-unaware) every PRO_TOOLS member
+    it wraps, silently defeating the grace for newly-enforced tools."""
     if tool_name not in PRO_TOOLS:
         return None
+    gate = _pro_gate_graced(tool_name)
+    if gate is not None:
+        # LED-1755 conversion-funnel signal. A non-None gate means a free /
+        # unlicensed caller was denied a Pro tool — i.e. upgrade INTENT. Emit it
+        # (denial path only, so low-frequency) so the free->Pro funnel is
+        # measurable: which Pro tools free users reach for = where the upgrade
+        # CTA should point. Fail-open: a telemetry error must NEVER change the
+        # gate decision, so this is wrapped and `gate` is returned regardless.
+        try:
+            from ai.events import emit as _emit_event
+            _emit_event("pro_gate_denied", tool=tool_name)
+        except Exception:  # noqa: BLE001 — telemetry is best-effort
+            pass
+    return gate
+
+
+# ── G2 social-tier enforcement with grace + grandfather (LED-1741) ───────────
+# The social posting tools were moved into Pro (real outbound + LLM cost) but
+# previously shipped free (the central gate was dead). Per the ratified
+# migration, existing users are NOT hard-cut: a 90-day grace window allows AND
+# grandfathers any current caller; only AFTER the window is a new, non-licensed,
+# non-grandfathered caller gated. Reversible (delete the grandfather file or move
+# the date). Nothing charges a customer until npm publish (founder gate).
+_SOCIAL_PRO_ENFORCE_AFTER = "2026-09-16T00:00:00+00:00"  # 90 days from 2026-06-16
+_NEWLY_ENFORCED_PRO = frozenset({
+    "delimit_social_post", "delimit_social_generate",
+    "delimit_social_approve", "delimit_social_history",
+    # LED-1740 staged-12 gating (founder-ratified 2026-06-16): tools with real
+    # marginal cost (3-model LLM audit, paid-API + LLM vendor news, outbound
+    # X/YouTube posting, scrapers, background daemon threads) moved into Pro.
+    # Same 90-day grace + grandfather — no existing free user is hard-cut.
+    "delimit_audit",
+    "delimit_build_loop_daemon",
+    "delimit_vendor_news_scan", "delimit_vendor_news_draft",
+    "delimit_content_publish",
+    "delimit_social_target", "delimit_github_scan", "delimit_reddit_scan",
+    "delimit_inbox_daemon", "delimit_social_daemon",
+    "delimit_daemon_run", "delimit_notify_inbox",
+    # LED-1454 leaky-gate closure (founder-ratified 2026-06-17): these moved
+    # INTO the compiled set, so free users on the COMPILED-engine path (who got
+    # them free via the set mismatch) start being gated. Same 90-day grace +
+    # grandfather so none is hard-cut mid-workflow. (social_approve already
+    # listed above.)
+    "delimit_security_deliberate", "delimit_security_ingest",
+    "delimit_gov_new_task",
+})
+_GRANDFATHER_FILE = os.path.expanduser("~/.delimit/grandfathered_tools.json")
+
+
+def _load_grandfathered() -> set:
+    try:
+        with open(_GRANDFATHER_FILE, encoding="utf-8") as fh:
+            data = json.load(fh)
+        return set(data) if isinstance(data, list) else set()
+    except Exception:  # noqa: BLE001
+        return set()
+
+
+def _mark_grandfathered(full_name: str) -> None:
+    try:
+        grand = _load_grandfathered()
+        if full_name in grand:
+            return
+        grand.add(full_name)
+        os.makedirs(os.path.dirname(_GRANDFATHER_FILE), exist_ok=True)
+        with open(_GRANDFATHER_FILE, "w", encoding="utf-8") as fh:
+            json.dump(sorted(grand), fh)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _pro_gate_graced(tool_name: str, *, now=None) -> Optional[Dict]:
+    """``require_premium`` for a tool, with a 90-day grace + grandfather for tools
+    NEWLY moved into Pro (LED-1741), so no existing free user is hard-cut.
+    Returns a premium_required dict (BLOCK) or None (ALLOW)."""
     from ai.license import require_premium
-    return require_premium(tool_name)
+    full = tool_name if tool_name.startswith("delimit_") else f"delimit_{tool_name}"
+    gate = require_premium(tool_name)
+    if gate is None:
+        return None  # licensed, or not a Pro tool → allow
+    if full not in _NEWLY_ENFORCED_PRO:
+        return gate  # already-Pro tool → enforce as before (no grace)
+    now = now or datetime.now(timezone.utc)
+    deadline = datetime.fromisoformat(_SOCIAL_PRO_ENFORCE_AFTER)
+    if now < deadline or full in _load_grandfathered():
+        _mark_grandfathered(full)  # grace-period users keep access after the window
+        return None
+    return gate  # post-grace, non-licensed, non-grandfathered → block
 
 
 def _safe_call(fn, **kwargs) -> Dict[str, Any]:
@@ -3134,21 +3227,102 @@ def _delimit_deploy_impl(
     tag: str = "latest",
     dry_run: bool = False,
 ) -> Dict[str, Any]:
-    """Manage deployments (Pro).
+    """Unified deployment entry point — dispatches to one of eight actions (Pro).
 
-    Actions: plan, build, npm, publish, site, status, verify, rollback.
+    When to use: as the single MCP-registered deploy surface
+    (delimit_deploy) when the caller wants to pick the deploy operation
+    by name in one call rather than choosing a specific delimit_deploy_*
+    alias. Covers the full container chain (plan -> build -> publish ->
+    verify -> rollback), the deploy-state read (status), and the two
+    non-container ship paths (site / npm).
+    When NOT to use: from internal code paths or when you want the
+    operation's behavior and gate to surface at the right name — prefer
+    the specific alias (delimit_deploy_plan, delimit_deploy_build,
+    delimit_deploy_publish, delimit_deploy_verify, delimit_deploy_rollback,
+    delimit_deploy_status, delimit_deploy_site, delimit_deploy_npm). For a
+    pure runtime health check use delimit_obs_status; for a pre-deploy
+    smoke test use delimit_test_smoke; for release-tracking metadata use
+    delimit_release_status.
+
+    Sibling contrast: each delimit_deploy_<action> wrapper is a thin
+    alias over this implementation (they exist so the action's docstring
+    lives at the right name). This is the dispatch core. The "plan" action
+    additionally shares logic with delimit_deploy_plan via the internal
+    _deploy_plan_chain helper.
+
+    Side effects: ALL actions are gated by require_premium — unlicensed
+    callers receive a license payload and no backend call is made. Errors
+    are deterministic: an unrecognized action returns
+    {"error": "Unknown action '<x>'. Valid: ..."} before any gate or
+    backend call. Per action:
+      - "plan": delegates to _deploy_plan_chain (gate key "deploy_plan").
+        Read-mostly but ORCHESTRATES a chain: a worktree-sanity precheck,
+        then delimit_security_audit (FAIL-CLOSED — halts with
+        status="blocked" on audit error or any critical finding without
+        producing a plan), then the deploy-bridge plan, then a best-effort
+        delimit_gov_evaluate. Produces no deploy artifact itself.
+      - "build": gate "deploy_build". WRITES locally — shells out to the
+        container builder (consumes local disk/CPU for image layers). No
+        network push at this step.
+      - "publish": gate "deploy_publish". NETWORK WRITE — pushes
+        previously built images to the configured container registry.
+      - "verify": gate "deploy_verify". Read-only network PROBES (HTTP
+        health checks, container/dependency inspection) of a deployed
+        revision. May return partial results on backends without health
+        endpoints.
+      - "rollback": gate "deploy_rollback". MUTATES the running
+        environment to point at to_sha (reversal-only).
+      - "status": gate "deploy_status". READ-ONLY query of the deploy
+        state store. No write, no probe.
+      - "site": project_path is path-sanitized FIRST (an escape returns
+        {"error": ...} before the gate). gate "deploy_site". LOCAL git ops
+        (add/commit/push) + a NETWORK Vercel build trigger.
+      - "npm": gate "deploy_npm". A PRODUCTION DEPLOY — bumps package.json
+        (LOCAL write), runs prepublishOnly, npm pack, then npm publish (a
+        publicly-visible NETWORK write, effectively not undoable).
+        dry_run=True suppresses only the final publish; the bump and pack
+        still run.
+    Every result is wrapped via _with_next_steps for orchestrator hints.
 
     Args:
-        action: Which deploy operation to perform.
-        app: Application name (for plan/build/publish/verify/rollback/status).
-        env: Target environment staging/production (for plan/verify/rollback/status).
-        git_ref: Git reference branch/tag/SHA (for plan/build/publish/verify).
-        to_sha: SHA to rollback to (for action='rollback').
-        project_path: Path to project (for action='site' or action='npm').
-        message: Git commit message (for action='site').
-        bump: Version bump patch/minor/major (for action='npm').
-        tag: npm dist-tag (for action='npm').
-        dry_run: Preview without publishing (for action='npm').
+        action: Which deploy operation to perform. One of "plan", "build",
+            "npm", "publish", "site", "status", "verify", "rollback".
+            Default "status". Case/space-insensitive (lowered + stripped).
+            Other values return a deterministic {"error": ...}.
+        app: Application name / project key in the deploy backend. Used by
+            "plan", "build", "publish", "verify", "rollback", "status".
+            Required for a real container operation. (Ignored by "site"
+            and "npm".)
+        env: Target environment, typically "staging" or "production". Used
+            by "plan", "verify", "rollback", "status".
+        git_ref: Git ref (branch/tag/SHA). Used by "plan", "build",
+            "publish", "verify". Default None = backend HEAD; drives the
+            image tag for "build".
+        to_sha: SHA to roll back to. Used by "rollback" only. None lets the
+            backend select the previous deployed SHA.
+        project_path: Path to the project. Used by "site" and "npm".
+            Default "." (cwd). For "site" it is sanitized and must not
+            escape the workspace root; for "npm" it must contain a
+            package.json.
+        message: Git commit message. Used by "site" only.
+        bump: Semver bump "patch" (default) / "minor" / "major". Used by
+            "npm" only.
+        tag: npm dist-tag. Used by "npm" only. Default "latest"; use "next"
+            or a custom tag to avoid auto-installing the new version for
+            existing users.
+        dry_run: If True, run the npm chain without the final publish. Used
+            by "npm" only. Default False.
+
+    Returns:
+        Dict whose shape depends on action — see the per-action wrapper
+        (delimit_deploy_plan / _build / _publish / _verify / _rollback /
+        _status / _site / _npm) for the exact keys. All responses are
+        wrapped via _with_next_steps. "plan" returns a plan plus a
+        security-audit summary, gov-evaluate result, and a "chain" trace,
+        or status="blocked" with a reason when the security gate trips.
+        Returns a license-gate payload for any action when unlicensed, or
+        {"error": "..."} for an unknown action, a "site" path-sanitisation
+        failure, or any backend failure.
     """
     action = action.lower().strip()
     valid_actions = ("plan", "build", "npm", "publish", "site", "status", "verify", "rollback")
@@ -4204,10 +4378,8 @@ def delimit_repo_diagnose(target: Annotated[str, Field(description="Repository p
     Returns:
         Dict with diagnostics (issues, severity, hints).
     """
-    from ai.license import require_premium
-    gate = require_premium("repo_diagnose")
-    if gate:
-        return gate
+    # LED-1454 (founder-ratified 2026-06-17): repo_diagnose moved to FREE
+    # (read-only quick health pass, zero marginal cost) — gate removed.
     from backends.repo_bridge import diagnose
     return _safe_call(diagnose, target=target)
 
@@ -4248,7 +4420,7 @@ def _run_repo_tool_with_remote(
 
 @mcp.tool()
 def delimit_repo_analyze(target: Annotated[str, Field(description="Repository path, \"owner/repo\", or GitHub URL. Default \".\" (cwd).")] = ".") -> Dict[str, Any]:
-    """Analyze repository structure and quality (experimental) (Pro).
+    """Analyze repository structure and quality (experimental).
 
     When to use: for a deep audit of a repo (local or remote) — code
     structure, language mix, quality signals.
@@ -4277,7 +4449,7 @@ def delimit_repo_analyze(target: Annotated[str, Field(description="Repository pa
 
 @mcp.tool()
 def delimit_repo_config_validate(target: Annotated[str, Field(description="Repository or config path, \"owner/repo\", or GitHub URL. Default \".\" (cwd).")] = ".") -> Dict[str, Any]:
-    """Validate repository configuration files (experimental) (Pro).
+    """Validate repository configuration files (experimental).
 
     When to use: as a pre-merge check that .github/, package.json,
     pyproject.toml, etc. are well-formed and self-consistent.
@@ -4306,7 +4478,7 @@ def delimit_repo_config_validate(target: Annotated[str, Field(description="Repos
 
 @mcp.tool()
 def delimit_repo_config_audit(target: Annotated[str, Field(description="Repository or config path, \"owner/repo\", or GitHub URL. Default \".\" (cwd).")] = ".") -> Dict[str, Any]:
-    """Audit repository configuration for compliance (experimental) (Pro).
+    """Audit repository configuration for compliance (experimental).
 
     When to use: when checking a repo's config against a compliance
     standard — required files, branch protection, license header.
@@ -4928,8 +5100,31 @@ def delimit_security_audit(
         repro_line,
     ])
 
-    # Step 3: Critical findings -- create governance task
     stub_title = f"Security: {critical_count} critical finding(s) in {target}"
+
+    # LED-1753 dedup: a recurring scan of the same target emits the SAME title
+    # every run. Without this guard each run piled up a duplicate open P0 — the
+    # source of the LED-3179..3213 noise (20+ identical "critical finding(s)"
+    # stubs that bloated the ledger and masked real priorities). If an open
+    # ledger item with this exact title already exists, the finding is already
+    # tracked: skip the gov-task + ledger + notify and return early.
+    try:
+        from ai.ledger_manager import list_items as _list_items
+        _existing = _list_items(ledger="ops", status="open", text=stub_title)
+        _ex_items = _existing.get("items") if isinstance(_existing, dict) else _existing
+        _dupe = any(
+            isinstance(it, dict) and it.get("title") == stub_title
+            for it in (_ex_items or [])
+        )
+    except Exception:  # noqa: BLE001 — dedup is best-effort; never block the audit
+        _dupe = False
+    if _dupe:
+        chain["steps"].append({"step": "dedup", "ok": True, "skipped": "duplicate_open_p0"})
+        chain["status"] = "critical_findings_already_tracked"
+        audit_result["chain"] = chain
+        return _with_next_steps("security_audit", audit_result)
+
+    # Step 3: Critical findings -- create governance task
     gov_result = _delimit_gov_impl(
         action="new_task",
         title=stub_title,
@@ -5112,19 +5307,79 @@ def _delimit_release_impl(
     # sync params
     sync_action: str = "audit",
 ) -> Dict[str, Any]:
-    """Manage releases: plan, validate, status, rollback, history, sync (Pro for plan/status/sync).
+    """Unified release-management entry point — dispatches to one of six actions.
 
-    Actions: plan, validate, status, rollback, history, sync.
+    When to use: as the single MCP-registered release surface
+    (delimit_release) when the caller wants to pick the release
+    operation by name in one call rather than choosing a specific
+    delimit_release_* alias. Release-tier means whole-environment,
+    multi-service versions (the rollup across apps), as opposed to the
+    deploy-tier (per-app SHA) covered by the delimit_deploy_* tools.
+    When NOT to use: from internal code paths — prefer the specific
+    alias (delimit_release_plan, delimit_release_validate,
+    delimit_release_status, delimit_release_rollback,
+    delimit_release_history, delimit_release_sync) for clarity and so
+    each action's docstring and license gate show up at the right call
+    site. For per-app rollout state use delimit_deploy_status; to ship
+    code use delimit_deploy_publish; for OpenAPI spec linting use
+    delimit_lint.
+
+    Sibling contrast: each delimit_release_<action> wrapper is a thin
+    alias over this implementation; they exist so the action's
+    docstring lives at the right name. This is the dispatch core.
+    delimit_release_validate routes through a shared _release_validate
+    chain, and the public delimit_release_sync exposes its sub-action as
+    a param named `action`, which this function receives as `sync_action`.
+
+    Side effects vary by action:
+      - "plan": gated by require_premium("release_plan") — unlicensed
+        callers get a license payload and NO backend call. Licensed,
+        it is read-only against git/repo; result wrapped via
+        _with_next_steps.
+      - "validate": runs the validate chain. On PASS, read-only. On
+        FAILURE it auto-chains WRITES — collects failure evidence, sends
+        a "release_validation_failed" webhook notification, and creates a
+        P1 fix item on the "ops" ledger. Each chained step is best-effort
+        and recorded in a "chain" trace.
+      - "status": gated by require_premium("release_status"). Read-only.
+      - "rollback": MUTATES the live environment — flips services to
+        to_version (reversal-only). No automatic evidence/ledger/notify.
+        Experimental.
+      - "history": read-only listing of prior releases. Experimental.
+      - "sync": gated by require_premium("release_sync"). sync_action=
+        "config" returns the raw release config; otherwise runs a
+        read-only audit wrapped via _with_next_steps.
+    Errors are deterministic: an unknown `action` short-circuits before
+    any backend call with {"error": "Unknown action '...'. Valid: ..."}.
 
     Args:
-        action: Which release operation to perform.
-        environment: Target environment staging/production.
-        version: Release version (auto-detected if empty, for plan/validate/rollback).
-        repository: Repository path (for action='plan').
-        services: Optional service list (for action='plan').
-        to_version: Version to rollback to (for action='rollback').
-        limit: Number of releases to return (for action='history').
-        sync_action: Sub-action audit/config (for action='sync').
+        action: Which release operation to perform. One of "plan",
+            "validate", "status", "rollback", "history", "sync".
+            Default "status". Other values return a deterministic error.
+        environment: Target environment, "staging" or "production".
+            Default "production".
+        version: Release version (auto-detected from git tags if empty).
+            Used by "plan", "validate", and "rollback" (as the expected
+            current version to roll back FROM).
+        repository: Repository path. Default ".". Used only by "plan".
+        services: Optional list of service names to scope the plan;
+            None = all services in the repo manifest. Used only by "plan".
+        to_version: Prior release version to roll back to. Required for
+            "rollback"; ignored otherwise.
+        limit: Maximum number of releases to return. Default 10. Used
+            only by "history".
+        sync_action: Sub-action for "sync" — "audit" (default) or
+            "config". Ignored by other actions.
+
+    Returns:
+        Dict whose shape depends on action — see the per-action wrapper
+        (delimit_release_plan / _validate / _status / _rollback /
+        _history / _sync) for the exact keys. Most responses include a
+        next_steps field from _with_next_steps (except sync with
+        sync_action="config", which returns the raw config). Gated
+        actions ("plan", "status", "sync") return a license-gate payload
+        when the caller lacks Premium. Unknown actions and backend
+        failures return {"error": "..."}.
     """
     action = action.lower().strip()
     valid_actions = ("plan", "validate", "status", "rollback", "history", "sync")
@@ -5255,7 +5510,7 @@ def _release_validate_chain(environment: str, version: str) -> Dict[str, Any]:
 
 @mcp.tool()  # Promoted from experimental (Consensus 120: chaining makes it production-ready)
 def delimit_release_validate(environment: Annotated[str, Field(description="Target environment (\"production\" / \"staging\").")], version: Annotated[str, Field(description="Release version string. Required.")]) -> Dict[str, Any]:
-    """Validate that a release is safe to ship (Pro).
+    """Validate that a release is safe to ship.
 
     When to use: as the gate between delimit_release_plan and the actual
     rollout — confirms the release passes preflight checks.
@@ -5651,18 +5906,80 @@ def _delimit_obs_impl(
     alert_rule: Optional[Dict[str, Any]] = None,
     rule_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Manage observability: metrics, logs, alerts, status (Pro for metrics/logs/status).
+    """Unified observability entry point — dispatches to one of four actions.
 
-    Actions: metrics, logs, alerts, status.
+    When to use: as the single MCP-registered observability surface
+    (delimit_obs) when the caller wants to pick the action by name in
+    one call rather than choosing a specific delimit_obs_* alias.
+    Covers runtime metrics, log search, alert-rule management, and the
+    at-a-glance health rollup.
+    When NOT to use: from internal code paths — prefer the specific
+    alias (delimit_obs_metrics, delimit_obs_logs, delimit_obs_alerts,
+    delimit_obs_status) for clarity and so docstrings and license gates
+    show up at the right call site. For the governance-kernel layer use
+    delimit_gov_health, not this runtime-observability surface.
+
+    Sibling contrast: each delimit_obs_<action> wrapper below is a thin
+    alias over this implementation; they exist so the action's docstring
+    lives at the right name. This is the dispatch core. Within the
+    actions: "metrics" returns numeric series, "logs" returns text
+    matches over the same backend, "status" returns a synthesised
+    health rollup, and "alerts" configures thresholds against the
+    metric series rather than querying data.
+
+    Side effects: action="metrics" / "logs" / "status" are READ-ONLY
+    and gated by require_premium (keys "obs_metrics", "obs_logs",
+    "obs_status") — unlicensed callers receive a license payload and no
+    backend call is made; licensed calls route to a distinct
+    observability backend function and are wrapped via _with_next_steps
+    for orchestrator hints. action="alerts" is the only WRITE-capable
+    path: its sub-action ("create" / "update" / "delete") mutates alert
+    configuration while "list" is read-only; it routes through the ops
+    bridge and is EXPERIMENTAL — the alert_rule schema is backend-
+    specific and may evolve. None of the read actions write data, append
+    to the ledger, or send notifications. Errors are deterministic
+    (`{"error": ...}`): an unknown action short-circuits before any
+    backend call with the valid-action list.
 
     Args:
-        action: Which observability operation to perform.
-        query: Metrics query type or log search string (for metrics/logs).
-        time_range: Time range e.g. 1h, 24h, 7d (for metrics/logs).
-        source: Optional data source (for metrics/logs).
-        alert_action: Alert sub-action list/create/delete/update (for action='alerts').
-        alert_rule: Alert rule definition (for alerts create/update).
-        rule_id: Rule ID (for alerts delete/update).
+        action: Which observability operation to perform. One of
+            "metrics", "logs", "alerts", "status". Default "status".
+            Case-insensitive and whitespace-trimmed. Other values
+            return a deterministic error listing the valid actions.
+        query: Metric query name (action="metrics") or log search
+            string (action="logs"). Default "system". For "logs" this
+            is effectively required — empty searches are rejected by
+            the backend. Ignored for "alerts" and "status".
+        time_range: Window like "1h", "24h", "7d" (used only when
+            action="metrics" or action="logs"). Default "1h". Larger
+            windows may downsample or be capped server-side. Ignored
+            for "alerts" and "status".
+        source: Optional data/log source override (used only when
+            action="metrics" or action="logs"). Default None = backend
+            default / all configured sources.
+        alert_action: Alert sub-action — one of "list", "create",
+            "update", "delete" (used only when action="alerts").
+            Default "list". "create"/"update"/"delete" write; "list"
+            reads.
+        alert_rule: Alert rule definition dict (used only when
+            action="alerts", required for alert_action "create" and
+            "update"). Backend-specific schema — typically metric,
+            threshold, comparison, window, severity.
+        rule_id: Identifier for an existing rule (used only when
+            action="alerts", required for alert_action "delete" and
+            "update").
+
+    Returns:
+        Dict whose shape depends on action — see the per-action wrapper
+        (delimit_obs_metrics, delimit_obs_logs, delimit_obs_alerts,
+        delimit_obs_status) for the exact keys. "metrics" → numeric
+        series; "logs" → matches + match_count; "status" → overall +
+        per-service rollup; "alerts" → rules list or {rule_id, status}.
+        Read actions include a next_steps field from _with_next_steps;
+        the alerts path returns the ops-bridge result directly. Returns
+        a license-gate payload for the gated read actions when
+        unlicensed, or {"error": "..."} for an unknown/unhandled action
+        or a backend rejection.
     """
     action = action.lower().strip()
     valid_actions = ("metrics", "logs", "alerts", "status")
@@ -6338,10 +6655,8 @@ def delimit_test_coverage(project_path: Annotated[str, Field(description="Path t
     Returns:
         Dict with coverage breakdown, threshold verdict, next_steps.
     """
-    from ai.license import require_premium
-    gate = require_premium("test_coverage")
-    if gate:
-        return gate
+    # LED-1454 (founder-ratified 2026-06-17): test_coverage moved to FREE
+    # (os.walk file-count estimate, zero marginal cost) — gate removed.
     from backends.ui_bridge import test_coverage
     return _safe_call(test_coverage, project_path=project_path, threshold=threshold)
 
@@ -8782,7 +9097,7 @@ def delimit_soul_capture(
     tokens_used: Annotated[int, Field(description="Estimated tokens consumed this session.")] = 0,
     context_fullness: Annotated[float, Field(description="0.0-1.0 representing context-window fullness.")] = 0.0,
 ) -> Dict[str, Any]:
-    """Capture session state as a 'soul' for cross-model resurrection (Pro).
+    """Capture session state as a 'soul' for cross-model resurrection.
 
     When to use: at session end or when context gets full, to save
     what you're working on so the next session in any model can pick
@@ -8846,7 +9161,7 @@ def delimit_soul_capture(
 
 @mcp.tool()
 def delimit_revive(project_path: Annotated[str, Field(description="Project path to revive. Empty = auto-detect from cwd.")] = "", soul_id: Annotated[str, Field(description="Specific soul id to revive. Empty = latest.")] = "", scope: Annotated[str, Field(description="Optional handoff/receipt id. When set, revives ONLY that scoped handoff context (for dispatched subagents) instead of the global session soul. Empty = full soul (default).")] = "") -> Dict[str, Any]:
-    """Revive the last session's captured soul in any model (Pro).
+    """Revive the last session's captured soul in any model.
 
     When to use: at session start, to load the prior session's soul
     (active task, decisions, blockers, next steps).
@@ -9234,8 +9549,7 @@ def delimit_audit(
         Dict with synthesised findings, agreement matrix, per-model
         raw responses.
     """
-    from ai.license import require_premium
-    gate = require_premium("audit")
+    gate = _pro_gate_graced("audit")
     if gate:
         return gate
 
@@ -9755,18 +10069,94 @@ def _delimit_secret_impl(
     agent_type: str = "",
     tool: str = "",
 ) -> Dict[str, Any]:
-    """Manage secrets broker.
+    """Unified secrets-broker entry point — dispatches to one of five actions.
 
-    Actions: store, get, list, revoke, access_log.
+    Manages just-in-time credential access through the local Delimit
+    secrets broker (ai.secrets_broker) instead of bare environment
+    variables or .env files: store a credential once with an access
+    scope, fetch it at execution time with every read recorded to an
+    audit trail, inventory credential metadata without exposing values,
+    revoke on rotation/leak, and read the access log.
+
+    When to use: as the single MCP-registered secrets surface
+    (delimit_secret) when the caller wants to pick the operation by name
+    in one call rather than choosing a specific delimit_secret_* alias.
+    When NOT to use: from internal code paths — prefer the specific alias
+    (delimit_secret_store, delimit_secret_get, delimit_secret_list,
+    delimit_secret_revoke, delimit_secret_access_log) so each operation's
+    docstring and arg schema show up at the right call site. Do not use
+    the broker as a general key/value store — it is credential-scoped and
+    every read is audited.
+
+    Sibling contrast: each delimit_secret_<action> wrapper below is a thin
+    alias over this implementation; they exist so the action's docstring
+    lives at the right name. This is the dispatch core. Versus
+    delimit_context_* / delimit_memory_*: those persist plans and notes;
+    this persists access-controlled credentials with a read audit trail.
+
+    Storage & access model: credentials are persisted to the local broker
+    store under ~/.delimit/secrets/ (encoded at rest) and returned in
+    cleartext to an authorized caller — the host filesystem is the trust
+    boundary, so protect it accordingly. Scope is enforced at READ time:
+    scope="all" permits any caller; otherwise the requester's agent_type
+    or tool must appear in the credential's comma-separated allow-list.
+    The access log records who/what/when and whether access was granted —
+    it never stores the credential value, and "list" returns metadata
+    only, never values.
+
+    Side effects (per action):
+      - "store": WRITES/overwrites the credential under ~/.delimit/secrets/
+        with its scope and description. A same-name store overwrites
+        silently; there is no version history.
+      - "get": returns the credential value to an authorized requester and
+        appends an access-log entry (granted true/false); on success it
+        updates the credential's access counter / last-accessed timestamp.
+        A scope denial, a missing name, or a revoked credential is logged
+        and returns without a value.
+      - "list": READ-ONLY. Returns credential metadata (name, scope,
+        description, created_by, access_count, revoked, timestamps) —
+        never values. Wrapped via _with_next_steps.
+      - "revoke": WRITES a revoked flag + timestamp and appends a revoke
+        entry to the access log; subsequent "get" calls are denied. Does
+        NOT hard-delete the stored file.
+      - "access_log": READ-ONLY. Returns the access trail (newest first),
+        optionally filtered to one credential name. Wrapped via
+        _with_next_steps.
+    No action is license-gated. Errors are deterministic
+    ({"error": "..."}): a missing required argument or an unknown action
+    short-circuits before the backend call.
 
     Args:
-        action: Which secret operation to perform.
-        name: Secret name (for store/get/revoke/access_log).
-        value: Secret value (for action='store').
-        scope: Comma-separated allowed agents/tools or 'all' (for action='store').
-        description: Human-readable description (for action='store').
-        agent_type: Requesting agent identity (for action='get').
-        tool: Requesting tool name (for action='get').
+        action: Which secret operation to perform. One of "store", "get",
+            "list", "revoke", "access_log". Default "list". Case-
+            insensitive (lowered + stripped). Other values return a
+            deterministic error.
+        name: Credential name / key. Required for "store", "get",
+            "revoke"; optional filter for "access_log" (empty = all);
+            ignored for "list". Sanitized for filesystem safety.
+        value: The credential to store. Required for action="store";
+            ignored otherwise. Never echoed back by "store".
+        scope: Comma-separated agent/tool identities permitted to read
+            this credential, or "all" for any requester. Used only by
+            action="store". Default "all". Enforced at read time.
+        description: Human-readable description (action="store" only).
+            Optional but recommended; surfaces in "list" and the audit
+            trail.
+        agent_type: Identity of the requesting agent (action="get" only),
+            checked against scope.
+        tool: Name of the requesting tool (action="get" only), checked
+            against scope.
+
+    Returns:
+        Dict whose shape depends on action — see the per-action wrapper
+        (delimit_secret_store / _get / _list / _revoke / _access_log) for
+        the exact keys. "store" → {"stored": <name>}; "get" →
+        {"value": ..., "granted": true, "name": ...} when authorized, or
+        {"error": ..., "granted": false} on denial/not-found/revoked;
+        "list" → {"secrets": [<metadata>], ...} (never values); "revoke"
+        → {"revoked": <name>}; "access_log" → {"log": [...], "count": N}.
+        Non-error reads include a next_steps field from _with_next_steps.
+        Unknown actions and missing-arg failures return {"error": "..."}.
     """
     action = action.lower().strip()
     valid_actions = ("store", "get", "list", "revoke", "access_log")
@@ -9984,19 +10374,93 @@ def _delimit_context_impl(
     branch_action: str = "list",
     branch_name: str = "",
 ) -> Dict[str, Any]:
-    """Manage context filesystem for cross-model continuity.
+    """Unified context-filesystem entry point — dispatches to one of six actions.
 
-    Actions: init, read, write, list, snapshot, branch.
+    Manages a venture-scoped, versioned context filesystem under
+    ~/.delimit/context/<venture>/ so plans, decisions, and artifacts
+    survive across sessions and across models. This is the cross-model-
+    continuity store: write once, read from any later session or any
+    other assistant.
+
+    When to use: as the single MCP-registered context surface
+    (delimit_context) when the caller wants to pick the action by name in
+    one call rather than choosing a specific delimit_context_* alias.
+    When NOT to use: from internal code paths — prefer the specific alias
+    (delimit_context_read, delimit_context_write, delimit_context_snapshot,
+    etc.) so each action's docstring, args, and side-effect notes show up
+    at the right call site. For ephemeral, conversation-scoped memory use
+    delimit_memory_store / delimit_memory_search instead — those are NOT
+    venture-namespaced or versioned.
+
+    Sibling contrast: each delimit_context_<action> wrapper below is a
+    thin alias over this implementation; they exist so the action's
+    docstring lives at the right name. This is the dispatch core. The
+    context FS is venture-scoped and versioned (snapshot/branch);
+    delimit_memory_* is conversation-scoped and unversioned. Snapshot vs
+    branch: snapshot is an immutable point-in-time copy (history/
+    rollback), branch is a mutable write-isolated fork that can be merged
+    back into main. Neither touches git or any code repository.
+
+    Side effects: all six actions are free-tier (no require_premium gate
+    in this dispatcher). Each routes to a distinct context-FS backend
+    function and is wrapped via _with_next_steps for orchestrator hints.
+    Per action:
+      - "list" — read-only enumeration of <venture>/artifacts/*. Returns
+        [] (no error) if the venture or artifacts dir does not exist.
+      - "read" — read-only load of one artifact. Returns {"error": ...}
+        if the named artifact is absent.
+      - "init" — WRITES. Creates the venture directory, the
+        memory/plans/artifacts/snapshots/branches subdirs, and
+        manifest.json if absent. Idempotent.
+      - "write" — WRITES/overwrites <venture>/artifacts/<name>.json and
+        bumps the manifest version counter. Overwrites silently if the
+        artifact name already exists.
+      - "snapshot" — WRITES. Copies the venture's artifacts/ and memory/
+        into a timestamped (optionally labeled) snapshot dir plus a
+        snapshot manifest. Does NOT bump the version counter.
+      - "branch" — depends on branch_action. "list" is read-only.
+        "create" WRITES a new branch fork (copy of artifacts/ + memory/)
+        and errors if the branch already exists. "merge" MUTATES the
+        venture's main artifacts/ and memory/ with the branch's files,
+        then DELETES the branch dir and bumps the version counter; errors
+        if the branch is not found.
+    Errors are deterministic ({"error": "..."}): an unknown top-level
+    action, an unknown branch_action, or a missing branch_name on
+    create/merge all short-circuit before the backend call.
 
     Args:
-        action: Which context operation to perform.
-        venture: Venture/project namespace (default: "default").
-        name: Artifact name (for read/write).
-        content: Artifact content (for action='write').
-        artifact_type: Type hint text/json/code/plan (for action='write').
-        label: Snapshot label (for action='snapshot').
-        branch_action: Branch sub-action create/merge/list (for action='branch').
-        branch_name: Branch name (for action='branch' with create/merge).
+        action: Which context operation to perform. One of "init", "read",
+            "write", "list", "snapshot", "branch". Default "list". Other
+            values return a deterministic error.
+        venture: Venture/project namespace key — selects the
+            ~/.delimit/context/<venture>/ tree. Used by every action.
+            Default "default".
+        name: Artifact name, used as the <name>.json file key. Required
+            for action="read" and action="write". Ignored by other
+            actions.
+        content: Artifact text body. Used only when action="write".
+        artifact_type: Type hint stored on the artifact — "text", "json",
+            "code", or "plan". Used only when action="write". Default
+            "text". Affects the stored type hint, not the storage format.
+        label: Optional human-readable snapshot label, appended to the
+            timestamp in the snapshot dir name. Used only when
+            action="snapshot".
+        branch_action: Branch sub-action — "list", "create", or "merge".
+            Used only when action="branch". Default "list".
+        branch_name: Branch name. Required when action="branch" with
+            branch_action="create" or "merge"; ignored for "list".
+
+    Returns:
+        Dict whose shape depends on action — see the per-action wrapper
+        (delimit_context_read, delimit_context_write,
+        delimit_context_branch, etc.) for the exact keys. "list" returns
+        {venture, artifacts, count}; "branch" with "list" returns
+        {venture, branches, count}; write/init/snapshot/read/create/merge
+        return the corresponding context-FS result dict. All non-error
+        responses include a next_steps field from _with_next_steps. No
+        license-gate payload is ever returned (no action is gated).
+        Returns {"error": "..."} for an unknown action, unknown
+        branch_action, or a missing required branch_name.
     """
     action = action.lower().strip()
     valid_actions = ("init", "read", "write", "list", "snapshot", "branch")
@@ -10234,7 +10698,7 @@ def delimit_resource_list(
     state: Annotated[str, Field(description="PR/issue state — \"open\" (default), \"closed\", \"all\".")] = "open",
     limit: Annotated[int, Field(description="Max results. Default 10.")] = 10,
 ) -> Dict[str, Any]:
-    """List resources from a connected data-plane system (Pro).
+    """List resources from a connected data-plane system.
 
     When to use: to enumerate items via a driver — repos, PRs, issues,
     workflow runs.
@@ -10289,7 +10753,7 @@ def delimit_resource_get(
     identifier: Annotated[str, Field(description="Resource identifier — repo name, PR number, run id. Required.")] = "",
     repo: Annotated[str, Field(description="\"owner/name\" required for PRs / issues / workflow runs.")] = "",
 ) -> Dict[str, Any]:
-    """Get a specific resource from a connected data-plane system (Pro).
+    """Get a specific resource from a connected data-plane system.
 
     When to use: to fetch a single item by identifier via a driver —
     a repo, PR, issue, or workflow run.
@@ -10620,6 +11084,9 @@ def delimit_social_post(text: Annotated[str, Field(description="Tweet text. Leav
         {"status": "skipped", "reason": ...}; on unsupported platform
         returns {"error": ..., "supported": [...]}.
     """
+    _g = _pro_gate_graced("social_post")
+    if _g:
+        return _g
     from ai.social import generate_post, post_tweet, should_post_now, save_draft
 
     if not draft and not should_post_now():
@@ -10837,6 +11304,9 @@ def delimit_social_generate(category: Annotated[str, Field(description="Post cat
         Dict with the generated post payload (text + metadata) and
         next_steps.
     """
+    _g = _pro_gate_graced("social_generate")
+    if _g:
+        return _g
     from ai.social import generate_post
 
     post = generate_post(category)
@@ -10845,7 +11315,7 @@ def delimit_social_generate(category: Annotated[str, Field(description="Post cat
 
 @mcp.tool()
 def delimit_social_accounts() -> Dict[str, Any]:
-    """List configured social media accounts (Pro).
+    """List configured social media accounts.
 
     When to use: to inventory which Twitter/X accounts have credentials
     available before drafting or scheduling a post.
@@ -10957,6 +11427,9 @@ def delimit_social_history(limit: Annotated[int, Field(description="Max entries 
     Returns:
         Dict with history entries and next_steps.
     """
+    _g = _pro_gate_graced("social_history")
+    if _g:
+        return _g
     from ai.social import get_post_history
 
     posts = get_post_history(limit, platform=platform, user=user, subreddit=subreddit)
@@ -10987,6 +11460,9 @@ def delimit_social_approve(action: Annotated[str, Field(description="\"list\" (d
     Returns:
         Dict with drafts list / post result / discard confirmation.
     """
+    _g = _pro_gate_graced("social_approve")
+    if _g:
+        return _g
     from ai.social import list_drafts, approve_draft, reject_draft
 
     if action == "list":
@@ -11070,6 +11546,9 @@ def delimit_social_target(
         metadata; list returns recent targets; stats returns counts.
         Every response includes next_steps.
     """
+    g = _pro_gate_graced("social_target")
+    if g:
+        return g
     from ai.social_target import scan_targets, process_targets, list_targets, get_stats
 
     if action == "scan":
@@ -11097,7 +11576,7 @@ def delimit_social_target_config(
     provider: Annotated[str, Field(description="Provider name — \"twttr241\", \"xai\", \"proxy\", \"gh_cli\", etc., for update.")] = "",
     subreddits: Annotated[str, Field(description="Comma-separated subreddits for add_subreddits.")] = "",
 ) -> Dict[str, Any]:
-    """Configure social target scanning platforms (Pro).
+    """Configure social target scanning platforms.
 
     When to use: to inspect / update which platforms the social-target
     scanner uses, or to add subreddits a venture should scan.
@@ -11176,6 +11655,9 @@ def delimit_reddit_scan(sort: Annotated[str, Field(description="Reddit sort orde
         title, score, classification high_priority / standard, suggested
         chain action), aggregate counts, plus next_steps.
     """
+    g = _pro_gate_graced("reddit_scan")
+    if g:
+        return g
     from ai.reddit_scanner import scan_all
 
     capped_limit = min(max(1, limit), 25)
@@ -11228,6 +11710,9 @@ def delimit_github_scan(
         signals and pain-thread findings with relevance scores; deep
         returns the full ecosystem intel corpus. All include next_steps.
     """
+    g = _pro_gate_graced("github_scan")
+    if g:
+        return g
     from ai.github_scanner import scan
 
     if cadence not in ("pulse", "hunter", "deep"):
@@ -11275,8 +11760,7 @@ def delimit_vendor_news_scan(dry_run: Annotated[bool, Field(description="If True
         Dict with stats, triggered, queued, rejected, rate_capped,
         errors — same shape as the cron summary.
     """
-    from ai.license import require_premium
-    gate = require_premium("vendor_news_scan")
+    gate = _pro_gate_graced("vendor_news_scan")
     if gate:
         return gate
 
@@ -11351,7 +11835,7 @@ def delimit_vendor_news_scan(dry_run: Annotated[bool, Field(description="If True
 
 @mcp.tool()
 def delimit_vendor_news_health() -> Dict[str, Any]:
-    """Health check for the vendor-news riff system (Pro) (LED-1253).
+    """Health check for the vendor-news riff system (LED-1253).
 
     When to use: to answer "is the cron firing? are drafts landing?
     what's getting rejected?" without grepping logs.
@@ -11364,7 +11848,6 @@ def delimit_vendor_news_health() -> Dict[str, Any]:
 
     Side effects: read-only. Greps crontab for the cron entry, reads
     sensor JSONL log, tweet queue, rejected log, watchlist file.
-    Gated by require_premium.
 
     Args:
         None.
@@ -11373,11 +11856,6 @@ def delimit_vendor_news_health() -> Dict[str, Any]:
         Dict with cron_installed, last_run_ts, sensor stats, 24h
         queued/rejected entries, watchlist count, budget snapshot.
     """
-    from ai.license import require_premium
-    gate = require_premium("vendor_news_health")
-    if gate:
-        return gate
-
     from ai.vendor_news.sensor import SENSOR_LOG_PATH, WATCHLIST_PATH, load_watchlist
     from ai.vendor_news.drafter import TWEET_QUEUE_PATH, REJECTED_LOG_PATH
 
@@ -11552,8 +12030,7 @@ def delimit_vendor_news_draft(tweet_id: Annotated[str, Field(description="Source
         Dict with the drafted riff text, validator outcomes, queue
         insertion id (or skipped indicator), next_steps.
     """
-    from ai.license import require_premium
-    gate = require_premium("vendor_news_draft")
+    gate = _pro_gate_graced("vendor_news_draft")
     if gate:
         return gate
 
@@ -11680,7 +12157,7 @@ def delimit_vendor_news_draft(tweet_id: Annotated[str, Field(description="Source
 
 @mcp.tool()
 def delimit_content_schedule() -> Dict[str, Any]:
-    """View the upcoming content schedule (queued + pending + recent) (Pro).
+    """View the upcoming content schedule (queued + pending + recent).
 
     When to use: to inspect what's queued (tweets, videos) and what
     has shipped recently before adding more or triggering a publish.
@@ -11727,6 +12204,9 @@ def delimit_content_publish(content_type: Annotated[str, Field(description="\"tw
     Returns:
         Dict with publish result for the chosen content_type.
     """
+    g = _pro_gate_graced("content_publish")
+    if g:
+        return g
     if content_type == "tweet":
         from ai.content_engine import post_next_tweet
         return _with_next_steps("content_publish", post_next_tweet())
@@ -11740,7 +12220,7 @@ def delimit_content_publish(content_type: Annotated[str, Field(description="\"tw
 
 @mcp.tool()
 def delimit_content_queue(action: Annotated[str, Field(description="\"status\" (default), \"seed\", or \"add\".")] = "status", items: Annotated[str, Field(description="For \"add\" — newline-separated tweet texts.")] = "") -> Dict[str, Any]:
-    """Manage the tweet and video content queues (Pro).
+    """Manage the tweet and video content queues.
 
     When to use: to view, seed, or add to the autonomous content
     queues that delimit_content_publish drains.
@@ -11836,6 +12316,9 @@ def delimit_daemon_run(iterations: Annotated[int, Field(description="Number of i
     Returns:
         Dict with loop result and next_steps.
     """
+    g = _pro_gate_graced("daemon_run")
+    if g:
+        return g
     from ai.daemon import run_loop
     return _with_next_steps("daemon_run", run_loop(
         max_iterations=iterations, interval_seconds=5, dry_run=dry_run,
@@ -11929,8 +12412,7 @@ def delimit_build_loop_daemon(
     Returns:
         Dict with daemon state / start/stop confirmation.
     """
-    from ai.license import require_premium
-    gate = require_premium("build_loop_daemon")
+    gate = _pro_gate_graced("build_loop_daemon")
     if gate:
         return gate
     from ai import loop_daemon
@@ -12027,6 +12509,9 @@ def delimit_inbox_daemon(action: Annotated[str, Field(description="\"start\" (be
     Returns:
         Dict with daemon status, last poll, failures, next_steps.
     """
+    g = _pro_gate_graced("inbox_daemon")
+    if g:
+        return g
     try:
         from ai.inbox_daemon import start_daemon, stop_daemon, get_daemon_status
     except (ImportError, ModuleNotFoundError):
@@ -12068,6 +12553,9 @@ def delimit_social_daemon(action: Annotated[str, Field(description="\"start\", \
     Returns:
         Dict with daemon status, last scan, targets found, next_steps.
     """
+    g = _pro_gate_graced("social_daemon")
+    if g:
+        return g
     from ai.social_daemon import start_daemon, stop_daemon, get_daemon_status
 
     if action == "start":
@@ -12506,7 +12994,7 @@ def delimit_notify(channel: Annotated[str, Field(description="webhook, slack, or
                    draft_payload: Annotated[Optional[Union[str, Dict[str, Any]]], Field(description="The action contents (e.g. {\"body\": \"...\"} for github_comment). JSON string or dict. Required when draft_kind is set.")] = None,
                    draft_target: Annotated[Optional[Union[str, Dict[str, Any]]], Field(description="Where the action lands (e.g. {\"repo\":\"x/y\",\"issue\":1}). JSON string or dict. Required when draft_kind is set.")] = None,
                    led_ref: Annotated[str, Field(description="Optional LED-XXXX tag tying the draft to its tracking item. Surfaced in subject-line matching by the executor.")] = "") -> Dict[str, Any]:
-    """Send a notification (webhook / Slack / email) (Pro).
+    """Send a notification (webhook / Slack / email).
 
     When to use: when the orchestrator identifies something that
     requires owner action — outreach reply, deployment decision,
@@ -12517,7 +13005,7 @@ def delimit_notify(channel: Annotated[str, Field(description="webhook, slack, or
     Sibling contrast: delimit_notify_routing configures rules;
     delimit_notify_inbox reads inbound; this sends one outbound.
 
-    Side effects: gated by require_premium. Sends a network message
+    Side effects: sends a network message
     via webhook (JSON POST), Slack webhook, or email (SMTP). The
     founder reviews and replies via email — that reply is consumed
     by delimit_notify_inbox / delimit_inbox_daemon.
@@ -12760,6 +13248,9 @@ def delimit_notify_inbox(action: Annotated[str, Field(description="\"status\" (d
     Returns:
         Dict with inbox state / poll result / routing history.
     """
+    g = _pro_gate_graced("notify_inbox")
+    if g:
+        return g
     from ai.notify import poll_inbox, get_inbox_status
 
     if action == "poll":
@@ -12812,23 +13303,89 @@ def _delimit_agent_impl(
     # handoff params
     to_model: str = "",
 ) -> Dict[str, Any]:
-    """Manage agent tasks: dispatch, status, complete, handoff (Pro).
+    """Manage the agent-task lifecycle — dispatches to one of four actions.
 
-    Actions: dispatch, status, complete, handoff.
+    When to use: as the single MCP-registered agent surface
+    (delimit_agent) when the caller wants to pick the lifecycle action by
+    name in one call rather than choosing a specific delimit_agent_*
+    alias. The lifecycle is dispatch (record intent) -> status (read) ->
+    handoff (transfer to another model) -> complete (close).
+    When NOT to use: from internal code paths — prefer the specific alias
+    (delimit_agent_dispatch, delimit_agent_status, delimit_agent_complete,
+    delimit_agent_handoff) so the action's docstring and arg schema show
+    up at the right call site. Do NOT use action="dispatch" expecting a
+    subagent to run — it RECORDS the dispatch, it does not execute it (see
+    Side effects). The related delimit_agent_link / _policy / _check /
+    _dashboard tools share the prefix but are SEPARATE tools, not actions
+    here — passing their names as action= returns an "Unknown action"
+    error.
+
+    Sibling contrast: delimit_agent_dispatch / _status / _complete /
+    _handoff are thin aliases that call straight into this implementation
+    with a fixed action; they exist so each action's docstring lives at
+    the right name. This is the dispatch core for those four. Versus
+    delimit_ledger_add: the ledger holds free-form work items; this
+    surface carries engineering-dispatch schema (assignee, tools_needed,
+    constraints) and a per-task audit trail.
+
+    Side effects: action="status" is READ-ONLY (loads the task store, no
+    writes). action="dispatch" / "complete" / "handoff" WRITE to the agent
+    task store and append to its audit log. CRITICAL: action="dispatch"
+    records intent only — it persists a task plus a formatted agent_prompt
+    and does NOT spawn or run a subagent. Per the operating model, actual
+    execution is the caller's responsibility via the Agent tool
+    (subagent_type=engineering); this is the planning + audit surface.
+    Dispatch additionally enforces deterministic guards before writing: a
+    kill switch (refuses if ~/.delimit/pause_dispatch exists), a dead-
+    letter circuit breaker (auto-pauses once too many tasks remain
+    un-acknowledged), a ghost-title reject, and a shipped-LED anti-
+    duplicate gate (refuses + auto-closes a task whose LED is already
+    merged to main). assignee="any" is resolved to a concrete model via
+    the task-type router. Every return is wrapped via _with_next_steps.
+    Errors are deterministic ({"error": ...}): an unknown action short-
+    circuits before any backend call.
 
     Args:
-        action: Which agent operation to perform.
-        title: Task title (for action='dispatch').
-        description: Task description (for action='dispatch').
-        assignee: Target model claude/codex/gemini/any (for action='dispatch').
-        priority: P0/P1/P2 (for action='dispatch').
-        tools_needed: Comma-separated tools list (for action='dispatch').
-        constraints: Comma-separated constraints (for action='dispatch').
-        context: Background info (for dispatch) or handoff context (for handoff).
-        task_id: Task ID e.g. AGT-A1B2C3D4 (for status/complete/handoff).
-        result: Summary of what was done (for action='complete').
-        files_changed: Comma-separated files modified (for action='complete').
-        to_model: Target model for handoff (for action='handoff').
+        action: Which lifecycle operation to perform. One of "dispatch",
+            "status", "complete", "handoff". Default "status". Any other
+            value returns a deterministic {"error": "Unknown action ..."}.
+        title: Task title (action="dispatch" only). Required — the backend
+            rejects empty titles.
+        description: Longer task description (action="dispatch" only).
+        assignee: Target model "claude"/"codex"/"gemini"/"any"
+            (action="dispatch" only). Default "any", resolved to a
+            concrete model by the router. Invalid values are rejected.
+        priority: "P0"/"P1"/"P2" (action="dispatch" only). Default "P1";
+            invalid values are rejected.
+        tools_needed: Comma-separated MCP tools the work will need
+            (action="dispatch" only). Coerced to a list.
+        constraints: Comma-separated constraints, e.g. "no force push"
+            (action="dispatch" only). Coerced to a list.
+        context: Background to seed the executor (action="dispatch") OR
+            notes for the next model (action="handoff"). Unused by
+            status/complete.
+        task_id: Task id, e.g. "AGT-A1B2C3D4". Used by status, complete,
+            handoff. Optional for status (empty lists all active tasks);
+            required and validated for complete/handoff.
+        result: Summary of what was done (action="complete" only).
+        files_changed: Comma-separated modified file paths
+            (action="complete" only). Coerced to a list.
+        to_model: Target model for the transfer (action="handoff" only).
+            Required; validated against the allowed models.
+
+    Returns:
+        Dict whose shape depends on action — see the per-action alias
+        (delimit_agent_dispatch / _status / _complete / _handoff) for the
+        exact keys. All responses carry a next_steps field from
+        _with_next_steps. dispatch → {status: "dispatched" | "deduped",
+        task_id, task, agent_prompt, message}; status → a single task
+        {status: "ok", task} for a known id, or an active-task summary
+        {status: "ok", active_count, completed_count, active_tasks,
+        summary} when task_id is empty; complete → {status: "completed",
+        task_id, task, message}; handoff → {status: "handed_off",
+        task_id, from_model, to_model, task, agent_prompt, message}.
+        Guard failures and unknown/already-done task ids return
+        {"error": "..."}.
     """
     action = action.lower().strip()
     valid_actions = ("dispatch", "status", "complete", "handoff")
@@ -12886,7 +13443,7 @@ delimit_agent = mcp.tool()(_delimit_agent_impl)
 def delimit_agent_dispatch(title: Annotated[str, Field(description="Short task title. Required.")], description: Annotated[str, Field(description="Longer task description.")] = "", assignee: Annotated[str, Field(description="Target model — \"claude\", \"codex\", \"gemini\", or \"any\". Default \"any\".")] = "any",
                            priority: Annotated[str, Field(description="One of \"P0\" (immediate), \"P1\" (default), \"P2\".")] = "P1", tools_needed: Annotated[str, Field(description="Comma-separated MCP tools the work will need.")] = "",
                            constraints: Annotated[str, Field(description="Comma-separated constraints (e.g. \"no force push\").")] = "", context: Annotated[str, Field(description="Background info to seed the executor.")] = "") -> Dict[str, Any]:
-    """Record an engineering-task dispatch with full audit trail (Pro).
+    """Record an engineering-task dispatch with full audit trail.
 
     When to use: as the PLANNING + AUDIT surface when the
     orchestrator decides to delegate parallelizable engineering work
@@ -12914,8 +13471,8 @@ def delimit_agent_dispatch(title: Annotated[str, Field(description="Short task t
     tasks file plus an audit log entry). String list inputs
     (`tools_needed`, `constraints`) are coerced from comma strings
     to lists. NO subagent is spawned by this call — the caller is
-    responsible for invoking the Agent tool separately. Gated by
-    require_premium — unlicensed callers receive a license payload.
+    responsible for invoking the Agent tool separately. This lifecycle
+    surface is not license-gated in the current build.
 
     Args:
         title: Short task title. Required.
@@ -12935,8 +13492,7 @@ def delimit_agent_dispatch(title: Annotated[str, Field(description="Short task t
         metadata: title, description, assignee, priority,
         tools_needed, constraints, context, status="dispatched",
         created_at), agent_prompt (formatted prompt for the
-        executor), plus a next_steps field. Returns a license-gate
-        payload if the caller lacks Premium.
+        executor), plus a next_steps field.
     """
     return _delimit_agent_impl(action="dispatch", title=title, description=description,
                          assignee=assignee, priority=priority, tools_needed=tools_needed,
@@ -12945,7 +13501,7 @@ def delimit_agent_dispatch(title: Annotated[str, Field(description="Short task t
 
 @mcp.tool()
 def delimit_agent_status(task_id: Annotated[str, Field(description="Specific task id (e.g. \"AGT-A1B2C3D4\") or empty to list all.")] = "") -> Dict[str, Any]:
-    """Check status of dispatched agent tasks (Pro).
+    """Check status of dispatched agent tasks.
 
     When to use: to monitor open/closed agent tasks, either a single
     task_id or all tasks when task_id is empty.
@@ -12970,7 +13526,7 @@ def delimit_agent_status(task_id: Annotated[str, Field(description="Specific tas
 @mcp.tool()
 def delimit_agent_complete(task_id: Annotated[str, Field(description="Task id from delimit_agent_dispatch. Required.")], result: Annotated[str, Field(description="Summary of what was done.")] = "",
                            files_changed: Annotated[str, Field(description="Comma-separated paths of modified files.")] = "") -> Dict[str, Any]:
-    """Close a dispatched agent task by recording the outcome (Pro).
+    """Close a dispatched agent task by recording the outcome.
 
     When to use: at the end of an engineering subagent's work, to
     record the result summary and the files touched on the dispatch
@@ -12994,8 +13550,8 @@ def delimit_agent_complete(task_id: Annotated[str, Field(description="Task id fr
     ai.agent_dispatch.complete_task — the task's status flips from
     "dispatched" to "completed", `result` and `files_changed` are
     persisted, and an audit log entry is appended. `files_changed`
-    is coerced from a comma string to a list. No license gate at
-    this level (handled by the backend). No notification — pair
+    is coerced from a comma string to a list. No license gate on
+    this lifecycle surface. No notification — pair
     with delimit_notify if the operator needs to be told.
 
     Args:
@@ -13018,7 +13574,7 @@ def delimit_agent_complete(task_id: Annotated[str, Field(description="Task id fr
 @mcp.tool()
 def delimit_agent_handoff(task_id: Annotated[str, Field(description="Existing task id from delimit_agent_dispatch. Required.")], to_model: Annotated[str, Field(description="Target model — \"claude\", \"codex\", \"gemini\", etc. Required.")],
                           context: Annotated[str, Field(description="Notes for the next model.")] = "") -> Dict[str, Any]:
-    """Hand off an agent task to a different AI model (Pro).
+    """Hand off an agent task to a different AI model.
 
     When to use: when an executor is blocked or when cross-model review
     is required and the next model needs the task's context.
@@ -13074,7 +13630,7 @@ def delimit_agent_link(task_id: Annotated[str, Field(description="Agent task id 
 
 @mcp.tool()
 def delimit_agent_dashboard() -> Dict[str, Any]:
-    """View the multi-agent orchestration dashboard (Pro).
+    """View the multi-agent orchestration dashboard.
 
     When to use: as a one-shot read of all agent activity grouped by
     assignee/status — useful for orchestrator status reporting.
@@ -13168,7 +13724,7 @@ def delimit_control(
 def delimit_agent_policy(model: Annotated[str, Field(description="AI model name — \"claude\", \"codex\", \"gemini\", \"cursor\". Empty = list all.")] = "", ledger: Annotated[str, Field(description="Ledger access level.")] = "", memory: Annotated[str, Field(description="Memory access level.")] = "",
                           deploy: Annotated[str, Field(description="Allow deploys (\"true\"/\"false\").")] = "", evidence: Annotated[str, Field(description="Evidence access level.")] = "",
                           secrets: Annotated[str, Field(description="Allow secret access (\"true\"/\"false\").")] = "", custom_constraints: Annotated[str, Field(description="Comma-separated constraints, e.g. \"no-deploy,no-publish\".")] = "") -> Dict[str, Any]:
-    """Set or view per-model governance permissions (Pro).
+    """Set or view per-model governance permissions.
 
     When to use: to inspect or modify the access policy that gates
     each AI model's operations on the ledger, memory, evidence,
@@ -13232,7 +13788,7 @@ def delimit_agent_policy(model: Annotated[str, Field(description="AI model name 
 
 @mcp.tool()
 def delimit_agent_check(model: Annotated[str, Field(description="AI model name — \"claude\", \"codex\", \"gemini\", \"cursor\". Required.")], action: Annotated[str, Field(description="Action to check (e.g. \"ledger_write\", \"deploy\"). Required.")]) -> Dict[str, Any]:
-    """Check if a model is allowed to perform an action under agent policy (Pro).
+    """Check if a model is allowed to perform an action under agent policy.
 
     When to use: as a per-action gate before executing sensitive
     operations from a non-orchestrator model — verify it has the
@@ -13274,7 +13830,7 @@ def delimit_agent_check(model: Annotated[str, Field(description="AI model name �
 
 @mcp.tool()
 def delimit_next_task(venture: Annotated[str, Field(description="Project name or path. Empty = auto-detect.")] = "", max_risk: Annotated[str, Field(description="Max risk level — \"low\", \"medium\", \"high\", \"critical\".")] = "", session_id: Annotated[str, Field(description="Resume existing session. Empty = new.")] = "") -> Dict[str, Any]:
-    """Get the next task to work on with safeguard checks (Pro).
+    """Get the next task to work on with safeguard checks.
 
     When to use: inside a loop session, to fetch the highest-priority
     open task with safeguard checks (cost cap, error threshold).
@@ -13335,7 +13891,7 @@ def delimit_ledger_propose(venture: Annotated[str, Field(description="Focus on a
 @mcp.tool()
 def delimit_task_complete(task_id: Annotated[str, Field(description="Ledger item id completed (e.g. \"LED-042\").")], result: Annotated[str, Field(description="Summary of what was done.")] = "", cost_incurred: Annotated[float, Field(description="Estimated cost (USD).")] = 0.0,
                           error: Annotated[str, Field(description="If task failed, describe error.")] = "", session_id: Annotated[str, Field(description="Loop session to update.")] = "", venture: Annotated[str, Field(description="Project name or path.")] = "") -> Dict[str, Any]:
-    """Mark current loop task done and get the next one (Pro).
+    """Mark current loop task done and get the next one.
 
     When to use: at the end of each loop iteration — records
     completion, updates session metrics, returns the next task.
@@ -13370,7 +13926,7 @@ def delimit_task_complete(task_id: Annotated[str, Field(description="Ledger item
 
 @mcp.tool()
 def delimit_loop_status(session_id: Annotated[str, Field(description="Session id to check. Empty = most recent session.")] = "") -> Dict[str, Any]:
-    """Check autonomous loop metrics for a session (Pro).
+    """Check autonomous loop metrics for a session.
 
     When to use: to inspect a continuous-loop session's run-time
     metrics — iterations completed, cost, errors, safeguard status.
@@ -13398,7 +13954,7 @@ def delimit_loop_config(session_id: Annotated[str, Field(description="Session to
                         cost_cap: Annotated[float, Field(description="Max session cost in dollars. Default 5.0.")] = 0.0, auto_consensus: Annotated[bool, Field(description="If True, suggest consensus when ledger empty.")] = False,
                         error_threshold: Annotated[int, Field(description="Consecutive errors before circuit-breaker trips. Default 3.")] = 0, status: Annotated[str, Field(description="Set loop status — \"running\", \"paused\", \"stopped\".")] = "",
                         require_approval_for: Annotated[str, Field(description="Comma-separated action types requiring human approval.")] = "") -> Dict[str, Any]:
-    """Configure autonomous build loop safeguards (Pro).
+    """Configure autonomous build loop safeguards.
 
     When to use: BEFORE starting a loop session — to set max iterations,
     cost cap, error threshold, approval policy.
@@ -13448,7 +14004,7 @@ def delimit_toolcard_cache(
     tool_schemas: Annotated[Optional[str], Field(description="JSON array of tool schema objects (for register/ estimate).")] = None,
     tool_names: Annotated[Optional[str], Field(description="Comma-separated tool names (for delta).")] = None,
 ) -> Dict[str, Any]:
-    """Manage the tool-schema cache to reduce per-session token waste (Pro).
+    """Manage the tool-schema cache to reduce per-session token waste.
 
     When to use: when an MCP client repeatedly dumps full tool
     definitions and you want to send only diffs across sessions.
@@ -13458,7 +14014,7 @@ def delimit_toolcard_cache(
     Sibling contrast: this caches tool schemas;
     delimit_help describes individual tools at runtime.
 
-    Side effects: gated by require_premium. action="register" /
+    Side effects: action="register" /
     "clear" / "flush" mutate the cache; "status" / "delta" /
     "estimate" are read-only.
 
@@ -13475,11 +14031,6 @@ def delimit_toolcard_cache(
         Dict with the action result (stats, delta names, estimate,
         usage/dormancy summary, etc).
     """
-    from ai.license import require_premium
-    gate = require_premium("toolcard_cache")
-    if gate:
-        return gate
-
     from ai.toolcard_cache import get_cache
     cache = get_cache()
 
@@ -13561,7 +14112,7 @@ def delimit_handoff_create(
     priority: Annotated[str, Field(description="P0 / P1 (default) / P2.")] = "P1",
     to_model: Annotated[str, Field(description="Target model name or \"any\" (default).")] = "any",
 ) -> Dict[str, Any]:
-    """Create a handoff receipt when transitioning between agents (Pro).
+    """Create a handoff receipt when transitioning between agents.
 
     When to use: at the end of a session or before passing work to
     another model — documents what was done, what's pending, and what
@@ -13649,7 +14200,7 @@ def delimit_handoff_acknowledge(
     receipt_id: Annotated[str, Field(description="Receipt id to acknowledge. Required (empty string returns an error payload).")] = "",
     notes: Annotated[str, Field(description="Optional notes from the receiving agent.")] = "",
 ) -> Dict[str, Any]:
-    """Acknowledge a pending handoff receipt before starting work (Pro).
+    """Acknowledge a pending handoff receipt before starting work.
 
     When to use: at session start when delimit_handoff_list shows a
     pending receipt — the receiving agent must acknowledge before
@@ -13693,7 +14244,7 @@ def delimit_handoff_acknowledge(
 def delimit_handoff_list(
     status: Annotated[str, Field(description="\"pending\" (default), \"acknowledged\", or \"all\".")] = "pending",
 ) -> Dict[str, Any]:
-    """List session handoff receipts (Pro).
+    """List session handoff receipts.
 
     When to use: at session start to see what previous sessions left
     pending, or to audit acknowledged handoffs.

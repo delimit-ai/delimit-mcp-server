@@ -13,6 +13,30 @@ from typing import Dict, List, Optional
 
 SECRETS_DIR = Path.home() / ".delimit" / "secrets"
 
+# The honest at-rest field name. Values are base64-ENCODED (reversible), not
+# encrypted — the field was historically misnamed "encrypted_value". We write
+# the honest key and READ both for back-compat with pre-rename files (LED-1736).
+_VALUE_KEY = "encoded_value"
+_LEGACY_VALUE_KEY = "encrypted_value"
+
+
+def _read_stored_value(secret: Dict) -> Optional[str]:
+    """Return the base64 at-rest value, honest key first, legacy key fallback."""
+    enc = secret.get(_VALUE_KEY)
+    if enc is None:
+        enc = secret.get(_LEGACY_VALUE_KEY)
+    return enc
+
+
+def _scope_failclosed() -> bool:
+    """Finding-B / LED-1736 kill-switch. When set, an UNIDENTIFIED requester (no
+    agent_type and no tool) is DENIED a non-"all"-scoped secret (fail-closed).
+    Default OFF so real callers are measured first via the Phase-0 telemetry
+    marker; flip ON per-host via env once the access log shows no legitimate
+    dependency. Reversible — never breaks an existing caller silently."""
+    return os.environ.get("DELIMIT_SECRETS_SCOPE_FAILCLOSED", "").strip().lower() in (
+        "1", "true", "yes", "on")
+
 
 def store_secret(
     name: str,
@@ -45,7 +69,7 @@ def store_secret(
     encoded = base64.b64encode(value.encode()).decode()
     secret = {
         "name": safe_name,
-        "encrypted_value": encoded,
+        _VALUE_KEY: encoded,  # honest name; readers fall back to the legacy key
         "scope": scope,
         "description": description,
         "created_by": created_by,
@@ -88,10 +112,33 @@ def get_secret(
 
     # Scope check — 'all' allows any requester, otherwise match tool or agent_type
     scope = secret.get("scope", "all")
+    grant_reason = ""
     if scope != "all":
         allowed = {s.strip().lower() for s in scope.split(",")}
         requester_ids = {agent_type.lower(), tool.lower()} - {""}
-        if requester_ids and not requester_ids & allowed:
+        if not requester_ids:
+            # Finding-B (LED-1736): an UNIDENTIFIED caller (no agent_type/tool)
+            # against a NON-"all" scope. Historically this fell OPEN (granted)
+            # because the old guard was `if requester_ids and ...`. Phase 1:
+            # DENY when the kill-switch is set. Default stays fail-open with a
+            # Phase-0 telemetry marker so real callers are measured before the
+            # default is flipped — never break an existing caller silently.
+            if _scope_failclosed():
+                _log_access(
+                    safe_name, agent_type, tool,
+                    granted=False,
+                    reason=f"scope_denied: unidentified requester for scope '{scope}' (fail-closed)",
+                )
+                return {
+                    "error": (f"Access denied: scope '{scope}' requires an "
+                              "identified requester (pass agent_type or tool)"),
+                    "granted": False,
+                }
+            grant_reason = (
+                f"scope_warn: unidentified requester granted under legacy "
+                f"fail-open for scope '{scope}' "
+                "(set DELIMIT_SECRETS_SCOPE_FAILCLOSED=1 to deny)")
+        elif not requester_ids & allowed:
             _log_access(
                 safe_name, agent_type, tool,
                 granted=False,
@@ -102,15 +149,22 @@ def get_secret(
                 "granted": False,
             }
 
-    # Log successful access
-    _log_access(safe_name, agent_type, tool, granted=True, reason="")
+    # Read the at-rest value (honest key first, legacy key fallback).
+    enc = _read_stored_value(secret)
+    if enc is None:
+        _log_access(safe_name, agent_type, tool, granted=False, reason="corrupt: no stored value")
+        return {"error": f"Secret '{safe_name}' is corrupt (no stored value)", "granted": False}
+
+    # Log successful access (grant_reason carries the Phase-0 telemetry marker
+    # when an unidentified requester was granted under legacy fail-open).
+    _log_access(safe_name, agent_type, tool, granted=True, reason=grant_reason)
 
     # Update access metadata
     secret["access_count"] = secret.get("access_count", 0) + 1
     secret["last_accessed_at"] = datetime.now(timezone.utc).isoformat()
     path.write_text(json.dumps(secret, indent=2))
 
-    value = base64.b64decode(secret["encrypted_value"]).decode()
+    value = base64.b64decode(enc).decode()
     return {"value": value, "granted": True, "name": safe_name}
 
 

@@ -98,34 +98,78 @@ def _function_body_text(source: str, node: ast.FunctionDef) -> str:
 
 
 def extract_tools(source: str) -> List[Dict[str, Any]]:
-    """Parse `source` and return a record per @mcp.tool()-decorated function.
+    """Parse `source` and return a record per MCP-registered tool.
 
-    Each record has: name, docstring, params, body_text, lineno, has_decorator.
-    Functions without docstrings are still returned (with docstring="") so
-    they can be flagged as zero-coverage by the scorer.
+    Covers BOTH registration styles FastMCP exposes on `tools/list` (and that
+    the Glama registry scores), so the linter grades the same surface a public
+    registry sees:
+      * decorator  — ``@mcp.tool()`` on the function definition; and
+      * assignment — ``name = mcp.tool()(fn)`` (or a bare ``mcp.tool()(fn)``
+        call), where an already-defined function is registered by passing it
+        to the decorator factory. These surface on the live server under the
+        FUNCTION's name (e.g. ``_delimit_deploy_impl``) and were previously
+        INVISIBLE to this linter — the exact consolidated multiplexers a
+        registry crawl can score independently of the granular wrappers.
+
+    Each record has: name, docstring, params, body_text, lineno,
+    has_decorator, registration. Functions without docstrings are still
+    returned (with docstring="") so they can be flagged as zero-coverage by
+    the scorer.
     """
     try:
         tree = ast.parse(source)
     except SyntaxError:
         return []
 
+    # Index every function definition by name so assignment-registration
+    # (which references the function by name) can be resolved to its node.
+    func_by_name: Dict[str, ast.AST] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            func_by_name.setdefault(node.name, node)
+
     tools: List[Dict[str, Any]] = []
+    seen: set = set()
+
+    def _record(func_node: ast.AST, registration: str) -> None:
+        if func_node.name in seen:
+            return
+        seen.add(func_node.name)
+        tools.append(
+            {
+                "name": func_node.name,
+                "docstring": ast.get_docstring(func_node) or "",
+                "params": _function_param_names(func_node),
+                "body_text": _function_body_text(source, func_node),
+                "lineno": func_node.lineno,
+                "has_decorator": registration == "decorator",
+                "registration": registration,
+            }
+        )
+
+    # Pass 1 — decorator-registered (@mcp.tool()).
     for node in ast.walk(tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
-        if not any(_is_mcp_tool_decorator(d) for d in node.decorator_list):
+        if any(_is_mcp_tool_decorator(d) for d in node.decorator_list):
+            _record(node, "decorator")
+
+    # Pass 2 — assignment/call-registered: ``mcp.tool()(fn)`` where fn is a
+    # bare Name resolving to a defined function. Matches both
+    # ``x = mcp.tool()(fn)`` (Assign value) and a bare ``mcp.tool()(fn)``
+    # (Expr). The inner ``mcp.tool()`` call has no positional args, so it is
+    # skipped; only the outer application carrying the function Name matches.
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
             continue
-        docstring = ast.get_docstring(node) or ""
-        tools.append(
-            {
-                "name": node.name,
-                "docstring": docstring,
-                "params": _function_param_names(node),
-                "body_text": _function_body_text(source, node),
-                "lineno": node.lineno,
-                "has_decorator": True,
-            }
-        )
+        if not _is_mcp_tool_decorator(node.func):
+            continue
+        if not node.args or not isinstance(node.args[0], ast.Name):
+            continue
+        target = func_by_name.get(node.args[0].id)
+        if target is not None:
+            _record(target, "assignment")
+
     return tools
 
 

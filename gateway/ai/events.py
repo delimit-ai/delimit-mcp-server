@@ -37,3 +37,33 @@ def recent(limit: int = 50) -> list:
             if len(events) >= limit:
                 return events
     return events
+
+
+def pro_gate_denial_summary(days: int = 30) -> dict:
+    """Free->Pro funnel signal (LED-1755): count `pro_gate_denied` events by
+    tool over the last `days` days. A high count = strong upgrade INTENT for
+    that tool — i.e. where the upgrade CTA has the most leverage. Read-only."""
+    from collections import Counter
+
+    counts: Counter = Counter()
+    total = 0
+    if not EVENTS_DIR.exists():
+        return {"days": days, "total_denials": 0, "by_tool": {}}
+    cutoff = time.time() - days * 86400
+    for f in sorted(EVENTS_DIR.glob("events-*.jsonl")):
+        for line in f.read_text().splitlines():
+            try:
+                ev = json.loads(line)
+            except Exception:
+                continue
+            if ev.get("type") != "pro_gate_denied":
+                continue
+            try:
+                ev_t = datetime.fromisoformat(ev.get("ts", "").replace("Z", "")).timestamp()
+            except Exception:
+                ev_t = cutoff  # undated → include rather than silently drop
+            if ev_t < cutoff:
+                continue
+            counts[ev.get("tool", "?")] += 1
+            total += 1
+    return {"days": days, "total_denials": total, "by_tool": dict(counts.most_common())}

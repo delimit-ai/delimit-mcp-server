@@ -171,6 +171,47 @@ FORBIDDEN_PRODUCT_TOKENS: Tuple[str, ...] = (
     "delimit", "delimit-cli", "delimit.ai", "delimitdev",
 )
 
+# LED-3486 bright-line: self-promo / "I built this thing" phrasing that
+# turns a genuine technical contribution into covert commercial outreach.
+# These supplement FORBIDDEN_PHRASES (which targets the more overt "our
+# tool / you should try" class). A third-party-repo body containing ANY
+# of these is a HARD BLOCK regardless of how substantive the rest is —
+# the SHIFT-1 anonymity constitution + pseudonymous-account calibration
+# forbid disguising a pitch as a comment.
+#
+# Matching is case-insensitive substring. Kept short and high-precision
+# so it doesn't false-positive on ordinary technical prose.
+SELF_PROMO_PHRASES: Tuple[str, ...] = (
+    "i built", "i made", "we built", "we made", "i created",
+    "i shipped", "battlecard",
+)
+
+# LED-3486 bright-line: any delimit.ai URL in a third-party-repo body is
+# covert commercial outreach (a product link), independent of the
+# FORBIDDEN_PRODUCT_TOKENS word-boundary check. Matches http(s)://...delimit.ai...
+_DELIMIT_AI_URL_RE = re.compile(
+    r"https?://[^\s)>\]]*delimit\.ai[^\s)>\]]*", re.IGNORECASE
+)
+
+# LED-3486: own-org repo prefixes. The bright-line is for THIRD-PARTY
+# repos only — on our own repos naming the product is fine. Match is on
+# the owner segment of "owner/name" (case-insensitive).
+_OWN_REPO_OWNERS: Tuple[str, ...] = ("delimit-ai", "delimit")
+
+
+def _is_own_repo(repo: str) -> bool:
+    """Return True if ``repo`` ("owner/name") is a delimit-owned repo.
+
+    The LED-3486 covert-commercial bright-line is THIRD-PARTY only; on
+    our own repos self-promo is allowed. An empty/unknown repo is NOT
+    treated as own (fail-closed: an unknown target is assumed external,
+    so the bright-line still applies).
+    """
+    if not repo or "/" not in repo:
+        return False
+    owner = repo.split("/", 1)[0].strip().lower()
+    return owner in _OWN_REPO_OWNERS
+
 # Minimum content length below which a body cannot be substantive
 # regardless of anchors. Calibrated to "two-sentence bug report".
 MIN_BODY_LENGTH = 200
@@ -442,17 +483,71 @@ def extract_technical_anchors(text: str) -> Dict[str, List[str]]:
 
 
 def _hits_forbidden_product_token(text_lower: str) -> Optional[str]:
-    """Return the first product token present as a word, else None."""
-    for token in FORBIDDEN_PRODUCT_TOKENS:
-        pattern = r"\b" + re.escape(token) + r"\b"
+    """Return the first product token present as a word, else None.
+
+    Word-boundary aware so "delimited"/"delimiter" do NOT trip the
+    block. Note: a dotted token like "delimit.ai" is matched first /
+    independently — the bare "delimit" pattern would also fire on it,
+    but the dotted form is the more specific signal.
+    """
+    # Check dotted/hyphenated multi-part tokens first (more specific),
+    # then the bare token. Sort by length desc so "delimit.ai" /
+    # "delimit-cli" win over bare "delimit" for a clearer reason string.
+    for token in sorted(FORBIDDEN_PRODUCT_TOKENS, key=len, reverse=True):
+        # Use lookarounds (not \b) so a leading/trailing dot in the token
+        # like "delimit.ai" still anchors on word chars correctly — \b
+        # between 't' and '.' would mis-anchor. Require the token be
+        # flanked by a non-word, non-dot, non-hyphen char (or string
+        # edge) so "delimited"/"delimiter" don't match the bare token.
+        pattern = (
+            r"(?<![\w.\-])" + re.escape(token) + r"(?![\w])"
+        )
         if re.search(pattern, text_lower):
             return token
     return None
 
 
+def detect_covert_commercial(body: str) -> List[str]:
+    """LED-3486 bright-line scan: return the covert-commercial violations.
+
+    A THIRD-PARTY-repo body must be a PURE genuine technical
+    contribution with ZERO Delimit self-promotion. This returns the
+    list of bright-line violations (empty == clean). Callers gate the
+    block on whether the target is a third-party repo (see
+    :func:`_is_own_repo`).
+
+    Violation classes:
+      * ``forbidden_product_token`` — a Delimit product name as a
+        standalone word (word-boundary safe; "delimited"/"delimiter"
+        do NOT trip it).
+      * ``delimit_ai_url`` — any http(s) link to delimit.ai.
+      * ``self_promo_phrase`` — "I built" / "we built" / "battlecard"
+        and the rest of :data:`SELF_PROMO_PHRASES`.
+    """
+    violations: List[str] = []
+    if not isinstance(body, str) or not body:
+        return violations
+    body_lower = body.lower()
+
+    product_hit = _hits_forbidden_product_token(body_lower)
+    if product_hit:
+        violations.append(f"forbidden_product_token: {product_hit!r}")
+
+    url_hit = _DELIMIT_AI_URL_RE.search(body)
+    if url_hit:
+        violations.append(f"delimit_ai_url: {url_hit.group(0)!r}")
+
+    for phrase in SELF_PROMO_PHRASES:
+        if phrase in body_lower:
+            violations.append(f"self_promo_phrase: {phrase!r}")
+
+    return violations
+
+
 def check_substantive_content(
     body: str,
     proposed_action: str,
+    repo: str = "",
 ) -> Dict[str, Any]:
     """Validate a draft body against the SHIFT-1 content rules.
 
@@ -460,11 +555,19 @@ def check_substantive_content(
     deliberation):
 
       1. Type / length floor — empty or under-length bodies block.
-      2. Forbidden product tokens — bans our own names (defends against
-         "btw try delimit-cli" class).
-      3. Forbidden commercial phrases — bans the broader "we built /
+      2. LED-3486 covert-commercial BRIGHT-LINE (third-party repos
+         only) — a HARD BLOCK if the body contains ANY Delimit
+         self-promotion: a product token as a standalone word, a
+         delimit.ai URL, or a self-promo phrase ("I built" /
+         "battlecard" / ...). On our own repos (``delimit-ai/*``) this
+         is skipped. This fires as ``covert_commercial`` and takes
+         precedence as the report reason.
+      3. Forbidden product tokens — bans our own names (defends against
+         "btw try delimit-cli" class). Subsumed by (2) for third-party
+         repos; retained for the own-repo path / belt-and-suspenders.
+      4. Forbidden commercial phrases — bans the broader "we built /
          our tool / you should try" class.
-      4. Technical anchor — must have at least one commit hash, issue
+      5. Technical anchor — must have at least one commit hash, issue
          ref, CVE, spec path, or file path. Without an anchor the body
          is "thanks for the project" by definition.
 
@@ -472,6 +575,14 @@ def check_substantive_content(
     at :func:`is_banking_adjacent`, called separately by
     :func:`evaluate_substantive_payload`. Splitting them keeps the
     failure modes distinguishable in logs and ledger entries.
+
+    Args:
+        body: The draft body to validate.
+        proposed_action: "comment", "issue", or "pr".
+        repo: Target "owner/name" if known. Drives the LED-3486
+            third-party-only bright-line. Empty/unknown is treated as
+            third-party (fail-closed — an unknown target gets the
+            bright-line).
 
     Returns:
         Dict with keys ``verdict`` (``"allow"`` | ``"block"``),
@@ -493,6 +604,23 @@ def check_substantive_content(
             "violations": [f"proposed_action must be one of {PROPOSED_ACTIONS}"],
             "anchors": {},
         }
+
+    # LED-3486 bright-line — third-party repos only. A covert-commercial
+    # hit is a HARD BLOCK and takes precedence as the report reason
+    # (return immediately so the verdict is unambiguous in logs/ledger).
+    # Own-repo (delimit-ai/*) bodies skip this — naming the product on
+    # our own repo is fine.
+    third_party = not _is_own_repo(repo)
+    if third_party:
+        covert = detect_covert_commercial(body)
+        if covert:
+            return {
+                "verdict": "block",
+                "reason": "covert_commercial",
+                "violations": covert,
+                "anchors": extract_technical_anchors(body),
+            }
+
     if len(body) < MIN_BODY_LENGTH:
         violations.append(
             f"body length {len(body)} < MIN_BODY_LENGTH={MIN_BODY_LENGTH}"
@@ -584,7 +712,14 @@ def evaluate_substantive_payload(
             "stage": "target",
         }
 
-    content_result = check_substantive_content(body, proposed_action)
+    # LED-3486: resolve the effective repo so the content gate can apply
+    # the third-party-only covert-commercial bright-line. Prefer the
+    # explicit ``repo`` arg, then the target's resolved repo. Unknown
+    # ("") is treated as third-party (fail-closed) inside the gate.
+    effective_repo = (repo or _repo_from_target(target) or "").strip()
+    content_result = check_substantive_content(
+        body, proposed_action, repo=effective_repo
+    )
     content_result["stage"] = "content"
     return content_result
 

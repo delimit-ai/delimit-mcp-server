@@ -59,18 +59,19 @@ version: 1
 tools:
   # ── Deliberation (separate rate tier) ────────────────────────────
   - {name: delimit_deliberate,           kind: deliberation, free_trial_limit: 3}
-  # LED-1260 leaky-gap (in_compiled: false) — landed AFTER the
-  # compiled set was last built. LED-1454 ratifies the closure.
-  - {name: delimit_security_deliberate,  kind: deliberation, in_compiled: false}
+  # LED-1454 (founder-ratified 2026-06-17): leaky-gap CLOSED — now in the
+  # compiled set. The only metered (LLM-cost) leak; free compiled-path users
+  # get a 90-day grace via _NEWLY_ENFORCED_PRO (server.py).
+  - {name: delimit_security_deliberate,  kind: deliberation}
 
   # ── Governance (deep) ────────────────────────────────────────────
   - {name: delimit_gov_evaluate,         kind: pro, category: governance}
   - {name: delimit_gov_policy,           kind: pro, category: governance}
   - {name: delimit_gov_run,              kind: pro, category: governance}
   - {name: delimit_gov_verify,           kind: pro, category: governance}
-  # LED-1260 caught this missing from compiled; in_compiled stays false
-  # until LED-1454 closes the leaky-gate gap with founder ratification.
-  - {name: delimit_gov_new_task,         kind: pro, category: governance, in_compiled: false}
+  # LED-1454 (founder-ratified 2026-06-17): leaky-gap CLOSED — in compiled set.
+  # Entry of new_task -> gov_run -> gov_verify (both already compiled-gated).
+  - {name: delimit_gov_new_task,         kind: pro, category: governance}
 
   # ── OS layer ─────────────────────────────────────────────────────
   - {name: delimit_os_plan,              kind: pro, category: os}
@@ -121,47 +122,68 @@ tools:
   - {name: delimit_social_post,          kind: pro, category: social}
   - {name: delimit_social_generate,      kind: pro, category: social}
   - {name: delimit_social_history,       kind: pro, category: social}
-  # LED-1260 caught this missing from compiled; in_compiled stays
-  # false until LED-1454 closes the leaky-gate gap.
-  - {name: delimit_social_approve,       kind: pro, category: social, in_compiled: false}
+  # LED-1454 (founder-ratified 2026-06-17): leaky-gap CLOSED — in compiled set.
+  # Approval point of the Pro social suite; already in _NEWLY_ENFORCED_PRO grace.
+  - {name: delimit_social_approve,       kind: pro, category: social}
 
   # ── Security orchestrator ────────────────────────────────────────
-  # LED-1260 leaky-gap (in_compiled: false) — see LED-1454.
-  - {name: delimit_security_ingest,      kind: pro, category: security, in_compiled: false}
+  # LED-1454 (founder-ratified 2026-06-17): leaky-gap CLOSED — in compiled set.
+  # Ingest half of the Pro ingest -> security_deliberate pair.
+  - {name: delimit_security_ingest,      kind: pro, category: security}
 
   # ── Repo deep ────────────────────────────────────────────────────
-  # LED-1260 leaky-gap on all four repo_* tools (in_compiled: false) —
-  # binary customers got these tools free while non-binary customers
-  # paid via the fallback set. LED-1454 ratifies the closure.
-  - {name: delimit_repo_analyze,         kind: pro, category: repo, in_compiled: false}
-  - {name: delimit_repo_config_audit,    kind: pro, category: repo, in_compiled: false}
-  - {name: delimit_repo_config_validate, kind: pro, category: repo, in_compiled: false}
-  - {name: delimit_repo_diagnose,        kind: pro, category: repo, in_compiled: false}
+  # repo_analyze / repo_config_audit / repo_config_validate moved to FREE
+  # 2026-06-16 (LED-1741). repo_diagnose MOVED TO FREE 2026-06-17 (LED-1454):
+  # read-only quick health smoke pass, zero marginal cost — completes the
+  # repo-inspection family as the PLG free on-ramp. Removed from manifest = free.
+  # (Corrects the old "stays Pro (deeper)" note: diagnose is the SHALLOW pass;
+  # the deep audit is repo_analyze, already free.)
 
   # ── Test ─────────────────────────────────────────────────────────
-  # LED-1260 leaky-gap (in_compiled: false) — see LED-1454.
-  - {name: delimit_test_coverage,        kind: pro, category: test, in_compiled: false}
+  # test_coverage MOVED TO FREE 2026-06-17 (LED-1454): os.walk file-count
+  # estimate (NOT a coverage runner), zero marginal cost; sibling test_smoke
+  # already free. Removed from manifest = free. (Revisit if it ever invokes a
+  # real runner — that would add compute cost.)
 
   # ── Screen capture (browser automation) ──────────────────────────
   - {name: delimit_screen_record,        kind: pro, category: capture}
   - {name: delimit_screenshot,           kind: pro, category: capture}
 
-  # ── Notifications ────────────────────────────────────────────────
-  - {name: delimit_notify,               kind: pro, category: notify}
-
-  # ── Agent orchestration ──────────────────────────────────────────
-  - {name: delimit_agent_dispatch,       kind: pro, category: agent}
-  - {name: delimit_agent_status,         kind: pro, category: agent}
-  - {name: delimit_agent_complete,       kind: pro, category: agent}
-  - {name: delimit_agent_handoff,        kind: pro, category: agent}
-
-  # ── Autonomous build loop ────────────────────────────────────────
-  # LED-1260 leaky-gap on all four (in_compiled: false) — these landed
-  # AFTER the compiled set was last built. LED-1454 ratifies closure.
-  - {name: delimit_next_task,            kind: pro, category: build_loop, in_compiled: false}
-  - {name: delimit_task_complete,        kind: pro, category: build_loop, in_compiled: false}
-  - {name: delimit_loop_status,          kind: pro, category: build_loop, in_compiled: false}
-  - {name: delimit_loop_config,          kind: pro, category: build_loop, in_compiled: false}
+  # ── Moved to FREE 2026-06-16 (LED-1741, ratified) ────────────────
+  # notify, the agent lifecycle (dispatch/status/complete/handoff), and the
+  # loop/task control plane (next_task/task_complete/loop_status/loop_config)
+  # are local-state / audit / control-plane ops with ZERO marginal cost — they
+  # anchor the PLG free tier (the dead central gate meant they already shipped
+  # free; this makes intent match reality). The autonomous DAEMON that runs the
+  # loop (build_loop_daemon) and outbound senders are separately Pro-eligible —
+  # staged for a follow-on gating pass (LED-1740 audit).
 
   # ── Worker Pool v2 executor (LED-981) ────────────────────────────
   - {name: delimit_executor,             kind: pro, category: agent}
+
+  # ── LED-1740 staged-12 gating (founder-ratified 2026-06-16) ──────
+  # Tools with REAL marginal cost — moved into Pro. in_compiled: false
+  # because they were added AFTER the last compiled .so build (so they
+  # land in license.py's fallback/extension union but not license_core's
+  # compiled set, identical to the LED-1260 leaky-gap class). The inline
+  # _pro_gate_graced gate in server.py enforces for non-binary customers
+  # with a 90-day grace + grandfather (LED-1741), so no existing free
+  # user is hard-cut. Tracked at LED-1740.
+  # 3-model cross-model LLM audit:
+  - {name: delimit_audit,                kind: pro, category: audit, in_compiled: false}
+  # Background daemon threads (spawn long-running workers):
+  - {name: delimit_build_loop_daemon,    kind: pro, category: daemon, in_compiled: false}
+  - {name: delimit_inbox_daemon,         kind: pro, category: daemon, in_compiled: false}
+  - {name: delimit_social_daemon,        kind: pro, category: daemon, in_compiled: false}
+  - {name: delimit_daemon_run,           kind: pro, category: daemon, in_compiled: false}
+  # Paid-API + LLM vendor news:
+  - {name: delimit_vendor_news_scan,     kind: pro, category: vendor_news, in_compiled: false}
+  - {name: delimit_vendor_news_draft,    kind: pro, category: vendor_news, in_compiled: false}
+  # Outbound posting / uploads (X + YouTube):
+  - {name: delimit_content_publish,      kind: pro, category: content, in_compiled: false}
+  # Network scrapers (outbound network):
+  - {name: delimit_social_target,        kind: pro, category: scan, in_compiled: false}
+  - {name: delimit_github_scan,          kind: pro, category: scan, in_compiled: false}
+  - {name: delimit_reddit_scan,          kind: pro, category: scan, in_compiled: false}
+  # Inbound inbox poll (network writes when forwarding owner-action mail):
+  - {name: delimit_notify_inbox,         kind: pro, category: notify, in_compiled: false}

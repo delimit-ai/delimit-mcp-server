@@ -1,3 +1,23 @@
+## [4.13.0] - 2026-06-20
+
+### Changed — Free/Pro tier realignment (LED-1454 / LED-1738 / LED-1740 / LED-1741)
+Tools are re-sorted by marginal cost. **A 90-day grace window (through 2026-09-16) plus automatic grandfathering means no existing free user is cut off mid-workflow** — newly-metered tools keep working for current free users during grace and are auto-grandfathered on first use.
+- **Now FREE** (zero-marginal-cost, read-only/local): `delimit_notify`, the agent lifecycle (`agent_dispatch`, `agent_status`, `agent_complete`, `agent_handoff`, `next_task`, `task_complete`), the loop control-plane (`loop_status`, `loop_config`), and `repo_analyze`, `repo_config_audit`, `repo_config_validate`, `repo_diagnose`, `test_coverage`.
+- **Now Pro** (real-marginal-cost — scrapers, daemons, posting, deep audits): `delimit_audit`, `build_loop_daemon`, `daemon_run`, `vendor_news_scan`, `vendor_news_draft`, `content_publish`, `social_post`, `social_generate`, `social_approve`, `social_history`, `social_target`, `social_daemon`, `github_scan`, `reddit_scan`, `inbox_daemon`, `notify_inbox`, `security_deliberate`, `security_ingest`, `gov_new_task`.
+- The free multi-model `delimit_deliberate` (3 free runs) is unchanged.
+
+### Added — Seal v0.2 dual-signed attestation
+- Attestations are now issued with **dual Ed25519 signatures** (independent key custody) and a REQUIRED model_sequence, verified client-side by the bundled verifier. Existing receipt verification (Merkle, constitution seed) is byte-compatible; the verifier and seed are unchanged.
+
+### Fixed
+- **`delimit_agent_dispatch`: the dead-letter circuit breaker no longer false-pauses on long-lived pool tasks** (LED-3514). Pool-lifecycle task types are excluded from the auto-pause depth count; a genuine worker backlog still trips the breaker.
+- **`delimit_substantive_content_check`: stricter gate on third-party-engagement bodies** (LED-3486) — promotion disguised as a technical contribution is now hard-blocked.
+- **`delimit_github_scan`: data-grounded precision filter** (LED-1724) cuts ~94% of low-signal scan noise.
+- `secrets_broker` scope checks can now fail closed (opt-in), and the `security_audit` chain no longer duplicates P0 ledger stubs (LED-1753).
+
+### Internal
+- Tool docstring-quality (TDQS) upgrades for the multiplexer tools; outreach/content tool-backend updates; test-suite hermeticity hardening; internal-only `outreach_body_gen.py` and the Seal `producer.py` issuance module excluded from the public bundle.
+
 ## [4.12.1] - 2026-06-20
 
 ### Fixed

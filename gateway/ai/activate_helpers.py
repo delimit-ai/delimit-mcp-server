@@ -398,7 +398,6 @@ def build_checklist(
         ("Deploy pipeline", "delimit_deploy_plan"),
         ("Cost analysis", "delimit_cost_analyze"),
         ("Release management", "delimit_release_plan"),
-        ("Agent orchestration", "delimit_agent_dispatch"),
     ]
     for label, tool_name in premium_checks:
         gate = require_premium(tool_name)

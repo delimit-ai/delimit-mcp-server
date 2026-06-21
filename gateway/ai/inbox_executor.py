@@ -522,6 +522,25 @@ def _dispatch_social_post(row: DraftRow) -> Tuple[bool, Optional[str], Optional[
         # 24h age check, daily cap, and audit log entry.
         return _auto_post_github_comment(jsonl_draft_id)
 
+    # LED-3214: twitter freshness gate — parity with the github path's 24h
+    # anti-replay window (_auto_post_github_comment, Gate 3). ai.social
+    # .auto_post_draft has NO age check of its own, so without this a
+    # stale-approved row (e.g. an old approval email actioned late) would post
+    # a stale @delimit_ai tweet. Refuse > 24h old as skipped_manual_required so
+    # the founder posts manually from the approval email. Uses the registry
+    # row's issued_at (epoch int); treats a missing/unparseable timestamp as
+    # fresh so a data glitch never silently blocks a legitimate post.
+    import time as _time
+    try:
+        _age_h = (_time.time() - float(row.issued_at)) / 3600.0 if row.issued_at else 0.0
+    except (TypeError, ValueError):
+        _age_h = 0.0
+    if _age_h > 24:
+        return False, None, (
+            f"skipped_manual_required: social draft is {_age_h:.1f}h old, exceeds "
+            f"the 24h auto-post window (post manually from the approval email)"
+        )
+
     try:
         from ai.social import auto_post_draft
     except Exception as e:
