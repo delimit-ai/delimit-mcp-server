@@ -1,5 +1,5 @@
 #!/bin/bash
-# Delimit OS — the AI developer operating system
+# Delimit — governance, context, and multi-model debate for AI coding assistants
 # Type 'delimit' to launch the TUI, or 'delimit <command>' for CLI tools
 #
 # Usage:
@@ -43,7 +43,7 @@ case "$1" in
     think|deliberate)
         shift
         QUESTION="${*:-What should we build next based on the current ledger and signals?}"
-        echo "[Delimit OS] Triggering deliberation..."
+        echo "[Delimit] Triggering deliberation..."
         cd "$DELIMIT_HOME/server" && python3 -c "
 from ai.deliberation import deliberate
 import json
@@ -62,7 +62,7 @@ else:
         ;;
     build|loop)
         shift
-        echo "[Delimit OS] Starting autonomous build loop..."
+        echo "[Delimit] Starting autonomous build loop..."
         echo "Checking ledger for next task..."
         cd "$DELIMIT_HOME/server" && python3 -c "
 from ai.ledger_manager import get_context
@@ -83,7 +83,7 @@ else:
             echo "Usage: delimit ask <question>"
             exit 1
         fi
-        echo "[Delimit OS] Checking context..."
+        echo "[Delimit] Checking context..."
         cd "$DELIMIT_HOME/server" && python3 -c "
 from ai.ledger_manager import get_context
 import json
