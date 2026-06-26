@@ -5112,9 +5112,23 @@ def delimit_security_audit(
         from ai.ledger_manager import list_items as _list_items
         _existing = _list_items(ledger="ops", status="open", text=stub_title)
         _ex_items = _existing.get("items") if isinstance(_existing, dict) else _existing
+        # ai.ledger_manager.list_items returns items as a dict KEYED BY LEDGER —
+        # {"ops": [...], "strategy": [...]} — not a flat list. The original
+        # LED-1753 guard iterated this dict directly, so `for it in _ex_items`
+        # yielded the string keys ("ops"/"strategy"); isinstance(str, dict) is
+        # always False, so _dupe was ALWAYS False and the guard never fired once
+        # — the true root cause of the LED-3458..3524 duplicate-P0 pile-up.
+        # Flatten the per-ledger lists before matching. (A flat list is also
+        # accepted, defensively, in case the return shape ever changes.)
+        if isinstance(_ex_items, dict):
+            _flat = [it for v in _ex_items.values() if isinstance(v, list) for it in v]
+        elif isinstance(_ex_items, list):
+            _flat = _ex_items
+        else:
+            _flat = []
         _dupe = any(
             isinstance(it, dict) and it.get("title") == stub_title
-            for it in (_ex_items or [])
+            for it in _flat
         )
     except Exception:  # noqa: BLE001 — dedup is best-effort; never block the audit
         _dupe = False
@@ -14314,6 +14328,18 @@ def delimit_handoff_list(
 
 async def run_mcp_server(server, server_name="delimit"):
     """Run the MCP server."""
+    
+    # Fix for Issue #142 (Credit: Ryofukutani): Prevent zombie process on client disconnect
+    if os.name == 'posix':
+        import time
+        def _monitor_parent():
+            original_ppid = os.getppid()
+            while True:
+                if os.getppid() != original_ppid or os.getppid() == 1:
+                    os._exit(0)
+                time.sleep(1)
+        threading.Thread(target=_monitor_parent, daemon=True, name="parent_monitor").start()
+
     # LED-2087 Phase 1a: log proprietary-module compilation status once
     # at startup so ops can see when license_core / deliberation /
     # governance are on the Python source-fallback path. Silent on the
