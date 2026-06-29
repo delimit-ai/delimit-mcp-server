@@ -1,3 +1,8 @@
+## [4.14.1] - 2026-06-29
+
+### Fixed
+- **`delimit chat`: transient API rate-limits no longer get blamed on subscription quota.** The pre-session quota probe used one broad pattern that matched a transient HTTP 429/503 overload the same as a genuine plan/usage cap, so a brief rate-limit during the cold-start probe could wrongly mark a model "out of quota" and fall the session over to the next model in the chain. The probe now distinguishes a sticky usage-cap (the only signal that triggers fallback) from a transient rate-limit, and re-probes once after a short backoff before concluding.
+
 ## [4.13.1] - 2026-06-21
 
 ### Fixed
