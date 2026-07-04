@@ -23,6 +23,63 @@ from typing import Any, Callable, Dict, List, Optional
 logger = logging.getLogger("delimit.ai.governance_hardening")
 
 
+# ── StateValidator ───────────────────────────────────────────────────────
+
+class StateValidator:
+    """Enforces state-change proofs before agent retries.
+    Checks if an operation actually changed state compared to previous attempts.
+    """
+    
+    def __init__(self):
+        self.last_state_hash: Optional[str] = None
+        
+    def get_state_hash(self, tool_category: str, args: Dict[str, Any], project_path: str = ".") -> str:
+        """Compute a hash representing the current state relevant to the tool category."""
+        import hashlib
+        import os
+        state_parts = [tool_category, str(args)]
+        
+        if tool_category == "file_system":
+            filepath = args.get("path") or args.get("filepath")
+            if filepath:
+                full_path = os.path.join(project_path, filepath) if not os.path.isabs(filepath) else filepath
+                if os.path.exists(full_path):
+                    if os.path.isfile(full_path):
+                        try:
+                            with open(full_path, "rb") as f:
+                                state_parts.append(hashlib.sha256(f.read()).hexdigest())
+                        except Exception:
+                            state_parts.append(str(os.path.getmtime(full_path)))
+                    else:
+                        state_parts.append(str(os.path.getmtime(full_path)))
+        elif tool_category == "git":
+            git_dir = os.path.join(project_path, ".git")
+            if os.path.exists(git_dir):
+                try:
+                    head_path = os.path.join(git_dir, "refs", "heads", "main")
+                    if os.path.exists(head_path):
+                        with open(head_path, "r") as f:
+                            state_parts.append(f.read().strip())
+                except Exception:
+                    pass
+            
+        return hashlib.sha256(str(state_parts).encode("utf-8")).hexdigest()
+        
+    def validate_state_change(self, tool_category: str, args: Dict[str, Any], project_path: str = ".") -> bool:
+        """Returns True if state changed or if it's the first run."""
+        current_hash = self.get_state_hash(tool_category, args, project_path)
+        
+        if self.last_state_hash is None:
+            self.last_state_hash = current_hash
+            return True
+            
+        if current_hash == self.last_state_hash:
+            return False
+            
+        self.last_state_hash = current_hash
+        return True
+
+
 # ── ResilientToolCaller ─────────────────────────────────────────────────
 
 class ResilientToolCaller:
@@ -34,6 +91,9 @@ class ResilientToolCaller:
         max_delay: Cap on backoff delay in seconds (default 30.0).
         timeout: Per-call timeout in seconds (default 60.0).
         fallback: Optional callable returning a fallback result on total failure.
+        enforce_state_change: Require state to change before allowing a retry (default False).
+        tool_category: The tool category for state validation.
+        project_path: Project root path for state validation.
     """
 
     def __init__(
@@ -43,13 +103,20 @@ class ResilientToolCaller:
         max_delay: float = 30.0,
         timeout: float = 60.0,
         fallback: Optional[Callable[..., Any]] = None,
+        enforce_state_change: bool = False,
+        tool_category: str = "general",
+        project_path: str = ".",
     ):
         self.max_retries = max_retries
         self.base_delay = base_delay
         self.max_delay = max_delay
         self.timeout = timeout
         self.fallback = fallback
+        self.enforce_state_change = enforce_state_change
+        self.tool_category = tool_category
+        self.project_path = project_path
         self._call_log: List[Dict[str, Any]] = []
+        self.state_validator = StateValidator() if enforce_state_change else None
 
     def call(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
         """Execute fn with retry and exponential backoff.
@@ -61,6 +128,13 @@ class ResilientToolCaller:
         last_error: Optional[Exception] = None
 
         for attempt in range(1, self.max_retries + 1):
+            if self.enforce_state_change and self.state_validator:
+                if attempt > 1 and not self.state_validator.validate_state_change(self.tool_category, kwargs, self.project_path):
+                    logger.warning("ResilientToolCaller: Retry aborted because state has not changed.")
+                    if last_error:
+                        raise last_error
+                    raise RuntimeError("Retry aborted: No state-change proof detected.")
+            
             start = time.monotonic()
             try:
                 result = fn(*args, **kwargs)
