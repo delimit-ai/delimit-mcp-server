@@ -62,9 +62,9 @@
   "scripts": {
     "postinstall": "node scripts/postinstall.js",
     "sync-gateway": "bash scripts/sync-gateway.sh",
-    "prepublishOnly": "bash scripts/publish-ci-guard.sh && npm run sync-gateway && bash scripts/build-license-core.sh && bash scripts/security-check.sh",
+    "prepublishOnly": "node scripts/clean-tree-guard.js && bash scripts/publish-ci-guard.sh && npm run sync-gateway && bash scripts/build-license-core.sh && bash scripts/security-check.sh",
     "test": "node scripts/test-with-config-guard.js",
-    "test:raw": "node --test tests/_config-sentinel.test.js tests/setup-onboarding.test.js tests/setup-matrix.test.js tests/setup-no-clobber.test.js tests/config-export-import.test.js tests/cross-model-hooks.test.js tests/golden-path.test.js tests/v420-features.test.js tests/v43-wrap-engine.test.js tests/v43-trust-page-engine.test.js tests/v43-ai-sbom-engine.test.js tests/attest-mcp.test.js tests/delimit-home.test.js tests/postinstall-hardening.test.js tests/auth-signin.test.js tests/auth-signout.test.js tests/migration-2092-banner.test.js tests/control-browser.test.js"
+    "test:raw": "node --test tests/clean-tree-guard.test.js tests/_config-sentinel.test.js tests/setup-onboarding.test.js tests/setup-matrix.test.js tests/setup-no-clobber.test.js tests/config-export-import.test.js tests/cross-model-hooks.test.js tests/golden-path.test.js tests/v420-features.test.js tests/v43-wrap-engine.test.js tests/v43-trust-page-engine.test.js tests/v43-ai-sbom-engine.test.js tests/attest-mcp.test.js tests/delimit-home.test.js tests/postinstall-hardening.test.js tests/auth-signin.test.js tests/auth-signout.test.js tests/migration-2092-banner.test.js tests/control-browser.test.js"
   },
   "keywords": [
     "openapi",
