@@ -1,3 +1,12 @@
+## [4.14.2] - 2026-07-04
+
+### Fixed
+- **Reconciled the 4.14.x release line so main matches what is published on npm (LED-3684).** The published 4.14.1 fixes and the main-branch clean-tree publish guard had diverged; this release records the union on main and closes the version gap (carries PRs #146 / #147 / #148).
+- **Publish clean-tree guard now allows the publish-time version bump (#148).** The dirty-tree publish block (STR-2169 D2, #146) was too strict — it also rejected the version bump + regenerated gateway-mirror sync artifacts that the publish step itself produces. The guard now permits the expected publish-time changes while still blocking an otherwise-dirty tree.
+
+### Internal
+- Carries the merged gateway fixes from the reconciled release line (#147): the union of the published 4.14.1 backend fixes and the main clean-tree guard. No customer-facing MCP tool or CLI surface change.
+
 ## [4.14.1] - 2026-06-29
 
 ### Fixed
