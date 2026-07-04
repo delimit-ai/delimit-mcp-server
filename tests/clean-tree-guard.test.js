@@ -42,6 +42,41 @@ describe('clean-tree publish gate', () => {
     assert.match(r.message, /2 change/);
   });
 
+  it('PASSES when only package.json is dirty (publish-time version bump)', () => {
+    const r = evaluateCleanTree({ porcelain: ' M package.json', allowDirty: false });
+    assert.strictEqual(r.blocked, false, 'lone version bump must not block');
+    assert.strictEqual(r.exitCode, 0);
+    assert.strictEqual(r.override, false);
+    assert.match(r.message, /version bump/i);
+  });
+
+  it('PASSES when package.json + package-lock.json are dirty (version bump)', () => {
+    const porcelain = [
+      ' M package.json',
+      ' M package-lock.json',
+    ].join('\n');
+    const r = evaluateCleanTree({ porcelain, allowDirty: false });
+    assert.strictEqual(r.blocked, false, 'version bump pair must not block');
+    assert.strictEqual(r.exitCode, 0);
+    assert.strictEqual(r.override, false);
+  });
+
+  it('BLOCKS when a stray file is dirty alongside the version bump', () => {
+    const porcelain = [
+      ' M package.json',
+      ' M package-lock.json',
+      ' M lib/stray.js',
+    ].join('\n');
+    const r = evaluateCleanTree({ porcelain, allowDirty: false });
+    assert.strictEqual(r.blocked, true, 'stray file must still block');
+    assert.strictEqual(r.exitCode, 1);
+    assert.match(r.message, /PUBLISH BLOCKED/);
+    // Only the stray file is surfaced/counted — the version bump is excluded.
+    assert.match(r.message, /lib\/stray\.js/);
+    assert.doesNotMatch(r.message, /package\.json/);
+    assert.match(r.message, /1 change/);
+  });
+
   it('BLOCKS on a single untracked file', () => {
     const r = evaluateCleanTree({ porcelain: '?? secret.js', allowDirty: false });
     assert.strictEqual(r.blocked, true);

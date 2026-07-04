@@ -28,6 +28,31 @@ const path = require('path');
 
 const OVERRIDE_ENV = 'DELIMIT_ALLOW_DIRTY_PUBLISH';
 
+// Files that are LEGITIMATELY dirty at publish time. `npm version` /
+// delimit_deploy_npm bump the version in package.json (and re-lock
+// package-lock.json) IN PLACE before npm runs prepublishOnly, so the guard
+// would otherwise see the expected version bump as "dirty" and false-block the
+// publish. These are the ONLY paths allowed to be dirty — any other modified or
+// untracked file still blocks (that's the stray-uncommitted-code the gate
+// exists to catch).
+const VERSION_BUMP_ALLOWLIST = new Set(['package.json', 'package-lock.json']);
+
+/**
+ * Extract the file path from a single `git status --porcelain` (v1) line.
+ * Porcelain v1 format is `XY <path>` — two status columns, a space, then the
+ * path. Renames/copies use `XY <old> -> <new>`; for those we use the new path
+ * (the destination), which is what matters for what would ship.
+ *
+ * @param {string} entry  A trimmed porcelain line (leading space preserved).
+ * @returns {string} The file path.
+ */
+function porcelainPath(entry) {
+  // Status is the first two chars, then a separator space, then the path.
+  const raw = entry.slice(3);
+  const arrow = raw.indexOf(' -> ');
+  return arrow === -1 ? raw : raw.slice(arrow + 4);
+}
+
 /**
  * Pure decision function — no I/O, fully testable.
  *
@@ -48,11 +73,31 @@ function evaluateCleanTree({ porcelain, allowDirty }) {
     };
   }
 
-  // Tree is dirty.
-  const entries = porcelain
+  // All non-empty porcelain lines.
+  const allEntries = porcelain
     .split('\n')
     .map((l) => l.trimEnd())
     .filter((l) => l.length > 0);
+
+  // Filter out the legitimate publish-time version bump (package.json /
+  // package-lock.json). Only the REMAINING entries count toward dirtiness.
+  const entries = allEntries.filter(
+    (e) => !VERSION_BUMP_ALLOWLIST.has(porcelainPath(e))
+  );
+
+  // If the only changes were the version-bump files, the tree is effectively
+  // clean for publish purposes.
+  if (entries.length === 0) {
+    return {
+      blocked: false,
+      exitCode: 0,
+      override: false,
+      message:
+        'Clean-tree gate: only the publish-time version bump ' +
+        '(package.json / package-lock.json) is dirty — OK to publish.',
+    };
+  }
+
   const listing = entries.map((e) => `    ${e}`).join('\n');
 
   if (allowDirty) {
