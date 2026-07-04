@@ -59,6 +59,17 @@ def diagnose(target: str = ".", options: Optional[Dict] = None) -> Dict[str, Any
         issues.append({"severity": "warning", "issue": "No test directory found"})
     if not any((root / f).exists() for f in [".github/workflows", ".gitlab-ci.yml", "Jenkinsfile", ".circleci"]):
         issues.append({"severity": "info", "issue": "No CI configuration detected"})
+    # Check for broken symlinks (link path checking)
+    try:
+        import os
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if d not in {".git", "node_modules", "venv", ".next"}]
+            for name in dirnames + filenames:
+                p = Path(dirpath) / name
+                if p.is_symlink() and not p.exists():
+                    issues.append({"severity": "warning", "issue": f"Broken symlink found: {p.relative_to(root)}"})
+    except Exception:
+        pass
     # Check for large files
     try:
         result = subprocess.run(["git", "-C", str(root), "ls-files"], capture_output=True, text=True, timeout=10)
