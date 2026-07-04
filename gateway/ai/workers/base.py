@@ -28,6 +28,7 @@ logger = logging.getLogger("delimit.workers")
 # This is the "sandboxed" property from the swarm charter.
 ALLOWED_TOOLS = frozenset({
     "delimit_lint",
+    "delimit_json_validate",
     "delimit_diff",
     "delimit_semver",
     "delimit_spec_health",

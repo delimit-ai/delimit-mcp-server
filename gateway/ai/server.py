@@ -14590,3 +14590,37 @@ def delimit_reddit_fetch_thread(thread_id: Annotated[str, Field(description="Red
     
     scored = score_and_classify([thread])
     return {"thread": scored[0] if scored else thread}
+
+@mcp.tool()
+def delimit_json_validate(file_path: Annotated[str, Field(description="Path to the JSON file to validate. Required.")], schema_path: Annotated[Optional[str], Field(description="Optional path to a JSON Schema file to validate against.")] = None) -> Dict[str, Any]:
+    """
+    Validate a JSON file for syntax errors, and optionally against a JSON Schema.
+    """
+    import json
+    import os
+    if not os.path.exists(file_path):
+        return {"error": f"File not found: {file_path}"}
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except json.JSONDecodeError as e:
+        return {"status": "invalid", "error": f"JSON syntax error: {str(e)}"}
+    
+    if schema_path:
+        if not os.path.exists(schema_path):
+            return {"error": f"Schema file not found: {schema_path}"}
+        try:
+            with open(schema_path, "r", encoding="utf-8") as sf:
+                schema = json.load(sf)
+        except json.JSONDecodeError as e:
+            return {"error": f"Schema JSON syntax error: {str(e)}"}
+        
+        try:
+            import jsonschema
+            jsonschema.validate(instance=data, schema=schema)
+        except ImportError:
+            return {"error": "jsonschema package not installed, cannot validate schema"}
+        except Exception as e:
+            return {"status": "invalid", "error": f"Schema validation failed: {str(e)}"}
+            
+    return {"status": "valid"}
