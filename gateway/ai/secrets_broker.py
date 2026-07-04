@@ -28,6 +28,31 @@ def _read_stored_value(secret: Dict) -> Optional[str]:
     return enc
 
 
+def _write_secret_file(path: Path, secret: Dict) -> None:
+    """Write a secret JSON restricted to the owner (0600) from birth and force the
+    secrets dir to 0700, so a secret is never momentarily group/world-readable.
+
+    Hardening: the previous write_text() inherited the process umask (=0644),
+    leaving broker files world-readable on disk. Shielded in practice by the
+    0700 $HOME, but defense-in-depth must not rely on the parent dir alone.
+    (Caught by the adversarial-audit capability, STR-2097 #3.)"""
+    SECRETS_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(SECRETS_DIR, 0o700)
+    except OSError:
+        pass
+    data = json.dumps(secret, indent=2).encode()
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, data)
+    finally:
+        os.close(fd)
+    try:
+        os.chmod(str(path), 0o600)  # enforce 0600 even if the file pre-existed at 0644
+    except OSError:
+        pass
+
+
 def _scope_failclosed() -> bool:
     """Finding-B / LED-1736 kill-switch. When set, an UNIDENTIFIED requester (no
     agent_type and no tool) is DENIED a non-"all"-scoped secret (fail-closed).
@@ -78,7 +103,7 @@ def store_secret(
         "access_count": 0,
         "revoked": False,
     }
-    (SECRETS_DIR / f"{safe_name}.json").write_text(json.dumps(secret, indent=2))
+    _write_secret_file(SECRETS_DIR / f"{safe_name}.json", secret)
     return {"stored": safe_name}
 
 
@@ -162,7 +187,7 @@ def get_secret(
     # Update access metadata
     secret["access_count"] = secret.get("access_count", 0) + 1
     secret["last_accessed_at"] = datetime.now(timezone.utc).isoformat()
-    path.write_text(json.dumps(secret, indent=2))
+    _write_secret_file(path, secret)
 
     value = base64.b64decode(enc).decode()
     return {"value": value, "granted": True, "name": safe_name}
@@ -215,7 +240,7 @@ def revoke_secret(name: str) -> Dict:
     secret = json.loads(path.read_text())
     secret["revoked"] = True
     secret["revoked_at"] = datetime.now(timezone.utc).isoformat()
-    path.write_text(json.dumps(secret, indent=2))
+    _write_secret_file(path, secret)
     _log_access(safe_name, "", "", granted=True, reason="revoked_by_user")
     return {"revoked": safe_name}
 
