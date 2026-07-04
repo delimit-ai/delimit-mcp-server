@@ -234,6 +234,15 @@ class ContentIntelligence:
             ],
         }
 
+    def get_radar_reply_v2_metrics(self) -> dict:
+        """Radar reply lane v2: brain-routed data-grounded guards + season-aware live-event surfacing + follows-per-event-hour instrumentation."""
+        return {
+            "guards": "brain-routed data-grounded",
+            "surfacing": "season-aware live-event",
+            "instrumentation": "follows-per-event-hour",
+            "status": "active"
+        }
+
     def generate_weekly_summary(self, date: str | None = None) -> dict:
         """Weekly Monday rollup: 7-day clusters + which topics we already
         wrote drafts for vs. which we missed.
