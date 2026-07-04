@@ -29,6 +29,7 @@ logger = logging.getLogger("delimit.workers")
 ALLOWED_TOOLS = frozenset({
     "delimit_lint",
     "delimit_json_validate",
+    "delimit_product_lookup",
     "delimit_diff",
     "delimit_semver",
     "delimit_spec_health",

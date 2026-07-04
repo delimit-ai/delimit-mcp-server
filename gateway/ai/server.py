@@ -14624,3 +14624,23 @@ def delimit_json_validate(file_path: Annotated[str, Field(description="Path to t
             return {"status": "invalid", "error": f"Schema validation failed: {str(e)}"}
             
     return {"status": "valid"}
+
+@mcp.tool()
+def delimit_product_lookup(url: Annotated[str, Field(description="E-commerce product URL. Required.")], extract_mode: Annotated[str, Field(description="Extraction mode: 'basic' or 'full'. Default 'basic'.")] = "basic") -> Dict[str, Any]:
+    """
+    Extract product specifications from an e-commerce URL. (Mock/stub implementation).
+    """
+    return {
+        "tool": "delimit_product_lookup",
+        "url": url,
+        "mode": extract_mode,
+        "status": "success",
+        "product": {
+            "name": "Sample Product",
+            "price": "$99.99",
+            "specs": {
+                "weight": "1.2kg",
+                "dimensions": "10x10x5"
+            }
+        }
+    }
