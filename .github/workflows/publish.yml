@@ -132,17 +132,8 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          # Node 24 bundles npm >= 11.5.1, which is required for OIDC trusted
-          # publishing. We do NOT rely on a separate `npm install -g npm@^11`
-          # step — a global npm upgrade in one GitHub Actions step does not
-          # reliably carry to a later step, so the publish step could fall back
-          # to Node 20's bundled npm 10.x (no OIDC) and ENEEDAUTH.
           node-version: '24'
-          # Intentionally NO registry-url: setup-node + registry-url writes a temp
-          # .npmrc with `always-auth` and a DUMMY NODE_AUTH_TOKEN placeholder when
-          # no real token env is provided; npm then authenticates with that garbage
-          # token and OIDC trusted publishing is never attempted -> E404. npm
-          # defaults to registry.npmjs.org and OIDC auth needs no .npmrc token.
+          registry-url: 'https://registry.npmjs.org'
 
       - name: Install dependencies
         working-directory: npm-delimit
@@ -183,15 +174,11 @@ jobs:
         run: npm publish --dry-run
 
       - name: Publish to npm
-        # Trusted Publishing (OIDC): no NODE_AUTH_TOKEN. Auth comes from the
-        # id-token: write OIDC handshake against the npm trusted-publisher config
-        # for this repo+workflow. Provenance is generated automatically; we keep
-        # --provenance explicit. REQUIRES a trusted publisher configured on
-        # npmjs.com (delimit-cli -> GitHub Actions, repo delimit-ai/delimit-mcp-server,
-        # workflow publish.yml) BEFORE the next publish, or auth fails.
         if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run == 'false')
         working-directory: npm-delimit
-        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public
 
       - name: Verify published version
         if: startsWith(github.ref, 'refs/tags/v')
