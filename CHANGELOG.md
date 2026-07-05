@@ -1,3 +1,23 @@
+## [4.15.0] - 2026-07-05
+
+### Added
+- Radar reply lane v2 instrumentation (LED-3222) (7b62bfee)
+- Implement delimit_product_lookup for e-commerce spec extraction (LED-3274) (b1bd7160)
+- Integrate link path checking into delimit_repo_diagnose (LED-3272) (fb0b58ce)
+- Add delimit_json_validate tool (LED-3271) (5e95b72c)
+
+### Fixed
+- Revert to NPM token auth for publishing (LED-3262) (0cbb9ee5)
+
+### Documentation
+- Workstream A deliverables + roadmap (LED-3686..3696) (7ac4f237)
+
+### Stats
+- **Commits**: 6
+- **Files changed**: 20
+- **Insertions**: 298(+) / 17(-)
+- **Since**: v4.14.2
+
 ## [4.14.2] - 2026-07-04
 
 ### Fixed
