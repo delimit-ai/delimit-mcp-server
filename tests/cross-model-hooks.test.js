@@ -179,8 +179,8 @@ describe('installClaudeHooks', () => {
         assert.strictEqual(config.hooks.SessionStart.length, 1, 'Should have exactly one SessionStart hook');
         // pre-tool + pre-commit + doctor + deploy-audit = 4
         assert.strictEqual(config.hooks.PreToolUse.length, 4, 'Should have exactly four PreToolUse hooks');
-        // spec-lint = 1
-        assert.strictEqual(config.hooks.PostToolUse.length, 1, 'Should have exactly one PostToolUse hook');
+        // spec-lint + STR-2202 agent-record = 2
+        assert.strictEqual(config.hooks.PostToolUse.length, 2, 'Should have exactly two PostToolUse hooks (spec-lint + agent-record)');
     });
 
     it('preserves existing settings.json content', () => {
@@ -895,6 +895,144 @@ describe('LED-234: Conditional Claude Code hooks', () => {
         // Delimit hooks also present
         assert.ok(config.hooks.PostToolUse.length >= 2, 'PostToolUse should have original + spec-lint');
         assert.ok(config.hooks.PreToolUse.length >= 3, 'PreToolUse should have original + doctor + deploy-audit');
+    });
+});
+
+// -----------------------------------------------------------------------
+// STR-2202: "tools fire tools" — HOOK half
+// -----------------------------------------------------------------------
+
+describe('STR-2202 SessionStart digest + heartbeat echo', () => {
+    beforeEach(() => { setupTmpHome(); });
+    afterEach(() => { teardownTmpHome(); });
+
+    it('embeds the digest + heartbeat echo in the SessionStart script by default', () => {
+        const claudeDir = path.join(tmpDir, '.claude');
+        fs.mkdirSync(claudeDir, { recursive: true });
+        const tool = { id: 'claude', name: 'Claude Code', configPath: path.join(claudeDir, 'settings.json') };
+
+        crossModelHooks.installClaudeHooks(tool, { session_start: true });
+
+        const script = fs.readFileSync(path.join(claudeDir, 'hooks', 'delimit'), 'utf-8');
+        assert.ok(script.includes('digest-*.json'), 'script reads the latest daily digest');
+        assert.ok(script.includes('stuck_over_24h'), 'script surfaces the stuck-dispatch count');
+        assert.ok(script.includes('from ai.heartbeat import check_staleness'), 'script surfaces heartbeat anomalies');
+        // Never-block contract: the echo is time-boxed and fails open.
+        assert.ok(script.includes("timeout 6 python3 - <<'DGEOF'"), 'echo is time-boxed');
+        assert.ok(/DGEOF' 2>\/dev\/null \|\| true/.test(script), 'echo fails open (|| true)');
+        // Skipped for subagents so a narrow task does not pull orchestrator context.
+        assert.ok(script.includes('"$DELIMIT_SESSION_TYPE" != "subagent"'), 'echo skipped for subagents');
+    });
+
+    it('omits the digest echo when session_digest_echo is false', () => {
+        const claudeDir = path.join(tmpDir, '.claude');
+        fs.mkdirSync(claudeDir, { recursive: true });
+        const tool = { id: 'claude', name: 'Claude Code', configPath: path.join(claudeDir, 'settings.json') };
+
+        crossModelHooks.installClaudeHooks(tool, { session_start: true, session_digest_echo: false });
+
+        const script = fs.readFileSync(path.join(claudeDir, 'hooks', 'delimit'), 'utf-8');
+        assert.ok(!script.includes('digest-*.json'), 'digest echo omitted when flag is false');
+        assert.ok(!script.includes("<<'DGEOF'"), 'digest echo block omitted when flag is false');
+    });
+});
+
+describe('STR-2202 subagent flight-recorder (PostToolUse)', () => {
+    beforeEach(() => { setupTmpHome(); });
+    afterEach(() => { teardownTmpHome(); });
+
+    it('installs a PostToolUse hook matched to the subagent (Task|Agent) tool', () => {
+        const claudeDir = path.join(tmpDir, '.claude');
+        fs.mkdirSync(claudeDir, { recursive: true });
+        const tool = { id: 'claude', name: 'Claude Code', configPath: path.join(claudeDir, 'settings.json') };
+
+        const changes = crossModelHooks.installClaudeHooks(tool, { session_start: true, conditional_hooks: false });
+
+        assert.ok(changes.includes('PostToolUse:agent-record'), 'agent-record change reported');
+        const config = JSON.parse(fs.readFileSync(tool.configPath, 'utf-8'));
+        const group = config.hooks.PostToolUse.find(
+            g => (g.hooks || []).some(h => (h.command || '').includes('delimit-agent-record'))
+        );
+        assert.ok(group, 'agent-record PostToolUse group exists');
+        assert.strictEqual(group.matcher, 'Task|Agent', 'matches the subagent-spawn tool by either name');
+    });
+
+    it('writes a recorder script that records dispatch + completion with model/task_type/outcome/venture', () => {
+        const claudeDir = path.join(tmpDir, '.claude');
+        fs.mkdirSync(claudeDir, { recursive: true });
+        const tool = { id: 'claude', name: 'Claude Code', configPath: path.join(claudeDir, 'settings.json') };
+
+        crossModelHooks.installClaudeHooks(tool, { session_start: true });
+
+        const recorderPath = path.join(claudeDir, 'hooks', 'delimit-agent-record');
+        assert.ok(fs.existsSync(recorderPath), 'recorder script written');
+        const s = fs.readFileSync(recorderPath, 'utf-8');
+        // Reads the harness PostToolUse event fields.
+        assert.ok(s.includes('tool_input') && s.includes('tool_response'), 'reads spawn input + result');
+        assert.ok(s.includes('subagent_type'), 'reads subagent_type');
+        // Records dispatch AND completion (fires post-completion).
+        assert.ok(s.includes('dispatch_task(') && s.includes('complete_task('), 'records dispatch + completion');
+        // Carries the LED-3720 instrumentation fields.
+        assert.ok(s.includes('task_type=subagent_type'), 'carries task_type');
+        assert.ok(s.includes('venture=venture'), 'carries venture');
+        assert.ok(s.includes('"outcome": outcome'), 'carries outcome');
+        assert.ok(s.includes('"model": subagent_type'), 'carries model proxy');
+        // Never-disrupt contract: time-boxed + always exits 0.
+        assert.ok(s.includes('timeout 6 python3'), 'time-boxed');
+        assert.ok(/exit 0\s*$/.test(s.trim()), 'always exits 0');
+        // Has a bundled-backend path and a direct-write fallback.
+        assert.ok(s.includes('from ai import agent_dispatch as ad'), 'prefers bundled backend');
+        assert.ok(s.includes('tasks.json'), 'has direct-write fallback');
+    });
+
+    it('is not installed when agent_record is false', () => {
+        const claudeDir = path.join(tmpDir, '.claude');
+        fs.mkdirSync(claudeDir, { recursive: true });
+        const tool = { id: 'claude', name: 'Claude Code', configPath: path.join(claudeDir, 'settings.json') };
+
+        const changes = crossModelHooks.installClaudeHooks(tool, { session_start: true, agent_record: false, conditional_hooks: false });
+
+        assert.ok(!changes.includes('PostToolUse:agent-record'), 'not reported');
+        assert.ok(!fs.existsSync(path.join(claudeDir, 'hooks', 'delimit-agent-record')), 'no recorder script');
+    });
+
+    it('is not installed when session_start is false (lifecycle-gated)', () => {
+        const claudeDir = path.join(tmpDir, '.claude');
+        fs.mkdirSync(claudeDir, { recursive: true });
+        const tool = { id: 'claude', name: 'Claude Code', configPath: path.join(claudeDir, 'settings.json') };
+
+        const changes = crossModelHooks.installClaudeHooks(tool, { session_start: false, conditional_hooks: false });
+        assert.ok(!changes.includes('PostToolUse:agent-record'), 'not installed without session lifecycle');
+    });
+
+    it('does not duplicate the recorder on repeated installation', () => {
+        const claudeDir = path.join(tmpDir, '.claude');
+        fs.mkdirSync(claudeDir, { recursive: true });
+        const tool = { id: 'claude', name: 'Claude Code', configPath: path.join(claudeDir, 'settings.json') };
+
+        crossModelHooks.installClaudeHooks(tool, { session_start: true });
+        crossModelHooks.installClaudeHooks(tool, { session_start: true });
+
+        const config = JSON.parse(fs.readFileSync(tool.configPath, 'utf-8'));
+        const recorders = config.hooks.PostToolUse.filter(
+            g => (g.hooks || []).some(h => (h.command || '').includes('delimit-agent-record'))
+        );
+        assert.strictEqual(recorders.length, 1, 'exactly one recorder group');
+    });
+
+    it('is stripped by removeClaudeHooks (reversible)', () => {
+        const claudeDir = path.join(tmpDir, '.claude');
+        fs.mkdirSync(claudeDir, { recursive: true });
+        const tool = { id: 'claude', name: 'Claude Code', configPath: path.join(claudeDir, 'settings.json') };
+
+        crossModelHooks.installClaudeHooks(tool, { session_start: true });
+        crossModelHooks.removeClaudeHooks();
+
+        const config = JSON.parse(fs.readFileSync(tool.configPath, 'utf-8'));
+        const recorders = (config.hooks && config.hooks.PostToolUse || []).filter(
+            g => (g.hooks || []).some(h => (h.command || '').includes('delimit-agent-record'))
+        );
+        assert.strictEqual(recorders.length, 0, 'recorder removed on uninstall');
     });
 });
 
