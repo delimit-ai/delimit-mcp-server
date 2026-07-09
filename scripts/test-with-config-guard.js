@@ -42,6 +42,7 @@ const TEST_FILES = [
     'tests/auth-signout.test.js',
     'tests/migration-2092-banner.test.js',
     'tests/control-browser.test.js',
+    'tests/bundle-parity-guard.test.js',
 ];
 
 const cfgPath = resolveSharedConfigPath();
