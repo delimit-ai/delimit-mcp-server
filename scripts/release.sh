@@ -91,12 +91,34 @@ echo ""
 echo "[4/5] Bumping version to $VERSION..."
 npm version "$VERSION" --no-git-tag-version
 
+# Keep server.json (MCP registry manifest) in lockstep with package.json.
+# Without this, server.json.version drifts behind the published npm version
+# (it lagged at 4.7.3 while package.json was 4.15.0 — LED-3717), which hurts
+# MCP-directory freshness/completeness scoring. Updates both the top-level
+# version and the npm package entry.
+if [ -f server.json ]; then
+    echo "  Syncing server.json version -> $VERSION"
+    node -e '
+        const fs = require("fs");
+        const v = require("./package.json").version;
+        const p = "server.json";
+        const s = JSON.parse(fs.readFileSync(p, "utf8"));
+        s.version = v;
+        if (Array.isArray(s.packages)) {
+            for (const pkg of s.packages) {
+                if (pkg && typeof pkg === "object") pkg.version = v;
+            }
+        }
+        fs.writeFileSync(p, JSON.stringify(s, null, 2) + "\n");
+    '
+fi
+
 # ── Step 5: Commit, tag, and push ────────────────────────────────────
 echo ""
 echo "[5/5] Committing and tagging..."
 
 # Stage synced gateway files too (sync-gateway may have updated them)
-git add package.json package-lock.json gateway/
+git add package.json package-lock.json server.json gateway/
 
 # Use a release branch to avoid main branch protection
 RELEASE_BRANCH="release/v$VERSION"
