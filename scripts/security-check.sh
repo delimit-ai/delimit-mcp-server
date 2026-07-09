@@ -76,6 +76,17 @@ fi
 # Cleanup
 rm -rf "$TMPDIR"
 
+# 5. Bundle parity — no package.json-blocked path present in the committed
+#    gateway/ bundle. Scans #1–#4 above only inspect the npm TARBALL file list
+#    (which already honors package.json "!"-exclusions), so they can never see
+#    a blocked file that is git-committed into this PUBLIC repo. This guard
+#    closes that gap and catches sync-gateway/package.json drift.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+echo "  Bundle parity..."
+if ! bash "$SCRIPT_DIR/check-bundle-parity.sh"; then
+    FAIL=1
+fi
+
 if [ $FAIL -ne 0 ]; then
     echo ""
     echo "❌ SECURITY CHECK FAILED — do not publish"
