@@ -7274,10 +7274,21 @@ program
     });
 
 
-// --- Chat command (Native REPL) ---
+// --- Chat command (governed session launcher / Auto-Phoenix) ---
+// Despite the name, this is NOT a chat surface: it is a governed session
+// launcher with quota fallback + soul revive (reads the models.json fallback
+// chain, probes quota, spawns the model shim, and on quota death captures the
+// soul and relaunches the next model with revive). See Fable doc-33.
+//
+// `phoenix` is an honest additional alias (the launcher's internal name is
+// "Auto-Phoenix"). NOTE: `session` was the originally-requested alias but a
+// distinct `session` command already exists (native session-shell); aliasing
+// to it throws at commander registration and would crash the whole CLI, so it
+// is intentionally NOT used here. `chat` behavior is unchanged.
 program
     .command('chat')
-    .description('Start the native Delimit interactive chat REPL')
+    .alias('phoenix')
+    .description('Governed session launcher: quota fallback + soul revive across models (Auto-Phoenix). Alias: phoenix')
     .option('--api-fallback', 'Enable API fallback to continue using paid tokens')
     .action((options) => {
         const { DelimitChatREPL } = require('../lib/chat-repl');
