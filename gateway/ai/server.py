@@ -14211,8 +14211,19 @@ def delimit_handoff_create(
 
 @mcp.tool()
 def delimit_handoff_acknowledge(
-    receipt_id: Annotated[str, Field(description="Receipt id to acknowledge. Required (empty string returns an error payload).")] = "",
+    receipt_id: Annotated[
+        str,
+        Field(
+            description="Receipt id to acknowledge. Required (empty string returns an error payload)."
+        ),
+    ] = "",
     notes: Annotated[str, Field(description="Optional notes from the receiving agent.")] = "",
+    project_path: Annotated[
+        str,
+        Field(
+            description="Optional exact project namespace. Blank searches all namespaces; an explicit path never writes outside that namespace."
+        ),
+    ] = "",
 ) -> Dict[str, Any]:
     """Acknowledge a pending handoff receipt before starting work.
 
@@ -14234,6 +14245,8 @@ def delimit_handoff_acknowledge(
         receipt_id: Receipt id to acknowledge. Required (empty string
             returns an error payload).
         notes: Optional notes from the receiving agent.
+        project_path: Optional exact project namespace. Blank searches
+            globally; an explicit path is a strict write boundary.
 
     Returns:
         Dict with acknowledgement result.
@@ -14241,22 +14254,32 @@ def delimit_handoff_acknowledge(
     from ai.handoff_receipts import acknowledge_receipt as _ack
 
     if not receipt_id or not receipt_id.strip():
-        return _with_next_steps("handoff_acknowledge", {
-            "status": "error",
-            "message": "receipt_id is required.",
-        })
+        return _with_next_steps(
+            "handoff_acknowledge",
+            {
+                "status": "error",
+                "message": "receipt_id is required.",
+            },
+        )
 
     result = _ack(
         receipt_id=receipt_id.strip(),
         model=_detect_model(),
         notes=notes,
+        project_path=project_path.strip(),
     )
     return _with_next_steps("handoff_acknowledge", result)
 
 
 @mcp.tool()
 def delimit_handoff_list(
-    status: Annotated[str, Field(description="\"pending\" (default), \"acknowledged\", or \"all\".")] = "pending",
+    status: Annotated[
+        str, Field(description='"pending" (default), "acknowledged", or "all".')
+    ] = "pending",
+    project_path: Annotated[
+        str, Field(description="Optional exact project namespace. Blank aggregates all namespaces.")
+    ] = "",
+    limit: Annotated[int, Field(description="Maximum receipts to return, 1-200. Default 50.")] = 50,
 ) -> Dict[str, Any]:
     """List session handoff receipts.
 
@@ -14272,6 +14295,9 @@ def delimit_handoff_list(
 
     Args:
         status: "pending" (default), "acknowledged", or "all".
+        project_path: Optional exact project namespace. Blank aggregates
+            all namespaces.
+        limit: Maximum receipts to return, clamped to 1-200.
 
     Returns:
         Dict with formatted receipts and count, plus next_steps.
@@ -14282,44 +14308,73 @@ def delimit_handoff_list(
     if status not in ("pending", "acknowledged", "all"):
         status = "pending"
 
-    receipts = get_receipts(status=status)
+    try:
+        display_limit = max(1, min(int(limit), 200))
+    except (TypeError, ValueError):
+        display_limit = 50
+    namespace = project_path.strip()
+    all_receipts = get_receipts(project_path=namespace, status=status)
+    total_count = len(all_receipts)
+    receipts = all_receipts[:display_limit]
+    truncated = total_count > len(receipts)
 
     if not receipts:
-        return _with_next_steps("handoff_list", {
-            "status": "empty",
-            "filter": status,
-            "count": 0,
-            "message": f"No {status} handoff receipts found.",
-        })
+        return _with_next_steps(
+            "handoff_list",
+            {
+                "status": "empty",
+                "filter": status,
+                "project_path": namespace,
+                "limit": display_limit,
+                "count": 0,
+                "total_count": 0,
+                "truncated": False,
+                "message": f"No {status} handoff receipts found.",
+            },
+        )
 
     formatted_list = []
     for r in receipts:
-        formatted_list.append({
-            "receipt_id": r.receipt_id,
-            "created_at": r.created_at,
-            "task_description": r.task_description,
-            "from_model": r.from_model,
-            "to_model": r.to_model,
-            "priority": r.priority,
-            "acknowledged": r.acknowledged,
-            "completed_count": len(r.completed),
-            "not_completed_count": len(r.not_completed),
-            "next_action": r.next_action,
-        })
+        formatted_list.append(
+            {
+                "receipt_id": r.receipt_id,
+                "project_path": r.project_path,
+                "created_at": r.created_at,
+                "task_description": r.task_description,
+                "from_model": r.from_model,
+                "to_model": r.to_model,
+                "priority": r.priority,
+                "acknowledged": r.acknowledged,
+                "completed_count": len(r.completed),
+                "not_completed_count": len(r.not_completed),
+                "next_action": r.next_action,
+            }
+        )
 
     # Format the first pending receipt in full for immediate context
     display = ""
     if status == "pending" and receipts:
         display = format_receipt(receipts[0])
 
-    return _with_next_steps("handoff_list", {
-        "status": "ok",
-        "filter": status,
-        "count": len(receipts),
-        "receipts": formatted_list,
-        "display": display,
-        "message": f"{len(receipts)} {status} receipt(s) found.",
-    })
+    return _with_next_steps(
+        "handoff_list",
+        {
+            "status": "ok",
+            "filter": status,
+            "project_path": namespace,
+            "limit": display_limit,
+            "count": len(receipts),
+            "total_count": total_count,
+            "truncated": truncated,
+            "receipts": formatted_list,
+            "display": display,
+            "message": (
+                f"Showing {len(receipts)} of {total_count} {status} receipt(s)."
+                if truncated
+                else f"{len(receipts)} {status} receipt(s) found."
+            ),
+        },
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════

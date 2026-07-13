@@ -25,7 +25,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 MAX_RECEIPTS_PER_PROJECT = 50
 RECEIPTS_BASE_DIR = Path.home() / ".delimit" / "handoff_receipts"
@@ -135,22 +135,31 @@ def _index_path(project_path: str) -> Path:
     return _project_dir(project_path) / "index.json"
 
 
+def _load_index_from_dir(project_dir: Path) -> Dict[str, Any]:
+    """Load and validate the index for an already-resolved namespace."""
+    try:
+        data = json.loads((project_dir / "index.json").read_text())
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {"receipts": []}
+    if not isinstance(data, dict) or not isinstance(data.get("receipts"), list):
+        return {"receipts": []}
+    return data
+
+
 def _load_index(project_path: str) -> Dict[str, Any]:
     """Load the receipt index for a project."""
-    idx_path = _index_path(project_path)
-    if idx_path.exists():
-        try:
-            return json.loads(idx_path.read_text())
-        except (json.JSONDecodeError, OSError):
-            pass
-    return {"receipts": []}
+    return _load_index_from_dir(_project_dir(project_path))
+
+
+def _save_index_to_dir(project_dir: Path, index: Dict[str, Any]) -> None:
+    """Persist an index to an already-resolved namespace."""
+    project_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / "index.json").write_text(json.dumps(index, indent=2))
 
 
 def _save_index(project_path: str, index: Dict[str, Any]) -> None:
     """Save the receipt index for a project."""
-    proj_dir = _project_dir(project_path)
-    proj_dir.mkdir(parents=True, exist_ok=True)
-    _index_path(project_path).write_text(json.dumps(index, indent=2))
+    _save_index_to_dir(_project_dir(project_path), index)
 
 
 def create_receipt(
@@ -232,9 +241,8 @@ def _store_receipt(receipt: HandoffReceipt) -> Path:
     return filepath
 
 
-def _load_receipt(project_path: str, receipt_id: str) -> Optional[HandoffReceipt]:
-    """Load a receipt from disk by ID."""
-    filepath = _project_dir(project_path) / f"{receipt_id}.json"
+def _load_receipt_file(filepath: Path) -> Optional[HandoffReceipt]:
+    """Load a receipt from an already-resolved file path."""
     if not filepath.exists():
         return None
     try:
@@ -247,45 +255,75 @@ def _load_receipt(project_path: str, receipt_id: str) -> Optional[HandoffReceipt
         return None
 
 
+def _load_receipt(project_path: str, receipt_id: str) -> Optional[HandoffReceipt]:
+    """Load a receipt from one explicit project namespace."""
+    return _load_receipt_file(_project_dir(project_path) / f"{receipt_id}.json")
+
+
+def _receipt_project_dirs(project_path: str = "") -> List[Path]:
+    """Resolve one explicit namespace, or every namespace when blank."""
+    if project_path:
+        return [_project_dir(project_path)]
+    if not RECEIPTS_BASE_DIR.exists():
+        return []
+    try:
+        entries = sorted(RECEIPTS_BASE_DIR.iterdir(), key=lambda path: path.name)
+    except OSError:
+        return []
+    project_dirs = []
+    for path in entries:
+        try:
+            if path.is_dir():
+                project_dirs.append(path)
+        except OSError:
+            continue
+    return project_dirs
+
+
+def _find_receipts(
+    receipt_id: str,
+    project_path: str = "",
+    fallback_global: bool = True,
+) -> List[Tuple[Path, HandoffReceipt]]:
+    """Find receipt matches, preferring an explicit namespace when it hits.
+
+    A supplied project path is a fast path, not an isolation boundary: scoped
+    revive historically falls back to the global receipt store when a handoff
+    was captured from a different cwd. Preserve that behavior while making
+    list and acknowledge use the same resolver contract.
+    """
+    if not receipt_id:
+        return []
+
+    if project_path:
+        explicit_matches = []
+        for project_dir in _receipt_project_dirs(project_path):
+            receipt = _load_receipt_file(project_dir / f"{receipt_id}.json")
+            if receipt is not None:
+                explicit_matches.append((project_dir, receipt))
+        if explicit_matches or not fallback_global:
+            return explicit_matches
+
+    matches = []
+    for project_dir in _receipt_project_dirs():
+        receipt = _load_receipt_file(project_dir / f"{receipt_id}.json")
+        if receipt is not None:
+            matches.append((project_dir, receipt))
+    return matches
+
+
 def get_receipt(receipt_id: str, project_path: str = "") -> Optional[HandoffReceipt]:
     """Look up a single receipt by id.
 
     Receipts are stored per project-hash, so a bare receipt id has no
     single canonical directory. When ``project_path`` is given we read the
-    fast path (``_load_receipt`` in that project's dir). Otherwise we scan
-    every project-hash directory under ``RECEIPTS_BASE_DIR`` for a matching
-    ``{receipt_id}.json`` and load the first hit. Read-only; returns None
-    when no receipt with that id exists anywhere.
+    fast path (``_load_receipt`` in that project's dir). On an explicit miss
+    we scan every project-hash directory under ``RECEIPTS_BASE_DIR`` for a
+    matching ``{receipt_id}.json``. Read-only; returns None when no receipt
+    exists or a bare id is ambiguous across namespaces.
     """
-    if not receipt_id:
-        return None
-
-    # Fast path: caller knows the project.
-    if project_path:
-        receipt = _load_receipt(project_path, receipt_id)
-        if receipt is not None:
-            return receipt
-
-    # Global scan across all project-hash dirs.
-    if not RECEIPTS_BASE_DIR.exists():
-        return None
-
-    filename = f"{receipt_id}.json"
-    for proj_dir in RECEIPTS_BASE_DIR.iterdir():
-        if not proj_dir.is_dir():
-            continue
-        filepath = proj_dir / filename
-        if not filepath.exists():
-            continue
-        try:
-            data = json.loads(filepath.read_text())
-            return HandoffReceipt(**{
-                k: v for k, v in data.items()
-                if k in HandoffReceipt.__dataclass_fields__
-            })
-        except (json.JSONDecodeError, TypeError, KeyError, OSError):
-            continue
-    return None
+    matches = _find_receipts(receipt_id, project_path=project_path)
+    return matches[0][1] if len(matches) == 1 else None
 
 
 def acknowledge_receipt(
@@ -298,14 +336,25 @@ def acknowledge_receipt(
 
     Returns the updated receipt data or an error if not found.
     """
-    project_path = project_path or os.getcwd()
-
-    receipt = _load_receipt(project_path, receipt_id)
-    if receipt is None:
+    matches = _find_receipts(
+        receipt_id,
+        project_path=project_path,
+        fallback_global=not bool(project_path),
+    )
+    if not matches:
         return {
             "status": "not_found",
             "message": f"No receipt with ID '{receipt_id}' found.",
         }
+    if len(matches) > 1:
+        return {
+            "status": "ambiguous",
+            "message": (
+                f"Receipt ID '{receipt_id}' exists in multiple project "
+                "namespaces; pass project_path."
+            ),
+        }
+    project_dir, receipt = matches[0]
 
     if receipt.acknowledged:
         return {
@@ -321,16 +370,29 @@ def acknowledge_receipt(
     receipt.acknowledge_notes = notes
 
     # Update the receipt file
-    filepath = _project_dir(project_path) / f"{receipt_id}.json"
+    filepath = project_dir / f"{receipt_id}.json"
     filepath.write_text(json.dumps(asdict(receipt), indent=2))
 
     # Update the index
-    index = _load_index(project_path)
+    index = _load_index_from_dir(project_dir)
+    found_in_index = False
     for entry in index["receipts"]:
-        if entry["receipt_id"] == receipt_id:
+        if isinstance(entry, dict) and entry.get("receipt_id") == receipt_id:
             entry["acknowledged"] = True
-            break
-    _save_index(project_path, index)
+            found_in_index = True
+    if not found_in_index:
+        index["receipts"].append(
+            {
+                "receipt_id": receipt.receipt_id,
+                "created_at": receipt.created_at,
+                "task_description": receipt.task_description,
+                "from_model": receipt.from_model,
+                "to_model": receipt.to_model,
+                "priority": receipt.priority,
+                "acknowledged": True,
+            }
+        )
+    _save_index_to_dir(project_dir, index)
 
     return {
         "status": "acknowledged",
@@ -345,34 +407,36 @@ def acknowledge_receipt(
 
 def get_pending_receipts(project_path: str = "") -> List[HandoffReceipt]:
     """Get receipts that haven't been acknowledged yet."""
-    project_path = project_path or os.getcwd()
-    index = _load_index(project_path)
-
-    pending = []
-    for entry in index["receipts"]:
-        if not entry.get("acknowledged", False):
-            receipt = _load_receipt(project_path, entry["receipt_id"])
-            if receipt and not receipt.acknowledged:
-                pending.append(receipt)
-    return pending
+    return get_receipts(project_path=project_path, status="pending")
 
 
 def get_receipts(project_path: str = "", status: str = "pending") -> List[HandoffReceipt]:
-    """Get receipts filtered by status: pending, acknowledged, or all."""
-    project_path = project_path or os.getcwd()
-    index = _load_index(project_path)
+    """Get receipts filtered by status: pending, acknowledged, or all.
 
+    Explicit project paths stay namespace-local. A blank path aggregates all
+    namespaces, newest first. MCP callers should bound and paginate display.
+    """
     results = []
-    for entry in index["receipts"]:
-        receipt = _load_receipt(project_path, entry["receipt_id"])
-        if receipt is None:
-            continue
-        if status == "all":
-            results.append(receipt)
-        elif status == "pending" and not receipt.acknowledged:
-            results.append(receipt)
-        elif status == "acknowledged" and receipt.acknowledged:
-            results.append(receipt)
+    seen = set()
+    for project_dir in _receipt_project_dirs(project_path):
+        index = _load_index_from_dir(project_dir)
+        for entry in index["receipts"]:
+            if not isinstance(entry, dict) or not isinstance(entry.get("receipt_id"), str):
+                continue
+            key = (project_dir, entry["receipt_id"])
+            if key in seen:
+                continue
+            seen.add(key)
+            receipt = _load_receipt_file(project_dir / f"{entry['receipt_id']}.json")
+            if receipt is None:
+                continue
+            if (
+                status == "all"
+                or (status == "pending" and not receipt.acknowledged)
+                or (status == "acknowledged" and receipt.acknowledged)
+            ):
+                results.append(receipt)
+    results.sort(key=lambda receipt: (receipt.created_at, receipt.receipt_id), reverse=True)
     return results
 
 
