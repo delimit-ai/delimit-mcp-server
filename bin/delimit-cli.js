@@ -7290,6 +7290,7 @@ program
     .alias('phoenix')
     .description('Governed session launcher: quota fallback + soul revive across models (Auto-Phoenix). Alias: phoenix')
     .option('--api-fallback', 'Enable API fallback to continue using paid tokens')
+    .option('--model <id>', 'Launch a specific model first (e.g. codex, claude, antigravity); the rest of the default chain stays as Auto-Phoenix fallback')
     .action((options) => {
         const { DelimitChatREPL } = require('../lib/chat-repl');
         const repl = new DelimitChatREPL(options);
