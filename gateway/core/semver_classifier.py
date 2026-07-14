@@ -54,6 +54,13 @@ BREAKING_TYPES = frozenset({
     ChangeType.SECURITY_SCOPE_REMOVED,
     ChangeType.MAX_LENGTH_DECREASED,
     ChangeType.MIN_LENGTH_INCREASED,
+    # LED-3792 always-breaking additions. MUST stay aligned with the engine's
+    # _ALWAYS_BREAKING (test_breaking_bucket_matches_engine_always_breaking).
+    ChangeType.SECURITY_REQUIREMENT_ADDED,
+    ChangeType.SECURITY_SCOPE_ADDED,
+    ChangeType.MEDIA_TYPE_REMOVED,
+    ChangeType.DISCRIMINATOR_CHANGED,
+    ChangeType.COMPOSITION_MEMBER_REMOVED,
 })
 
 # Context-sensitive types whose breaking-ness is decided per-Change by the
@@ -62,6 +69,12 @@ CONTEXT_SENSITIVE_TYPES = frozenset({
     ChangeType.FIELD_REMOVED,
     ChangeType.REQUIRED_FIELD_ADDED,
     ChangeType.FIELD_REQUIREMENT_RELAXED,
+    # LED-3792 direction-aware types. Their breaking-ness is read per-Change
+    # via is_breaking (request vs response), never inferred from type alone.
+    ChangeType.CONSTRAINT_TIGHTENED,
+    ChangeType.ADDITIONAL_PROPERTIES_TIGHTENED,
+    ChangeType.NULLABILITY_ADDED,
+    ChangeType.NULLABILITY_REMOVED,
 })
 
 ADDITIVE_TYPES = frozenset({
@@ -70,7 +83,11 @@ ADDITIVE_TYPES = frozenset({
     ChangeType.OPTIONAL_PARAM_ADDED,
     ChangeType.RESPONSE_ADDED,
     ChangeType.OPTIONAL_FIELD_ADDED,
+    # ENUM_VALUE_ADDED is direction-aware (breaking in a RESPONSE); it lives
+    # here for the non-breaking request case and is decided per-Change by
+    # is_breaking in classify() when it is a response addition.
     ChangeType.ENUM_VALUE_ADDED,
+    ChangeType.FORMAT_WIDENED,
 })
 
 PATCH_TYPES = frozenset({

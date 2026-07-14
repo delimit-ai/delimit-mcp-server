@@ -31,14 +31,20 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from ai.scan_bridge.dedup import (
     _candidate_strategy_items,
     extract_topic_fingerprint,
+    idempotency_key,
     is_duplicate,
+    release_version_from_signal,
 )
+from ai.scan_bridge.wedge import classify_wedge, wedge_enabled
 
 logger = logging.getLogger("delimit.ai.scan_bridge.bridge")
 
 TARGETS_FILE = Path.home() / ".delimit" / "social_targets.jsonl"
 CURSOR_FILE = Path.home() / ".delimit" / "scan_bridge_cursor.json"
 PROMOTIONS_LOG = Path.home() / ".delimit" / "scan_bridge_promotions.jsonl"
+# Non-wedge survivors are routed here (the "delimit_digest / intel snapshot"
+# sink) instead of the strategy ledger — see the strategic-bar wedge filter.
+DIGEST_SINK_LOG = Path.home() / ".delimit" / "scan_bridge_digest.jsonl"
 
 
 def _confidence_floor() -> float:
@@ -272,6 +278,30 @@ def _log_promotion(record: Dict[str, Any]) -> None:
         pass
 
 
+def _log_digest_sink(signal: Dict[str, Any], reason: str) -> None:
+    """Record a non-wedge survivor to the digest / intel-snapshot sink.
+
+    This is the "route to delimit_digest / an intel snapshot, NOT the
+    ledger" destination for signals that pass classification + confidence +
+    precision + dedup but fall outside Delimit's wedge. Best-effort append.
+    """
+    try:
+        DIGEST_SINK_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with DIGEST_SINK_LOG.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps({
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "signal_fingerprint": signal.get("fingerprint"),
+                "platform": signal.get("platform"),
+                "canonical_url": signal.get("canonical_url"),
+                "snippet_head": (signal.get("content_snippet") or "")[:200],
+                "confidence": signal.get("confidence"),
+                "reason": reason,
+                "routed_to": "digest",
+            }, ensure_ascii=False) + "\n")
+    except OSError:  # pragma: no cover — best-effort
+        pass
+
+
 # ── Filtering ─────────────────────────────────────────────────────────
 
 
@@ -282,6 +312,7 @@ class _FilterStats:
     rejected_confidence: int = 0
     rejected_precision: int = 0
     rejected_dedup: int = 0
+    routed_digest: int = 0
     promoted: int = 0
 
 
@@ -341,6 +372,8 @@ def _build_item(signal: Dict[str, Any]) -> Dict[str, Any]:
     source_id = signal.get("source_id") or signal.get("fingerprint") or ""
 
     fingerprint_set = sorted(extract_topic_fingerprint(signal))
+    idem_key = idempotency_key(signal)
+    release_version = release_version_from_signal(signal)
 
     description = (
         f"Auto-promoted from {platform} signal at {confidence:.2f}: "
@@ -352,6 +385,12 @@ def _build_item(signal: Dict[str, Any]) -> Dict[str, Any]:
         "Founder reviews via daily digest."
     )
 
+    tags = ["auto_promoted", "scan_bridge", platform] if platform else ["auto_promoted", "scan_bridge"]
+    # Carry the repo-scoped idempotency key as a tag so future runs dedup
+    # reliably against this item (repo full-name, version-agnostic).
+    if idem_key:
+        tags.append(idem_key)
+
     return {
         "title": _build_title(signal),
         "ledger": "strategy",
@@ -359,12 +398,14 @@ def _build_item(signal: Dict[str, Any]) -> Dict[str, Any]:
         "priority": "P2",
         "description": description,
         "context": context_text,
-        "tags": ["auto_promoted", "scan_bridge", platform] if platform else ["auto_promoted", "scan_bridge"],
+        "tags": tags,
         "source": "scan_bridge_auto",
         "metadata_signal_ref": {
             "platform": platform,
             "source_id": source_id,
             "fingerprint": fingerprint_set,
+            "idempotency_key": idem_key,
+            "release_version": release_version,
             "first_seen": first_seen,
             "confidence": confidence,
             "canonical_url": canonical_url,
@@ -452,9 +493,11 @@ def promote_recent_signals(
     targets_file: Optional[Path] = None,
     confidence_floor: Optional[float] = None,
     candidates: Optional[Iterable[Dict[str, Any]]] = None,
+    route: str = "ledger",
+    wedge_filter: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """Process scanned signals from ``targets_file`` and promote
-    survivors of the strict gate to the strategy ledger.
+    survivors of the strict gate.
 
     Parameters
     ----------
@@ -462,7 +505,7 @@ def promote_recent_signals(
         Optional cutoff. Defaults to the persisted cursor; falls back to
         24h ago when no cursor exists.
     dry_run:
-        When True no ledger writes happen; the response still contains
+        When True no writes happen; the response still contains
         the would-be promotions for audit / preview.
     targets_file:
         Override the default ``social_targets.jsonl`` path (test hook).
@@ -471,6 +514,22 @@ def promote_recent_signals(
     candidates:
         Override the strategy-ledger candidate list for dedup (test
         hook). When omitted we fetch live items inside ``is_duplicate``.
+    wedge_filter:
+        The strategic-bar wedge gate. ``None`` (default) resolves from
+        ``DELIMIT_SCAN_WEDGE`` (default ON). When active, a survivor that
+        falls OUTSIDE Delimit's wedge (API breaking-change/contract-CI, or
+        governance/orchestration for AI coding assistants) is routed to the
+        digest / intel-snapshot sink instead of the ledger — this is the
+        noise filter. Pass ``False`` to restore pre-wedge behavior (every
+        gate survivor reaches the ledger).
+    route:
+        Where survivors go (LED-3729). ``"ledger"`` (default; legacy
+        behavior — write a strategy-ledger item), ``"backlog"`` (write a
+        report-topic candidate to the internal reports backlog instead —
+        stops the unactioned-clipping accumulation), or ``"both"``. The
+        auto/cron path defaults to ``"backlog"`` via
+        ``DELIMIT_SCAN_PROMO_ROUTE`` so genuinely-strong signals become
+        report-topic candidates rather than dead strategy-ledger clippings.
 
     Returns
     -------
@@ -480,6 +539,7 @@ def promote_recent_signals(
     """
     targets_file = targets_file or TARGETS_FILE
     floor = confidence_floor if confidence_floor is not None else _confidence_floor()
+    wedge_on = wedge_enabled() if wedge_filter is None else bool(wedge_filter)
 
     cursor_value = _load_cursor()
     if since is not None:
@@ -496,6 +556,7 @@ def promote_recent_signals(
 
     stats = _FilterStats()
     promoted: List[Dict[str, Any]] = []
+    digested: List[Dict[str, Any]] = []
     max_seen = since_iso
 
     # Resolve candidates ONCE per run for performance — production calls
@@ -539,6 +600,27 @@ def promote_recent_signals(
             stats.rejected_dedup += 1
             continue
 
+        # Strategic bar (the filter): only WEDGE-relevant survivors reach
+        # the ledger. Everything else routes to the digest / intel-snapshot
+        # sink. Reversible via DELIMIT_SCAN_WEDGE=off / wedge_filter=False.
+        if wedge_on:
+            in_wedge, _arm, wedge_reason = classify_wedge(signal)
+            if not in_wedge:
+                stats.routed_digest += 1
+                if not dry_run:
+                    _log_digest_sink(signal, wedge_reason)
+                digested.append({
+                    "signal_fingerprint": signal.get("fingerprint"),
+                    "title": _build_title(signal),
+                    "snippet": (signal.get("content_snippet") or "")[:200],
+                    "confidence": signal.get("confidence"),
+                    "platform": signal.get("platform"),
+                    "canonical_url": signal.get("canonical_url"),
+                    "first_seen": first_seen,
+                    "wedge_reason": wedge_reason,
+                })
+                continue
+
         if dry_run:
             stats.promoted += 1
             promoted.append({
@@ -575,6 +657,59 @@ def promote_recent_signals(
         # off the item dict — we need it for the within-batch snapshot
         # append below so subsequent signals can dedup against this one.
         captured_signal_ref = item.get("metadata_signal_ref") or {}
+
+        # LED-3729: route survivors to the report-topic backlog instead of
+        # (or in addition to) the strategy ledger. Backlog writes fail-open —
+        # never block a promotion on the research-backlog write.
+        if route in ("backlog", "both"):
+            try:
+                from ai.report_backlog import add_candidate, score_demand
+                _demand = score_demand(
+                    f"{item.get('title', '')} {item.get('description', '')}"
+                )
+                add_candidate(
+                    title=item.get("title", ""),
+                    source=f"sense_signal:{signal.get('platform', 'unknown')}",
+                    source_url=signal.get("canonical_url", ""),
+                    snippet=(signal.get("content_snippet") or "")[:600],
+                    matched_keywords=_demand.get("matched", []),
+                    score=_demand.get("score", 0),
+                    tags=["sense_promote", signal.get("platform", "")],
+                )
+            except Exception:
+                logger.exception(
+                    "scan_bridge: backlog write failed for %s (non-fatal)",
+                    signal.get("fingerprint"),
+                )
+
+        if route == "backlog":
+            # No ledger item — the backlog is the destination.
+            stats.promoted += 1
+            promoted.append({
+                "item_id": f"backlog:{signal.get('fingerprint')}",
+                "signal_fingerprint": signal.get("fingerprint"),
+                "title": item["title"],
+                "snippet": (signal.get("content_snippet") or "")[:200],
+                "confidence": signal.get("confidence"),
+                "platform": signal.get("platform"),
+                "canonical_url": signal.get("canonical_url"),
+                "first_seen": first_seen,
+                "routed_to": "report_backlog",
+            })
+            now_iso = datetime.now(timezone.utc).isoformat()
+            live_snapshot.append({
+                "id": f"backlog:{signal.get('fingerprint')}",
+                "status": "open",
+                "title": item["title"],
+                "description": item["description"],
+                "context": item.get("context", ""),
+                "tags": item.get("tags") or [],
+                "created_at": now_iso,
+                "updated_at": now_iso,
+                "metadata": {"signal_ref": captured_signal_ref},
+            })
+            continue
+
         try:
             result = _add_to_strategy_ledger(item)
         except Exception as exc:
@@ -631,13 +766,17 @@ def promote_recent_signals(
             "rejected_confidence": stats.rejected_confidence,
             "rejected_precision": stats.rejected_precision,
             "rejected_dedup": stats.rejected_dedup,
+            "routed_digest": stats.routed_digest,
             "promoted": stats.promoted,
         },
         "promoted": promoted,
+        "digested": digested,
         "cursor_advanced_to": max_seen if (not dry_run and max_seen != since_iso) else None,
         "since": since_iso,
         "dry_run": dry_run,
         "confidence_floor": floor,
+        "wedge_filter": wedge_on,
+        "route": route,
     }
 
 

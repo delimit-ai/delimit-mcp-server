@@ -208,7 +208,13 @@ class ToolcardCache:
             "hit_rate": round(len(cached) / len(tool_names) * 100, 1) if tool_names else 0.0,
         }
 
-    def record_call(self, tool_name: str) -> None:
+    def record_call(
+        self,
+        tool_name: str,
+        outcome: Optional[str] = None,
+        duration_ms: Optional[float] = None,
+        linked_id: Optional[str] = None,
+    ) -> None:
         """Record that a tool was called: in-memory (session) AND durably.
 
         The prior implementation only kept an in-memory counter that vanished on
@@ -217,16 +223,37 @@ class ToolcardCache:
         append to a crash-safe, append-only JSONL event log so utilization is
         measurable over time. Append is O(1) with no read-modify-write race.
         Analytics must never break a tool call, so all failures are swallowed.
+
+        Org-instrumentation (doc 25 §8 Phase 1 item #5 / gap G5): the optional
+        ``outcome`` / ``duration_ms`` / ``linked_id`` fields let §9's 30-day
+        review read REAL data (ok/error/refused/blocked counts, latency, and
+        the ledger/task id an action was linked to) instead of vibes. All three
+        are OPTIONAL and are written only when supplied, so:
+          * existing callers that pass only ``tool_name`` are unchanged, and
+          * old records already on customer machines (no outcome key) still
+            parse — :meth:`usage_summary` treats a missing outcome as untagged.
+        ``outcome`` is normalised to a lowercase token; anything unrecognised is
+        recorded verbatim so we never silently drop a caller's signal.
         """
         self._session_calls[tool_name] = self._session_calls.get(tool_name, 0) + 1
         try:
             usage_log = self._cache_file.parent / "tool_usage.jsonl"
             usage_log.parent.mkdir(parents=True, exist_ok=True)
+            rec: Dict[str, Any] = {
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "tool": tool_name,
+            }
+            if outcome is not None:
+                rec["outcome"] = str(outcome).strip().lower()
+            if duration_ms is not None:
+                try:
+                    rec["duration_ms"] = round(float(duration_ms), 3)
+                except (TypeError, ValueError):
+                    pass
+            if linked_id:
+                rec["linked_id"] = str(linked_id)
             with open(usage_log, "a") as f:
-                f.write(json.dumps({
-                    "ts": datetime.now(timezone.utc).isoformat(),
-                    "tool": tool_name,
-                }) + "\n")
+                f.write(json.dumps(rec) + "\n")
         except Exception:
             pass
 
@@ -241,6 +268,14 @@ class ToolcardCache:
         counts: Dict[str, int] = {}
         last_seen: Dict[str, str] = {}
         total = 0
+        # Org-instrumentation aggregates (doc 25 §8 item #5). Records that
+        # predate the outcome field simply don't contribute — backward
+        # compatible by construction.
+        outcomes: Dict[str, int] = {}
+        outcomes_by_tool: Dict[str, Dict[str, int]] = {}
+        tagged = 0
+        duration_total = 0.0
+        duration_n = 0
         try:
             with open(usage_log, "r") as f:
                 for line in f:
@@ -259,6 +294,19 @@ class ToolcardCache:
                     if ts and (name not in last_seen or ts > last_seen[name]):
                         last_seen[name] = ts
                     total += 1
+                    oc = rec.get("outcome")
+                    if oc:
+                        oc = str(oc)
+                        outcomes[oc] = outcomes.get(oc, 0) + 1
+                        outcomes_by_tool.setdefault(name, {})
+                        outcomes_by_tool[name][oc] = (
+                            outcomes_by_tool[name].get(oc, 0) + 1
+                        )
+                        tagged += 1
+                    dur = rec.get("duration_ms")
+                    if isinstance(dur, (int, float)):
+                        duration_total += float(dur)
+                        duration_n += 1
         except FileNotFoundError:
             pass
         result: Dict[str, Any] = {
@@ -267,6 +315,12 @@ class ToolcardCache:
             "counts": dict(sorted(counts.items(), key=lambda x: x[1], reverse=True)),
             "last_seen": last_seen,
             "usage_log": str(usage_log),
+            # Outcome instrumentation — empty dicts when no record is tagged.
+            "outcomes": dict(sorted(outcomes.items(), key=lambda x: x[1], reverse=True)),
+            "outcomes_by_tool": outcomes_by_tool,
+            "tagged_calls": tagged,
+            "avg_duration_ms": round(duration_total / duration_n, 3) if duration_n else None,
+            "timed_calls": duration_n,
         }
         if registry is not None:
             used = set(counts)

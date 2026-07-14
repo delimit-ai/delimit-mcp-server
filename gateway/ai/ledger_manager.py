@@ -13,6 +13,7 @@ import base64
 import json
 import hashlib
 import os
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -111,7 +112,7 @@ def _detect_venture(project_path: str = ".") -> Dict[str, str]:
             capture_output=True, text=True, timeout=3, cwd=str(p)
         )
         if remote.returncode == 0:
-            url = remote.stdout.strip()
+            url = _strip_url_userinfo(remote.stdout.strip())
             # Extract repo name from URL
             repo = url.rstrip("/").split("/")[-1].replace(".git", "")
             info["repo"] = url
@@ -123,14 +124,23 @@ def _detect_venture(project_path: str = ".") -> Dict[str, str]:
     return info
 
 
+# LED-3733: the canonical guard logic now lives in the reusable
+# ai.registry_guards module so the swarm venture registry (and, later, the
+# souls / agents-tasks stores) apply the identical, tested guard instead of
+# a drifting copy. These thin private wrappers are kept for backward
+# compatibility with existing imports (tests, callers).
+from ai.registry_guards import strip_url_userinfo as _strip_url_userinfo  # noqa: E402
+from ai.registry_guards import is_ephemeral_path as _is_ephemeral_path  # noqa: E402
+
+
 def _register_venture(info: Dict[str, str]):
     """Silently register a venture in the global registry.
 
-    Phase C follow-up (2026-05-18): reject paths under /tmp/* or the
-    bare "/tmp" itself. Pytest tmp_path values leaked into the registry
-    as ventures (`tmp: /tmp`, `test_project: /tmp/pytest-of-root/...`),
-    causing every fresh tmp_path to match via path-prefix in
-    resolve_venture and breaking test_resolve_venture_unregistered_path.
+    Guard (STR-2169 / LED-3733, 2026-07-01): refuse to persist ephemeral
+    paths (anything under /tmp or matching pytest/tempfile patterns) and
+    strip any embedded credentials from the remote URL before writing.
+    Previously only bare "/tmp" was rejected, so ~250 pytest tmp_path
+    ventures accumulated and PAT-embedded remotes were stored verbatim.
     The guard fails-silently — tests that pass tmp_path to functions
     which auto-register simply don't pollute the registry going forward.
     """
@@ -144,19 +154,13 @@ def _register_venture(info: Dict[str, str]):
 
     name = info["name"]
     path = info.get("path", "")
-    # Guard against the specific test-state pollution that broke
-    # test_resolve_venture_unregistered_path: a `tmp: /tmp` venture
-    # caught EVERY pytest tmp_path via path-prefix in resolve_venture.
-    # Reject bare "/tmp" only. Deeper /tmp/<X> paths are fine — they
-    # only path-prefix-match their own subtree, not every tmp_path,
-    # AND legitimate test fixtures (e.g. test_ledger_proof) register
-    # subpaths during a single test run and need that to work.
-    if path == "/tmp" or path.rstrip("/") == "/tmp":
+    # Never auto-register transient test/scratch paths into the shared registry.
+    if _is_ephemeral_path(path):
         return
     if name not in ventures:
         ventures[name] = {
             "path": path,
-            "repo": info.get("repo", ""),
+            "repo": _strip_url_userinfo(info.get("repo", "")),
             "type": info.get("type", ""),
             "registered_at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
@@ -288,6 +292,66 @@ def _project_ledger_dir(project_path: str = ".") -> Path:
     # No partitioned tree for this venture — fall back to the central
     # legacy layout (operations.jsonl + strategy.jsonl directly in ledger/).
     return CENTRAL_LEDGER_DIR
+
+
+def _resolve_namespace(project_path: str = ".") -> Dict[str, str]:
+    """Report which physical store a project_path resolves to (LED-3720).
+
+    Read-only. Returns the detected venture name, the canonical namespace
+    slug (or "" when the name maps to no known venture and the central
+    legacy layout is used), and the absolute store directory that
+    list/query/health will actually read. Exposed so callers and tests can
+    prove that two aliases for the same project resolve to the SAME store —
+    the fragmentation that let an item be reachable via one alias and not
+    another. Does NOT move or mutate any data.
+    """
+    info = _detect_venture(project_path)
+    slug = _canonical_venture_slug(info.get("name", "")) or ""
+    return {
+        "venture": info.get("name", ""),
+        "namespace": slug,
+        "store_path": str(_project_ledger_dir(project_path)),
+    }
+
+
+def _replay_status_counts(
+    ledger_dir: Path,
+    ledgers=("operations.jsonl", "strategy.jsonl"),
+) -> Dict[str, int]:
+    """Deterministic, event-sourced status tally for a resolved ledger dir.
+
+    Single source of truth for the open / in_progress / blocked / done / …
+    counts (LED-3720). Replays create + update rows in file order, honoring
+    the LATEST status per item id, so an item whose status was updated to
+    ``done`` is counted as done — NOT open. This mirrors ``list_items``'
+    event-sourcing exactly (an update row is only applied to an item whose
+    create row was already seen in the SAME store), so the number it returns
+    equals an independent recount of the same store and matches the
+    ``summary`` ``list_items`` computes.
+
+    Read-only. Never counts a status value of ``None`` (an item with no
+    status field lands in no bucket), matching list_items' breakdown.
+    """
+    counts: Dict[str, int] = {}
+    for filename in ledgers:
+        path = ledger_dir / filename
+        if not path.exists():
+            continue
+        state: Dict[str, Optional[str]] = {}
+        for item in _read_ledger(path):
+            iid = item.get("id", "")
+            if not iid:
+                continue
+            if item.get("type") == "update":
+                if iid in state and "status" in item:
+                    state[iid] = item.get("status")
+            else:
+                state[iid] = item.get("status")
+        for status in state.values():
+            if status is None:
+                continue
+            counts[status] = counts.get(status, 0) + 1
+    return counts
 
 
 def _ensure(project_path: str = "."):
@@ -429,6 +493,7 @@ def add_item(
     tools_needed: Optional[List[str]] = None,
     estimated_complexity: str = "",
     worked_by: str = "",
+    decision_card: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Add a new item to the project's strategy or operational ledger.
 
@@ -522,6 +587,14 @@ def add_item(
         entry["tools_needed"] = tools_needed
     if estimated_complexity:
         entry["estimated_complexity"] = estimated_complexity
+    # Phase-0 autonomous-org (mem-b2a9762b78d8): a decision card is a ledger
+    # item of type="decision" carrying the founder-facing option set. The
+    # payload is stored on the initial (non-update) event so list_items' replay
+    # ({**item}) preserves it. Additive — items without a decision_card are
+    # unchanged. Only attached when type == "decision" to avoid polluting
+    # ordinary tasks.
+    if decision_card and type == "decision":
+        entry["decision_card"] = decision_card
 
     result = _append(path, entry)
 
@@ -927,6 +1000,17 @@ def list_items(
 
     text_lower = (text or "").lower() if text else None
 
+    # LED-3739: the status breakdown in `summary` must be independent of the
+    # `status`/`status__in` filter, otherwise callers that filter by status
+    # (get_context uses status="open"; health_summary uses
+    # status__in=[open,in_progress,blocked]) get a self-referential breakdown
+    # where the filtered-out statuses read 0. That produced the reported
+    # divergence (health said 43 in_progress, context said 0 in_progress on the
+    # SAME store). We accumulate items that pass every filter EXCEPT the status
+    # filter and compute the breakdown over that scoped set, so the status
+    # distribution is authoritative regardless of the status filter.
+    breakdown_pool: list = []
+
     results: Dict[str, list] = {}
     for ledger_name, filename in [("ops", "operations.jsonl"), ("strategy", "strategy.jsonl")]:
         if ledger not in ("both", ledger_name):
@@ -958,10 +1042,8 @@ def list_items(
 
         filtered = list(state.values())
 
-        # Apply filters
-        if status_list:
-            statuses = set(status_list)
-            filtered = [i for i in filtered if i.get("status") in statuses]
+        # Apply every filter EXCEPT status first, so the status breakdown can be
+        # computed over this scoped-but-status-agnostic set.
         if priority_list:
             priorities = set(priority_list)
             filtered = [i for i in filtered if i.get("priority") in priorities]
@@ -993,6 +1075,14 @@ def list_items(
             filtered = [i for i in filtered if _compare_iso(_ts_to_iso(i.get("updated_at") or i.get("created_at")), updated_before, "before")]
         if updated_after:
             filtered = [i for i in filtered if _compare_iso(_ts_to_iso(i.get("updated_at") or i.get("created_at")), updated_after, "after")]
+
+        # Snapshot the scoped set (all filters except status) for the breakdown.
+        breakdown_pool.extend(filtered)
+
+        # Now apply the status filter for the returned items + pagination total.
+        if status_list:
+            statuses = set(status_list)
+            filtered = [i for i in filtered if i.get("status") in statuses]
 
         # Sort
         reverse = order == "desc"
@@ -1049,16 +1139,20 @@ def list_items(
         paged_results.setdefault(bucket, []).append(dst)
 
     summary_total = total_pre_page
+    # Status breakdown is computed over breakdown_pool (all filters EXCEPT the
+    # status filter) so it is authoritative and identical for callers that
+    # differ only in their status filter (LED-3739). `total` remains the
+    # post-status-filter count for pagination + the health "unresolved" count.
     response = {
         "venture": venture["name"],
         "items": {k: v for k, v in paged_results.items() if k in results},
         "summary": {
             "total": summary_total,
-            "open": sum(1 for i in combined if i.get("status") == "open"),
-            "done": sum(1 for i in combined if i.get("status") == "done"),
-            "in_progress": sum(1 for i in combined if i.get("status") == "in_progress"),
-            "blocked": sum(1 for i in combined if i.get("status") == "blocked"),
-            "archived": sum(1 for i in combined if i.get("status") == "archived"),
+            "open": sum(1 for i in breakdown_pool if i.get("status") == "open"),
+            "done": sum(1 for i in breakdown_pool if i.get("status") == "done"),
+            "in_progress": sum(1 for i in breakdown_pool if i.get("status") == "in_progress"),
+            "blocked": sum(1 for i in breakdown_pool if i.get("status") == "blocked"),
+            "archived": sum(1 for i in breakdown_pool if i.get("status") == "archived"),
         },
         "next_cursor": next_cursor,
     }
@@ -1330,10 +1424,34 @@ def session_handoff(
     blockers: Optional[List[str]] = None,
     files_changed: Optional[List[str]] = None,
     venture: str = "",
+    project_path: str = "",
+    source_model: str = "session_handoff",
+    refresh_soul: bool = True,
 ) -> Dict[str, Any]:
     """Store a session summary for cross-session continuity.
 
     Called at end of a productive session so the next session can load context.
+
+    LED-3731: the handoff store (``~/.delimit/sessions/``) and the souls store
+    (``~/.delimit/souls/<project-hash>/``, read by ``delimit_revive``) used to
+    be DISJOINT — a fresh handoff never surfaced in revive, so revive could
+    return a month-old soul instead of the state written minutes earlier (this
+    bit a real wire-report session). To close the gap, a handoff now ALSO
+    refreshes a lightweight pointer-soul in the souls store for the SAME
+    project via ``session_phoenix.capture_soul`` (no soul-schema duplication),
+    keyed by the same project identity ``revive`` uses. That makes the newest
+    handoff win the next revive.
+
+    ``project_path`` (additive, default = cwd) selects which project's soul is
+    refreshed so handoff + revive agree on identity. ``refresh_soul=False``
+    skips the pointer-soul (used by the deterministic-floor orphan-salvage
+    path, which manages its own capture stamping). The refresh is
+    best-effort and NEVER raises into the handoff write — matching
+    session_phoenix's "never blocks revive" contract. The ephemeral-path guard
+    (LED-3759) is inherited automatically: ``capture_soul`` routes through
+    ``session_phoenix._project_dir``, which redirects ephemeral (/tmp/pytest)
+    paths to a throwaway store, so a test handoff never pollutes the real
+    souls store. No storage-format change to either store.
     """
     SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -1365,7 +1483,34 @@ def session_handoff(
     except Exception:
         pass
 
-    return {"saved": session_id, "path": str(path), "handoff": handoff}
+    # LED-3731: refresh a pointer-soul so the NEXT revive for this project
+    # returns THIS handoff's state, not an older soul. Best-effort; a failure
+    # here must never break the handoff write.
+    soul_id = ""
+    if refresh_soul:
+        try:
+            try:
+                from ai.session_phoenix import capture_soul
+            except ImportError:  # pragma: no cover - flat import layout
+                from session_phoenix import capture_soul  # type: ignore
+            soul = capture_soul(
+                active_task=summary,
+                decisions=list(key_decisions or []),
+                key_context=list(items_completed or []),
+                blockers=list(blockers or []),
+                next_steps=list(items_added or []),
+                source_model=source_model,
+                project_path=project_path or "",
+                task_status="in_progress",
+            )
+            soul_id = getattr(soul, "soul_id", "") or ""
+        except Exception:
+            soul_id = ""
+
+    result = {"saved": session_id, "path": str(path), "handoff": handoff}
+    if soul_id:
+        result["soul_id"] = soul_id
+    return result
 
 
 def session_history(limit: int = 5) -> Dict[str, Any]:
@@ -1443,6 +1588,35 @@ def _replay_current_state(item_id: str, ledger_dir: Path) -> Optional[Dict[str, 
     return None
 
 
+def _apply_field_update(
+    item_id: str,
+    field: str,
+    new_value: Any,
+    note: Optional[str],
+    ledger_dir: Path,
+) -> None:
+    """Append a single-field update event directly to the item's file within
+    a specific ledger_dir. Used by bulk_action when a ``ledger_dir_override``
+    is given so priority/status changes land in the correct per-venture
+    sub-ledger even when the item isn't reachable from the caller's
+    project_path. Byte-compatible with the events update_item writes, so the
+    change is fully reversible (append a counter-event to restore).
+    """
+    found = _find_item_in_ledger_dir(item_id, ledger_dir)
+    if not found:
+        raise RuntimeError(f"item {item_id} not found in {ledger_dir}")
+    update_event = {
+        "id": item_id,
+        "type": "update",
+        field: new_value,
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "worked_by": _detect_model(),
+    }
+    if note:
+        update_event["note"] = note
+    _append(found["path"], update_event)
+
+
 def bulk_action(
     item_ids,
     action: str,
@@ -1452,6 +1626,7 @@ def bulk_action(
     new_priority: Optional[str] = None,
     tag: Optional[str] = None,
     project_path: str = ".",
+    ledger_dir_override: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """Apply one action to many items. Default `dry_run=True` returns what
     would change without writing. Per-item failures are reported but don't
@@ -1505,8 +1680,11 @@ def bulk_action(
         if not tag or not str(tag).strip():
             return {"error": "add_tag requires a non-empty tag"}
 
-    _ensure(project_path)
-    ledger_dir = _project_ledger_dir(project_path)
+    if ledger_dir_override is not None:
+        ledger_dir = Path(ledger_dir_override)
+    else:
+        _ensure(project_path)
+        ledger_dir = _project_ledger_dir(project_path)
 
     # Build the per-item change description.
     # archive    → status: <current> → archived
@@ -1570,7 +1748,11 @@ def bulk_action(
         item_id = change["id"]
         field = change["field"]
         try:
-            if field == "status":
+            if ledger_dir_override is not None:
+                # Write directly into the resolved sub-ledger so items that
+                # aren't reachable from the caller's project_path still update.
+                _apply_field_update(item_id, field, change["new"], note, ledger_dir)
+            elif field == "status":
                 update_item(item_id=item_id, status=change["new"], note=note, project_path=project_path)
             elif field == "priority":
                 update_item(item_id=item_id, priority=change["new"], note=note, project_path=project_path)
@@ -2377,10 +2559,24 @@ def health_summary(
         stale_days: threshold passed through to groom_proposal.
         dup_min_count: threshold passed through to groom_proposal.
 
+    LED-3720: the reported counts are now derived from a deterministic
+    event-sourced recount of the SINGLE store this project_path resolves to
+    (``_replay_status_counts``), and the store's provenance is surfaced via
+    ``namespace`` + ``store_path``. Previously the open-count's origin was
+    invisible, so a call that auto-detected the ``root`` catch-all store
+    (thousands of never-closed sensed signals) looked identical to one that
+    read the clean ``delimit`` store — the "garbage open-count" symptom.
+    The count itself was always an accurate replay of whichever store was
+    read; the ambiguity was WHICH store. ``namespace``/``store_path`` make
+    that explicit and ``open_recount`` proves the number against the store.
+
     Returns:
         {
             "venture": str,
+            "namespace": str,          # canonical slug read ("" = central legacy)
+            "store_path": str,         # absolute dir the counts came from
             "totals": {"unresolved": int, "open": int, "in_progress": int, "blocked": int, ...},
+            "open_recount": int,       # independent deterministic recount == totals.open
             "p0":         {"count": int, "quota": int, "health": str},
             "stale":      {"count": int, "health": str},
             "duplicates": {"groups": int, "items": int, "health": str},
@@ -2392,12 +2588,17 @@ def health_summary(
             ],
         }
     """
+    # Deterministic, event-sourced recount of the ONE store this path
+    # resolves to. Authoritative source for the totals below (LED-3720).
+    ns = _resolve_namespace(project_path)
+    ledger_dir = _project_ledger_dir(project_path)
+    status_counts = _replay_status_counts(ledger_dir)
+
     listing = list_items(
         status__in=["open", "in_progress", "blocked"],
         limit=10_000,
         project_path=project_path,
     )
-    summary = listing.get("summary", {})
     venture = listing.get("venture", "unknown")
 
     p0_count = _count_unresolved_p0(project_path=project_path)
@@ -2468,14 +2669,20 @@ def health_summary(
             "follow_up": "No grooming required",
         })
 
+    open_ct = status_counts.get("open", 0)
+    in_progress_ct = status_counts.get("in_progress", 0)
+    blocked_ct = status_counts.get("blocked", 0)
     return {
         "venture": venture,
+        "namespace": ns["namespace"],
+        "store_path": ns["store_path"],
         "totals": {
-            "unresolved": summary.get("total", 0),
-            "open": summary.get("open", 0),
-            "in_progress": summary.get("in_progress", 0),
-            "blocked": summary.get("blocked", 0),
+            "unresolved": open_ct + in_progress_ct + blocked_ct,
+            "open": open_ct,
+            "in_progress": in_progress_ct,
+            "blocked": blocked_ct,
         },
+        "open_recount": open_ct,
         "p0": {"count": p0_count, "quota": p0_quota, "health": p0_health},
         "stale": {"count": stale_count, "health": stale_health, "threshold_days": stale_days},
         "duplicates": {"groups": dup_groups, "items": dup_items, "health": dup_health},

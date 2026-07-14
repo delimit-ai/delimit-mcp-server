@@ -20,3 +20,24 @@ jobs:
       - run: npm install
 
       - run: npm test
+
+  bundle-guards:
+    runs-on: ubuntu-latest
+    name: Bundle fail-closed guards
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - run: npm install
+
+      # Guard A — every committed gateway/ai file is classified (allow/exclude).
+      # No gateway source in this job, so it runs in committed-bundle mode.
+      - name: Classification guard (fail-closed)
+        run: bash scripts/check-bundle-classification.sh
+
+      # Guard B — npm pack ships EXACTLY the allowlist, nothing else.
+      - name: Tarball parity guard (fail-closed)
+        run: bash scripts/check-bundle-parity.sh

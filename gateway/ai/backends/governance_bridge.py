@@ -157,6 +157,68 @@ def _not_init_response(tool_name: str, **extra) -> Dict[str, Any]:
     return {"tool": tool_name, "status": "not_available", "error": _NOT_INIT_ERROR, **extra}
 
 
+def _evaluate_swarm_task(context: Dict[str, Any]) -> Dict[str, Any]:
+    """STR-2204 P0: classify a unit of work against ``swarm_policy.json``.
+
+    Effects are DERIVED from concrete artifacts in ``context`` — never from
+    task text. Recognised effect keys: ``changed_files``, ``git_commands``,
+    ``push_refs``, ``push_remotes``, ``network_destinations``,
+    ``identity_emails``, ``server_before``, ``server_after``. Any self-
+    declared ``tier``/``verdict`` in the context is IGNORED.
+
+    Optionally, when ``item`` (a ledger item) is supplied, the mandate-
+    provenance gate is applied: a Tier-A effect is only ``auto_executable``
+    when a valid signed origin grant backs the item.
+    """
+    try:
+        from ai.swarm_safety import effects as _eff
+        from ai.swarm_safety import policy as _pol
+        from ai.swarm_safety import provenance as _prov
+    except Exception as exc:  # fail-closed
+        return {
+            "tool": "gov.evaluate",
+            "status": "evaluated",
+            "action": "swarm_task",
+            "verdict": "deny",
+            "tier": "deny",
+            "error": f"swarm policy unavailable → fail-closed deny: {exc}",
+        }
+
+    eff = _eff.derive_effects(
+        changed_files=context.get("changed_files"),
+        git_commands=context.get("git_commands"),
+        push_refs=context.get("push_refs"),
+        push_remotes=context.get("push_remotes"),
+        network_destinations=context.get("network_destinations"),
+        identity_emails=context.get("identity_emails"),
+        server_before=context.get("server_before"),
+        server_after=context.get("server_after"),
+    )
+    decision = _pol.classify(eff)
+    result: Dict[str, Any] = {
+        "tool": "gov.evaluate",
+        "status": "evaluated",
+        "action": "swarm_task",
+        **decision.to_dict(),
+    }
+
+    # Mandate-provenance gate (only when a ledger item is provided).
+    item = context.get("item")
+    if isinstance(item, dict):
+        prov = _prov.verify_origin(item, effects_tier=decision.tier)
+        auto = _prov.is_auto_executable(item, effects_tier=decision.tier)
+        result["provenance"] = prov
+        result["auto_executable"] = auto
+        if decision.tier == "A" and not auto:
+            # Tier-A effect but provenance not trusted → NOT auto-executable.
+            result["auto_executable"] = False
+            result["next_action"] = (
+                "Tier-A effect but origin is not a valid signed mandate grant "
+                "— route to manual dispatch; do NOT auto-execute."
+            )
+    return result
+
+
 def evaluate_trigger(action: str, context: Optional[Dict] = None, repo: str = ".") -> Dict[str, Any]:
     """Evaluate if governance is required for an action.
 
@@ -165,7 +227,17 @@ def evaluate_trigger(action: str, context: Optional[Dict] = None, repo: str = ".
     Context for external_pr should include {"target_repo": "owner/name",
     "author": "github-username"} (author optional but recommended).
     Verdict "duplicate" is propagated to callers as a hard stop.
+
+    Special action "swarm_task" (STR-2204 P0) classifies a unit of work
+    into the 3-tier, DEFAULT-DENY swarm policy. It is evaluated on DERIVED
+    EFFECTS (files/refs/network/tool-surface in ``context``), NEVER on task
+    text, and does NOT require repo governance init (machine-local policy).
     """
+    # STR-2204: swarm task classification is machine-local and must be
+    # reachable even in an un-initialized repo. Evaluate it first.
+    if action == "swarm_task":
+        return _evaluate_swarm_task(context or {})
+
     if not _is_initialized(repo):
         return _not_init_response("gov.evaluate", action=action, repo=repo)
 

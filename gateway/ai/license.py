@@ -306,20 +306,59 @@ except ImportError:
         }
 
     def activate_license(key: str) -> dict:
+        # Pure-Python fallback activation (only runs when the compiled
+        # license_core is unavailable). Pro is granted ONLY when Lemon
+        # Squeezy confirms the key — there is no signed offline license
+        # format, so an unverifiable key is NEVER granted Pro (LED-3809 /
+        # SR-6 F3). Previously this path wrote tier=pro on ANY well-formed
+        # >=10-char key with no network call at all — a Pro-access bypass.
         import re
+        import hashlib
+        import urllib.request
         if not key or len(key) < 10:
             return {"error": "Invalid license key format"}
         if key.startswith("DELIMIT-") and not re.match(r"^DELIMIT-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$", key):
             return {"error": "Invalid key format. Expected: DELIMIT-XXXX-XXXX-XXXX"}
-        # Store key for offline validation
-        license_data = {
-            "key": key, "tier": "pro", "valid": True,
-            "activated_at": time.time(), "last_validated_at": time.time(),
-            "validated_via": "offline_fallback",
+
+        machine_hash = hashlib.sha256(str(Path.home()).encode()).hexdigest()[:16]
+        api_valid = None
+        try:
+            req_data = json.dumps({"license_key": key, "instance_name": machine_hash}).encode()
+            req = urllib.request.Request(
+                "https://api.lemonsqueezy.com/v1/licenses/validate",
+                data=req_data,
+                headers={"Content-Type": "application/json", "Accept": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                result = json.loads(resp.read())
+            api_valid = result.get("valid", False)
+        except Exception:
+            api_valid = None
+
+        if api_valid is True:
+            license_data = {
+                "key": key, "tier": "pro", "valid": True,
+                "activated_at": time.time(), "last_validated_at": time.time(),
+                "machine_hash": machine_hash,
+                "validated_via": "lemon_squeezy",
+            }
+            LICENSE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            LICENSE_FILE.write_text(json.dumps(license_data, indent=2))
+            return {"status": "activated", "tier": "pro"}
+
+        if api_valid is False:
+            return {"error": "Invalid license key.", "status": "invalid"}
+
+        # Unreachable — do NOT grant Pro on an unverified key and do NOT
+        # clobber any existing license already on disk.
+        return {
+            "status": "pending",
+            "tier": "free",
+            "error": "Could not reach the license server to verify this key. "
+                     "Pro was not activated. Reconnect and run activation again.",
+            "message": "License validation unavailable (offline). Pro not granted — retry when online.",
         }
-        LICENSE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        LICENSE_FILE.write_text(json.dumps(license_data, indent=2))
-        return {"status": "activated", "tier": "pro", "message": "Activated (offline fallback). Will validate on next network access."}
 
 # ─── LED-1254 (P0 SECURITY) ──────────────────────────────────────────────
 # The DELIMIT_TEST_MODE bypass that previously lived here was removed:

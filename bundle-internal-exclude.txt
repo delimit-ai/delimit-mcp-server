@@ -1,0 +1,164 @@
+# ============================================================================
+# bundle-internal-exclude.txt  —  classified-INTERNAL gateway paths
+# ============================================================================
+# Every path here is a gateway file that is INTENTIONALLY NOT shipped to the
+# public delimit-cli npm package: proprietary engine source, another venture's
+# code (wire.report / DomainVested), internal ops/marketing/outreach tooling,
+# autonomous daemons, or the swarm/marshal control plane.
+#
+# This file exists so the classification guard (scripts/check-bundle-
+# classification.sh) can tell an INTENTIONALLY-excluded file apart from a NEW,
+# UNCLASSIFIED file. A gateway/ai source file that is in NEITHER this list NOR
+# bundle-allowlist.txt is a hard FAIL — classify it before it can ship.
+#
+# Adding a path here does NOT ship it (only bundle-allowlist.txt ships). This
+# list is the audit record of *why* each non-shipped file is excluded; see
+# bundle-classification.md for the per-file reason.
+# ============================================================================
+
+gateway/ai/board_pack.py
+gateway/ai/board_report.py
+gateway/ai/content_engine.py
+gateway/ai/content_grounding/__init__.py
+gateway/ai/content_grounding/build.py
+gateway/ai/content_grounding/consume.py
+gateway/ai/content_grounding/features.py
+gateway/ai/content_grounding/fixtures/fail/01_missing_evidence.json
+gateway/ai/content_grounding/fixtures/fail/02_unknown_evidence_prefix.json
+gateway/ai/content_grounding/fixtures/fail/03_banned_comparative.json
+gateway/ai/content_grounding/fixtures/fail/04_banned_adoption.json
+gateway/ai/content_grounding/fixtures/fail/05_aggregate_no_numeric.json
+gateway/ai/content_grounding/fixtures/fail/06_unversioned_inference_rule.json
+gateway/ai/content_grounding/fixtures/pass/01_feature_shipped.json
+gateway/ai/content_grounding/fixtures/pass/02_aggregate_claim.json
+gateway/ai/content_grounding/fixtures/pass/03_attestation.json
+gateway/ai/content_grounding/schemas.py
+gateway/ai/content_grounding/schemas/asset_provenance.schema.json
+gateway/ai/content_grounding/schemas/claim.schema.json
+gateway/ai/content_grounding/schemas/event.schema.json
+gateway/ai/content_grounding/telemetry.py
+gateway/ai/content_intel.py
+gateway/ai/corp_dashboard.py
+gateway/ai/custom_gemini_repl.py
+gateway/ai/daemon.py
+gateway/ai/daily_digest.py
+gateway/ai/day90_gate.py
+gateway/ai/decision_cards.py
+gateway/ai/deliberation.py
+gateway/ai/delimit_daemon.py
+gateway/ai/dv_mention_tracker.py
+gateway/ai/evidence_merge_hook.py
+gateway/ai/focus_gate.py
+gateway/ai/founding_users.py
+gateway/ai/gemini_vertex_shim.py
+gateway/ai/github_scanner.py
+gateway/ai/inbox_classifier.py
+gateway/ai/inbox_daemon.py
+gateway/ai/inbox_daemon_runner.py
+gateway/ai/inbox_drafts/__init__.py
+gateway/ai/inbox_drafts/registry.py
+gateway/ai/inbox_drafts/schema.py
+gateway/ai/inbox_executor.py
+gateway/ai/led193_daemon/__init__.py
+gateway/ai/led193_daemon/audit.py
+gateway/ai/led193_daemon/cost.py
+gateway/ai/led193_daemon/executor.py
+gateway/ai/led193_daemon/gate.py
+gateway/ai/led193_daemon/pause.py
+gateway/ai/led193_daemon/picker.py
+gateway/ai/ledger_deflation.py
+gateway/ai/license_core.py
+gateway/ai/loop_daemon.py
+gateway/ai/loop_engine.py
+gateway/ai/outreach_body_gen.py
+gateway/ai/outreach_gate.py
+gateway/ai/outreach_instrumentation.py
+gateway/ai/outreach_loop_daemon.py
+gateway/ai/outreach_substantive.py
+gateway/ai/posting_budget.py
+gateway/ai/reaper.py
+gateway/ai/reddit_proxy.py
+gateway/ai/reddit_scanner.py
+gateway/ai/report_backlog.py
+gateway/ai/reports_distribution.py
+gateway/ai/reports_distribution_drainer.py
+gateway/ai/route_daemon.py
+gateway/ai/screen_record.py
+gateway/ai/seal/A1_BUNDLE.md
+gateway/ai/seal/producer.py
+gateway/ai/seal/verify_a1.py
+gateway/ai/self_repair/__init__.py
+gateway/ai/self_repair/apply.py
+gateway/ai/self_repair/cli.py
+gateway/ai/self_repair/default_kpis/social_outreach.yaml
+gateway/ai/self_repair/default_self_repair.yaml
+gateway/ai/self_repair/deliberate.py
+gateway/ai/self_repair/diagnose.py
+gateway/ai/self_repair/history.py
+gateway/ai/self_repair/kpi.py
+gateway/ai/self_repair/mode.py
+gateway/ai/self_repair/verify.py
+gateway/ai/self_repair/watcher.py
+gateway/ai/self_repair_daemon.py
+gateway/ai/sensing/__init__.py
+gateway/ai/sensing/schema.py
+gateway/ai/sensing/signal_store.py
+gateway/ai/sensor_twttr.py
+gateway/ai/session_phoenix.py
+gateway/ai/siem_streaming.py
+gateway/ai/social.py
+gateway/ai/social_archetypes.py
+gateway/ai/social_cache.py
+gateway/ai/social_capability/__init__.py
+gateway/ai/social_capability/capability_validator.py
+gateway/ai/social_capability/current_capabilities.yaml
+gateway/ai/social_capability/fit_floor.py
+gateway/ai/social_daemon.py
+gateway/ai/social_queue.py
+gateway/ai/social_target.py
+gateway/ai/sports_signal_x.py
+gateway/ai/supabase_sync.py
+gateway/ai/swarm.py
+gateway/ai/swarm_infra.py
+gateway/ai/swarm_marshal/__init__.py
+gateway/ai/swarm_marshal/arming.py
+gateway/ai/swarm_marshal/catalog.py
+gateway/ai/swarm_marshal/changed_files.py
+gateway/ai/swarm_marshal/detectors.py
+gateway/ai/swarm_marshal/eligibility.py
+gateway/ai/swarm_marshal/eligible_scope.json
+gateway/ai/swarm_marshal/fallback_catalog.json
+gateway/ai/swarm_marshal/keys.py
+gateway/ai/swarm_marshal/marshal.py
+gateway/ai/swarm_marshal/marshal_actions.py
+gateway/ai/swarm_marshal/nonce_ledger.py
+gateway/ai/swarm_marshal/precedence.py
+gateway/ai/swarm_marshal/schemas.py
+gateway/ai/swarm_marshal/transforms.py
+gateway/ai/swarm_p1/__init__.py
+gateway/ai/swarm_p1/actions.py
+gateway/ai/swarm_p1/config.py
+gateway/ai/swarm_p1/daemon.py
+gateway/ai/swarm_safety/__init__.py
+gateway/ai/swarm_safety/claims.py
+gateway/ai/swarm_safety/effects.py
+gateway/ai/swarm_safety/pause.py
+gateway/ai/swarm_safety/policy.py
+gateway/ai/swarm_safety/provenance.py
+gateway/ai/swarm_safety/signing.py
+gateway/ai/swarm_safety/swarm_policy.json
+gateway/ai/swarm_safety/verifier.py
+gateway/ai/tweet_corpus.py
+gateway/ai/tweet_corpus_schema.sql
+gateway/ai/twttr241_budget.py
+gateway/ai/vendor_news/__init__.py
+gateway/ai/vendor_news/drafter.py
+gateway/ai/vendor_news/sensor.py
+gateway/ai/vendor_news/watchlist.yaml
+gateway/ai/workers/__init__.py
+gateway/ai/workers/base.py
+gateway/ai/workers/executor.py
+gateway/ai/workers/outreach_drafter.py
+gateway/ai/workers/pr_drafter.py
+gateway/ai/x_ranker.py
+gateway/core/diff_engine_v2.py.bak

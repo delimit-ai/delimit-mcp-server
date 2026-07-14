@@ -1,4 +1,8 @@
 {
+  "a1_key_manifest": "03128ac2a7c94804b8f94c7b9efb92e7f0b77be96bb0489bfe07054e132d656d",
+  "a1_leaf_nonced": "dc866250598c859bed7b0201691beee21f5f96ebdde23d3ea6f921e349a2a2fa",
+  "a1_mixed_realistic": "d330ecec63bbe692e962767b62c1f1ebe058d63349dfa5321e95c8a380d11cc5",
+  "a1_subject": "4925d1016a398d76eb2c4f812a857c14f7acc9f57a62342d3e12a45e9f8f4dd8",
   "booleans_and_null": "22e00dc2f7b01420f940fbdbfbdf34fa0667cc6500186495023ba37722cbd05e",
   "control_chars": "c8c6a3428954c433eecbc6e325b485f610597b71f35e89effadcecfc3eed65c0",
   "empty_list_field": "3c2643284db48d4629260c90f921c0b265664fee01fb7ccff09ef094db3c946d",

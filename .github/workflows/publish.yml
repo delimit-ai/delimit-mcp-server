@@ -44,6 +44,15 @@ jobs:
         working-directory: npm-delimit
         run: npm install
 
+      # Guard A (fail-closed): every gateway/ai file must be classified as
+      # PUBLIC (bundle-allowlist.txt) or INTERNAL (bundle-internal-exclude.txt).
+      # Runs against the gateway SOURCE (authoritative), before any sync.
+      - name: Classification guard (fail-closed)
+        working-directory: npm-delimit
+        env:
+          GATEWAY_OVERRIDE: ${{ github.workspace }}/delimit-gateway
+        run: bash scripts/check-bundle-classification.sh
+
       - name: Sync gateway
         working-directory: npm-delimit
         env:
@@ -52,6 +61,26 @@ jobs:
           # The sync script looks for /home/delimit/delimit-gateway by default.
           # In CI we override via env var or symlink.
           GATEWAY_OVERRIDE="${{ github.workspace }}/delimit-gateway" npm run sync-gateway
+
+      # Fail-closed anti-drift: the COMMITTED bundle must already equal the
+      # allowlisted gateway sync. If sync produced changes, the bundle was
+      # tagged stale (this is exactly what broke v4.14.2 / v4.15.0: the publish
+      # job's own sync dirtied the tree and clean-tree-guard then blocked
+      # npm publish). Surface it here as a clear, early failure instead.
+      - name: Assert committed bundle is in sync with gateway
+        working-directory: npm-delimit
+        run: |
+          # Ignore the transient license_core.py (kept for the .so compile) and
+          # any generated .so — those are expected to differ from HEAD.
+          DIRTY="$(git status --porcelain -- gateway/ \
+            | grep -v 'gateway/ai/license_core.py' \
+            | grep -v 'gateway/ai/license_core.cpython' || true)"
+          if [ -n "$DIRTY" ]; then
+            echo "::error::Committed bundle is STALE vs delimit-gateway. Run 'npm run sync-gateway', review, and COMMIT the bundle before tagging a release."
+            echo "$DIRTY"
+            exit 1
+          fi
+          echo "Committed bundle matches allowlisted gateway sync."
 
       - name: Set up Python (LED-1259 compile)
         uses: actions/setup-python@v5
@@ -72,6 +101,12 @@ jobs:
       - name: Compile license_core to native .so (LED-1259)
         working-directory: npm-delimit
         run: bash scripts/build-license-core.sh
+
+      # Guard B (fail-closed): npm pack must ship EXACTLY bundle-allowlist.txt.
+      # Runs after the .so is built so the tarball reflects the final state.
+      - name: Tarball parity guard (fail-closed)
+        working-directory: npm-delimit
+        run: bash scripts/check-bundle-parity.sh
 
       - name: Run tests
         working-directory: npm-delimit
@@ -139,13 +174,14 @@ jobs:
         working-directory: npm-delimit
         run: npm install
 
-      - name: Sync gateway
-        working-directory: npm-delimit
-        run: |
-          if [ ! -d /home/delimit/delimit-gateway/ai ]; then
-            sed -i "s|/home/delimit/delimit-gateway|${{ github.workspace }}/delimit-gateway|g" scripts/sync-gateway.sh
-          fi
-          npm run sync-gateway
+      # NOTE: no standalone "Sync gateway" step here. `npm publish` fires
+      # prepublishOnly, whose FIRST step (clean-tree-guard) requires a CLEAN
+      # working tree. A pre-publish sync step dirties the tree and made
+      # clean-tree-guard block the publish (root cause of the v4.14.2 / v4.15.0
+      # failures). prepublishOnly runs sync-gateway ITSELF, AFTER clean-tree-
+      # guard, so the gateway is synced at pack time from a clean baseline.
+      # GATEWAY_OVERRIDE (set on the publish steps below) lets that internal
+      # sync resolve the checked-out gateway in CI.
 
       - name: Set up Python (LED-1259 compile)
         uses: actions/setup-python@v5
@@ -171,6 +207,8 @@ jobs:
       - name: Publish (dry run)
         if: github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run == 'true'
         working-directory: npm-delimit
+        env:
+          GATEWAY_OVERRIDE: ${{ github.workspace }}/delimit-gateway
         run: npm publish --dry-run
 
       - name: Publish to npm
@@ -178,6 +216,7 @@ jobs:
         working-directory: npm-delimit
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          GATEWAY_OVERRIDE: ${{ github.workspace }}/delimit-gateway
         run: npm publish --access public
 
       - name: Verify published version

@@ -228,3 +228,92 @@ TOOL_TIERS: Dict[str, Tier] = {
     "delimit_generate_scaffold": "internal",
     "delimit_generate_template": "internal",
 }
+
+
+# ─────────────────────────────────────────────────────────────────────
+#  DELIMIT_TOOLSET — opt-in compatibility profiles (LED-3709)
+#
+#  Additive, non-breaking. Selected via the DELIMIT_TOOLSET env var:
+#
+#    full  (default / unset) → every tool registers, byte-identical to
+#                              the historical surface. Pro customers have
+#                              this server installed locally; default-full
+#                              guarantees zero breakage.
+#    standard                → drops the founder-only "internal" and
+#                              "experimental" tiers; keeps core + public +
+#                              workspace-ops. Intermediate surface.
+#    core                    → only the essential merge-gate + memory +
+#                              ledger + handoff set (see CORE_SET below).
+#                              Sized for clients with tight tool caps
+#                              (e.g. VS Code agent mode's 128-tool limit).
+#
+#  This reuses the existing TOOL_TIERS classification and CORE_TOOLS set;
+#  it does NOT introduce a parallel taxonomy. Where CORE_TOOLS was too
+#  thin for a usable "core" profile it is EXTENDED additively below (see
+#  CORE_PROFILE_EXTRA) — the original CORE_TOOLS set is left untouched so
+#  the "5 workflows" documentation stays accurate.
+# ─────────────────────────────────────────────────────────────────────
+
+VALID_TOOLSETS = ("core", "standard", "full")
+DEFAULT_TOOLSET = "full"
+
+# Essential tools added to the core profile on top of CORE_TOOLS. These are
+# the merge-gate + governance + continuity surfaces the audit (LED-3709)
+# identified as the empirical/essential core but which predate the
+# "5 workflows" CORE_TOOLS list. Additive only.
+CORE_PROFILE_EXTRA = {
+    "delimit_deliberate",       # multi-model consensus (moat)
+    "delimit_revive",           # session revival / continuity
+    "delimit_gov_evaluate",     # policy evaluation
+    "delimit_security_audit",   # merge-gate: security
+    "delimit_test_smoke",       # merge-gate: tests actually ran
+    "delimit_evidence_collect", # attestation / audit trail
+    "delimit_context_read",     # cross-session context
+    "delimit_context_write",
+    "delimit_diagnose",         # setup/health (doctor)
+    "delimit_handoff_create",   # model handoff
+}
+
+# Tiers excluded from the "standard" profile.
+_STANDARD_EXCLUDED_TIERS = frozenset({"internal", "experimental"})
+
+
+def core_tool_set() -> set:
+    """The set of tool names visible under DELIMIT_TOOLSET=core.
+
+    Union of CORE_TOOLS (the "5 workflows" set), any tool explicitly
+    tier-classified "core" in TOOL_TIERS, and CORE_PROFILE_EXTRA.
+    """
+    core = set(CORE_TOOLS)
+    core |= {name for name, tier in TOOL_TIERS.items() if tier == "core"}
+    core |= CORE_PROFILE_EXTRA
+    return core
+
+
+def tool_in_toolset(tool_name: str, toolset: str) -> bool:
+    """Return True if ``tool_name`` should register under ``toolset``.
+
+    Fails open (returns True) for any unknown toolset value so a
+    misconfigured env var never silently hides tools.
+    """
+    if toolset == "full":
+        return True
+    if toolset == "core":
+        return tool_name in core_tool_set()
+    if toolset == "standard":
+        tier = TOOL_TIERS.get(tool_name, "public")
+        return tier not in _STANDARD_EXCLUDED_TIERS
+    # Unknown / misconfigured value → behave like "full" (never hide).
+    return True
+
+
+def resolve_toolset(raw: str | None) -> str:
+    """Normalize a raw DELIMIT_TOOLSET env value to a valid toolset name.
+
+    Unset, empty, or unrecognized values resolve to the default ("full"),
+    preserving byte-identical default behavior.
+    """
+    if not raw:
+        return DEFAULT_TOOLSET
+    val = raw.strip().lower()
+    return val if val in VALID_TOOLSETS else DEFAULT_TOOLSET

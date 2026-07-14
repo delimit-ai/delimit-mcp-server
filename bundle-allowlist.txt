@@ -1,0 +1,168 @@
+# ============================================================================
+# bundle-allowlist.txt  —  THE SECURITY BOUNDARY OF THE delimit-cli npm PACKAGE
+# ============================================================================
+# This file IS the security boundary. Adding a path here SHIPS it to the PUBLIC
+# npm package (delimit-cli) AND to the PUBLIC git repo (delimit-ai/delimit-mcp-
+# server). Do NOT add a path unless it is (a) required by the public CLI / MCP
+# server surface, (b) non-proprietary, and (c) not another venture's code.
+#
+# FAIL-CLOSED MODEL (replaces the old fail-OPEN `gateway/` + blocklist):
+#   * package.json "files" ships ONLY the paths listed here.
+#   * scripts/sync-gateway.sh copies ONLY these paths into the working tree.
+#   * scripts/check-bundle-classification.sh FAILS if any gateway/ai source file
+#     is in NEITHER this file NOR bundle-internal-exclude.txt (unclassified).
+#   * scripts/check-bundle-parity.sh FAILS if `npm pack` ships anything not
+#     exactly equal to this allowlist.
+#
+# A NEW internal module added to the gateway therefore leaks NOTHING by default:
+# it is simply absent from this list, so it is never synced, never packed.
+#
+# Format: one bundle-relative path per line (gateway/...). One glob permitted:
+# the compiled license_core .so (built at publish time, name varies by ABI).
+# Classification rationale per path: bundle-classification.md
+# ============================================================================
+
+# --- compiled proprietary engine (source EXCLUDED; .so shipped) ---
+gateway/ai/license_core.cpython-*-*.so
+
+# --- gateway/ai (public MCP server surface) ---
+gateway/ai/__init__.py
+gateway/ai/_compile_status.py
+gateway/ai/_paths.py
+gateway/ai/activate_helpers.py
+gateway/ai/agent_dispatch.py
+gateway/ai/agent_policy.py
+gateway/ai/backends/__init__.py
+gateway/ai/backends/async_utils.py
+gateway/ai/backends/deploy_bridge.py
+gateway/ai/backends/gateway_core.py
+gateway/ai/backends/generate_bridge.py
+gateway/ai/backends/git_health.py
+gateway/ai/backends/governance_bridge.py
+gateway/ai/backends/memory_bridge.py
+gateway/ai/backends/ops_bridge.py
+gateway/ai/backends/os_bridge.py
+gateway/ai/backends/playwright_sandbox.py
+gateway/ai/backends/repo_bridge.py
+gateway/ai/backends/tools_data.py
+gateway/ai/backends/tools_design.py
+gateway/ai/backends/tools_infra.py
+gateway/ai/backends/tools_real.py
+gateway/ai/backends/ui_bridge.py
+gateway/ai/backends/vault_bridge.py
+gateway/ai/checksums.sha256
+gateway/ai/cli_contract.py
+gateway/ai/collision_detect.py
+gateway/ai/context_fs.py
+gateway/ai/continuity.py
+gateway/ai/control_plane.py
+gateway/ai/cross_model_audit.py
+gateway/ai/data_plane.py
+gateway/ai/deliberation.pyi
+gateway/ai/dispatch_gate.py
+gateway/ai/drift_monitor.py
+gateway/ai/events.py
+gateway/ai/governance.py
+gateway/ai/governance.pyi
+gateway/ai/governance_hardening.py
+gateway/ai/handoff_preflight.py
+gateway/ai/handoff_receipts.py
+gateway/ai/heartbeat.py
+gateway/ai/hot_reload.py
+gateway/ai/integrations/__init__.py
+gateway/ai/integrations/opensage_wrapper.py
+gateway/ai/key_resolver.py
+gateway/ai/last_capture.py
+gateway/ai/ledger_manager.py
+gateway/ai/ledger_proof.py
+gateway/ai/ledger_propose.py
+gateway/ai/license.py
+gateway/ai/license_consistency.py
+gateway/ai/license_core.pyi
+gateway/ai/local_server.py
+gateway/ai/mcp_bridge.py
+gateway/ai/multi_review.py
+gateway/ai/notify.py
+gateway/ai/pii_redact.py
+gateway/ai/playbook.py
+gateway/ai/pro_tools.yaml
+gateway/ai/project_config.py
+gateway/ai/prompt_drift.py
+gateway/ai/rate_limiter.py
+gateway/ai/registry_guards.py
+gateway/ai/release_sync.py
+gateway/ai/remote_resolve.py
+gateway/ai/scan_bridge/__init__.py
+gateway/ai/scan_bridge/bridge.py
+gateway/ai/scan_bridge/dedup.py
+gateway/ai/scan_bridge/digest.py
+gateway/ai/scan_bridge/wedge.py
+gateway/ai/schemas/__init__.py
+gateway/ai/seal/HARDENED_SCHEMA.md
+gateway/ai/seal/canon_vectors.json
+gateway/ai/seal/canon_vectors.sha256.json
+gateway/ai/seal/constitution.json
+gateway/ai/seal/merkle.py
+gateway/ai/seal/sample_receipt.json
+gateway/ai/seal/seal_pubkey.ed25519
+gateway/ai/seal/seal_pubkeys.json
+gateway/ai/seal/verifier.py
+gateway/ai/secrets_broker.py
+gateway/ai/server.py
+gateway/ai/tdqs_lint.py
+gateway/ai/tenant_auth.py
+gateway/ai/tenant_data.py
+gateway/ai/tenant_paths.py
+gateway/ai/tool_metadata.py
+gateway/ai/toolcard_cache.py
+gateway/ai/tracing.py
+gateway/ai/tui.py
+gateway/ai/usage_allowlist.py
+gateway/ai/work_order.py
+
+# --- gateway/core (API governance engine: diff / semver / policy) ---
+gateway/core/__init__.py
+gateway/core/auto_baseline.py
+gateway/core/ci_formatter.py
+gateway/core/complexity_analyzer.py
+gateway/core/contract_ledger.py
+gateway/core/dependency_graph.py
+gateway/core/dependency_manifest.py
+gateway/core/diff_engine_v2.py
+gateway/core/event_backbone.py
+gateway/core/event_schema.py
+gateway/core/explainer.py
+gateway/core/gateway.py
+gateway/core/gateway_v2.py
+gateway/core/gateway_v3.py
+gateway/core/generator_drift.py
+gateway/core/impact_analyzer.py
+gateway/core/json_schema_diff.py
+gateway/core/openapi_version.py
+gateway/core/policies/default.yml
+gateway/core/policies/relaxed.yml
+gateway/core/policies/strict.yml
+gateway/core/policy_engine.py
+gateway/core/registry.py
+gateway/core/registry_v2.py
+gateway/core/registry_v3.py
+gateway/core/semver_classifier.py
+gateway/core/spec_detector.py
+gateway/core/spec_health.py
+gateway/core/surface_bridge.py
+gateway/core/zero_spec/__init__.py
+gateway/core/zero_spec/detector.py
+gateway/core/zero_spec/express_extractor.py
+gateway/core/zero_spec/fastapi_extractor.py
+gateway/core/zero_spec/nestjs_extractor.py
+
+# --- gateway/tasks (CLI task scripts: validate / diff / policy) ---
+gateway/tasks/__init__.py
+gateway/tasks/check_policy.py
+gateway/tasks/check_policy_v2.py
+gateway/tasks/check_policy_v3.py
+gateway/tasks/explain_diff.py
+gateway/tasks/explain_diff_v2.py
+gateway/tasks/validate_api.py
+gateway/tasks/validate_api_v2.py
+gateway/tasks/validate_api_v3.py
