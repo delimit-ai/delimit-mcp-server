@@ -113,6 +113,15 @@ if [ -f server.json ]; then
     '
 fi
 
+# LED-1900 follow-up: sync-gateway (step 1) ran BEFORE the version bump, so
+# the gateway/VERSION marker it wrote carries the OLD version and trips the
+# publish workflow's anti-drift assert. Rewrite the marker from the bumped
+# package.json so the committed bundle matches what a fresh sync produces.
+if [ -f gateway/VERSION ]; then
+    node -p "require('./package.json').version" > gateway/VERSION
+    echo "  gateway/VERSION -> $(cat gateway/VERSION)"
+fi
+
 # ── Step 5: Commit, tag, and push ────────────────────────────────────
 echo ""
 echo "[5/5] Committing and tagging..."
