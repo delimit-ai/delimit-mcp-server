@@ -336,35 +336,70 @@ PROJECTION_END_MARKER = "<!-- delimit:end -->"
 def _format_hot_entry_as_markdown(entry: Dict[str, Any]) -> str:
     """Render one delimit_memory entry as a Markdown bullet for the
     MEMORY.md hot-load index. Intentionally compact — the index loads
-    into every Claude Code session, so each entry should fit on a
-    line or two."""
+    into every Claude Code session, so each entry is ONE line.
+
+    LED-1882: the previous format (280-char content + unbounded tag
+    list + a 200-char context blockquote) averaged ~550 chars/entry;
+    at 69 hot entries the block hit 38KB and pushed MEMORY.md past
+    the session-load read limit, silently truncating the index — the
+    exact failure an index exists to prevent. One line, hard caps,
+    no context quote (the full entry stays in delimit_memory;
+    `delimit_memory_search` retrieves it)."""
     mid = entry.get("id", "?")
     content = (entry.get("content") or "").strip()
-    # Single-line the content but cap at ~280 chars so the line stays
-    # readable. Long content stays in delimit_memory; index is just
-    # the hook for Claude to know it exists.
     one_line = " ".join(content.split())
-    if len(one_line) > 280:
-        one_line = one_line[:277] + "..."
+    if len(one_line) > 200:
+        one_line = one_line[:197] + "..."
     tags = entry.get("tags") or []
-    tag_str = (" [tags: " + ", ".join(tags) + "]") if tags else ""
-    ctx = (entry.get("context") or "").strip()
-    ctx_line = f"\n  > {ctx[:200]}" if ctx else ""
-    return f"- **{mid}**{tag_str} — {one_line}{ctx_line}"
+    tag_str = ""
+    if tags:
+        joined = ", ".join(tags)
+        if len(joined) > 64:
+            joined = joined[:61] + "..."
+        tag_str = f" [{joined}]"
+    return f"- **{mid}**{tag_str} — {one_line}"
+
+
+# Hard cap on the rendered managed block (LED-1882). list_hot()'s contract
+# always promised "the projection writer hard-caps the rendered MEMORY.md
+# size" — this implements it. Entries are newest-first, so the budget keeps
+# the most recent hot memories and elides the tail with a retrieval hint.
+PROJECTION_BUDGET_CHARS = 8_000
 
 
 def _render_managed_block(entries: List[Dict[str, Any]]) -> str:
     """Render the full managed section (between markers) for the
     MEMORY.md hot-load index. Includes a one-line preamble explaining
-    the section so anyone editing the file understands what it is."""
+    the section so anyone editing the file understands what it is.
+
+    Budgeted (LED-1882): bullets are accumulated newest-first until
+    PROJECTION_BUDGET_CHARS; older hot entries are elided behind a
+    one-line `delimit_memory_search` pointer instead of blowing past
+    the session-load read limit."""
     if not entries:
         body = (
             "_No hot-load memory entries. Add one with "
             "`delimit_memory_store(content=\"...\", hot_load=True)`._\n"
         )
     else:
-        bullets = "\n".join(_format_hot_entry_as_markdown(e) for e in entries)
-        body = bullets + "\n"
+        lines: List[str] = []
+        used = 0
+        shown = 0
+        for e in entries:
+            bullet = _format_hot_entry_as_markdown(e)
+            if used + len(bullet) > PROJECTION_BUDGET_CHARS:
+                break
+            lines.append(bullet)
+            used += len(bullet) + 1  # newline
+            shown += 1
+        elided = len(entries) - shown
+        if elided > 0:
+            lines.append(
+                f"- _...and {elided} older hot entr"
+                f"{'y' if elided == 1 else 'ies'} elided (8KB index budget) — "
+                "retrieve via `delimit_memory_search`._"
+            )
+        body = "\n".join(lines) + "\n"
 
     # Brief header + body + caveat
     header = (
