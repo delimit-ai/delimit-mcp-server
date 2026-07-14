@@ -1,21 +1,23 @@
 ## [4.15.0] - 2026-07-05
 
-### Added
-- Radar reply lane v2 instrumentation (LED-3222) (7b62bfee)
-- Implement delimit_product_lookup for e-commerce spec extraction (LED-3274) (b1bd7160)
-- Integrate link path checking into delimit_repo_diagnose (LED-3272) (fb0b58ce)
-- Add delimit_json_validate tool (LED-3271) (5e95b72c)
-
 ### Fixed
 - Revert to NPM token auth for publishing (LED-3262) (0cbb9ee5)
 
 ### Documentation
 - Workstream A deliverables + roadmap (LED-3686..3696) (7ac4f237)
 
+### Corrected 2026-07-14 (truth audit, LED-1889)
+- This entry previously listed four "Added" features (`delimit_product_lookup`,
+  `delimit_json_validate`, repo_diagnose link-path checking, and reply-lane
+  instrumentation). Those changes were committed to the bundle mirror rather
+  than the gateway source of truth and were removed by subsequent gateway
+  syncs — **none of them ship in this package**. The changelog was
+  auto-generated from the wrong commit set; the tools are not part of the
+  MCP tool surface. Removed here so the changelog matches what the package
+  actually contains. (4.15.0 was corrected before any npm publish; npm still
+  serves 4.14.2 at the time of this correction.)
+
 ### Stats
-- **Commits**: 6
-- **Files changed**: 20
-- **Insertions**: 298(+) / 17(-)
 - **Since**: v4.14.2
 
 ## [4.14.2] - 2026-07-04

@@ -56,6 +56,16 @@ done
 # ── requirements.txt (bundle metadata, always shipped by postinstall path) ──
 cp "$GATEWAY_SRC/requirements.txt" "$NPM_ROOT/gateway/requirements.txt" 2>/dev/null || true
 
+# ── VERSION marker (LED-1889 version truth) ──────────────────────────
+# Written from package.json (single canonical version source) so the bundled
+# MCP server — and the ~/.delimit/server copy that `delimit setup` installs —
+# self-reports the true shipped version instead of a hardcoded constant.
+PKG_VERSION="$(node -p "require('$NPM_ROOT/package.json').version" 2>/dev/null || true)"
+if [ -n "$PKG_VERSION" ]; then
+    printf '%s\n' "$PKG_VERSION" > "$NPM_ROOT/gateway/VERSION"
+    echo "  VERSION marker: $PKG_VERSION"
+fi
+
 # ── PRUNE: delete every synced gateway file NOT on the allowlist ─────
 # (Exempt: license_core.py, kept transiently for the .so compile step.)
 PRUNED=0
@@ -90,6 +100,9 @@ elif [ -d "$INSTALLED_SERVER/ai" ]; then
         "$GATEWAY_SRC/ai/" "$INSTALLED_SERVER/ai/"
     rsync -a --delete --exclude='__pycache__' --exclude='*.pyc' \
         "$GATEWAY_SRC/core/" "$INSTALLED_SERVER/core/" 2>/dev/null || true
+    if [ -n "${PKG_VERSION:-}" ]; then
+        printf '%s\n' "$PKG_VERSION" > "$INSTALLED_SERVER/VERSION"
+    fi
     echo "  ✅ installed dev server synced"
 fi
 

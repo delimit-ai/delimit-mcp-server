@@ -222,7 +222,7 @@ async function ensureAgent() {
 
 program
     .name('delimit')
-    .description('One workspace for every AI coding assistant')
+    .description('The merge gate for AI-written code, with signed, replayable attestation')
     .version(require('../package.json').version)
     .option('--print-continuity', 'Print resolved continuity context and continue');
 
