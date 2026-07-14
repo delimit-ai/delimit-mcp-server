@@ -120,6 +120,26 @@ echo "[5/5] Committing and tagging..."
 # Stage synced gateway files too (sync-gateway may have updated them)
 git add package.json package-lock.json server.json gateway/
 
+# LED-1900: sync-gateway copies proprietary/internal SOURCE (e.g.
+# license_core.py, which ships only as a compiled .so) into the tree. The
+# bundle guards gate the npm PACK, not the git COMMIT — so `git add gateway/`
+# would commit that source to the PUBLIC repo. Prune every bundle-internal
+# path from the index + working tree, then HARD-ASSERT none remain staged.
+if [ -f bundle-internal-exclude.txt ]; then
+    while IFS= read -r _excl; do
+        case "$_excl" in ''|\#*) continue ;; esac
+        git reset -q -- "$_excl" 2>/dev/null || true
+        rm -f "$_excl" 2>/dev/null || true
+    done < bundle-internal-exclude.txt
+    _leaked=$(git diff --cached --name-only | grep -Ff <(grep -vE '^\s*#|^\s*$' bundle-internal-exclude.txt) || true)
+    if [ -n "$_leaked" ]; then
+        echo "ERROR: internal/proprietary file(s) staged for the public release commit:" >&2
+        echo "$_leaked" >&2
+        echo "Refusing to commit. Fix the prune step before releasing." >&2
+        exit 1
+    fi
+fi
+
 # Use a release branch to avoid main branch protection
 RELEASE_BRANCH="release/v$VERSION"
 git checkout -b "$RELEASE_BRANCH"
