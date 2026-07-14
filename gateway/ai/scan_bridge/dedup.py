@@ -98,6 +98,126 @@ def _url_terms(canonical_url: str) -> Set[str]:
     return out
 
 
+# ── Idempotency key (repo full-name + release-version-or-none) ────────
+#
+# The token-overlap dedup below is fuzzy (recall ~60%). For competitor /
+# release signals we want a HARD, reliable key so "oasdiff v1.22" never
+# creates a second item when *any* oasdiff item is already tracked. The
+# canonical key is the source repo's full name (host/org/repo) — release
+# version is captured separately in metadata but the dedup key is
+# repo-scoped, so we keep ONE canonical "watch" item per competitor repo
+# rather than one per release.
+
+# github.com/<org>/<repo>/releases/tag/<ver>  ->  ver
+_RELEASE_TAG_RE = re.compile(r"/releases/(?:tag/)?([^/?#]+)")
+
+# Known code-hosting hosts whose first two path segments are ``org/repo``.
+# We scope the idempotency key to these so a plain content URL
+# (``example.com/blog/post``) does NOT masquerade as a repo — those fall
+# back to the fuzzy token dedup instead.
+_CODE_HOST_SUFFIXES = (
+    "github.com",
+    "gitlab.com",
+    "bitbucket.org",
+    "codeberg.org",
+    "sourceforge.net",
+    "gitea.com",
+)
+
+
+def _repo_full_name_from_url(canonical_url: str) -> Optional[str]:
+    """Return ``host/org/repo`` (lowercased) from a code-host URL, or None.
+
+    Only returns a value when the URL is on a known code-hosting host and
+    has an ``org/repo`` path head. Non-repo URLs (a blog post, a bare host)
+    return None so the caller falls back to the fuzzy token dedup.
+    """
+    if not canonical_url:
+        return None
+    try:
+        p = urlparse(canonical_url)
+    except Exception:
+        return None
+    host = (p.netloc or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    if not host or not any(host == h or host.endswith("." + h) for h in _CODE_HOST_SUFFIXES):
+        return None
+    segments = [s for s in (p.path or "").split("/") if s]
+    if len(segments) < 2:
+        return None
+    org, repo = segments[0].lower(), segments[1].lower()
+    # Strip a trailing ".git" if present.
+    if repo.endswith(".git"):
+        repo = repo[:-4]
+    if not org or not repo:
+        return None
+    return f"{host}/{org}/{repo}"
+
+
+def release_version_from_signal(signal: Dict[str, Any]) -> Optional[str]:
+    """Best-effort release version from the signal URL, or None.
+
+    Recognises ``/releases/tag/<ver>`` and ``/releases/<ver>``. Version is
+    metadata only — it is NOT part of the dedup key (which is repo-scoped).
+    """
+    url = signal.get("canonical_url") or ""
+    m = _RELEASE_TAG_RE.search(url)
+    if m:
+        ver = m.group(1).strip()
+        if ver and ver.lower() != "latest":
+            return ver
+    return None
+
+
+def idempotency_key(signal: Dict[str, Any]) -> Optional[str]:
+    """Canonical, repo-scoped idempotency key for a scanned signal.
+
+    ``idem:repo:<host/org/repo>``. Returns None when the signal has no
+    repo-identifying URL (the caller then relies on token-overlap dedup).
+    Deliberately version-AGNOSTIC so a new release of an already-tracked
+    competitor does not create a second ledger item.
+    """
+    repo = _repo_full_name_from_url(signal.get("canonical_url") or "")
+    if not repo:
+        return None
+    return f"idem:repo:{repo}"
+
+
+def _item_idempotency_keys(item: Dict[str, Any]) -> Set[str]:
+    """Recover idempotency keys stored on a ledger item.
+
+    Auto-promoted items carry the key both as a ``idem:repo:*`` tag and in
+    ``metadata.signal_ref.idempotency_key``. Older / hand-added items carry
+    neither, so we also synthesise one from any URL in the description.
+    """
+    keys: Set[str] = set()
+    for t in item.get("tags") or []:
+        ts = str(t)
+        if ts.startswith("idem:repo:"):
+            keys.add(ts.lower())
+    metadata = item.get("metadata") or {}
+    signal_ref = metadata.get("signal_ref") or {}
+    stored = signal_ref.get("idempotency_key")
+    if isinstance(stored, str) and stored:
+        keys.add(stored.lower())
+    stored_url = signal_ref.get("canonical_url")
+    if isinstance(stored_url, str) and stored_url:
+        repo = _repo_full_name_from_url(stored_url)
+        if repo:
+            keys.add(f"idem:repo:{repo}")
+    if not keys:
+        # Fallback: recover a repo key from any github-style URL in text.
+        for field in ("description", "context", "title"):
+            val = item.get(field) or ""
+            m = re.search(r"https?://[^\s)\"']+", val)
+            if m:
+                repo = _repo_full_name_from_url(m.group(0))
+                if repo:
+                    keys.add(f"idem:repo:{repo}")
+    return keys
+
+
 def extract_topic_fingerprint(signal: Dict[str, Any]) -> Set[str]:
     """Return the dedup fingerprint set for a single scanned signal.
 
@@ -306,10 +426,11 @@ def is_duplicate(
         the live ledger.
     """
     sig_tokens = extract_topic_fingerprint(signal)
-    if not sig_tokens:
-        # No tokens at all means we can't make a useful dedup judgement.
-        # Treat as non-duplicate; the tight confidence floor is the main
-        # quality gate.
+    sig_idem = idempotency_key(signal)
+    if not sig_tokens and not sig_idem:
+        # No tokens and no repo key means we can't make a useful dedup
+        # judgement. Treat as non-duplicate; the tight confidence floor is
+        # the main quality gate.
         return None
 
     items = list(candidates) if candidates is not None else list(
@@ -323,6 +444,19 @@ def is_duplicate(
         # re-implementing the date filter.
         if candidates is not None and not _within_window(item, window_days, now):
             continue
+
+        # 1. Hard idempotency-key match (repo-scoped). This is the reliable
+        #    layer: oasdiff v1.22 dedups against ANY existing oasdiff item
+        #    regardless of release version or fuzzy token overlap.
+        if sig_idem:
+            item_keys = _item_idempotency_keys(item)
+            if sig_idem in item_keys:
+                reason = "idem_open_match" if (item.get("status") == "open") else "idem_recent_match"
+                _log_dedup(signal, item, reason)
+                return item
+
+        # 2. Fuzzy token-overlap match (fallback for non-repo signals and
+        #    older items with no idempotency key).
         item_tokens = _item_fingerprint_tokens(item)
         if not item_tokens:
             continue

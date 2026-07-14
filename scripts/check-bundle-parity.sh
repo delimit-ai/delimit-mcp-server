@@ -1,23 +1,24 @@
 #!/bin/bash
-# Proprietary-gating PARITY GUARD (prevention-first).
+# ============================================================================
+# Guard B — TARBALL MANIFEST PARITY (fail-closed)
+# ============================================================================
+# Asserts that the set of gateway/ files `npm pack` would actually ship is
+# EXACTLY equal to bundle-allowlist.txt. Any EXTRA shipped gateway path (a leak)
+# fails; any allowlisted path MISSING from the pack (a mis-exclusion) fails.
 #
-# FAILS if any package.json-blocked `gateway/...` path is present in the
-# committed public bundle. package.json's "files" "!"-negations keep these
-# proprietary modules out of the npm TARBALL, but the tarball exclusion does
-# nothing for the GIT repo — and delimit-ai/delimit-mcp-server is PUBLIC. A
-# blocked path that is git-tracked is therefore an IP leak, even though npm
-# never ships it.
+# This replaces the old "no package.json-blocked path present" check (which was
+# fail-OPEN: it only caught enumerated blocklist paths). The allowlist model is
+# fail-CLOSED: the tarball must match the allowlist and nothing else.
 #
-# Single source of truth: package.json, via list-blocked-gateway-paths.js.
-# This guard and scripts/sync-gateway.sh both derive their path list from that
-# one extractor, so they cannot drift.
+# One glob is permitted in the allowlist — the compiled license_core .so
+# (gateway/ai/license_core.cpython-*-*.so), whose exact name varies by ABI.
 #
-# Wired into scripts/security-check.sh (which runs in prepublishOnly + the
-# publish.yml "Security check" step). Can also be run standalone in CI or by
-# hand:  bash scripts/check-bundle-parity.sh
+# Wired into: security-check.sh + prepublishOnly (after build) + publish.yml + CI.
+# Run standalone (after sync + build):  bash scripts/check-bundle-parity.sh
 #
-# Emergency override (use only for a genuine hotfix while a pre-existing leak
-# is being remediated separately):  DELIMIT_ALLOW_COMMITTED_LEAK=1
+# Emergency override (hotfix while a leak is remediated separately):
+#   DELIMIT_ALLOW_COMMITTED_LEAK=1
+# ============================================================================
 
 set -euo pipefail
 
@@ -25,65 +26,79 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 NPM_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$NPM_ROOT"
 
-# ── Derive the blocked-path list from package.json (single source of truth) ──
-BLOCKED=()
-while IFS= read -r line; do
-    [ -n "$line" ] && BLOCKED+=("$line")
-done < <(node "$SCRIPT_DIR/list-blocked-gateway-paths.js")
-
-if [ ${#BLOCKED[@]} -eq 0 ]; then
-    echo "⚠️  check-bundle-parity: no blocked gateway paths derived from package.json — nothing to check."
-    exit 0
+ALLOWLIST="$NPM_ROOT/bundle-allowlist.txt"
+if [ ! -f "$ALLOWLIST" ]; then
+    echo "❌ check-bundle-parity: missing bundle-allowlist.txt — cannot enforce parity."
+    exit 1
 fi
 
-# ── Exemptions ──────────────────────────────────────────────────────────────
-# license_core.py is a transient compile input: sync-gateway keeps it, then
-# build-license-core.sh compiles it to a native .so and strips the plaintext.
-# It is legitimately never committed to git, so it is exempt from this check.
-EXEMPT=("gateway/ai/license_core.py")
-is_exempt() {
-    local p="$1"
-    for e in "${EXEMPT[@]}"; do [ "$p" = "$e" ] && return 0; done
+# ── Allowlisted gateway paths (strip comments/blank lines) ───────────────────
+ALLOW_GATEWAY="$(grep -vE '^\s*(#|$)' "$ALLOWLIST" | grep '^gateway/' || true)"
+# Split into the single .so glob and the exact paths.
+ALLOW_GLOB="$(printf '%s\n' "$ALLOW_GATEWAY" | grep '\*' || true)"
+ALLOW_EXACT="$(printf '%s\n' "$ALLOW_GATEWAY" | grep -v '\*' | sort -u)"
+
+# ── What would npm actually ship? (enumerate, never writes a tarball) ────────
+PACK_JSON="$(npm pack --dry-run --json 2>/dev/null || true)"
+if [ -z "$PACK_JSON" ]; then
+    echo "❌ check-bundle-parity: 'npm pack --dry-run --json' returned nothing."
+    exit 1
+fi
+SHIPPED_GATEWAY="$(printf '%s' "$PACK_JSON" \
+  | node -e 'const d=JSON.parse(require("fs").readFileSync(0,"utf8"));process.stdout.write((d[0].files||[]).map(f=>f.path).join("\n"))' \
+  | grep '^gateway/' | sort -u || true)"
+
+# ── A .so glob match in the shipped set is folded to its allowlist glob form ─
+# so exact-set comparison ignores the ABI-specific filename.
+matches_glob() {
+    local path="$1"
+    [ -n "$ALLOW_GLOB" ] || return 1
+    while IFS= read -r g; do
+        [ -n "$g" ] || continue
+        case "$path" in $g) return 0 ;; esac
+    done <<< "$ALLOW_GLOB"
     return 1
 }
 
-# ── Enumerate what is actually in the bundle ────────────────────────────────
-# Prefer git (authoritative COMMITTED state — this is what the public repo
-# exposes). Fall back to filesystem if not inside a git work tree.
-if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    PRESENT="$(git ls-files gateway/ 2>/dev/null || true)"
-    MODE="git-tracked"
-else
-    PRESENT="$(find gateway -type f 2>/dev/null || true)"
-    MODE="filesystem"
+# ── EXTRA: shipped gateway path not permitted by the allowlist (a LEAK) ──────
+EXTRA=()
+SHIPPED_SO=0
+while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    if printf '%s\n' "$ALLOW_EXACT" | grep -qxF "$p"; then continue; fi
+    if matches_glob "$p"; then SHIPPED_SO=1; continue; fi
+    EXTRA+=("$p")
+done <<< "$SHIPPED_GATEWAY"
+
+# ── MISSING: allowlisted exact path not present in the pack (mis-exclusion) ──
+MISSING=()
+while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    if ! printf '%s\n' "$SHIPPED_GATEWAY" | grep -qxF "$p"; then
+        MISSING+=("$p")
+    fi
+done <<< "$ALLOW_EXACT"
+
+FAIL=0
+if [ ${#EXTRA[@]} -ne 0 ]; then
+    FAIL=1
+    echo "❌ BUNDLE PARITY VIOLATION — npm pack ships path(s) NOT in bundle-allowlist.txt:"
+    for e in "${EXTRA[@]}"; do echo "      + $e   (LEAK — internal or unclassified file)"; done
+    echo "   Fix: exclude it (bundle-internal-exclude.txt + keep it out of package.json"
+    echo "        \"files\") or, if it is genuinely public, add it to bundle-allowlist.txt."
+fi
+if [ ${#MISSING[@]} -ne 0 ]; then
+    FAIL=1
+    echo "❌ BUNDLE PARITY VIOLATION — allowlisted path(s) MISSING from npm pack:"
+    for m in "${MISSING[@]}"; do echo "      - $m   (mis-excluded — public tool may break)"; done
+    echo "   Fix: ensure sync-gateway copies it and package.json \"files\" includes it."
 fi
 
-# ── Compare ─────────────────────────────────────────────────────────────────
-VIOLATIONS=()
-for b in "${BLOCKED[@]}"; do
-    is_exempt "$b" && continue
-    if [[ "$b" == */ ]]; then
-        # Directory negation — match any tracked file under that prefix.
-        if printf '%s\n' "$PRESENT" | grep -q "^${b}"; then
-            VIOLATIONS+=("$b")
-        fi
-    else
-        # Exact file match.
-        if printf '%s\n' "$PRESENT" | grep -qxF "$b"; then
-            VIOLATIONS+=("$b")
-        fi
-    fi
-done
+if [ -n "$ALLOW_GLOB" ] && [ "$SHIPPED_SO" -ne 0 ]; then
+    echo "   (compiled license_core .so present and matched the allowlist glob)"
+fi
 
-if [ ${#VIOLATIONS[@]} -ne 0 ]; then
-    echo "❌ BUNDLE PARITY VIOLATION ($MODE)"
-    echo "   package.json blocks these proprietary paths from the npm tarball,"
-    echo "   but they are present in the PUBLIC git bundle (= IP leak):"
-    for v in "${VIOLATIONS[@]}"; do echo "      - $v"; done
-    echo ""
-    echo "   Remediation (founder decision — do NOT silently delete history):"
-    echo "     1. Remove from HEAD:  git rm -r <path> && commit"
-    echo "     2. Decide on history scrub (git filter-repo / BFG) for already-pushed commits."
+if [ $FAIL -ne 0 ]; then
     if [ "${DELIMIT_ALLOW_COMMITTED_LEAK:-}" = "1" ]; then
         echo ""
         echo "   ⚠️  DELIMIT_ALLOW_COMMITTED_LEAK=1 set — overriding (emergency hotfix only)."
@@ -92,5 +107,6 @@ if [ ${#VIOLATIONS[@]} -ne 0 ]; then
     exit 1
 fi
 
-echo "✅ bundle parity ($MODE): no package.json-blocked path present in the bundle (${#BLOCKED[@]} paths checked)"
+COUNT="$(printf '%s\n' "$SHIPPED_GATEWAY" | grep -c '^gateway/' || true)"
+echo "✅ bundle parity: npm pack ships exactly the allowlist ($COUNT gateway path(s), matches bundle-allowlist.txt)."
 exit 0

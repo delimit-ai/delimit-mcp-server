@@ -1,5 +1,11 @@
 # Delimit Seal — hardened receipt schema v0.2 (LED-3127)
 
+> **See also `A1_BUNDLE.md`** for the additive **v0.3 A1 profile** — the
+> offline-verifiable `.a1.tar.gz` bundle (subject binding, hiding leaves,
+> crypto-suite label, key-manifest fingerprints) and its standalone air-gapped
+> verifier `verify_a1.py`. v0.2 receipts described below verify unchanged.
+
+
 Goal: let a third party (auditor / LP / D&O underwriter) verify an attestation
 bundle **offline** — with no call to Delimit infra — while (a) never leaking the
 customer's source and (b) making the model trace non-suppressible.

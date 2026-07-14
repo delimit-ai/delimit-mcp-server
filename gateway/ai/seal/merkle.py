@@ -31,14 +31,29 @@ def _h(*parts):
 
 
 def leaf_hash(leaf):
-    """Hash one canonical leaf: sha256(0x00 || kind || 0x1f || hash-hex-bytes).
+    """Hash one canonical leaf.
 
-    `leaf` is {"kind": "input"|"output", "hash": "sha256:<hex>"}. The leaf's
-    own `hash` is already a content hash supplied by the producer — we never
-    see raw content here.
+    v0.2 leaf (no ``alg`` key):
+        sha256(0x00 || kind || 0x1f || hash-hex-bytes)
+    v0.3 leaf (``alg`` key PRESENT — A1 profile):
+        sha256(0x00 || kind || 0x1f || alg || 0x1f || hash-hex-bytes)
+
+    `leaf` is {"kind": "input"|"output", "hash": "sha256:<hex>"} plus, on the
+    A1 (v0.3) profile, an "alg" field ("sha256" or "sha256-nonce"). Binding the
+    leaf-content algorithm into the tree stops a nonced (hiding) leaf from being
+    swapped for a plain leaf that carries the same hash string.
+
+    The `alg` inclusion is **presence-gated**: a v0.2 leaf has no "alg" key and
+    hashes exactly as before, so every already-issued v0.2 Merkle root is
+    byte-for-byte unchanged (Customer Protection: add, don't change). The leaf's
+    own `hash` is already a content hash supplied by the producer — we never see
+    raw content here.
     """
     kind = str(leaf.get("kind", "")).encode("utf-8")
     h = str(leaf.get("hash", "")).encode("utf-8")
+    if "alg" in leaf:  # v0.3 (A1) leaf — bind alg into the tree
+        alg = str(leaf.get("alg", "")).encode("utf-8")
+        return _h(_LEAF_PREFIX, kind, b"\x1f", alg, b"\x1f", h)
     return _h(_LEAF_PREFIX, kind, b"\x1f", h)
 
 

@@ -59,17 +59,6 @@ def diagnose(target: str = ".", options: Optional[Dict] = None) -> Dict[str, Any
         issues.append({"severity": "warning", "issue": "No test directory found"})
     if not any((root / f).exists() for f in [".github/workflows", ".gitlab-ci.yml", "Jenkinsfile", ".circleci"]):
         issues.append({"severity": "info", "issue": "No CI configuration detected"})
-    # Check for broken symlinks (link path checking)
-    try:
-        import os
-        for dirpath, dirnames, filenames in os.walk(root):
-            dirnames[:] = [d for d in dirnames if d not in {".git", "node_modules", "venv", ".next"}]
-            for name in dirnames + filenames:
-                p = Path(dirpath) / name
-                if p.is_symlink() and not p.exists():
-                    issues.append({"severity": "warning", "issue": f"Broken symlink found: {p.relative_to(root)}"})
-    except Exception:
-        pass
     # Check for large files
     try:
         result = subprocess.run(["git", "-C", str(root), "ls-files"], capture_output=True, text=True, timeout=10)
@@ -351,12 +340,29 @@ def seal_verify(receipt_path: str, options: Optional[Dict] = None) -> Dict[str, 
     The `cryptography` dependency is optional and lazy-imported inside the
     verifier; a missing wheel returns verification_unavailable, never raises.
     """
+    opts = options or {}
+    mode = str(opts.get("mode", "receipt") or "receipt").lower()
+    if mode == "a1":
+        # A1 offline-verifiable bundle path (schema_version >= 0.3). ADDITIVE —
+        # the default mode ("receipt") is the unchanged legacy/v0.2 behavior.
+        try:
+            from ai.seal.verifier import verify_a1_bundle
+        except Exception as e:  # import guard — never break the caller
+            return {"valid": False, "seal_valid": False,
+                    "error": f"seal verifier unavailable: {e}"}
+        return verify_a1_bundle(
+            receipt_path,
+            disclosure_path=opts.get("disclosure_path"),
+            expect_merge_commit=opts.get("expect_merge_commit"),
+            expect_repo=opts.get("expect_repo"),
+            constitution_path=opts.get("constitution_path"),
+            pubkey_path=opts.get("pubkey_path"),
+        )
     try:
         from ai.seal.verifier import verify_receipt
     except Exception as e:  # import guard — never break the caller
         return {"valid": False, "seal_valid": False,
                 "error": f"seal verifier unavailable: {e}"}
-    opts = options or {}
     return verify_receipt(
         receipt_path,
         constitution_path=opts.get("constitution_path"),

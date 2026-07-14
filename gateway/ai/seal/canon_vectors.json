@@ -14,6 +14,10 @@
     { "name": "control_chars", "obj": { "s": "\u0001\u001f\u007f" } },
     { "name": "signature_stripped", "obj": { "data": "x", "signature": "ed25519:deadbeef", "signatures": [{ "key_id": "k1", "sig": "ed25519:00" }] } },
     { "name": "nested_lists", "obj": { "leaves": [{ "kind": "input", "hash": "sha256:aa" }, { "kind": "output", "hash": "sha256:bb" }] } },
-    { "name": "mixed_realistic", "obj": { "schema_version": "0.2", "model_sequence": ["a", "b"], "merkle_root": "sha256:00", "action": "ANNOTATE", "findings": [], "does_not_attest": { "factual_correctness": true } } }
+    { "name": "mixed_realistic", "obj": { "schema_version": "0.2", "model_sequence": ["a", "b"], "merkle_root": "sha256:00", "action": "ANNOTATE", "findings": [], "does_not_attest": { "factual_correctness": true } } },
+    { "name": "a1_subject", "obj": { "repo": "sha256:aa", "repo_hint": "delimit-ai/delimit-gateway", "base_commit": "0123456789abcdef0123456789abcdef01234567", "merge_commit": "fedcba9876543210fedcba9876543210fedcba98", "subject_salt": "0123456789abcdef0123456789abcdef" } },
+    { "name": "a1_leaf_nonced", "obj": { "kind": "input", "alg": "sha256-nonce", "hash": "sha256:00" } },
+    { "name": "a1_key_manifest", "obj": { "seal-primary": "sha256:aa", "seal-cosign-2": "sha256:bb" } },
+    { "name": "a1_mixed_realistic", "obj": { "schema": "delimit.governed_agent.receipt.v0", "schema_version": "0.3", "crypto_suite": "delimit-a1-v1", "action": "MERGE_APPROVED", "issued_at": "2026-07-08T18:00:00Z", "model_sequence": ["claude-opus-4-8", "gpt-5.3-codex", "grok-4.3"], "merkle_leaves": [{ "kind": "input", "alg": "sha256-nonce", "hash": "sha256:aa" }, { "kind": "output", "alg": "sha256-nonce", "hash": "sha256:bb" }], "merkle_root": "sha256:00", "subject": { "repo": "sha256:cc", "base_commit": "0123456789abcdef0123456789abcdef01234567", "merge_commit": "fedcba9876543210fedcba9876543210fedcba98", "subject_salt": "0123456789abcdef0123456789abcdef" }, "key_manifest": { "seal-primary": "sha256:dd", "seal-cosign-2": "sha256:ee" }, "does_not_attest": { "factual_correctness": true, "model_sequence_execution_proof": true } } }
   ]
 }

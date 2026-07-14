@@ -102,6 +102,111 @@ def release_file(file_path: str, model: str = "") -> Dict[str, Any]:
     return {"status": "ok", "message": "File was not locked"}
 
 
+# --- STR-2202: checkout/branch-level claims -------------------------------
+# Per-file locks (above) solve simultaneous edits WITHIN one checkout. The
+# real 2026 fleet hazard, documented in memory
+# (feedback_parallel_agents_need_worktree_isolation), is CHECKOUT-STATE
+# collisions: two agents in the same checkout, an agent dirtying a tree a
+# restart-watcher needs clean, a branch left checked out that another process
+# assumes is main. These helpers reuse the SAME lock store + TTL but key on a
+# ``checkout:`` prefix and treat ANY existing holder from a DIFFERENT task as a
+# CONFLICT (not just a different model) — because two arms of the same model in
+# one checkout still collide on branch/tree state. Additive: the existing
+# claim_file / release_file / check_collisions surfaces are unchanged.
+
+_CHECKOUT_PREFIX = "checkout:"
+
+
+def _checkout_key(checkout: str) -> str:
+    return _CHECKOUT_PREFIX + str(Path(checkout).expanduser().resolve())
+
+
+def claim_checkout(
+    checkout: str,
+    model: str,
+    task_id: str = "",
+) -> Dict[str, Any]:
+    """Claim a checkout root / worktree for exclusive write use.
+
+    Conflict semantics differ from claim_file: a checkout held by ANY task
+    other than ``task_id`` is a collision, regardless of model. Re-claiming
+    with the same task_id is idempotent (returns "claimed").
+    """
+    if not checkout or not model:
+        return {"error": "checkout and model are required"}
+
+    key = _checkout_key(checkout)
+    model = model.lower().strip()
+    task_id = (task_id or "").strip()
+
+    locks = _cleanup_expired(_load_locks())
+
+    existing = locks.get(key)
+    if existing and existing.get("task_id", "") != task_id:
+        return {
+            "status": "collision",
+            "checkout": key[len(_CHECKOUT_PREFIX):],
+            "held_by": existing.get("model", "unknown"),
+            "held_by_task": existing.get("task_id", ""),
+            "held_since": existing.get("claimed_at", "unknown"),
+            "your_model": model,
+            "your_task": task_id,
+            "message": (
+                f"CHECKOUT COLLISION: {existing.get('task_id') or existing.get('model')} "
+                f"holds {key[len(_CHECKOUT_PREFIX):]} since "
+                f"{existing.get('claimed_at', 'unknown')}"
+            ),
+            "recommendation": "Use an isolated worktree for this dispatch, or wait for the holder to release.",
+        }
+
+    locks[key] = {
+        "model": model,
+        "task_id": task_id,
+        "kind": "checkout",
+        "ts": time.time(),
+        "claimed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    _save_locks(locks)
+
+    return {
+        "status": "claimed",
+        "checkout": key[len(_CHECKOUT_PREFIX):],
+        "lock_key": key,
+        "model": model,
+        "task_id": task_id,
+        "message": f"{model} claimed checkout {key[len(_CHECKOUT_PREFIX):]}",
+    }
+
+
+def release_checkout(checkout: str = "", task_id: str = "") -> Dict[str, Any]:
+    """Release checkout lock(s). By ``checkout`` path, by ``task_id``, or both.
+
+    When only ``task_id`` is given, every checkout lock held by that task is
+    released (the completion/handoff path uses this — it need not know which
+    checkout was claimed).
+    """
+    locks = _load_locks()
+    task_id = (task_id or "").strip()
+    removed: List[str] = []
+
+    if checkout:
+        key = _checkout_key(checkout)
+        lock = locks.get(key)
+        if lock and (not task_id or lock.get("task_id", "") == task_id):
+            del locks[key]
+            removed.append(key[len(_CHECKOUT_PREFIX):])
+    elif task_id:
+        for key in [k for k, v in locks.items()
+                    if k.startswith(_CHECKOUT_PREFIX) and v.get("task_id", "") == task_id]:
+            del locks[key]
+            removed.append(key[len(_CHECKOUT_PREFIX):])
+
+    if removed:
+        _save_locks(locks)
+        return {"status": "released", "checkouts": removed}
+    return {"status": "ok", "message": "No matching checkout lock held"}
+
+
 def check_collisions(model: str = "") -> Dict[str, Any]:
     """Check for active file locks and potential collisions."""
     locks = _cleanup_expired(_load_locks())

@@ -12,6 +12,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -28,6 +29,51 @@ def _has_playwright() -> bool:
         return True
     except ImportError:
         return False
+
+
+_PLAYWRIGHT_PYTHON: Optional[str] = None
+
+
+def _resolve_playwright_python() -> str:
+    """Return a python interpreter that can ``import playwright``.
+
+    (LED-2316) The MCP server's own venv (``sys.executable``) frequently lacks
+    playwright — it is installed in a separate suite venv (e.g.
+    ``~/.delimit_suite/venv``). Launching the responsive sandbox with a bare
+    ``sys.executable`` therefore reported "Playwright is not installed in the
+    subprocess environment" even though a sitewide install exists. Probe
+    candidate interpreters, cache the first that can import playwright, and fall
+    back to ``sys.executable`` so the sandbox still runs (and surfaces its own
+    error) if none is found.
+    """
+    global _PLAYWRIGHT_PYTHON
+    if _PLAYWRIGHT_PYTHON:
+        return _PLAYWRIGHT_PYTHON
+    import glob as _glob
+    candidates = [
+        sys.executable,
+        "/home/delimit/.delimit_suite/venv/bin/python",
+        os.path.expanduser("~/.delimit_suite/venv/bin/python"),
+        shutil.which("python3"),
+    ]
+    candidates += _glob.glob("/home/*/.delimit_suite/venv/bin/python")
+    seen = set()
+    for c in candidates:
+        if not c or c in seen:
+            continue
+        seen.add(c)
+        try:
+            if not Path(c).exists():
+                continue
+            probe = subprocess.run(
+                [c, "-c", "import playwright"], capture_output=True, timeout=10
+            )
+            if probe.returncode == 0:
+                _PLAYWRIGHT_PYTHON = c
+                return c
+        except Exception:
+            continue
+    return sys.executable
 
 
 def _find_files(root: Path, extensions: List[str], max_depth: int = 6) -> List[Path]:
@@ -775,6 +821,7 @@ _RESPONSIVE_UNITS_RE = re.compile(r"(?:vw|vh|vmin|vmax|%|rem|em|clamp|min\(|max\
 def design_validate_responsive(
     project_path: str,
     check_types: Optional[List[str]] = None,
+    url: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Validate responsive design patterns via static analysis.
 
@@ -898,8 +945,54 @@ def design_validate_responsive(
         issues.append({
             "severity": "warning",
             "message": "No CSS breakpoints or Tailwind config detected",
-            "fix": "Add responsive breakpoints via media queries or a CSS framework",
+            "fix": "Use a responsive grid or standard breakpoints (sm, md, lg) for adaptable layout",
         })
+
+    # Run Playwright sandbox if a URL or HTML file is provided
+    sandbox_results = {}
+    if url:
+        try:
+            sandbox_script = Path(__file__).parent / "playwright_sandbox.py"
+            # (LED-2316) The MCP server's own venv (sys.executable) does NOT have
+            # playwright installed — it lives in the separate suite venv. Launching
+            # the sandbox with a bare sys.executable therefore reported "Playwright
+            # is not installed in the subprocess environment" even though the
+            # sitewide install exists. Resolve an interpreter that can actually
+            # import playwright (probe candidates, cache the winner), fall back to
+            # sys.executable so behavior degrades gracefully if none is found.
+            _pw_py = _resolve_playwright_python()
+            cmd = [_pw_py, str(sandbox_script), "--url-or-path", url]
+            if check_types:
+                cmd.extend(["--check-types"] + check_types)
+
+            sandbox_proc = subprocess.run(cmd, capture_output=True, text=True)
+            if sandbox_proc.returncode == 0:
+                try:
+                    sandbox_results = json.loads(sandbox_proc.stdout)
+                    if sandbox_results.get("status") == "ok":
+                        issues.extend(sandbox_results.get("issues", []))
+                        coverage["playwright_tested"] = True
+                        coverage["breakpoints_tested"] = sandbox_results.get("breakpoints_tested", [])
+                    else:
+                        issues.append({
+                            "severity": "error", 
+                            "message": f"Playwright sandbox error: {sandbox_results.get('error')}"
+                        })
+                except json.JSONDecodeError:
+                    issues.append({
+                        "severity": "error",
+                        "message": f"Playwright sandbox returned invalid JSON: {sandbox_proc.stdout}"
+                    })
+            else:
+                issues.append({
+                    "severity": "error",
+                    "message": f"Playwright sandbox failed: {sandbox_proc.stderr}"
+                })
+        except Exception as e:
+            issues.append({
+                "severity": "error",
+                "message": f"Could not run Playwright sandbox: {e}"
+            })
 
     # Check for fixed-width containers
     for cf in css_files:
@@ -1141,6 +1234,7 @@ def _puppeteer_screenshot_fallback(url: str, baselines_dir: Path) -> Dict[str, A
                 "status": "error",
                 "engine": "puppeteer",
                 "error": stderr,
+                "screenshot_path": None,
                 "hint": "Puppeteer is installed but the screenshot call failed at runtime. Check the URL reachability, sandbox permissions, or memory limits.",
             }
 
@@ -1154,7 +1248,7 @@ def _puppeteer_screenshot_fallback(url: str, baselines_dir: Path) -> Dict[str, A
             "hint": "Screenshot taken with puppeteer (fallback). Install Playwright for full visual regression with baseline comparison.",
         }
     except Exception as e:
-        return {"tool": "story.visual_test", "status": "error", "error": str(e)}
+        return {"tool": "story.visual_test", "status": "error", "error": str(e), "screenshot_path": None}
 
 
 # ---------------------------------------------------------------------------

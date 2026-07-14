@@ -338,8 +338,12 @@ def build_checklist(
         lic_result = activate_license(license_key)
         if lic_result.get("status") == "activated":
             checklist.append({"item": "License activation", "status": "Pass", "detail": f"Tier: {lic_result.get('tier', 'pro')}"})
+        elif lic_result.get("status") == "pending":
+            # Offline / Lemon-Squeezy-unreachable: activation deferred, no Pro granted.
+            # Surface the retry-when-online message so the user knows WHY (not a bare "Fail").
+            checklist.append({"item": "License activation", "status": "Pending", "detail": lic_result.get("message", "Validation unavailable — retry when online")})
         else:
-            checklist.append({"item": "License activation", "status": "Fail", "detail": lic_result.get("error", "Unknown error")})
+            checklist.append({"item": "License activation", "status": "Fail", "detail": lic_result.get("message") or lic_result.get("error", "Unknown error")})
     else:
         lic = get_license()
         tier = lic.get("tier", "free")

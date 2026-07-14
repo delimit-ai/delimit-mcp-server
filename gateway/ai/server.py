@@ -641,7 +641,7 @@ def _auto_configure_antigravity():
 # Call auto-configuration on load
 _auto_configure_antigravity()
 mcp.description = (
-    "Delimit - One workspace for every AI coding assistant. "
+    "Delimit - The merge gate for AI-written code, with signed, replayable attestation. "
     "On session start, call delimit_ledger_context to check for open tasks. "
     "Use delimit_scan on new projects. Track all work via the ledger."
 )
@@ -688,6 +688,150 @@ def _internal_tool():
 def _experimental_tool():
     """Backward-compatible alias: register tool only when experimental tier is enabled."""
     return _tier_tool("experimental")
+
+
+# ─────────────────────────────────────────────────────────────────────
+#  DELIMIT_TOOLSET — opt-in compatibility profile (LED-3709)
+#
+#  Additive + reversible. Gates which tools register based on the
+#  DELIMIT_TOOLSET env var (core | standard | full). Default / unset is
+#  "full" — in that case the wrapper below is NOT installed at all, so
+#  every @mcp.tool() registration is byte-identical to the historical
+#  surface (Pro customers run this server locally; default-full = zero
+#  breakage). See ai/tool_metadata.py for the profile definitions.
+#
+#  Implementation: when a reduced profile is active we transparently wrap
+#  mcp.tool so that any tool whose name is excluded from the active
+#  profile is skipped — the function stays importable as plain Python
+#  (identical to how _tier_tool degrades), so internal call-chaining is
+#  never affected, only the exposed MCP surface shrinks.
+# ─────────────────────────────────────────────────────────────────────
+from ai.tool_metadata import resolve_toolset as _resolve_toolset, tool_in_toolset as _tool_in_toolset
+
+ACTIVE_TOOLSET = _resolve_toolset(os.environ.get("DELIMIT_TOOLSET"))
+
+if ACTIVE_TOOLSET != "full":
+    _orig_mcp_tool = mcp.tool
+
+    def _toolset_gated_tool(*args, **kwargs):
+        explicit_name = kwargs.get("name")
+
+        # Case A: bare `@mcp.tool` — first positional arg is the function.
+        if args and callable(args[0]) and not isinstance(args[0], str):
+            fn = args[0]
+            name = explicit_name or getattr(fn, "__name__", "")
+            if not _tool_in_toolset(name, ACTIVE_TOOLSET):
+                return fn
+            return _orig_mcp_tool(*args, **kwargs)
+
+        # Case B: factory usage `@mcp.tool(...)` / `mcp.tool()(fn)`.
+        decorator = _orig_mcp_tool(*args, **kwargs)
+
+        def _gate(fn):
+            name = explicit_name or getattr(fn, "__name__", "")
+            if not _tool_in_toolset(name, ACTIVE_TOOLSET):
+                return fn
+            return decorator(fn)
+
+        return _gate
+
+    mcp.tool = _toolset_gated_tool
+
+
+# ─────────────────────────────────────────────────────────────────────
+#  MCP tool annotations — mechanical, docstring-derived (LED-3709)
+#
+#  Additive metadata only. Stamps readOnlyHint / destructiveHint /
+#  idempotentHint / title onto every tool, derived programmatically from
+#  the existing "Side effects:" line in each docstring. Annotations are
+#  optional MCP hints (spec 2025-03-26+): they do not change any tool
+#  signature, parameters, or return schema — clients that ignore them see
+#  no difference. Applied uniformly at registration time so no per-tool
+#  hand-editing is required. fastmcp 3.2.4 mcp.tool(annotations=...)
+#  verified to accept a dict / ToolAnnotations (checked, not assumed).
+# ─────────────────────────────────────────────────────────────────────
+import inspect as _inspect
+import re as _re
+
+_ANN_DESTRUCTIVE_KW = (
+    "delete", "deletes", "remove", "removes", "revoke", "revokes",
+    "overwrite", "overwrites", "purge", "destroy", "clobber", "teardown",
+    "force-push", "force push", "wipe", "wipes", "rollback",
+)
+_ANN_WRITE_KW = (
+    "write", "creat", "store", "append", "persist", "publish", "posts",
+    "post ", "send", "deploy", "modif", "update", "chmod", "schedule",
+    "enqueue", "queue", "notif", "emit",
+)
+
+
+def _ann_extract_side_effects(doc: str) -> str:
+    """Return the text of the docstring's 'Side effects:' section, or ''."""
+    low = doc.lower()
+    idx = low.find("side effects:")
+    if idx == -1:
+        return ""
+    rest = doc[idx + len("side effects:"):]
+    # Cut at the next section header or a blank-line paragraph break.
+    m = _re.search(r"\n\s*\n|\n\s*(Args:|Returns:|Parameters:|Example)", rest)
+    if m:
+        rest = rest[: m.start()]
+    return rest.strip()
+
+
+def _ann_tool_title(name: str) -> str:
+    base = name.lstrip("_")
+    if base.startswith("delimit_"):
+        base = base[len("delimit_"):]
+    words = [w for w in base.split("_") if w]
+    return "Delimit " + " ".join(w.capitalize() for w in words) if words else name
+
+
+def _derive_tool_annotations(fn) -> dict:
+    name = getattr(fn, "__name__", "") or ""
+    ann: dict = {"title": _ann_tool_title(name)}
+    se = _ann_extract_side_effects(_inspect.getdoc(fn) or "").lower()
+    if not se:
+        return ann
+    destructive = any(k in se for k in _ANN_DESTRUCTIVE_KW)
+    write = destructive or any(k in se for k in _ANN_WRITE_KW)
+    read_only = (
+        ("read-only" in se or "read only" in se
+         or se.startswith("none") or "no side effect" in se)
+        and not write
+    )
+    ann["readOnlyHint"] = read_only
+    ann["destructiveHint"] = bool(destructive)
+    if read_only or "idempotent" in se:
+        ann["idempotentHint"] = True
+    return ann
+
+
+_pre_annotation_mcp_tool = mcp.tool
+
+
+def _annotating_tool(*args, **kwargs):
+    # Bare `@mcp.tool` — first positional arg is the function.
+    if args and callable(args[0]) and not isinstance(args[0], str):
+        fn = args[0]
+        if "annotations" not in kwargs:
+            kwargs["annotations"] = _derive_tool_annotations(fn)
+        return _pre_annotation_mcp_tool(*args, **kwargs)
+
+    # Factory usage `@mcp.tool(...)` / `mcp.tool()(fn)` — defer until we
+    # have the function so we can read its docstring.
+    if "annotations" in kwargs:
+        return _pre_annotation_mcp_tool(*args, **kwargs)
+
+    def _apply(fn):
+        local_kwargs = dict(kwargs)
+        local_kwargs["annotations"] = _derive_tool_annotations(fn)
+        return _pre_annotation_mcp_tool(*args, **local_kwargs)(fn)
+
+    return _apply
+
+
+mcp.tool = _annotating_tool
 
 
 # Pro tools - single source of truth is license_core.py
@@ -1566,10 +1710,26 @@ def _with_next_steps(tool_name: str, result: Dict[str, Any]) -> Dict[str, Any]:
         except Exception as e:
             logger.warning("Toolcard cache auto-register failed: %s", e)
 
-    # LED-219: Track every tool call for session analytics
+    # LED-219: Track every tool call for session analytics.
+    # doc 25 §8 item #5 (org instrumentation / gap G5): also derive a coarse
+    # outcome from the result so the 30-day org review reads real ok/error/
+    # refused/blocked data. Derivation is best-effort and never raises; a
+    # missing/opaque result records no outcome (untagged), preserving the
+    # prior behavior exactly.
     try:
         from ai.toolcard_cache import get_cache as _get_tc
-        _get_tc().record_call(tool_name)
+        _outcome = None
+        if isinstance(result, dict):
+            _status = str(result.get("status", "")).lower()
+            if result.get("error") or _status == "error":
+                _outcome = "error"
+            elif "blocked" in _status or result.get("blocked"):
+                _outcome = "blocked"
+            elif "refused" in _status or result.get("refused"):
+                _outcome = "refused"
+            else:
+                _outcome = "ok"
+        _get_tc().record_call(tool_name, outcome=_outcome)
     except Exception:
         pass
 
@@ -2857,6 +3017,17 @@ def delimit_substantive_content_check(
         repo_description=repo_description,
         repo_topics=repo_topics,
     )
+    # LED-3722: when the gate ALLOWS, record a passing verdict keyed to
+    # (repo, action, body) so the fail-closed executor interlock will let
+    # this exact body auto-post. Recording only happens on `allow`; a block
+    # is never recorded. Best-effort — recording failure must not change the
+    # returned verdict. This is the sole side effect added to the tool.
+    if isinstance(result, dict) and result.get("verdict") == "allow":
+        try:
+            from ai.outreach_gate import record_content_pass
+            record_content_pass(repo=repo, proposed_action=proposed_action, body=body)
+        except Exception:
+            logger.warning("substantive_content_check: verdict recording failed", exc_info=True)
     return _with_next_steps("substantive_content_check", result)
 
 
@@ -5272,12 +5443,19 @@ def delimit_evidence_verify(bundle_id: Annotated[Optional[str], Field(descriptio
 
 
 @mcp.tool()
-def delimit_seal_verify(receipt_path: Annotated[str, Field(description="Path to a Delimit Seal receipt JSON file. Required.")]) -> Dict[str, Any]:
+def delimit_seal_verify(
+    receipt_path: Annotated[str, Field(description="Path to a Delimit Seal receipt JSON file, OR (mode='a1') an A1 bundle (.a1.tar.gz). Required.")],
+    mode: Annotated[str, Field(description="Verification mode. 'receipt' (default) = legacy/v0.2 receipt path, unchanged. 'a1' = hardened offline A1 bundle path (schema_version >= 0.3): tar-safety, version floor, crypto-suite allowlist, subject binding, key-manifest crosscheck.")] = "receipt",
+    expect_merge_commit: Annotated[Optional[str], Field(description="A1 only: the git merge-commit SHA the relying party expects. When given, verification hard-fails unless subject.merge_commit matches (anti-replay binding, spec §2.2 step 11).")] = None,
+    expect_repo: Annotated[Optional[str], Field(description="A1 only: the canonical repo URL the relying party expects. When given, sha256(subject_salt || url) must equal subject.repo or verification hard-fails.")] = None,
+) -> Dict[str, Any]:
     """Verify a Delimit Seal receipt against the bundled Layer-0 constitution (Free).
 
     When to use: to check that a signed governed-output receipt has not
     been tampered with — content-pin to the published constitution, a
-    valid Ed25519 signature, and a well-formed structure. Free tier.
+    valid Ed25519 signature, and a well-formed structure. Free tier. Pass
+    mode='a1' to verify a hardened offline A1 bundle (schema_version >= 0.3)
+    with subject binding + key-manifest crosscheck.
     When NOT to use: to verify an evidence bundle (use
     delimit_evidence_verify) or to query the ledger (delimit_ledger).
 
@@ -5290,14 +5468,27 @@ def delimit_seal_verify(receipt_path: Annotated[str, Field(description="Path to 
     returns verification_unavailable rather than failing. No license gate.
 
     Args:
-        receipt_path: Path to a Delimit Seal receipt JSON file. Required.
+        receipt_path: Path to a Seal receipt JSON, or (mode='a1') an
+            A1 bundle .a1.tar.gz. Required.
+        mode: 'receipt' (default, unchanged legacy/v0.2 path) or 'a1'
+            (hardened offline A1 bundle path). Optional, additive.
+        expect_merge_commit: A1 only — hard-fail unless subject.merge_commit
+            matches this git SHA. Optional.
+        expect_repo: A1 only — hard-fail unless sha256(subject_salt || url)
+            matches subject.repo. Optional.
 
     Returns:
         Dict with the verdict (valid, seal_valid, per-check results),
         what it does_not_attest, and next_steps.
     """
     from backends.repo_bridge import seal_verify
-    return _with_next_steps("seal_verify", _safe_call(seal_verify, receipt_path=receipt_path))
+    options = {"mode": mode}
+    if expect_merge_commit is not None:
+        options["expect_merge_commit"] = expect_merge_commit
+    if expect_repo is not None:
+        options["expect_repo"] = expect_repo
+    return _with_next_steps(
+        "seal_verify", _safe_call(seal_verify, receipt_path=receipt_path, options=options))
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -6428,8 +6619,9 @@ def delimit_design_generate_tailwind(figma_file_key: Annotated[Optional[str], Fi
 def delimit_design_validate_responsive(
     project_path: Annotated[str, Field(description="Project path to validate. Required.")],
     check_types: Annotated[Optional[Union[str, List[str]]], Field(description="Specific checks (\"breakpoints\", \"containers\", \"fluid-type\", etc.) as comma string or list. None = all.")] = None,
+    url: Annotated[Optional[str], Field(description="Optional URL or HTML file path for dynamic Playwright testing.")] = None,
 ) -> Dict[str, Any]:
-    """Validate responsive design patterns via static CSS analysis.
+    """Validate responsive design patterns via static CSS analysis and optional dynamic Playwright testing.
 
     When to use: as a CI check after editing UI/CSS, to flag missing
     media queries, fixed widths, or non-mobile-first patterns.
@@ -6440,7 +6632,7 @@ def delimit_design_validate_responsive(
     Sibling contrast: delimit_story_accessibility checks WCAG;
     this checks responsive patterns.
 
-    Side effects: read-only static analysis of CSS files. Calls
+    Side effects: read-only static analysis of CSS files and dynamic browser check if URL is provided. Calls
     backends.ui_bridge.design_validate_responsive. Coerces check_types
     from comma string to list via _coerce_list_arg.
 
@@ -6448,6 +6640,7 @@ def delimit_design_validate_responsive(
         project_path: Project path to validate. Required.
         check_types: Specific checks ("breakpoints", "containers",
             "fluid-type", etc.) as comma string or list. None = all.
+        url: Optional URL or HTML file path for dynamic Playwright testing.
 
     Returns:
         Dict with per-check findings and next_steps.
@@ -6457,7 +6650,7 @@ def delimit_design_validate_responsive(
     except ValueError as e:
         return _with_next_steps("design_validate_responsive", {"error": str(e)})
     from backends.ui_bridge import design_validate_responsive
-    return _with_next_steps("design_validate_responsive", _safe_call(design_validate_responsive, project_path=project_path, check_types=check_types))
+    return _with_next_steps("design_validate_responsive", _safe_call(design_validate_responsive, project_path=project_path, check_types=check_types, url=url))
 
 
 @mcp.tool()
@@ -8987,6 +9180,7 @@ def delimit_session_handoff(
     blockers: Annotated[Optional[Union[str, List[str]]], Field(description="What's blocked and why.")] = None,
     files_changed: Annotated[Optional[Union[str, List[str]]], Field(description="Key files that were modified.")] = None,
     venture: Annotated[str, Field(description="Venture context. Empty = auto-detect.")] = "",
+    project_path: Annotated[str, Field(description="Project path whose revive soul this handoff should refresh. Empty = auto-detect from cwd.")] = "",
 ) -> Dict[str, Any]:
     """Save a session summary for cross-session continuity.
 
@@ -9001,7 +9195,10 @@ def delimit_session_handoff(
 
     Side effects: writes a handoff record via
     ai.ledger_manager.session_handoff. Coerces list inputs from comma
-    strings via _coerce_list_arg.
+    strings via _coerce_list_arg. LED-3731: also refreshes a lightweight
+    pointer-soul for `project_path` (default = cwd) so the NEXT
+    delimit_revive for that project returns THIS handoff's state rather
+    than a stale older soul.
 
     Args:
         summary: 2-3 sentence summary of the session. Required.
@@ -9012,6 +9209,8 @@ def delimit_session_handoff(
         blockers: What's blocked and why.
         files_changed: Key files that were modified.
         venture: Venture context. Empty = auto-detect.
+        project_path: Project path whose revive soul this handoff should
+            refresh. Empty = auto-detect from cwd.
 
     Returns:
         Dict with the saved handoff record.
@@ -9040,7 +9239,7 @@ def delimit_session_handoff(
     return session_handoff(
         summary=summary, items_completed=items_completed, items_added=items_added,
         key_decisions=key_decisions, blockers=blockers, files_changed=files_changed,
-        venture=venture,
+        venture=venture, project_path=project_path, source_model=_detect_model(),
     )
 
 
@@ -9110,6 +9309,7 @@ def delimit_soul_capture(
     task_status: Annotated[str, Field(description="One of \"in_progress\", \"blocked\", \"almost_done\".")] = "in_progress",
     tokens_used: Annotated[int, Field(description="Estimated tokens consumed this session.")] = 0,
     context_fullness: Annotated[float, Field(description="0.0-1.0 representing context-window fullness.")] = 0.0,
+    project_path: Annotated[str, Field(description="Project path to capture the soul for. Empty = auto-detect from cwd.")] = "",
 ) -> Dict[str, Any]:
     """Capture session state as a 'soul' for cross-model resurrection.
 
@@ -9137,6 +9337,9 @@ def delimit_soul_capture(
         task_status: One of "in_progress", "blocked", "almost_done".
         tokens_used: Estimated tokens consumed this session.
         context_fullness: 0.0-1.0 representing context-window fullness.
+        project_path: Project path to capture the soul for. Empty =
+            auto-detect from cwd. LED-3731: pass an explicit venture path to
+            capture a soul for a project other than the current directory.
 
     Returns:
         Dict with the captured soul record, plus next_steps suggestions.
@@ -9155,6 +9358,7 @@ def delimit_soul_capture(
         blockers=_split(blockers),
         next_steps=_split(next_steps),
         source_model=_detect_model(),
+        project_path=project_path,
         task_status=task_status,
         tokens_used=tokens_used,
         context_fullness=context_fullness,
@@ -11501,19 +11705,22 @@ def delimit_social_approve(action: Annotated[str, Field(description="\"list\" (d
 
 @mcp.tool()
 def delimit_social_target(
-    action: Annotated[str, Field(description="\"scan\" to discover targets, \"list\" to show recent, \"stats\" to show counts.")] = "scan",
+    action: Annotated[str, Field(description="\"scan\" to discover targets, \"list\" to show recent, \"stats\" to show counts, \"backlog\" to show the report-topic backlog.")] = "scan",
     platforms: Annotated[str, Field(description="Comma-separated platforms to scan (x, hn, devto, reddit, github, namepros).")] = "x,hn,devto,reddit,github",
     ventures: Annotated[str, Field(description="Comma-separated ventures to scan for. Empty = all.")] = "",
     keywords: Annotated[str, Field(description="Extra keywords to search for beyond venture topics.")] = "",
     limit: Annotated[int, Field(description="Max targets per platform.")] = 10,
     draft_replies: Annotated[bool, Field(description="If True, auto-draft social posts for \"reply\" targets.")] = False,
     create_ledger: Annotated[bool, Field(description="If True, create ledger items for \"strategic\" targets.")] = False,
+    mode: Annotated[str, Field(description="\"engagement\" (default, legacy behavior) or \"demand_signal\" to route scan results into the INTERNAL report-topic backlog instead of drafting outbound. LED-3729.")] = "engagement",
 ) -> Dict[str, Any]:
-    """Discover engagement opportunities across platforms (Pro).
+    """Scan platforms for demand signals / engagement opportunities (Pro).
 
-    When to use: to find posts on X, Reddit, HN, Dev.to, GitHub where
-    a Delimit venture can engage. Run inside a /loop for continuous
-    discovery.
+    When to use: mode="demand_signal" (recommended under SHIFT-1) to research
+    which topics/repos show API-governance / breaking-change pain and feed the
+    INTERNAL report-topic backlog — the input to choosing the next public
+    worked-example report. mode="engagement" (legacy) finds posts a venture
+    could engage with.
     When NOT to use: to fetch one X tweet (use delimit_x_fetch) or
     drafts (delimit_social_generate).
 
@@ -11521,44 +11728,38 @@ def delimit_social_target(
     platforms to scan; delimit_x_fetch is single-tweet; this is the
     multi-platform scanner.
 
-    Side effects: read-only network scans by default. With
-    draft_replies=True, calls delimit_social_post(draft=True) for
-    "reply" targets. With create_ledger=True, calls
-    delimit_ledger_add for "strategic" targets. Deduplicates across
-    runs.
+    Side effects: read-only network scans by default. With mode="demand_signal"
+    (LED-3729) scored results are written to the local report-topic backlog —
+    an internal research list, NOT outbound; nothing is posted or contacted.
+    With draft_replies=True, calls delimit_social_post(draft=True) for "reply"
+    targets. With create_ledger=True, calls delimit_ledger_add for "strategic"
+    targets. Deduplicates across runs.
 
-    IMPORTANT - TOOL CHAINING RULE:
-    After scanning, the AI MUST immediately process results:
-    1. For "reply" targets: draft a reply via delimit_social_post or
-       delimit_notify
-    2. For "strategic" targets: create a ledger item via
-       delimit_ledger_add
-    3. For "both": do both
-    Never just return targets and stop. Always chain to the next
-    action.
+    SHIFT-1 NOTE (LED-3729): under the anonymity constitution, brand-account
+    reply/DM prospecting is forbidden, so engagement targets are mostly
+    un-actionable. Prefer mode="demand_signal": a "target" becomes a
+    demonstrated public question/pain to answer with a BROADCAST report, not a
+    person to contact. The produced artifact is a public report — squarely
+    in-bounds. Do NOT chain scan results into outbound replies.
 
-    Scans X, Reddit (RapidAPI), HN, Dev.to, GitHub for posts where
-    ventures can engage. NamePros flagged as manual_check_needed
-    (no API).
-
-    Run in a /loop for continuous discovery. Deduplicates across runs.
-    Targets are classified as: reply (social engagement), strategic (ledger item), or both.
+    Scans X, Reddit (RapidAPI), HN, Dev.to, GitHub. NamePros flagged as
+    manual_check_needed (no API). Run in a /loop for continuous discovery.
 
     Args:
-        action: "scan" to discover targets, "list" to show recent, "stats" to show counts.
+        action: "scan", "list", "stats", or "backlog".
         platforms: Comma-separated platforms to scan (x, hn, devto, reddit, github, namepros).
         ventures: Comma-separated ventures to scan for. Empty = all.
         keywords: Extra keywords to search for beyond venture topics.
         limit: Max targets per platform.
         draft_replies: If True, auto-draft social posts for "reply" targets.
         create_ledger: If True, create ledger items for "strategic" targets.
+        mode: "engagement" (default) or "demand_signal" (route to report-topic backlog).
 
     Returns:
         Dict whose shape depends on action — scan returns
-        {action, targets_found, targets[], optional processed} with each
-        target's classification (reply / strategic / both) and platform
-        metadata; list returns recent targets; stats returns counts.
-        Every response includes next_steps.
+        {action, targets_found, targets[], optional processed / demand_signals};
+        list returns recent targets; stats returns counts; backlog returns the
+        report-topic candidates. Every response includes next_steps.
     """
     g = _pro_gate_graced("social_target")
     if g:
@@ -11571,7 +11772,12 @@ def delimit_social_target(
         keyword_list = [k.strip() for k in keywords.split(",") if k.strip()] or None
         targets = scan_targets(platform_list, venture_list, keyword_list, limit)
         result = {"action": "scan", "targets_found": len(targets), "targets": targets}
-        if draft_replies or create_ledger:
+        if mode == "demand_signal":
+            # LED-3729: route to the INTERNAL report-topic backlog — research,
+            # not outbound. No replies drafted.
+            from ai.report_backlog import route_demand_signals
+            result["demand_signals"] = route_demand_signals(targets)
+        elif draft_replies or create_ledger:
             processed = process_targets(targets, draft_replies, create_ledger)
             result["processed"] = processed
         return _with_next_steps("social_target", result)
@@ -11579,7 +11785,15 @@ def delimit_social_target(
         return _with_next_steps("social_target", list_targets(limit))
     elif action == "stats":
         return _with_next_steps("social_target", get_stats())
-    return {"error": f"Unknown action: {action}. Supported: scan, list, stats"}
+    elif action == "backlog":
+        from ai.report_backlog import list_candidates
+        candidates = list_candidates(limit=limit)
+        return _with_next_steps("social_target", {
+            "action": "backlog",
+            "count": len(candidates),
+            "candidates": candidates,
+        })
+    return {"error": f"Unknown action: {action}. Supported: scan, list, stats, backlog"}
 
 
 @mcp.tool()
@@ -12187,20 +12401,23 @@ def delimit_content_schedule() -> Dict[str, Any]:
         None.
 
     Returns:
-        Dict with queued tweets, pending videos, recent activity,
-        next_steps.
+        Dict with queued tweets, pending videos, recent activity, the
+        staged reports-distribution queue (LED-3729), and next_steps.
     """
-    from ai.content_engine import get_content_schedule
+    from ai.content_engine import get_content_schedule, get_report_distribution_status
 
-    return _with_next_steps("content_schedule", get_content_schedule())
+    schedule = dict(get_content_schedule())
+    schedule["reports_distribution"] = get_report_distribution_status()
+    return _with_next_steps("content_schedule", schedule)
 
 
 @mcp.tool()
-def delimit_content_publish(content_type: Annotated[str, Field(description="\"tweet\" (default) to post next queued tweet, or \"youtube\" to generate + upload the next video.")] = "tweet") -> Dict[str, Any]:
-    """Manually trigger a content publish (tweet or YouTube video) (Pro).
+def delimit_content_publish(content_type: Annotated[str, Field(description="\"tweet\" (default) to post next queued tweet, \"youtube\" to generate + upload the next video, or \"report\" to STAGE (compose, not post) distribution for the next report.")] = "tweet") -> Dict[str, Any]:
+    """Manually trigger a content publish (tweet, YouTube video, or report) (Pro).
 
-    When to use: to fire off the next queued tweet or video on demand,
-    bypassing the autonomous content loop.
+    When to use: to fire off the next queued tweet or video on demand, or to
+    STAGE distribution of the next mature report across owned broadcast
+    surfaces (README / GitHub Release note / minimal X mirror).
     When NOT to use: to inspect the queue (use
     delimit_content_schedule) or modify it (delimit_content_queue).
 
@@ -12208,15 +12425,18 @@ def delimit_content_publish(content_type: Annotated[str, Field(description="\"tw
     delimit_content_queue mutates queue;
     this performs a single publish step.
 
-    Side effects: writes to the social/YouTube backends — for tweet,
-    posts the next queued tweet; for youtube, generates and uploads.
+    Side effects: for tweet, posts the next queued tweet; for youtube,
+    generates and uploads. For "report" (LED-3729) it is COMPOSE + STAGE
+    ONLY — it writes composed distribution artifacts to a local staging
+    queue and posts NOTHING to X and creates NO live GitHub Release.
 
     Args:
         content_type: "tweet" (default) to post next queued tweet,
-            or "youtube" to generate + upload the next video.
+            "youtube" to generate + upload the next video, or "report"
+            to stage distribution for the next report (no live send).
 
     Returns:
-        Dict with publish result for the chosen content_type.
+        Dict with publish (or, for report, staging) result.
     """
     g = _pro_gate_graced("content_publish")
     if g:
@@ -12228,16 +12448,22 @@ def delimit_content_publish(content_type: Annotated[str, Field(description="\"tw
         from ai.content_engine import populate_video_queue, process_next_video
         populate_video_queue()
         return _with_next_steps("content_publish", process_next_video())
+    elif content_type == "report":
+        # LED-3729: STAGE ONLY — composes distribution artifacts for the next
+        # report; does not post to X or create a Release.
+        from ai.content_engine import stage_next_report_distribution
+        return _with_next_steps("content_publish", stage_next_report_distribution())
     else:
-        return {"error": f"Unknown content_type: {content_type}", "supported": ["tweet", "youtube"]}
+        return {"error": f"Unknown content_type: {content_type}", "supported": ["tweet", "youtube", "report"]}
 
 
 @mcp.tool()
-def delimit_content_queue(action: Annotated[str, Field(description="\"status\" (default), \"seed\", or \"add\".")] = "status", items: Annotated[str, Field(description="For \"add\" — newline-separated tweet texts.")] = "") -> Dict[str, Any]:
-    """Manage the tweet and video content queues.
+def delimit_content_queue(action: Annotated[str, Field(description="\"status\" (default), \"seed\", \"add\", or \"add_report\".")] = "status", items: Annotated[str, Field(description="For \"add\" — newline-separated tweet texts. For \"add_report\" — one or more report slugs (newline- or comma-separated).")] = "") -> Dict[str, Any]:
+    """Manage the tweet, video, and report content queues.
 
     When to use: to view, seed, or add to the autonomous content
-    queues that delimit_content_publish drains.
+    queues that delimit_content_publish drains, or to STAGE a report
+    for distribution (LED-3729).
     When NOT to use: to publish (use delimit_content_publish) or read
     upcoming schedule (delimit_content_schedule).
 
@@ -12245,21 +12471,29 @@ def delimit_content_queue(action: Annotated[str, Field(description="\"status\" (
     delimit_content_schedule reads; this mutates the queue.
 
     Side effects: action="seed" populates queue with defaults;
-    action="add" appends items. action="status" is read-only.
+    action="add" appends tweet items; action="add_report" composes and
+    STAGES report-distribution artifacts (README block / Release note /
+    minimal X mirror) — compose-only, posts NOTHING. action="status" is
+    read-only and now also reports the staged reports-distribution queue.
 
     Args:
-        action: "status" (default), "seed", or "add".
-        items: For "add" — newline-separated tweet texts.
+        action: "status" (default), "seed", "add", or "add_report".
+        items: For "add" — newline-separated tweet texts. For
+            "add_report" — report slugs (newline- or comma-separated).
 
     Returns:
         Dict with queue state and next_steps. Returns
-        {error: "..."} for action="add" with empty items.
+        {error: "..."} for "add"/"add_report" with empty items.
     """
     if action == "status":
-        from ai.content_engine import get_tweet_queue_status, get_content_schedule
+        from ai.content_engine import (
+            get_tweet_queue_status, get_content_schedule,
+            get_report_distribution_status,
+        )
         return _with_next_steps("content_queue", {
             "tweets": get_tweet_queue_status(),
             "schedule": get_content_schedule(),
+            "reports": get_report_distribution_status(),
         })
     elif action == "seed":
         from ai.content_engine import seed_tweet_queue, populate_video_queue
@@ -12273,8 +12507,16 @@ def delimit_content_queue(action: Annotated[str, Field(description="\"status\" (
         if not tweet_list:
             return {"error": "Provide tweet texts in 'items' parameter, separated by newlines"}
         return _with_next_steps("content_queue", add_tweets_to_queue(tweet_list))
+    elif action == "add_report":
+        # LED-3729: STAGE report distribution (compose-only, no live send).
+        from ai.content_engine import enqueue_report_distribution
+        slugs = [s.strip() for s in items.replace(",", "\n").split("\n") if s.strip()]
+        if not slugs:
+            return {"error": "Provide report slug(s) in 'items' (newline- or comma-separated)"}
+        staged = [enqueue_report_distribution(slug) for slug in slugs]
+        return _with_next_steps("content_queue", {"staged": staged})
     else:
-        return {"error": f"Unknown action: {action}", "supported": ["status", "seed", "add"]}
+        return {"error": f"Unknown action: {action}", "supported": ["status", "seed", "add", "add_report"]}
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -14645,57 +14887,3 @@ def delimit_reddit_fetch_thread(thread_id: Annotated[str, Field(description="Red
     
     scored = score_and_classify([thread])
     return {"thread": scored[0] if scored else thread}
-
-@mcp.tool()
-def delimit_json_validate(file_path: Annotated[str, Field(description="Path to the JSON file to validate. Required.")], schema_path: Annotated[Optional[str], Field(description="Optional path to a JSON Schema file to validate against.")] = None) -> Dict[str, Any]:
-    """
-    Validate a JSON file for syntax errors, and optionally against a JSON Schema.
-    """
-    import json
-    import os
-    if not os.path.exists(file_path):
-        return {"error": f"File not found: {file_path}"}
-    try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except json.JSONDecodeError as e:
-        return {"status": "invalid", "error": f"JSON syntax error: {str(e)}"}
-    
-    if schema_path:
-        if not os.path.exists(schema_path):
-            return {"error": f"Schema file not found: {schema_path}"}
-        try:
-            with open(schema_path, "r", encoding="utf-8") as sf:
-                schema = json.load(sf)
-        except json.JSONDecodeError as e:
-            return {"error": f"Schema JSON syntax error: {str(e)}"}
-        
-        try:
-            import jsonschema
-            jsonschema.validate(instance=data, schema=schema)
-        except ImportError:
-            return {"error": "jsonschema package not installed, cannot validate schema"}
-        except Exception as e:
-            return {"status": "invalid", "error": f"Schema validation failed: {str(e)}"}
-            
-    return {"status": "valid"}
-
-@mcp.tool()
-def delimit_product_lookup(url: Annotated[str, Field(description="E-commerce product URL. Required.")], extract_mode: Annotated[str, Field(description="Extraction mode: 'basic' or 'full'. Default 'basic'.")] = "basic") -> Dict[str, Any]:
-    """
-    Extract product specifications from an e-commerce URL. (Mock/stub implementation).
-    """
-    return {
-        "tool": "delimit_product_lookup",
-        "url": url,
-        "mode": extract_mode,
-        "status": "success",
-        "product": {
-            "name": "Sample Product",
-            "price": "$99.99",
-            "specs": {
-                "weight": "1.2kg",
-                "dimensions": "10x10x5"
-            }
-        }
-    }

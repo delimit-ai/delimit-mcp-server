@@ -32,7 +32,13 @@ DEFAULT_PERMISSIONS = {
     "secrets": False,
 }
 
-VALID_MODELS = {"claude", "codex", "gemini", "cursor", "any"}
+# Additive (LED-3709): extend to the models actually present in the
+# ecosystem (~/.delimit/models.json) so per-agent policies can cover them.
+# Existing names are unchanged — this only widens the accepted set.
+VALID_MODELS = {
+    "claude", "codex", "gemini", "cursor", "any",
+    "fable", "grok", "antigravity",
+}
 VALID_ACCESS = {"read-only", "read-write", "none"}
 
 

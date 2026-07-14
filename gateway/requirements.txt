@@ -1,3 +1,14 @@
+# Runtime deps for the Delimit MCP server (ai/server.py).
+# Mirrors [project].dependencies in pyproject.toml. This file is what
+# scripts/sync-gateway.sh copies into the npm bundle (gateway/requirements.txt)
+# and what `delimit setup` installs on a fresh machine — so it MUST list every
+# bare import server.py needs at boot.
+#
+# LED-3806 (clean-baseline-2026 second review): fastmcp was missing here, so a
+# fresh `delimit setup` installed only the 3 lines below, the fastmcp fallback
+# in delimit-setup.js never fired, and `import fastmcp` in ai/server.py killed
+# the MCP server on every clean install. Adding it closes that never-break-installs gap.
+fastmcp>=3.0
 pydantic>=2.0.0
 pyyaml>=6.0
 packaging>=23.0

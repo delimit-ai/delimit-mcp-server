@@ -1,15 +1,21 @@
 /**
- * Tests for the proprietary-gating parity guard (fix/sync-gateway-exclude-parity).
+ * Tests for the FAIL-CLOSED bundle guards (fix/bundle-fail-closed-allowlist).
  *
- * Proves:
- *   1. list-blocked-gateway-paths.js is a faithful single-source-of-truth
- *      projection of package.json's "!gateway/..." negations.
- *   2. check-bundle-parity.sh PASSES on a clean bundle and FAILS when a
- *      package.json-blocked path is present (drift detection).
- *   3. The license_core.py transient-compile input is exempt.
+ * The bundle was inverted from a fail-OPEN blocklist (`gateway/` + a hand-
+ * maintained list of `!` exclusions) to a fail-CLOSED allowlist
+ * (bundle-allowlist.txt IS the security boundary). These tests prove the two
+ * guards that enforce it:
  *
- * The guard tests build a throwaway npm-root fixture (own package.json + copies
- * of the two scripts) so they never depend on the real repo's committed state.
+ *   Guard A — scripts/check-bundle-classification.sh
+ *     Every gateway/ai file must be classified (allowlist OR internal-exclude).
+ *     A NEW, unclassified file is a hard FAIL.
+ *
+ *   Guard B — scripts/check-bundle-parity.sh
+ *     `npm pack` must ship EXACTLY the allowlist — any extra shipped gateway
+ *     path (a leak) or any missing allowlisted path (a mis-exclusion) fails.
+ *
+ * Both guards are exercised against throwaway fixtures so they never depend on
+ * the real repo's committed state.
  */
 
 const { describe, it } = require('node:test');
@@ -21,99 +27,172 @@ const path = require('node:path');
 
 const REPO_ROOT = path.join(__dirname, '..');
 
-function realBlockedFromPackageJson() {
-  const pkg = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8'));
-  return (pkg.files || [])
-    .filter((f) => typeof f === 'string' && f.startsWith('!gateway/'))
-    .map((f) => f.slice(1));
+function writeFile(dir, rel, body = '# content\n') {
+  const p = path.join(dir, rel);
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, body);
 }
 
-describe('list-blocked-gateway-paths.js (single source of truth)', () => {
-  it('emits exactly the package.json "!gateway/" negations', () => {
-    const out = execFileSync('node', [path.join(REPO_ROOT, 'scripts', 'list-blocked-gateway-paths.js')], {
+function runScript(dir, script, env = {}) {
+  try {
+    const out = execFileSync('bash', [path.join(dir, 'scripts', script)], {
       encoding: 'utf8',
+      cwd: dir,
+      env: { ...process.env, ...env },
     });
-    const emitted = out.split('\n').filter(Boolean);
-    assert.deepStrictEqual(emitted, realBlockedFromPackageJson());
-    assert.ok(emitted.length >= 20, 'expected the full blocked set, not a hand-trimmed subset');
-  });
+    return { code: 0, out };
+  } catch (e) {
+    return { code: e.status, out: (e.stdout || '') + (e.stderr || '') };
+  }
+}
 
-  it('does NOT emit include patterns (e.g. the license_core .so)', () => {
-    const out = execFileSync('node', [path.join(REPO_ROOT, 'scripts', 'list-blocked-gateway-paths.js')], {
-      encoding: 'utf8',
-    });
-    assert.ok(!out.includes('.so'), 'include patterns must not appear in the blocked list');
-  });
-});
-
-describe('check-bundle-parity.sh (drift guard)', () => {
-  function makeFixture(blockedList) {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'parity-fix-'));
+// ── Guard A — classification ────────────────────────────────────────────────
+describe('check-bundle-classification.sh (fail-closed classification)', () => {
+  function makeFixture({ allow, exclude, aiFiles }) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'classify-fix-'));
     fs.mkdirSync(path.join(dir, 'scripts'), { recursive: true });
-    // Minimal package.json whose negations we control.
-    const files = ['gateway/', ...blockedList.map((b) => '!' + b)];
-    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'fixture', files }, null, 2));
-    // Copy the two scripts under test.
-    for (const s of ['check-bundle-parity.sh', 'list-blocked-gateway-paths.js']) {
-      fs.copyFileSync(path.join(REPO_ROOT, 'scripts', s), path.join(dir, 'scripts', s));
-    }
+    fs.copyFileSync(
+      path.join(REPO_ROOT, 'scripts', 'check-bundle-classification.sh'),
+      path.join(dir, 'scripts', 'check-bundle-classification.sh')
+    );
+    fs.writeFileSync(
+      path.join(dir, 'bundle-allowlist.txt'),
+      '# allowlist\n' + allow.join('\n') + '\n'
+    );
+    fs.writeFileSync(
+      path.join(dir, 'bundle-internal-exclude.txt'),
+      '# exclude\n' + exclude.join('\n') + '\n'
+    );
+    // No gateway SOURCE tree — force committed-bundle mode via the fixture's
+    // own gateway/ai. Point GATEWAY_OVERRIDE at a non-existent path so the
+    // guard falls back to the fixture bundle.
+    for (const f of aiFiles) writeFile(dir, f);
     return dir;
   }
 
-  function runGuard(dir, env = {}) {
-    try {
-      const out = execFileSync('bash', [path.join(dir, 'scripts', 'check-bundle-parity.sh')], {
-        encoding: 'utf8',
-        env: { ...process.env, ...env },
-      });
-      return { code: 0, out };
-    } catch (e) {
-      return { code: e.status, out: (e.stdout || '') + (e.stderr || '') };
-    }
-  }
+  const env = { GATEWAY_OVERRIDE: '/nonexistent/gateway' };
 
-  function writeFile(dir, rel) {
-    const p = path.join(dir, rel);
-    fs.mkdirSync(path.dirname(p), { recursive: true });
-    fs.writeFileSync(p, '# proprietary\n');
-  }
-
-  it('PASSES when no blocked path is present', () => {
-    const dir = makeFixture(['gateway/ai/social.py', 'gateway/ai/self_repair/']);
-    writeFile(dir, 'gateway/ai/server.py'); // an allowed file
-    const r = runGuard(dir);
+  it('PASSES when every gateway/ai file is classified', () => {
+    const dir = makeFixture({
+      allow: ['gateway/ai/server.py'],
+      exclude: ['gateway/ai/swarm.py'],
+      aiFiles: ['gateway/ai/server.py', 'gateway/ai/swarm.py'],
+    });
+    const r = runScript(dir, 'check-bundle-classification.sh', env);
     assert.strictEqual(r.code, 0, r.out);
-    assert.match(r.out, /bundle parity/i);
+    assert.match(r.out, /every gateway\/ai file is classified/i);
   });
 
-  it('FAILS when a blocked file is present (drift)', () => {
-    const dir = makeFixture(['gateway/ai/social.py', 'gateway/ai/seal/producer.py']);
-    writeFile(dir, 'gateway/ai/seal/producer.py'); // planted leak
-    const r = runGuard(dir);
-    assert.strictEqual(r.code, 1, 'guard must fail on a committed blocked file');
+  it('FAILS on a NEW unclassified gateway/ai file', () => {
+    const dir = makeFixture({
+      allow: ['gateway/ai/server.py'],
+      exclude: ['gateway/ai/swarm.py'],
+      aiFiles: [
+        'gateway/ai/server.py',
+        'gateway/ai/swarm.py',
+        'gateway/ai/brand_new_internal.py', // neither list
+      ],
+    });
+    const r = runScript(dir, 'check-bundle-classification.sh', env);
+    assert.strictEqual(r.code, 1, 'unclassified file must fail the guard');
+    assert.match(r.out, /CLASSIFICATION FAILURE/);
+    assert.match(r.out, /brand_new_internal\.py/);
+  });
+
+  it('ignores __pycache__, .pyc and .so artifacts', () => {
+    const dir = makeFixture({
+      allow: ['gateway/ai/server.py'],
+      exclude: [],
+      aiFiles: [
+        'gateway/ai/server.py',
+        'gateway/ai/__pycache__/server.cpython-310.pyc',
+        'gateway/ai/license_core.cpython-310-x86_64-linux-gnu.so',
+      ],
+    });
+    const r = runScript(dir, 'check-bundle-classification.sh', env);
+    assert.strictEqual(r.code, 0, r.out);
+  });
+});
+
+// ── Guard B — tarball parity against the allowlist ──────────────────────────
+describe('check-bundle-parity.sh (fail-closed allowlist parity)', () => {
+  function makeFixture({ files, allow, gatewayFiles }) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'parity-fix-'));
+    fs.mkdirSync(path.join(dir, 'scripts'), { recursive: true });
+    fs.copyFileSync(
+      path.join(REPO_ROOT, 'scripts', 'check-bundle-parity.sh'),
+      path.join(dir, 'scripts', 'check-bundle-parity.sh')
+    );
+    fs.writeFileSync(
+      path.join(dir, 'package.json'),
+      JSON.stringify({ name: 'fixture', version: '0.0.0', files }, null, 2)
+    );
+    fs.writeFileSync(
+      path.join(dir, 'bundle-allowlist.txt'),
+      '# allowlist\n' + allow.join('\n') + '\n'
+    );
+    for (const f of gatewayFiles) writeFile(dir, f);
+    return dir;
+  }
+
+  it('PASSES when the pack equals the allowlist exactly', () => {
+    const dir = makeFixture({
+      files: ['gateway/ai/server.py', 'gateway/ai/license.py'],
+      allow: ['gateway/ai/server.py', 'gateway/ai/license.py'],
+      gatewayFiles: ['gateway/ai/server.py', 'gateway/ai/license.py'],
+    });
+    const r = runScript(dir, 'check-bundle-parity.sh');
+    assert.strictEqual(r.code, 0, r.out);
+    assert.match(r.out, /ships exactly the allowlist/i);
+  });
+
+  it('FAILS when the pack ships a path NOT in the allowlist (leak)', () => {
+    const dir = makeFixture({
+      // package.json ships an internal file the allowlist does not permit.
+      files: ['gateway/ai/server.py', 'gateway/ai/swarm.py'],
+      allow: ['gateway/ai/server.py'],
+      gatewayFiles: ['gateway/ai/server.py', 'gateway/ai/swarm.py'],
+    });
+    const r = runScript(dir, 'check-bundle-parity.sh');
+    assert.strictEqual(r.code, 1, 'a shipped non-allowlisted path must fail');
     assert.match(r.out, /PARITY VIOLATION/);
-    assert.match(r.out, /seal\/producer\.py/);
+    assert.match(r.out, /swarm\.py/);
   });
 
-  it('FAILS when a blocked directory has any file under it', () => {
-    const dir = makeFixture(['gateway/ai/self_repair/']);
-    writeFile(dir, 'gateway/ai/self_repair/watcher.py'); // planted leak in dir
-    const r = runGuard(dir);
-    assert.strictEqual(r.code, 1);
-    assert.match(r.out, /self_repair\//);
+  it('FAILS when an allowlisted path is MISSING from the pack', () => {
+    const dir = makeFixture({
+      files: ['gateway/ai/server.py'], // does not ship license.py
+      allow: ['gateway/ai/server.py', 'gateway/ai/license.py'],
+      gatewayFiles: ['gateway/ai/server.py', 'gateway/ai/license.py'],
+    });
+    const r = runScript(dir, 'check-bundle-parity.sh');
+    assert.strictEqual(r.code, 1, 'a missing allowlisted path must fail');
+    assert.match(r.out, /MISSING from npm pack/);
+    assert.match(r.out, /license\.py/);
   });
 
-  it('EXEMPTS license_core.py (transient compile input)', () => {
-    const dir = makeFixture(['gateway/ai/license_core.py']);
-    writeFile(dir, 'gateway/ai/license_core.py'); // present but exempt
-    const r = runGuard(dir);
+  it('accepts the compiled license_core .so via the allowlist glob', () => {
+    const dir = makeFixture({
+      files: ['gateway/ai/server.py', 'gateway/ai/license_core.cpython-*-*.so'],
+      allow: ['gateway/ai/server.py', 'gateway/ai/license_core.cpython-*-*.so'],
+      gatewayFiles: [
+        'gateway/ai/server.py',
+        'gateway/ai/license_core.cpython-310-x86_64-linux-gnu.so',
+      ],
+    });
+    const r = runScript(dir, 'check-bundle-parity.sh');
     assert.strictEqual(r.code, 0, r.out);
   });
 
   it('honours the emergency override', () => {
-    const dir = makeFixture(['gateway/ai/social.py']);
-    writeFile(dir, 'gateway/ai/social.py');
-    const r = runGuard(dir, { DELIMIT_ALLOW_COMMITTED_LEAK: '1' });
+    const dir = makeFixture({
+      files: ['gateway/ai/server.py', 'gateway/ai/swarm.py'],
+      allow: ['gateway/ai/server.py'],
+      gatewayFiles: ['gateway/ai/server.py', 'gateway/ai/swarm.py'],
+    });
+    const r = runScript(dir, 'check-bundle-parity.sh', {
+      DELIMIT_ALLOW_COMMITTED_LEAK: '1',
+    });
     assert.strictEqual(r.code, 0, r.out);
     assert.match(r.out, /overriding/i);
   });
