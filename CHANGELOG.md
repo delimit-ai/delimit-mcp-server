@@ -1,3 +1,33 @@
+## [4.16.0] - 2026-07-14
+
+Security-focused release: the npm bundle is now built from a fail-closed
+allowlist, removing internal files that previous versions shipped.
+
+### Security
+- **Fail-closed bundle allowlist** (#158, #159, #160): the package now ships
+  only explicitly reviewed gateway files (137 paths). ~22 internal modules
+  that 4.14.2 shipped unintentionally are removed. Two CI guards block any
+  unclassified or non-allowlisted file from ever entering the tarball.
+
+### Added
+- `delimit chat --model <id>` — per-launch model selector for the session
+  launcher; the rest of the fallback chain stays as Auto-Phoenix (#156)
+- Launch pre-brief: `delimit chat` shows pending approvals/agents at start (#155)
+- Cross-model session hooks (SessionStart digest echo + subagent flight
+  recorder) (#151)
+
+### Fixed
+- Handoff receipts now resolve across namespaces (#157)
+- MCP self-reported version derived from the package manifest instead of a
+  stale hardcoded constant; `gateway/VERSION` marker added (#161, gateway #293)
+- CLI description aligned to the product promise (#161)
+- MCP directory (Glama) Docker surface pinned to the core toolset (#152)
+
+### CI/CD
+- Fail-closed identity guard on commit identities (#154)
+- Publish workflow repaired (clean-tree ordering) + bundle anti-drift assert;
+  release pipeline validated end-to-end via dry run before this release
+
 ## [4.15.0] - 2026-07-05
 
 ### Fixed
