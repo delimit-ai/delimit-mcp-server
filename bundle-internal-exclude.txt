@@ -15,9 +15,9 @@
 # list is the audit record of *why* each non-shipped file is excluded; see
 # bundle-classification.md for the per-file reason.
 # ============================================================================
-
 gateway/ai/board_pack.py
 gateway/ai/board_report.py
+gateway/ai/brand_notes.py
 gateway/ai/content_engine.py
 gateway/ai/content_grounding/__init__.py
 gateway/ai/content_grounding/build.py
