@@ -8,6 +8,7 @@
     "bin/",
     "lib/",
     "adapters/",
+    "gateway/VERSION",
     "gateway/ai/license_core.cpython-*-*.so",
     "gateway/ai/__init__.py",
     "gateway/ai/_compile_status.py",

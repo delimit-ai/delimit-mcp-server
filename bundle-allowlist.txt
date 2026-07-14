@@ -25,6 +25,10 @@
 # --- compiled proprietary engine (source EXCLUDED; .so shipped) ---
 gateway/ai/license_core.cpython-*-*.so
 
+# --- version marker (written by sync-gateway.sh from package.json; lets the
+#     MCP server self-report the true shipped version — LED-1889) ---
+gateway/VERSION
+
 # --- gateway/ai (public MCP server surface) ---
 gateway/ai/__init__.py
 gateway/ai/_compile_status.py
