@@ -274,6 +274,22 @@ def _ledger_update_item(item_id: str, *, status: str, project_path: str = ".") -
     return _lm.update_item(item_id, status=status, project_path=project_path)
 
 
+def _audit_append_event(kind: str, payload: Dict[str, Any], *, source: str = "",
+                        quorum: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Indirection layer so tests can patch the audit-stream hook.
+
+    LED-1908/1909: evidence-class events (deliberation consensus records)
+    route to the append-only audit stream instead of the WORK ledger. The
+    underlying append is exception-safe; this wrapper adds one more layer of
+    defense so governance can never fail on an audit write."""
+    try:
+        import ai.audit_stream as _as
+        return _as.append_event(kind, payload, source=source, quorum=quorum)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Governance audit-stream append failed: %s", e)
+        return {"ok": False, "error": str(e)}
+
+
 # Governance rules — what triggers auto-ledger-creation
 RULES = {
     "test_coverage": {
@@ -312,6 +328,10 @@ RULES = {
         "ledger_title": "Deliberation consensus reached — action items pending",
         "ledger_type": "strategy",
         "ledger_priority": "P1",
+        # LED-1908/1909: consensus records are EVIDENCE, not actionable work —
+        # they route to ~/.delimit/audit_stream.jsonl, never to the ledger.
+        "evidence_stream": True,
+        "audit_kind": "deliberation_consensus",
     },
     "gov_health": {
         "trigger_key": "status",
@@ -357,6 +377,10 @@ MILESTONES = {
         "ledger_type": "strategy",
         "ledger_priority": "P1",
         "auto_done": True,
+        # LED-1908/1909: "Consensus reached: ..." is an evidence record, not
+        # an open work item — route to the append-only audit stream.
+        "evidence_stream": True,
+        "audit_kind": "deliberation_consensus",
     },
     "test_generate": {
         "threshold_key": "tests_generated",
@@ -753,6 +777,8 @@ def govern(tool_name: str, result: Dict[str, Any], project_path: str = ".") -> D
                 "type": rule.get("ledger_type", "task"),
                 "priority": rule.get("ledger_priority", "P1"),
                 "source": f"governance:{clean_name}",
+                "evidence_stream": bool(rule.get("evidence_stream")),
+                "audit_kind": rule.get("audit_kind", ""),
             })
 
     # 1b. Check milestone rules (auto-create DONE items for achievements)
@@ -806,7 +832,56 @@ def govern(tool_name: str, result: Dict[str, Any], project_path: str = ".") -> D
                 "priority": milestone.get("ledger_priority", "P1"),
                 "source": f"milestone:{clean_name}",
                 "auto_done": milestone.get("auto_done", True),
+                "evidence_stream": bool(milestone.get("evidence_stream")),
+                "audit_kind": milestone.get("audit_kind", ""),
             })
+
+    # 1c. LED-1908/1909 audit-stream split: evidence-class events (deliberation
+    # consensus records) stop landing in the WORK ledger as open items and
+    # instead append to ~/.delimit/audit_stream.jsonl. Gate FAILURES and
+    # sensor findings are actionable and KEEP creating work items below.
+    evidence_items = [i for i in auto_items if i.get("evidence_stream")]
+    auto_items = [i for i in auto_items if not i.get("evidence_stream")]
+    if evidence_items:
+        audit_events = []
+        _evidence_test_mode = _is_test_mode()
+        for ev in evidence_items:
+            payload = {
+                "title": ev["title"],
+                "tool": tool_name,
+                # Evidence provenance: carry the deliberation gist, never the
+                # full (potentially huge) tool result.
+                "question": str(_deep_get(result, "question") or "")[:200],
+                "final_verdict": str(_deep_get(result, "final_verdict") or "")[:200],
+                "unanimous": _deep_get(result, "unanimous"),
+                "scope": _deep_get(result, "scope"),
+                "deliberation_id": _deep_get(result, "deliberation_id"),
+                "saved_to": _deep_get(result, "saved_to"),
+            }
+            if _evidence_test_mode:
+                # Mirror the ledger test-mode skip: never write the real
+                # audit stream from a test run.
+                logger.debug("Test mode: skipping audit-stream write for %s", ev["title"])
+                appended = {"ok": True, "test_mode": True}
+            else:
+                appended = _audit_append_event(
+                    ev.get("audit_kind") or "evidence",
+                    {k: v for k, v in payload.items() if v not in (None, "")},
+                    source=ev["source"],
+                    quorum=result.get("quorum") if isinstance(result, dict) else None,
+                )
+            audit_events.append({
+                "kind": ev.get("audit_kind") or "evidence",
+                "source": ev["source"],
+                "ok": bool(appended.get("ok")),
+            })
+        # ADDITIVE key — existing consumers of governed_result["governance"]
+        # (ledger_items_created) are unaffected.
+        governed_result["audit_stream"] = {
+            "action": "audit_events_recorded",
+            "events": audit_events,
+            "reason": "Evidence-class event routed to audit stream (LED-1908/1909)",
+        }
 
     # 2. Auto-create ledger items (with dedup — skip if open item with same title exists)
     if auto_items:

@@ -46,6 +46,7 @@
     "gateway/ai/dispatch_gate.py",
     "gateway/ai/drift_monitor.py",
     "gateway/ai/events.py",
+    "gateway/ai/audit_stream.py",
     "gateway/ai/governance.py",
     "gateway/ai/governance.pyi",
     "gateway/ai/governance_hardening.py",

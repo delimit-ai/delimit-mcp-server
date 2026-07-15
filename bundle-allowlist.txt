@@ -21,21 +21,20 @@
 # the compiled license_core .so (built at publish time, name varies by ABI).
 # Classification rationale per path: bundle-classification.md
 # ============================================================================
-
 # --- compiled proprietary engine (source EXCLUDED; .so shipped) ---
-gateway/ai/license_core.cpython-*-*.so
-
 # --- version marker (written by sync-gateway.sh from package.json; lets the
 #     MCP server self-report the true shipped version — LED-1889) ---
-gateway/VERSION
-
 # --- gateway/ai (public MCP server surface) ---
+# --- gateway/core (API governance engine: diff / semver / policy) ---
+# --- gateway/tasks (CLI task scripts: validate / diff / policy) ---
+gateway/VERSION
 gateway/ai/__init__.py
 gateway/ai/_compile_status.py
 gateway/ai/_paths.py
 gateway/ai/activate_helpers.py
 gateway/ai/agent_dispatch.py
 gateway/ai/agent_policy.py
+gateway/ai/audit_stream.py
 gateway/ai/backends/__init__.py
 gateway/ai/backends/async_utils.py
 gateway/ai/backends/deploy_bridge.py
@@ -82,6 +81,7 @@ gateway/ai/ledger_proof.py
 gateway/ai/ledger_propose.py
 gateway/ai/license.py
 gateway/ai/license_consistency.py
+gateway/ai/license_core.cpython-*-*.so
 gateway/ai/license_core.pyi
 gateway/ai/local_server.py
 gateway/ai/mcp_bridge.py
@@ -123,8 +123,6 @@ gateway/ai/tracing.py
 gateway/ai/tui.py
 gateway/ai/usage_allowlist.py
 gateway/ai/work_order.py
-
-# --- gateway/core (API governance engine: diff / semver / policy) ---
 gateway/core/__init__.py
 gateway/core/auto_baseline.py
 gateway/core/ci_formatter.py
@@ -159,8 +157,6 @@ gateway/core/zero_spec/detector.py
 gateway/core/zero_spec/express_extractor.py
 gateway/core/zero_spec/fastapi_extractor.py
 gateway/core/zero_spec/nestjs_extractor.py
-
-# --- gateway/tasks (CLI task scripts: validate / diff / policy) ---
 gateway/tasks/__init__.py
 gateway/tasks/check_policy.py
 gateway/tasks/check_policy_v2.py
