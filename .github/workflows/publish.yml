@@ -70,11 +70,14 @@ jobs:
       - name: Assert committed bundle is in sync with gateway
         working-directory: npm-delimit
         run: |
-          # Ignore the transient license_core.py (kept for the .so compile) and
-          # any generated .so — those are expected to differ from HEAD.
+          # Ignore the transient license_core.py (kept for the .so compile),
+          # any generated .so, and checksums.sha256 (a manifest OVER those .so —
+          # CI compiles fresh .so [LED-1259], so its hashes differ from HEAD's;
+          # it is regenerated to match the actual shipped .so at pack time).
           DIRTY="$(git status --porcelain -- gateway/ \
             | grep -v 'gateway/ai/license_core.py' \
-            | grep -v 'gateway/ai/license_core.cpython' || true)"
+            | grep -v 'gateway/ai/license_core.cpython' \
+            | grep -v 'gateway/ai/checksums.sha256' || true)"
           if [ -n "$DIRTY" ]; then
             echo "::error::Committed bundle is STALE vs delimit-gateway. Run 'npm run sync-gateway', review, and COMMIT the bundle before tagging a release."
             echo "$DIRTY"
