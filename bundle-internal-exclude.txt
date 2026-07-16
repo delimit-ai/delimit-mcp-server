@@ -83,6 +83,7 @@ gateway/ai/report_backlog.py
 gateway/ai/reports_distribution.py
 gateway/ai/reports_distribution_drainer.py
 gateway/ai/route_daemon.py
+gateway/ai/schemas/__init__.py
 gateway/ai/screen_record.py
 gateway/ai/seal/A1_BUNDLE.md
 gateway/ai/seal/producer.py
