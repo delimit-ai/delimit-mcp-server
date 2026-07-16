@@ -138,6 +138,7 @@ gateway/ai/swarm_marshal/transforms.py
 gateway/ai/swarm_p1/__init__.py
 gateway/ai/swarm_p1/actions.py
 gateway/ai/swarm_p1/config.py
+gateway/ai/swarm_p1/custodian.py
 gateway/ai/swarm_p1/daemon.py
 gateway/ai/swarm_safety/__init__.py
 gateway/ai/swarm_safety/claims.py

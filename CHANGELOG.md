@@ -1,3 +1,19 @@
+## [4.16.1] - 2026-07-15
+
+Reliability release for the `delimit chat` session launcher (Auto-Phoenix).
+
+### Fixed
+- A model that failed over (e.g. during a quota window) was excluded for the
+  entire process lifetime; failures now expire after 30 minutes
+  (`DELIMIT_PHOENIX_FAIL_TTL_MS` to override) and the launch probe re-verifies
+  health before returning to it (#166)
+- The launch health probe keyed off words like "quota"/"limit" in the model's
+  free-form reply, causing false failovers; verdicts are now deterministic
+  (exit code + stderr signatures only), and codex is probed before handoff
+  instead of being trusted blind (#166)
+- Deliberation results now carry a `quorum` record (additive) and sub-floor
+  panels are labeled non-authoritative (gateway sync)
+
 ## [4.16.0] - 2026-07-14
 
 Security-focused release: the npm bundle is now built from a fail-closed
