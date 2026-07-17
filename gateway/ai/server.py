@@ -9609,6 +9609,7 @@ def delimit_deliberate(
     max_rounds: Annotated[int, Field(description="Max rounds. Default 3 for debate, 6 for dialogue.")] = 3,
     save_path: Annotated[str, Field(description="Optional file path to save the full transcript.")] = "",
     scope: Annotated[str, Field(description="Optional scope override — \"strategic\", \"social\", or \"operational\". Empty = engine classifies from keywords.")] = "",
+    context_files: Annotated[Optional[List[str]], Field(description="Optional list of file paths whose contents are read server-side, redacted (secrets/PII), size-capped, and injected as a \"Referenced Files\" block so the panel can reason over real source (panelists have no filesystem access). Fails closed per file.")] = None,
 ) -> Dict[str, Any]:
     """Run multi-model consensus via AI-to-AI deliberation (Pro).
 
@@ -9638,6 +9639,12 @@ def delimit_deliberate(
         save_path: Optional file path to save the full transcript.
         scope: Optional scope override — "strategic", "social", or
             "operational". Empty = engine classifies from keywords.
+        context_files: Optional list of file paths. Contents are read
+            server-side, redacted (secrets/PII) before leaving the machine,
+            size-capped, and appended as a "Referenced Files" block. The
+            panel has no filesystem access, so this is the only way it sees
+            real file content. Fails closed (an unreadable/oversize file is
+            annotated, never aborts the deliberation).
 
     Returns:
         Dict with the consensus result, per-round transcripts, and
@@ -9655,6 +9662,7 @@ def delimit_deliberate(
         max_rounds=max_rounds,
         save_path=save_path or "",
         scope=scope or "",
+        context_files=context_files,
     )
 
     # LED-978: a blocked deliberation returns an error dict; pass it straight

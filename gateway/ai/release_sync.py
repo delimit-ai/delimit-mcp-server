@@ -34,7 +34,7 @@ DEFAULT_CONFIG = {
         "homepage": "https://delimit.ai",
         "docs": "https://delimit.ai/docs",
         "github": "https://github.com/delimit-ai/delimit-mcp-server",
-        "action": "https://github.com/marketplace/actions/delimit-api-governance",
+        "action": "https://github.com/marketplace/actions/delimit-merge-gate-for-ai-written-code",
         "npm": "https://www.npmjs.com/package/delimit-cli",
         "quickstart": "https://github.com/delimit-ai/delimit-mcp-server-quickstart",
     },
