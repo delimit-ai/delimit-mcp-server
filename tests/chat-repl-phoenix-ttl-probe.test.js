@@ -149,6 +149,27 @@ describe('LED-3433 deterministic quota probe', () => {
         assert.strictEqual(c.verdict, 'probe_error'); // fails over, but not blamed on quota
     });
 
+    it('non-interactive TTY error (codex "stdin is not a terminal") is reachable, NOT a probe failure', () => {
+        const r = replWith({});
+        // Real codex probe output: it launches then refuses non-interactive stdin.
+        assert.strictEqual(
+            r.classifyProbeResult(probeResult({ status: 1, stderr: 'Error: stdin is not a terminal' })).verdict,
+            'noninteractive',
+        );
+        assert.strictEqual(
+            r.classifyProbeResult(probeResult({ status: 1, stderr: 'raw mode is not supported: not a tty' })).verdict,
+            'noninteractive',
+        );
+        // And probeModelHealth PROCEEDS (returns true) rather than failing over.
+        assert.strictEqual(
+            silence(() => r.probeModelHealthFromResult
+                ? r.probeModelHealthFromResult({ status: 1, stderr: 'stdin is not a terminal' })
+                : (r._runProbe = () => probeResult({ status: 1, stderr: 'stdin is not a terminal' }),
+                   r.probeModelHealth({ id: 'codex' }, '/fake/shim'))),
+            true,
+        );
+    });
+
     it('timeout (ETIMEDOUT / SIGTERM / 143) stays healthy-but-slow', () => {
         const r = replWith({});
         assert.strictEqual(r.classifyProbeResult(probeResult({ status: 143 })).verdict, 'slow');
