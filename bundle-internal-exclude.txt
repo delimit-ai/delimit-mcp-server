@@ -164,3 +164,5 @@ gateway/ai/workers/outreach_drafter.py
 gateway/ai/workers/pr_drafter.py
 gateway/ai/x_ranker.py
 gateway/core/diff_engine_v2.py.bak
+gateway/ai/outreach_identity_firewall.py
+gateway/ai/fs_sector_denylist.txt
