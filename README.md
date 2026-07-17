@@ -6,7 +6,7 @@ Wrap any AI coding assistant (Claude Code, Codex, Cursor, Gemini CLI) with a gov
 
 [![npm](https://img.shields.io/npm/v/delimit-cli)](https://www.npmjs.com/package/delimit-cli)
 [![Tests](https://img.shields.io/badge/tests-4800%2B%20passing-brightgreen)](https://github.com/delimit-ai/delimit-mcp-server)
-[![GitHub Action](https://img.shields.io/badge/GitHub%20Action-latest-blue)](https://github.com/marketplace/actions/delimit-api-governance)
+[![GitHub Action](https://img.shields.io/badge/GitHub%20Action-latest-blue)](https://github.com/marketplace/actions/delimit-merge-gate-for-ai-written-code)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Glama Score](https://glama.ai/mcp/servers/delimit-ai/delimit-mcp-server/badges/score.svg)](https://glama.ai/mcp/servers/delimit-ai/delimit-mcp-server/score)
 
@@ -321,7 +321,7 @@ jobs:
 
 That's it. Delimit auto-fetches the base branch spec, diffs it, and posts a PR comment with breaking changes, semver classification, migration guides, and governance gate results.
 
-[View on GitHub Marketplace](https://github.com/marketplace/actions/delimit-api-governance) | [See a live demo (23 breaking changes)](https://github.com/delimit-ai/delimit-action-demo/pull/2)
+[View on GitHub Marketplace](https://github.com/marketplace/actions/delimit-merge-gate-for-ai-written-code) | [See a live demo (23 breaking changes)](https://github.com/delimit-ai/delimit-action-demo/pull/2)
 
 ### Example PR comment
 
@@ -571,7 +571,7 @@ If you spot another code path that could phone home without disclosure, file an 
 - [delimit.ai](https://delimit.ai) -- homepage
 - [Dashboard](https://app.delimit.ai) -- governance console
 - [Docs](https://delimit.ai/docs) -- full documentation
-- [GitHub Action](https://github.com/marketplace/actions/delimit-api-governance) -- Marketplace listing
+- [GitHub Action](https://github.com/marketplace/actions/delimit-merge-gate-for-ai-written-code) -- Marketplace listing
 - [Quickstart](https://github.com/delimit-ai/delimit-mcp-server) -- try it in 2 minutes
 - [npm](https://www.npmjs.com/package/delimit-cli) -- CLI package
 - [Pricing](https://delimit.ai/pricing) -- free tier + Pro
