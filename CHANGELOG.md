@@ -1,3 +1,32 @@
+## [4.16.3] - 2026-07-18
+
+Reliability + opsec release. Session-end auto-capture now installs correctly,
+plus a scheduled commit-author audit and bundle-classification hardening.
+
+### Fixed
+- The SessionEnd auto-capture hook is now installed in the nested settings
+  shape Claude Code expects, so end-of-session handoff/context capture fires
+  automatically instead of being silently dropped (#178)
+
+### Changed
+- Always-on scheduled commit-author audit workflow to catch identity drift on
+  the repo (opsec, LED-3830) (#177)
+- Bundle classification: `outreach_submit` and its wiring are classified
+  INTERNAL and kept out of the published npm tarball (LED-1938) (#176);
+  firewall files likewise classified INTERNAL-EXCLUDE (#175)
+
+## [4.16.2] - 2026-07-17
+
+Maintenance release: runtime slug fix synced from the gateway plus onboarding
+and chat-launcher fixes.
+
+### Fixed
+- `delimit chat`: a codex TTY probe error is now treated as reachable rather
+  than a probe failure, preventing false failovers (#173)
+- Repointed dead GitHub Marketplace slugs in the shipped `CLAUDE.md`
+  onboarding template and README to the live listing (#171, #172)
+- MCP runtime slug fix synced from the gateway (gateway #301)
+
 ## [4.16.1] - 2026-07-15
 
 Reliability release for the `delimit chat` session launcher (Auto-Phoenix).
