@@ -1037,6 +1037,144 @@ describe('STR-2202 subagent flight-recorder (PostToolUse)', () => {
 });
 
 // -----------------------------------------------------------------------
+// SessionEnd hook — deterministic capture floor on real session exit
+// -----------------------------------------------------------------------
+
+describe('SessionEnd hook install', () => {
+    beforeEach(() => { setupTmpHome(); });
+    afterEach(() => { teardownTmpHome(); });
+
+    it('installs a SessionEnd hook in the NESTED shape pointing at delimit-session-end', () => {
+        const claudeDir = path.join(tmpDir, '.claude');
+        fs.mkdirSync(claudeDir, { recursive: true });
+        const tool = { id: 'claude', name: 'Claude Code', configPath: path.join(claudeDir, 'settings.json') };
+
+        const changes = crossModelHooks.installClaudeHooks(tool, { session_start: true, conditional_hooks: false });
+
+        assert.ok(changes.includes('SessionEnd'), 'SessionEnd change should be reported');
+
+        const config = JSON.parse(fs.readFileSync(tool.configPath, 'utf-8'));
+        assert.ok(Array.isArray(config.hooks.SessionEnd), 'SessionEnd should be an array');
+        assert.strictEqual(config.hooks.SessionEnd.length, 1, 'exactly one SessionEnd group');
+
+        const group = config.hooks.SessionEnd[0];
+        // NESTED shape: { matcher, hooks: [{ type, command, timeout }] }
+        assert.strictEqual(group.matcher, '', 'matcher present (nested shape)');
+        assert.ok(Array.isArray(group.hooks), 'nested hooks[] array present');
+        assert.strictEqual(group.hooks[0].type, 'command');
+        assert.ok(group.hooks[0].command.includes('delimit-session-end'), 'points at delimit-session-end script');
+        assert.strictEqual(group.hooks[0].timeout, 10, 'time-boxed under 10s');
+
+        // The deployed script exists and is executable.
+        const scriptPath = path.join(claudeDir, 'hooks', 'delimit-session-end');
+        assert.ok(fs.existsSync(scriptPath), 'delimit-session-end script deployed');
+        assert.ok((fs.statSync(scriptPath).mode & 0o111) !== 0, 'script is executable');
+    });
+
+    it('NEVER writes a FLAT-shape SessionEnd entry (Claude Code silently ignores flat)', () => {
+        const claudeDir = path.join(tmpDir, '.claude');
+        fs.mkdirSync(claudeDir, { recursive: true });
+        const tool = { id: 'claude', name: 'Claude Code', configPath: path.join(claudeDir, 'settings.json') };
+
+        crossModelHooks.installClaudeHooks(tool, { session_start: true, conditional_hooks: false });
+
+        const config = JSON.parse(fs.readFileSync(tool.configPath, 'utf-8'));
+        for (const group of config.hooks.SessionEnd) {
+            // A flat entry carries command/type at the top level and no hooks[].
+            assert.strictEqual(group.command, undefined, 'no top-level command (would be flat)');
+            assert.strictEqual(group.type, undefined, 'no top-level type (would be flat)');
+            assert.ok(Array.isArray(group.hooks), 'every group uses nested hooks[]');
+        }
+    });
+
+    it('the deployed script does a deterministic, no-LLM floor capture (git + ledger + transcript tail)', () => {
+        const claudeDir = path.join(tmpDir, '.claude');
+        fs.mkdirSync(claudeDir, { recursive: true });
+        const tool = { id: 'claude', name: 'Claude Code', configPath: path.join(claudeDir, 'settings.json') };
+
+        crossModelHooks.installClaudeHooks(tool, { session_start: true });
+
+        const s = fs.readFileSync(path.join(claudeDir, 'hooks', 'delimit-session-end'), 'utf-8');
+        // Reads the SessionEnd event JSON from stdin for transcript_path.
+        assert.ok(s.includes('SESSIONEND_EVENT_JSON'), 'reads the SessionEnd event JSON');
+        assert.ok(s.includes('transcript_path'), 'reads transcript_path');
+        // Deterministic floor: git state + ledger + transcript tail, NO model call.
+        assert.ok(s.includes('rev-parse') && s.includes('status'), 'captures git state');
+        assert.ok(s.includes('operations.jsonl'), 'captures cheap ledger context');
+        assert.ok(s.includes('"source": "deterministic"'), 'floor is deterministic (no LLM)');
+        assert.ok(s.includes('.last_capture'), 'stamps .last_capture for next revive');
+        // Never-block contract: time-boxed + always exits 0.
+        assert.ok(s.includes("timeout 8 python3"), 'time-boxed (<10s)');
+        assert.ok(/exit 0\s*$/.test(s.trim()), 'always exits 0 (never blocks exit)');
+    });
+
+    it('is idempotent — installing twice yields exactly one SessionEnd group', () => {
+        const claudeDir = path.join(tmpDir, '.claude');
+        fs.mkdirSync(claudeDir, { recursive: true });
+        const tool = { id: 'claude', name: 'Claude Code', configPath: path.join(claudeDir, 'settings.json') };
+
+        crossModelHooks.installClaudeHooks(tool, { session_start: true, conditional_hooks: false });
+        const changes2 = crossModelHooks.installClaudeHooks(tool, { session_start: true, conditional_hooks: false });
+
+        assert.ok(!changes2.includes('SessionEnd'), 'second install reports no SessionEnd change');
+        const config = JSON.parse(fs.readFileSync(tool.configPath, 'utf-8'));
+        const delimitGroups = config.hooks.SessionEnd.filter(
+            g => (g.hooks || []).some(hh => (hh.command || '').includes('delimit'))
+        );
+        assert.strictEqual(delimitGroups.length, 1, 'exactly one delimit SessionEnd group');
+    });
+
+    it('no-clobber — preserves a pre-existing user SessionEnd hook', () => {
+        const claudeDir = path.join(tmpDir, '.claude');
+        fs.mkdirSync(claudeDir, { recursive: true });
+        // User already has their own SessionEnd hook (unrelated to delimit).
+        const userConfig = {
+            hooks: {
+                SessionEnd: [
+                    { matcher: '', hooks: [{ type: 'command', command: '/home/user/.scripts/my-cleanup.sh' }] },
+                ],
+            },
+        };
+        fs.writeFileSync(path.join(claudeDir, 'settings.json'), JSON.stringify(userConfig));
+
+        const tool = { id: 'claude', name: 'Claude Code', configPath: path.join(claudeDir, 'settings.json') };
+        crossModelHooks.installClaudeHooks(tool, { session_start: true, conditional_hooks: false });
+
+        const config = JSON.parse(fs.readFileSync(tool.configPath, 'utf-8'));
+        const commands = config.hooks.SessionEnd.flatMap(g => (g.hooks || []).map(h => h.command || ''));
+        assert.ok(commands.some(c => c === '/home/user/.scripts/my-cleanup.sh'), 'user SessionEnd hook MUST be preserved');
+        assert.ok(commands.some(c => c.includes('delimit-session-end')), 'delimit SessionEnd hook added alongside');
+        assert.strictEqual(config.hooks.SessionEnd.length, 2, 'user hook + delimit hook = 2 groups');
+    });
+
+    it('is not installed when session_start is false (lifecycle-gated)', () => {
+        const claudeDir = path.join(tmpDir, '.claude');
+        fs.mkdirSync(claudeDir, { recursive: true });
+        const tool = { id: 'claude', name: 'Claude Code', configPath: path.join(claudeDir, 'settings.json') };
+
+        const changes = crossModelHooks.installClaudeHooks(tool, { session_start: false, conditional_hooks: false });
+        assert.ok(!changes.includes('SessionEnd'), 'not installed without session lifecycle');
+        const config = JSON.parse(fs.readFileSync(tool.configPath, 'utf-8'));
+        assert.ok(!config.hooks.SessionEnd, 'no SessionEnd entry');
+    });
+
+    it('is stripped by removeClaudeHooks (reversible)', () => {
+        const claudeDir = path.join(tmpDir, '.claude');
+        fs.mkdirSync(claudeDir, { recursive: true });
+        const tool = { id: 'claude', name: 'Claude Code', configPath: path.join(claudeDir, 'settings.json') };
+
+        crossModelHooks.installClaudeHooks(tool, { session_start: true });
+        crossModelHooks.removeClaudeHooks();
+
+        const config = JSON.parse(fs.readFileSync(tool.configPath, 'utf-8'));
+        const remaining = (config.hooks && config.hooks.SessionEnd || []).filter(
+            g => (g.hooks || []).some(h => (h.command || '').includes('delimit'))
+        );
+        assert.strictEqual(remaining.length, 0, 'delimit SessionEnd removed on uninstall');
+    });
+});
+
+// -----------------------------------------------------------------------
 // LED-234: Helper function tests
 // -----------------------------------------------------------------------
 
