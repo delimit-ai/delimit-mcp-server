@@ -74,6 +74,8 @@ gateway/ai/outreach_body_gen.py
 gateway/ai/outreach_gate.py
 gateway/ai/outreach_instrumentation.py
 gateway/ai/outreach_loop_daemon.py
+gateway/ai/outreach_submit.py
+gateway/ai/outreach_submit_wiring.py
 gateway/ai/outreach_substantive.py
 gateway/ai/posting_budget.py
 gateway/ai/reaper.py
