@@ -53,6 +53,16 @@ DEFAULT_STALENESS_THRESHOLDS: Dict[str, int] = {
     "delimit-drift-check": 129600,
     # stake.one INJ-claim: daily 13:00 UTC. >30 hours = stale.
     "stakeone-inj-claim": 108000,
+    # Self-repair watcher: 1h pass loop (ai.self_repair_daemon). >2h = stale.
+    "delimit-self-repair": 7200,
+    # Inbox executor: 30s poll loop (ai.inbox_executor). >30 min = stale.
+    # Generous vs the 30s cadence so a slow cycle isn't a false alarm.
+    "delimit-inbox-executor": 1800,
+    # Outreach daemon: daily 14:00 UTC timer. >30 hours = stale.
+    # (Already writes a heartbeat via delimit_outreach_daemon_run.py; was
+    # relying on the 24h fallback which is too tight for a daily-at-14:00
+    # cadence + RandomizedDelaySec slop.)
+    "delimit-outreach-daemon": 108000,
 }
 
 # Fallback for services not in the threshold map.
