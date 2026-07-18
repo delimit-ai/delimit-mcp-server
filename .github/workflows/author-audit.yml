@@ -1,0 +1,130 @@
+name: author-audit
+
+# ALWAYS-ON author/committer email audit (SHIFT-1 anonymity, LED-3830).
+#
+# WHY THIS EXISTS SEPARATELY FROM identity-guard.yml:
+#   identity-guard.yml is a *required status check* on pull_request/push. But a
+#   routine `gh pr merge --admin` BYPASSES required checks, so non-anonymized
+#   (e.g. gmail) authors have historically reached public `main`. This workflow
+#   runs on a SCHEDULE — independent of any PR/push event — and cannot be
+#   bypassed by an --admin merge. A violation turns the Actions tab RED.
+#
+# It scans EVERY public delimit-ai repo (not just this one), so a single
+# scheduled run covers the whole org surface.
+#
+# ALLOWLIST (anonymized identities only; kept in lockstep with
+# .github/workflows/identity-guard.yml and scripts/audit_public_commit_authors.py
+# in the gateway):
+#   - any address ending @users.noreply.github.com   (GitHub per-user noreply)
+#   - any address ending @delimit.ai                  (org domain)
+#   - exact noreply@github.com                        (GitHub system committer)
+#   - exact actions@github.com                        (GitHub Actions committer)
+#
+# TOKEN: the default GITHUB_TOKEN can READ public repos across the org (public
+# data + public-repo enumeration need no elevated scope). If the org later makes
+# a scanned repo private, supply a read-only PAT via a repo/org secret named
+# AUTHOR_AUDIT_TOKEN and it will be used instead. No secret is hardcoded.
+#
+# ADDITIVE — reads only; touches no other workflow and no runtime.
+
+on:
+  schedule:
+    - cron: "17 6 * * *"   # daily 06:17 UTC
+  workflow_dispatch:
+    inputs:
+      since_days:
+        description: "Scan commits from the last N days"
+        required: false
+        default: "90"
+      full:
+        description: "Scan entire history (true/false)"
+        required: false
+        default: "false"
+
+permissions:
+  contents: read
+
+jobs:
+  author-audit:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.AUTHOR_AUDIT_TOKEN || secrets.GITHUB_TOKEN }}
+      ORG: delimit-ai
+      SINCE_DAYS: ${{ github.event.inputs.since_days || '90' }}
+      FULL: ${{ github.event.inputs.full || 'false' }}
+    steps:
+      - name: Audit public commit author/committer identities
+        run: |
+          set -euo pipefail
+
+          # --- ALLOWLIST (mirror of identity-guard.yml) --------------------
+          ALLOW_SUFFIXES=("@users.noreply.github.com" "@delimit.ai")
+          ALLOW_EXACT=("noreply@github.com" "actions@github.com")
+
+          allowed() {
+            local email="$1" suf exact
+            [ -z "$email" ] && return 1            # missing identity -> fail-closed
+            for exact in "${ALLOW_EXACT[@]}"; do
+              [ "$email" = "$exact" ] && return 0
+            done
+            for suf in "${ALLOW_SUFFIXES[@]}"; do
+              case "$email" in *"$suf") return 0 ;; esac
+            done
+            return 1
+          }
+
+          # --- Enumerate PUBLIC, non-archived repos in the org -------------
+          mapfile -t REPOS < <(gh repo list "$ORG" \
+            --visibility public --no-archived --limit 200 \
+            --json name --jq '.[].name' | sort)
+          echo "Scanning ${#REPOS[@]} public repo(s) in $ORG"
+
+          # --- Build the commits query -------------------------------------
+          if [ "$FULL" = "true" ]; then
+            QS="per_page=100"
+          else
+            SINCE_ISO="$(date -u -d "-${SINCE_DAYS} days" +%Y-%m-%dT%H:%M:%SZ)"
+            QS="per_page=100&since=${SINCE_ISO}"
+            echo "Window: commits since ${SINCE_ISO} (${SINCE_DAYS}d)"
+          fi
+
+          total_violations=0
+          checked_total=0
+          report=""
+
+          for repo in "${REPOS[@]}"; do
+            # gh api --paginate flattens paginated arrays; the jq filter emits
+            # one "sha<TAB>role<TAB>email" row per author and per committer.
+            rows="$(gh api --paginate "repos/${ORG}/${repo}/commits?${QS}" \
+              --jq '.[] | "\(.sha[0:12])\tauthor\t\(.commit.author.email // "")\n\(.sha[0:12])\tcommitter\t\(.commit.committer.email // "")"' \
+              2>/dev/null || true)"
+
+            repo_v=0
+            while IFS=$'\t' read -r sha role email; do
+              [ -z "${sha:-}" ] && continue
+              checked_total=$((checked_total + 1))
+              if ! allowed "$email"; then
+                domain="${email##*@}"; [ "$domain" = "$email" ] && domain="(none)"
+                echo "::error::${ORG}/${repo} ${sha} ${role} identity not anonymized: ***@${domain}"
+                report="${report}\n  ${repo} ${sha} ${role} ***@${domain}"
+                repo_v=$((repo_v + 1))
+                total_violations=$((total_violations + 1))
+              fi
+            done <<< "$rows"
+            echo "  ${repo}: ${repo_v} violation(s)"
+          done
+
+          echo ""
+          echo "================ AUTHOR-AUDIT SUMMARY (LED-3830) ================"
+          # shellcheck disable=SC2059
+          printf "identity rows checked: %s\n" "$checked_total"
+          if [ "$total_violations" -ne 0 ]; then
+            # shellcheck disable=SC2059
+            printf "VIOLATIONS:%b\n" "$report"
+            echo ""
+            echo "author-audit FAILED: ${total_violations} non-anonymized identity row(s) on public main."
+            echo "This is un-bypassable by --admin merges. Remediation (founder-gated history"
+            echo "rewrite) is tracked separately; this scan is the preventive alarm."
+            exit 1
+          fi
+          echo "author-audit OK: all public commit author/committer identities are anonymized."
