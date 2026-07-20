@@ -76,6 +76,14 @@ for c in /usr/bin/grep /bin/grep; do
     if [ -x "$c" ]; then GREP="$c"; break; fi
 done
 
+# File-level allowlist — founder-blessed exceptions (audited; keep rare).
+# glama.json: the glama.ai MCP-directory registry file; its maintainers field
+# legitimately names the public pseudonymous maintainer account. Founder
+# reviewed + blessed 2026-07-20 (LED-3799): intentionally-public metadata,
+# not a linkage leak. JSON cannot carry inline override comments, hence
+# file-level entry here.
+FILE_ALLOWLIST='^glama\.json$'
+
 # Tracked file extensions we scan.
 EXTS='\.(py|js|ts|tsx|json|yaml|yml|toml|md)$'
 
@@ -85,7 +93,7 @@ list_files() {
         git diff --cached --name-only --diff-filter=ACMR
     else
         git ls-files
-    fi | "$GREP" -E "$EXTS" | while IFS= read -r f; do
+    fi | "$GREP" -E "$EXTS" | "$GREP" -Ev "$FILE_ALLOWLIST" | while IFS= read -r f; do
         [ -f "$f" ] || continue
         if [ "$INCLUDE_TESTS" = "0" ]; then
             case "$f" in
