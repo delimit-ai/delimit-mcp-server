@@ -1,0 +1,41 @@
+# LED-3799: PR-time identity-string + secret content gate for the public
+# npm-delimit (delimit-ai/delimit-mcp-server) repo.
+#
+# Complements the two guards already here:
+#   - identity-guard.yml   -> blocks non-anonymized commit AUTHOR/COMMITTER emails
+#   - scripts/security-check.sh (prepublish) -> scans the npm TARBALL at publish
+# Neither catches a banned identity STRING committed to a source/config/doc file
+# at PR review time. This gate does — porting the gateway's LED-1409 content gate
+# so leaks fail at PR review, not at publish (after merge).
+#
+# Fail-closed: any match in a git-tracked file fails the job.
+#
+# To enable as REQUIRED in branch protection:
+#   gh api -X PUT repos/delimit-ai/delimit-mcp-server/branches/main/protection/required_status_checks \
+#     -f 'contexts[]=Identity-strings gate'
+#
+# Override: add a comment containing `delimit-security-allow: <reason>` on the
+# offending line (audited via grep).
+
+name: Identity-strings gate
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  identity-strings:
+    name: Identity-strings gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Run identity-string gate
+        run: bash scripts/check_identity_strings.sh
