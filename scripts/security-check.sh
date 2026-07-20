@@ -46,7 +46,7 @@ fi
 
 # 2. Blocklist terms
 echo -n "  Blocklist... "
-BLOCKLIST="jamsonsholdings|Bladabah|Domainvested26|Delimit26|home/jamsons|infracore|crypttrx|\.wr_env"
+BLOCKLIST="jamsonsholdings|Bladabah|Domainvested26|Delimit26|home/jamsons|infracore|crypttrx|\.wr_env"  # delimit-security-allow: pattern definitions of the prepublish guard itself
 if grep -rEi "$BLOCKLIST" "$TMPDIR/package/" --include="*.py" --include="*.js" --include="*.json" 2>/dev/null; then
     echo "❌ BLOCKED TERMS FOUND"
     FAIL=1
