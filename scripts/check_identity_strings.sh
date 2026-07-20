@@ -58,13 +58,13 @@ done
 
 # Patterns — kept in lockstep with scripts/security-check.sh BLOCKLIST.
 # Adding a new banned term requires updating BOTH files.
-BLOCKLIST_REGEX='jamsonsholdings|Bladabah|Domainvested26|Delimit26|home/jamsons|\binfracore\b|\bcrypttrx\b|\.wr_env'
+BLOCKLIST_REGEX='jamsonsholdings|Bladabah|Domainvested26|Delimit26|home/jamsons|\binfracore\b|\bcrypttrx\b|\.wr_env'  # delimit-security-allow: pattern definitions of the guard itself
 
 # PII: real-looking personal email addresses (examples/docstrings suppressed).
-PII_REGEX='[a-z0-9._%+-]+@(gmail|yahoo|hotmail|outlook|proton|jamsons|wire\.report|domainvested)'
+PII_REGEX='[a-z0-9._%+-]+@(gmail|yahoo|hotmail|outlook|proton|jamsons|wire\.report|domainvested)'  # delimit-security-allow: pattern definitions of the guard itself
 
 # Hardcoded credentials: assignment of a string literal to a secret-ish name.
-CRED_REGEX='(password|passwd|secret|api_key|apikey)[[:space:]]*[:=][[:space:]]*["'"'"'][^"'"'"']{8,}'
+CRED_REGEX='(password|passwd|secret|api_key|apikey)[[:space:]]*[:=][[:space:]]*["'"'"'][^"'"'"']{8,}'  # delimit-security-allow: pattern definitions of the guard itself
 
 # Suppressors — lines matching any of these are EXCLUDED.
 SUPPRESSORS='environ|getenv|process\.env|os\.environ|<configured|example|placeholder|REDACTED|\$\{credentials|credentials\.|security-scan-ignore|delimit-security-allow|noreply|e\.g\.|docstring|Args:|Credential resolution'
@@ -85,7 +85,7 @@ done
 FILE_ALLOWLIST='^glama\.json$'
 
 # Tracked file extensions we scan.
-EXTS='\.(py|js|ts|tsx|json|yaml|yml|toml|md)$'
+EXTS='\.(py|js|ts|tsx|json|yaml|yml|toml|md|sh)$'
 
 # git ls-files enumeration -> newline list of candidate files.
 list_files() {
