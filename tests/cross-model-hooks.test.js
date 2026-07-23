@@ -952,8 +952,13 @@ describe('LED-1962 SessionStart auto-revive last soul', () => {
         // The marker printed into the new session, and the module it imports.
         assert.ok(script.includes('Auto-revived working context'), 'emits the auto-revive marker');
         assert.ok(script.includes('session_phoenix'), 'imports ai.session_phoenix');
-        assert.ok(script.includes('find_most_recent_soul_across_projects'),
-            'picks the globally most-recent soul');
+        assert.ok(script.includes('get_latest_soul'), 'revives the current-project soul');
+        // Cross-project fallback is OPT-IN and OFF by default — a soul from a
+        // different project/venture must not bleed into this (possibly public) session.
+        assert.ok(script.includes('DELIMIT_AUTO_REVIVE_GLOBAL=""'),
+            'cross-project fallback OFF by default');
+        assert.ok(script.includes('DELIMIT_AUTO_REVIVE_GLOBAL") == "1"'),
+            'global fallback is env-guarded (opt-in only)');
         // Never-block contract: time-boxed + fails open, orchestrator-only.
         assert.ok(script.includes("timeout 6 python3 - <<'RVEOF'"), 'revive is time-boxed');
         assert.ok(/RVEOF' 2>\/dev\/null \|\| true/.test(script), 'revive fails open (|| true)');
@@ -972,6 +977,19 @@ describe('LED-1962 SessionStart auto-revive last soul', () => {
         assert.ok(!script.includes('Auto-revived working context'),
             'auto-revive marker omitted when flag is false');
         assert.ok(!script.includes("<<'RVEOF'"), 'auto-revive block omitted when flag is false');
+    });
+
+    it('enables cross-project fallback only when session_auto_revive_global is true', () => {
+        const claudeDir = path.join(tmpDir, '.claude');
+        fs.mkdirSync(claudeDir, { recursive: true });
+        const tool = { id: 'claude', name: 'Claude Code', configPath: path.join(claudeDir, 'settings.json') };
+
+        crossModelHooks.installClaudeHooks(tool, { session_start: true, session_auto_revive_global: true });
+
+        const script = fs.readFileSync(path.join(claudeDir, 'hooks', 'delimit'), 'utf-8');
+        assert.ok(script.includes('DELIMIT_AUTO_REVIVE_GLOBAL="1"'),
+            'cross-project fallback enabled when opted in');
+        assert.ok(script.includes('Auto-revived working context'), 'still emits the revive block');
     });
 
     it('generates a syntactically valid bash script (bash -n) with the revive block', () => {
