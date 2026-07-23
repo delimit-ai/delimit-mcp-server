@@ -937,6 +937,94 @@ describe('STR-2202 SessionStart digest + heartbeat echo', () => {
     });
 });
 
+describe('LED-1962 SessionStart auto-revive last soul', () => {
+    beforeEach(() => { setupTmpHome(); });
+    afterEach(() => { teardownTmpHome(); });
+
+    it('embeds the auto-revive-last-soul block in the SessionStart script by default', () => {
+        const claudeDir = path.join(tmpDir, '.claude');
+        fs.mkdirSync(claudeDir, { recursive: true });
+        const tool = { id: 'claude', name: 'Claude Code', configPath: path.join(claudeDir, 'settings.json') };
+
+        crossModelHooks.installClaudeHooks(tool, { session_start: true });
+
+        const script = fs.readFileSync(path.join(claudeDir, 'hooks', 'delimit'), 'utf-8');
+        // The marker printed into the new session, and the module it imports.
+        assert.ok(script.includes('Auto-revived working context'), 'emits the auto-revive marker');
+        assert.ok(script.includes('session_phoenix'), 'imports ai.session_phoenix');
+        assert.ok(script.includes('get_latest_soul'), 'revives the current-project soul');
+        // Cross-project fallback is OPT-IN and OFF by default — a soul from a
+        // different project/venture must not bleed into this (possibly public) session.
+        assert.ok(script.includes('DELIMIT_AUTO_REVIVE_GLOBAL=""'),
+            'cross-project fallback OFF by default');
+        assert.ok(script.includes('DELIMIT_AUTO_REVIVE_GLOBAL") == "1"'),
+            'global fallback is env-guarded (opt-in only)');
+        // Never-block contract: time-boxed + fails open, orchestrator-only.
+        assert.ok(script.includes("timeout 6 python3 - <<'RVEOF'"), 'revive is time-boxed');
+        assert.ok(/RVEOF' 2>\/dev\/null \|\| true/.test(script), 'revive fails open (|| true)');
+        assert.ok(script.includes('"$DELIMIT_SESSION_TYPE" != "subagent"'),
+            'revive skipped for subagents');
+    });
+
+    it('omits the auto-revive block when session_auto_revive is false', () => {
+        const claudeDir = path.join(tmpDir, '.claude');
+        fs.mkdirSync(claudeDir, { recursive: true });
+        const tool = { id: 'claude', name: 'Claude Code', configPath: path.join(claudeDir, 'settings.json') };
+
+        crossModelHooks.installClaudeHooks(tool, { session_start: true, session_auto_revive: false });
+
+        const script = fs.readFileSync(path.join(claudeDir, 'hooks', 'delimit'), 'utf-8');
+        assert.ok(!script.includes('Auto-revived working context'),
+            'auto-revive marker omitted when flag is false');
+        assert.ok(!script.includes("<<'RVEOF'"), 'auto-revive block omitted when flag is false');
+    });
+
+    it('enables cross-project fallback only when session_auto_revive_global is true', () => {
+        const claudeDir = path.join(tmpDir, '.claude');
+        fs.mkdirSync(claudeDir, { recursive: true });
+        const tool = { id: 'claude', name: 'Claude Code', configPath: path.join(claudeDir, 'settings.json') };
+
+        crossModelHooks.installClaudeHooks(tool, { session_start: true, session_auto_revive_global: true });
+
+        const script = fs.readFileSync(path.join(claudeDir, 'hooks', 'delimit'), 'utf-8');
+        assert.ok(script.includes('DELIMIT_AUTO_REVIVE_GLOBAL="1"'),
+            'cross-project fallback enabled when opted in');
+        assert.ok(script.includes('Auto-revived working context'), 'still emits the revive block');
+    });
+
+    it('generates a syntactically valid bash script (bash -n) with the revive block', () => {
+        const claudeDir = path.join(tmpDir, '.claude');
+        fs.mkdirSync(claudeDir, { recursive: true });
+        const tool = { id: 'claude', name: 'Claude Code', configPath: path.join(claudeDir, 'settings.json') };
+
+        crossModelHooks.installClaudeHooks(tool, { session_start: true });
+
+        const hookPath = path.join(claudeDir, 'hooks', 'delimit');
+        // Throws (non-zero exit) if the generated script is not valid bash.
+        execSync(`bash -n ${JSON.stringify(hookPath)}`, { stdio: 'pipe' });
+    });
+
+    it('Codex instructions.md carries the strengthened first-action revive text', () => {
+        const codexDir = path.join(tmpDir, '.codex');
+        fs.mkdirSync(codexDir, { recursive: true });
+        const tool = {
+            id: 'codex',
+            name: 'Codex CLI',
+            configPath: path.join(codexDir, 'config.json'),
+            instructionsPath: path.join(codexDir, 'instructions.md'),
+        };
+
+        crossModelHooks.installCodexHooks(tool, { session_start: true, pre_tool: true, pre_commit: true });
+
+        const instructions = fs.readFileSync(tool.instructionsPath, 'utf-8');
+        assert.ok(/Session start.*FIRST/.test(instructions),
+            'session-start line elevated to a FIRST action');
+        assert.ok(instructions.includes('delimit_revive'), 'names delimit_revive');
+        assert.ok(/switching agents/.test(instructions),
+            'explains the cross-agent (quota-switch) resume rationale');
+    });
+});
+
 describe('STR-2202 subagent flight-recorder (PostToolUse)', () => {
     beforeEach(() => { setupTmpHome(); });
     afterEach(() => { teardownTmpHome(); });
