@@ -1227,7 +1227,9 @@ def release_status(environment: str = "production") -> Dict[str, Any]:
     return result
 
 
-def deploy_site(project_path: str = ".", message: str = "", env_vars: dict = None) -> Dict[str, Any]:
+def _deploy_site_legacy(
+    project_path: str = ".", message: str = "", env_vars: dict = None
+) -> Dict[str, Any]:
     """Deploy a site project — git commit, push, Vercel build, deploy.
 
     Handles the full chain: commit changes, push to remote, build with env vars,
@@ -1243,7 +1245,10 @@ def deploy_site(project_path: str = ".", message: str = "", env_vars: dict = Non
     try:
         status = subprocess.run(
             ["git", "status", "--porcelain"],
-            capture_output=True, text=True, timeout=10, cwd=str(p)
+            capture_output=True,
+            text=True,
+            timeout=10,
+            cwd=str(p),
         )
         changed_files = [l.strip() for l in status.stdout.strip().splitlines() if l.strip()]
         if not changed_files:
@@ -1257,14 +1262,19 @@ def deploy_site(project_path: str = ".", message: str = "", env_vars: dict = Non
     try:
         result = subprocess.run(
             ["git", "push", "--dry-run", "origin", "HEAD"],
-            cwd=str(p), timeout=30, capture_output=True, text=True
+            cwd=str(p),
+            timeout=30,
+            capture_output=True,
+            text=True,
         )
         if result.returncode != 0:
-            results["steps"].append({
-                "step": "push_precheck",
-                "status": "error",
-                "detail": (result.stderr.strip() or result.stdout.strip())[:200],
-            })
+            results["steps"].append(
+                {
+                    "step": "push_precheck",
+                    "status": "error",
+                    "detail": (result.stderr.strip() or result.stdout.strip())[:200],
+                }
+            )
             results["status"] = "push_precheck_failed"
             return results
         results["steps"].append({"step": "push_precheck", "status": "ok"})
@@ -1277,7 +1287,15 @@ def deploy_site(project_path: str = ".", message: str = "", env_vars: dict = Non
     env = {**os.environ}
     if env_vars:
         # Whitelist safe env var prefixes — block LD_PRELOAD, PATH overrides, etc.
-        blocked = {"LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_", "PATH", "HOME", "USER", "SHELL"}
+        blocked = {
+            "LD_PRELOAD",
+            "LD_LIBRARY_PATH",
+            "DYLD_",
+            "PATH",
+            "HOME",
+            "USER",
+            "SHELL",
+        }
         for k, v in env_vars.items():
             if not any(k.startswith(b) for b in blocked):
                 env[str(k)] = str(v)
@@ -1285,13 +1303,23 @@ def deploy_site(project_path: str = ".", message: str = "", env_vars: dict = Non
     try:
         result = subprocess.run(
             ["npx", "vercel", "build", "--prod"],
-            cwd=str(p), timeout=120, capture_output=True, text=True, env=env
+            cwd=str(p),
+            timeout=120,
+            capture_output=True,
+            text=True,
+            env=env,
         )
-        results["steps"].append({
-            "step": "build",
-            "status": "ok" if result.returncode == 0 else "error",
-            "detail": result.stdout.strip()[-200:] if result.returncode == 0 else result.stderr.strip()[:200]
-        })
+        results["steps"].append(
+            {
+                "step": "build",
+                "status": "ok" if result.returncode == 0 else "error",
+                "detail": (
+                    result.stdout.strip()[-200:]
+                    if result.returncode == 0
+                    else result.stderr.strip()[:200]
+                ),
+            }
+        )
         if result.returncode != 0:
             results["status"] = "build_failed"
             return results
@@ -1307,16 +1335,33 @@ def deploy_site(project_path: str = ".", message: str = "", env_vars: dict = Non
     # 4. Git add + commit
     commit_msg = message or "deploy: site update"
     try:
-        result = subprocess.run(["git", "add", "-A"], cwd=str(p), timeout=10, capture_output=True, text=True)
+        # Backward-compatible backend calls predate the repository-scoped MCP
+        # contract.  Keep their call order stable, but never use an unscoped
+        # ``git add -A``: stage only the paths reported by this status read.
+        changed_paths = []
+        for line in status.stdout.strip().splitlines():
+            candidate = line[3:] if len(line) > 3 else ""
+            if " -> " in candidate:
+                candidate = candidate.split(" -> ", 1)[1]
+            if candidate:
+                changed_paths.append(candidate)
+        add_cmd = ["git", "add", "--", *changed_paths]
+        result = subprocess.run(add_cmd, cwd=str(p), timeout=10, capture_output=True, text=True)
         if result.returncode != 0:
-            results["steps"].append({
-                "step": "git_add",
-                "status": "error",
-                "detail": (result.stderr.strip() or result.stdout.strip())[:200],
-            })
+            results["steps"].append(
+                {
+                    "step": "git_add",
+                    "status": "error",
+                    "detail": (result.stderr.strip() or result.stdout.strip())[:200],
+                }
+            )
             results["status"] = "git_add_failed"
             return results
         results["steps"].append({"step": "git_add", "status": "ok"})
+    except subprocess.TimeoutExpired:
+        results["steps"].append({"step": "git_add", "status": "timeout"})
+        results["status"] = "git_add_timeout"
+        return results
     except Exception as e:
         results["steps"].append({"step": "git_add", "status": "error", "detail": str(e)})
         results["status"] = "git_add_error"
@@ -1325,19 +1370,26 @@ def deploy_site(project_path: str = ".", message: str = "", env_vars: dict = Non
     try:
         result = subprocess.run(
             ["git", "commit", "-m", commit_msg],
-            cwd=str(p), timeout=10, capture_output=True, text=True
+            cwd=str(p),
+            timeout=10,
+            capture_output=True,
+            text=True,
         )
         commit_output = f"{result.stdout}\n{result.stderr}".lower()
         if result.returncode == 0:
             results["steps"].append({"step": "commit", "status": "ok", "message": commit_msg})
         elif "nothing to commit" in commit_output or "working tree clean" in commit_output:
-            results["steps"].append({"step": "commit", "status": "skipped", "detail": "nothing to commit"})
+            results["steps"].append(
+                {"step": "commit", "status": "skipped", "detail": "nothing to commit"}
+            )
         else:
-            results["steps"].append({
-                "step": "commit",
-                "status": "error",
-                "detail": (result.stderr.strip() or result.stdout.strip())[:200],
-            })
+            results["steps"].append(
+                {
+                    "step": "commit",
+                    "status": "error",
+                    "detail": (result.stderr.strip() or result.stdout.strip())[:200],
+                }
+            )
             results["status"] = "commit_failed"
             return results
     except Exception as e:
@@ -1349,14 +1401,19 @@ def deploy_site(project_path: str = ".", message: str = "", env_vars: dict = Non
     try:
         result = subprocess.run(
             ["git", "push", "origin", "HEAD"],
-            cwd=str(p), timeout=30, capture_output=True, text=True
+            cwd=str(p),
+            timeout=30,
+            capture_output=True,
+            text=True,
         )
         if result.returncode != 0:
-            results["steps"].append({
-                "step": "push",
-                "status": "error",
-                "detail": (result.stderr.strip() or result.stdout.strip())[:200],
-            })
+            results["steps"].append(
+                {
+                    "step": "push",
+                    "status": "error",
+                    "detail": (result.stderr.strip() or result.stdout.strip())[:200],
+                }
+            )
             results["status"] = "push_failed"
             return results
         results["steps"].append({"step": "push", "status": "ok", "detail": "pushed"})
@@ -1369,7 +1426,11 @@ def deploy_site(project_path: str = ".", message: str = "", env_vars: dict = Non
     try:
         result = subprocess.run(
             ["npx", "vercel", "deploy", "--prebuilt", "--prod"],
-            cwd=str(p), timeout=60, capture_output=True, text=True, env=env
+            cwd=str(p),
+            timeout=60,
+            capture_output=True,
+            text=True,
+            env=env,
         )
         output = result.stdout.strip()
         # Extract deploy URL
@@ -1378,15 +1439,31 @@ def deploy_site(project_path: str = ".", message: str = "", env_vars: dict = Non
             if "vercel.app" in line or "delimit.ai" in line:
                 deploy_url = line.strip()
                 break
-        results["steps"].append({
-            "step": "deploy",
-            "status": "ok" if result.returncode == 0 else "error",
-            "url": deploy_url
-        })
+        results["steps"].append(
+            {
+                "step": "deploy",
+                "status": "ok" if result.returncode == 0 else "error",
+                "url": deploy_url,
+            }
+        )
         if result.returncode != 0:
             results["status"] = "deploy_failed"
             return results
         results["deploy_url"] = deploy_url
+    except subprocess.TimeoutExpired as exc:
+        pending_output = "\n".join(
+            str(value or "") for value in (getattr(exc, "stdout", ""), getattr(exc, "stderr", ""))
+        )
+        results["steps"].append(
+            {
+                "step": "deploy",
+                "status": "pending",
+                "detail": "Vercel command timed out after push",
+            }
+        )
+        results["status"] = "pending"
+        results.update(_extract_vercel_deployment_metadata(pending_output))
+        return results
     except Exception as e:
         results["steps"].append({"step": "deploy", "status": "error", "detail": str(e)})
         results["status"] = "deploy_error"
@@ -1395,6 +1472,459 @@ def deploy_site(project_path: str = ".", message: str = "", env_vars: dict = Non
     results["status"] = "deployed"
     return results
 
+
+def _validate_scoped_paths(repo: Path, paths: Optional[List[str]]) -> List[str]:
+    """Return normalized repo-relative pathspecs without option/path escapes."""
+    normalized: List[str] = []
+    for raw_path in paths or []:
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            raise ValueError("paths entries must be non-empty strings")
+        if raw_path.startswith("-") or "\x00" in raw_path:
+            raise ValueError(f"unsafe deploy path: {raw_path!r}")
+        candidate = (repo / raw_path).resolve()
+        try:
+            relative = candidate.relative_to(repo)
+        except ValueError as exc:
+            raise ValueError(f"deploy path escapes repository: {raw_path}") from exc
+        normalized_path = relative.as_posix()
+        if normalized_path == ".":
+            raise ValueError("repository root is not an explicit deploy path")
+        normalized.append(normalized_path)
+    return list(dict.fromkeys(normalized))
+
+
+def _parse_nul_paths(output: str) -> List[str]:
+    """Parse NUL-delimited Git output (newline fallback supports old Git/mocks)."""
+    if not output:
+        return []
+    values = output.split("\0") if "\0" in output else output.splitlines()
+    return [value.strip() for value in values if value.strip()]
+
+
+def _read_vercel_project(project: Path) -> Optional[Dict[str, Any]]:
+    """Validate Vercel's local binding without returning its identifiers."""
+    project_file = project / ".vercel" / "project.json"
+    try:
+        data = json.loads(project_file.read_text())
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    if not isinstance(data.get("projectId"), str) or not data["projectId"].strip():
+        return None
+    if not isinstance(data.get("orgId"), str) or not data["orgId"].strip():
+        return None
+    return {"configured": True, "source": str(project_file)}
+
+
+def _extract_vercel_deployment_metadata(output: str) -> Dict[str, str]:
+    """Extract non-secret continuation identifiers from bounded CLI output."""
+    metadata: Dict[str, str] = {}
+    url_match = re.search(r"https://[^\s]+", output or "")
+    if url_match:
+        metadata["deploy_url"] = url_match.group(0).rstrip(".,)")
+    id_match = re.search(r"\b(dpl_[A-Za-z0-9]+)\b", output or "")
+    if id_match:
+        metadata["deployment_id"] = id_match.group(1)
+    return metadata
+
+
+def _scoped_git_result(
+    cmd: List[str],
+    *,
+    cwd: Path,
+    timeout: int,
+    env: Optional[Dict[str, str]] = None,
+) -> subprocess.CompletedProcess:
+    """Run one bounded command for the repository-scoped deploy pipeline."""
+    return subprocess.run(
+        cmd,
+        cwd=str(cwd),
+        timeout=timeout,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+
+def _deploy_site_scoped(
+    *,
+    repo_path: str,
+    project_path: str,
+    app: str,
+    message: str,
+    env_vars: Optional[dict],
+    paths: Optional[List[str]],
+    staged_only: bool,
+    vercel_timeout: int,
+) -> Dict[str, Any]:
+    """Repository-scoped site deployment used by the public MCP surface."""
+    repo = Path(repo_path).expanduser().resolve()
+    if not repo.is_dir():
+        return {
+            "status": "invalid_repository",
+            "error": f"Repository does not exist: {repo}",
+        }
+
+    project = Path(project_path).expanduser()
+    project = (repo / project).resolve() if not project.is_absolute() else project.resolve()
+    try:
+        project.relative_to(repo)
+    except ValueError:
+        return {
+            "status": "invalid_project",
+            "error": "project_path must be inside repo_path",
+        }
+    if not project.is_dir():
+        return {
+            "status": "invalid_project",
+            "error": f"Project does not exist: {project}",
+        }
+
+    context = _scoped_git_result(["git", "rev-parse", "--show-toplevel"], cwd=repo, timeout=10)
+    if context.returncode != 0:
+        return {
+            "status": "invalid_repository",
+            "error": (context.stderr.strip() or "repo_path is not a Git worktree")[:300],
+            "repo_path": str(repo),
+        }
+    try:
+        git_root = Path(context.stdout.strip()).resolve()
+    except (OSError, RuntimeError):
+        git_root = Path("")
+    if git_root != repo:
+        return {
+            "status": "invalid_repository",
+            "error": "repo_path must be the Git worktree root",
+            "repo_path": str(repo),
+            "git_root": str(git_root),
+        }
+
+    try:
+        scoped_paths = _validate_scoped_paths(repo, paths)
+    except ValueError as exc:
+        return {"status": "invalid_scope", "error": str(exc), "repo_path": str(repo)}
+    if staged_only and scoped_paths:
+        return {
+            "status": "invalid_scope",
+            "error": "Choose staged_only=true or explicit paths, not both",
+            "repo_path": str(repo),
+        }
+    if not staged_only and not scoped_paths:
+        return {
+            "status": "scope_required",
+            "error": "Explicit paths are required when staged_only is false",
+            "repo_path": str(repo),
+        }
+
+    staged = _scoped_git_result(
+        ["git", "diff", "--cached", "--name-only", "-z"], cwd=repo, timeout=10
+    )
+    if staged.returncode != 0:
+        return {
+            "status": "git_status_failed",
+            "error": staged.stderr.strip()[:300],
+            "repo_path": str(repo),
+        }
+    staged_paths = _parse_nul_paths(staged.stdout)
+    if staged_only:
+        selected_paths = staged_paths
+        if not selected_paths:
+            return {
+                "status": "no_staged_changes",
+                "error": "No staged changes. Stage the intended files or pass explicit paths.",
+                "repo_path": str(repo),
+            }
+    else:
+
+        def authorized_by_scope(staged_path: str) -> bool:
+            for scope in scoped_paths:
+                if staged_path == scope:
+                    return True
+                if staged_path.startswith(scope.rstrip("/") + "/"):
+                    return True
+            return False
+
+        extras = sorted(path for path in staged_paths if not authorized_by_scope(path))
+        if extras:
+            return {
+                "status": "unsafe_staged_changes",
+                "error": "The index contains changes outside the requested deploy paths",
+                "unexpected_staged_paths": extras,
+                "repo_path": str(repo),
+            }
+        selected_paths = scoped_paths
+
+    env = dict(os.environ)
+    if env_vars:
+        blocked = {
+            "LD_PRELOAD",
+            "LD_LIBRARY_PATH",
+            "DYLD_",
+            "PATH",
+            "HOME",
+            "USER",
+            "SHELL",
+        }
+        for key, value in env_vars.items():
+            if not any(str(key).startswith(prefix) for prefix in blocked):
+                env[str(key)] = str(value)
+
+    results: Dict[str, Any] = {
+        "app": app,
+        "project": app or project.name,
+        "repo_path": str(repo),
+        "project_path": str(project),
+        "scope": "staged_only" if staged_only else "explicit_paths",
+        "selected_paths": selected_paths,
+        "steps": [],
+    }
+
+    vercel_config = _read_vercel_project(project)
+    if vercel_config is None:
+        pull = _scoped_git_result(
+            ["npx", "vercel", "pull", "--yes", "--environment=production"],
+            cwd=project,
+            timeout=60,
+            env=env,
+        )
+        if pull.returncode != 0 or _read_vercel_project(project) is None:
+            results["status"] = "vercel_setup_required"
+            results["steps"].append(
+                {
+                    "step": "vercel_setup",
+                    "status": "error",
+                    "detail": (pull.stderr.strip() or "Vercel project settings were not created")[
+                        :300
+                    ],
+                }
+            )
+            results["hint"] = "Link this project to Vercel, then retry; no commit or push occurred."
+            return results
+        vercel_config = _read_vercel_project(project)
+        results["steps"].append({"step": "vercel_setup", "status": "pulled"})
+    else:
+        results["steps"].append({"step": "vercel_setup", "status": "validated"})
+    results["vercel_project"] = vercel_config
+
+    # Explicit paths start unstaged by definition. Stage exactly those paths
+    # only after the Vercel binding has been validated, then inspect the whole
+    # project for any other dirty input before building.
+    if not staged_only:
+        add_result = _scoped_git_result(["git", "add", "--", *selected_paths], cwd=repo, timeout=10)
+        if add_result.returncode != 0:
+            results["status"] = "git_add_failed"
+            results["steps"].append(
+                {
+                    "step": "git_add",
+                    "status": "error",
+                    "detail": add_result.stderr.strip()[:300],
+                }
+            )
+            return results
+        results["steps"].append({"step": "git_add", "status": "ok"})
+        staged_after_add = _scoped_git_result(
+            ["git", "diff", "--cached", "--name-only", "-z"], cwd=repo, timeout=10
+        )
+        if staged_after_add.returncode != 0:
+            results["status"] = "git_status_failed"
+            results["steps"].append(
+                {
+                    "step": "git_status_after_add",
+                    "status": "error",
+                    "detail": staged_after_add.stderr.strip()[:300],
+                }
+            )
+            return results
+        newly_staged_paths = sorted(
+            set(_parse_nul_paths(staged_after_add.stdout)) - set(staged_paths)
+        )
+
+    project_rel = project.relative_to(repo).as_posix()
+    project_scope = [] if project_rel == "." else ["--", project_rel]
+    dirty = _scoped_git_result(
+        ["git", "status", "--porcelain=v1", "-z", *project_scope], cwd=repo, timeout=10
+    )
+    if dirty.returncode != 0:
+        return {
+            "status": "git_status_failed",
+            "error": dirty.stderr.strip()[:300],
+            "repo_path": str(repo),
+        }
+    # The build reads the working tree. Refuse unstaged/untracked inputs in the
+    # deployed project so the Vercel artifact cannot differ from the commit.
+    unsafe_dirty: List[str] = []
+    entries = dirty.stdout.split("\0") if "\0" in dirty.stdout else dirty.stdout.splitlines()
+    for entry in entries:
+        if not entry:
+            continue
+        state = entry[:2]
+        path = entry[3:] if len(entry) > 3 else ""
+        if state == "??" or len(state) < 2 or state[1] != " ":
+            unsafe_dirty.append(path)
+    if unsafe_dirty:
+        cleanup_error = ""
+        if not staged_only and newly_staged_paths:
+            cleanup = _scoped_git_result(
+                ["git", "reset", "--quiet", "HEAD", "--", *newly_staged_paths],
+                cwd=repo,
+                timeout=10,
+            )
+            if cleanup.returncode != 0:
+                cleanup_error = cleanup.stderr.strip()[:300]
+        return {
+            "status": "unsafe_dirty_project",
+            "error": "Unstaged or untracked project files could contaminate the build",
+            "dirty_paths": unsafe_dirty,
+            "repo_path": str(repo),
+            "project_path": str(project),
+            "index_restored": not cleanup_error,
+            **({"index_cleanup_error": cleanup_error} if cleanup_error else {}),
+        }
+
+    precheck = _scoped_git_result(
+        ["git", "push", "--dry-run", "origin", "HEAD"], cwd=repo, timeout=30
+    )
+    if precheck.returncode != 0:
+        results["status"] = "push_precheck_failed"
+        results["steps"].append(
+            {
+                "step": "push_precheck",
+                "status": "error",
+                "detail": (precheck.stderr or precheck.stdout).strip()[:300],
+            }
+        )
+        return results
+    results["steps"].append({"step": "push_precheck", "status": "ok"})
+
+    try:
+        build_result = _scoped_git_result(
+            ["npx", "vercel", "build", "--prod"], cwd=project, timeout=120, env=env
+        )
+    except subprocess.TimeoutExpired:
+        results["status"] = "build_timeout"
+        results["steps"].append({"step": "build", "status": "timeout"})
+        return results
+    if build_result.returncode != 0:
+        results["status"] = "build_failed"
+        results["steps"].append(
+            {
+                "step": "build",
+                "status": "error",
+                "detail": build_result.stderr.strip()[:300],
+            }
+        )
+        return results
+    results["steps"].append({"step": "build", "status": "ok"})
+
+    commit_result = _scoped_git_result(
+        ["git", "commit", "-m", message or "deploy: site update"], cwd=repo, timeout=120
+    )
+    if commit_result.returncode != 0:
+        results["status"] = "commit_failed"
+        results["steps"].append(
+            {
+                "step": "commit",
+                "status": "error",
+                "detail": (commit_result.stderr or commit_result.stdout).strip()[:300],
+            }
+        )
+        return results
+    sha_result = _scoped_git_result(["git", "rev-parse", "HEAD"], cwd=repo, timeout=10)
+    commit_sha = sha_result.stdout.strip() if sha_result.returncode == 0 else ""
+    results["commit_sha"] = commit_sha
+    results["steps"].append({"step": "commit", "status": "ok", "commit_sha": commit_sha})
+
+    push_result = _scoped_git_result(["git", "push", "origin", "HEAD"], cwd=repo, timeout=60)
+    if push_result.returncode != 0:
+        results["status"] = "push_failed"
+        results["steps"].append(
+            {
+                "step": "push",
+                "status": "error",
+                "detail": push_result.stderr.strip()[:300],
+            }
+        )
+        return results
+    results["steps"].append({"step": "push", "status": "ok"})
+
+    try:
+        deploy_result = _scoped_git_result(
+            ["npx", "vercel", "deploy", "--prebuilt", "--prod"],
+            cwd=project,
+            timeout=max(10, min(int(vercel_timeout), 600)),
+            env=env,
+        )
+    except subprocess.TimeoutExpired as exc:
+        timeout_output = "\n".join(
+            str(value or "") for value in (getattr(exc, "stdout", ""), getattr(exc, "stderr", ""))
+        )
+        results.update(_extract_vercel_deployment_metadata(timeout_output))
+        results["status"] = "pending"
+        results["steps"].append(
+            {
+                "step": "deploy",
+                "status": "pending",
+                "detail": "Vercel timed out after push; continue with deploy_verify",
+            }
+        )
+        results["continuation"] = {
+            "tool": "delimit_deploy_verify",
+            "app": app,
+            "repo_path": str(repo),
+            "git_ref": commit_sha,
+        }
+        return results
+    output = "\n".join((deploy_result.stdout or "", deploy_result.stderr or ""))
+    results.update(_extract_vercel_deployment_metadata(output))
+    if deploy_result.returncode != 0:
+        results["status"] = "deploy_failed"
+        results["steps"].append(
+            {
+                "step": "deploy",
+                "status": "error",
+                "detail": deploy_result.stderr.strip()[:300],
+            }
+        )
+        return results
+    results["steps"].append(
+        {"step": "deploy", "status": "ok", "url": results.get("deploy_url", "")}
+    )
+    results["status"] = "deployed"
+    return results
+
+
+def deploy_site(
+    project_path: str = ".",
+    message: str = "",
+    env_vars: dict = None,
+    *,
+    repo_path: str = "",
+    app: str = "",
+    paths: Optional[List[str]] = None,
+    staged_only: Optional[bool] = None,
+    vercel_timeout: int = 60,
+) -> Dict[str, Any]:
+    """Deploy a Vercel site with an explicit repository and change scope.
+
+    MCP callers pass ``repo_path`` and either retain the safe staged-only
+    default or provide explicit ``paths``. Direct legacy backend callers keep
+    their historical call order, while their staging command is path-scoped.
+    """
+    if staged_only is None and not repo_path and paths is None and not app:
+        return _deploy_site_legacy(project_path, message, env_vars)
+    effective_repo = repo_path or project_path
+    effective_project = project_path if repo_path else "."
+    return _deploy_site_scoped(
+        repo_path=effective_repo,
+        project_path=effective_project,
+        app=app,
+        message=message,
+        env_vars=env_vars,
+        paths=paths,
+        staged_only=True if staged_only is None else staged_only,
+        vercel_timeout=vercel_timeout,
+    )
 
 def deploy_npm(project_path: str = ".", bump: str = "patch", tag: str = "latest", dry_run: bool = False) -> Dict[str, Any]:
     """Publish an npm package — bump version, publish, verify.

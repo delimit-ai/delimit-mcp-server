@@ -1725,6 +1725,7 @@ def _with_next_steps(tool_name: str, result: Dict[str, Any]) -> Dict[str, Any]:
         _inbox_daemon_autostarted = True
         try:
             from ai.inbox_daemon import start_daemon
+
             start_daemon()
             logger.info("Inbox daemon auto-started on first tool call")
         except Exception as e:
@@ -1736,10 +1737,13 @@ def _with_next_steps(tool_name: str, result: Dict[str, Any]) -> Dict[str, Any]:
         _toolcard_cache_autoregistered = True
         try:
             from ai.toolcard_cache import get_cache
+
             _tc = get_cache()
             # Build schema list from mcp's registered tools
             _tool_schemas = []
-            for _tname, _tfn in getattr(mcp, '_tool_manager', {}).items() if hasattr(mcp, '_tool_manager') else []:
+            for _tname, _tfn in (
+                getattr(mcp, "_tool_manager", {}).items() if hasattr(mcp, "_tool_manager") else []
+            ):
                 _tool_schemas.append({"name": _tname})
             if not _tool_schemas:
                 # Fallback: just record the current tool call
@@ -1756,6 +1760,7 @@ def _with_next_steps(tool_name: str, result: Dict[str, Any]) -> Dict[str, Any]:
     # prior behavior exactly.
     try:
         from ai.toolcard_cache import get_cache as _get_tc
+
         _outcome = None
         if isinstance(result, dict):
             _status = str(result.get("status", "")).lower()
@@ -1773,9 +1778,13 @@ def _with_next_steps(tool_name: str, result: Dict[str, Any]) -> Dict[str, Any]:
 
     # Voice doctrine check - flag hype words in outgoing text
     if isinstance(result, dict):
-        _text_fields = [result.get("text", ""), result.get("message", ""),
-                        result.get("explanation", ""), result.get("changelog", ""),
-                        result.get("content", "")]
+        _text_fields = [
+            result.get("text", ""),
+            result.get("message", ""),
+            result.get("explanation", ""),
+            result.get("changelog", ""),
+            result.get("content", ""),
+        ]
         _all_text = " ".join(str(f) for f in _text_fields if f).lower()
         _found_hype = [w for w in FOUNDER_VOICE_HYPE_WORDS if w in _all_text]
         if _found_hype:
@@ -1797,7 +1806,10 @@ def _with_next_steps(tool_name: str, result: Dict[str, Any]) -> Dict[str, Any]:
     policy_gate = _check_policy_gate(tool_name, result if isinstance(result, dict) else {})
     if policy_gate:
         policy_gate["original_result"] = result
-        policy_gate["governance"] = {"action": "policy_blocked", "reason": policy_gate["reason"]}
+        policy_gate["governance"] = {
+            "action": "policy_blocked",
+            "reason": policy_gate["reason"],
+        }
         return _cap_response(policy_gate)
 
     # LED-195: Prompt injection detection on tool inputs
@@ -1815,12 +1827,24 @@ def _with_next_steps(tool_name: str, result: Dict[str, Any]) -> Dict[str, Any]:
     # Route through governance loop
     try:
         from ai.governance import govern
-        return _cap_response(govern(tool_name, result))
+
+        governance_project = (
+            (
+                result.get("repo_path")
+                or result.get("repository")
+                or result.get("project_path")
+                or "."
+            )
+            if isinstance(result, dict)
+            else "."
+        )
+        return _cap_response(govern(tool_name, result, project_path=str(governance_project)))
     except Exception:
         # Fallback: just add next_steps from registry
         steps = NEXT_STEPS_REGISTRY.get(tool_name, [])
         result["next_steps"] = steps
         return _cap_response(result)
+
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -3435,6 +3459,15 @@ def _delimit_deploy_impl(
     bump: str = "patch",
     tag: str = "latest",
     dry_run: bool = False,
+    # explicit repository / attribution context
+    repo_path: str = "",
+    venture: str = "",
+    # safe site scope + bounded continuation
+    paths: Optional[List[str]] = None,
+    staged_only: bool = True,
+    vercel_timeout: int = 60,
+    # app-specific verification targets
+    target_urls: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Unified deployment entry point — dispatches to one of eight actions (Pro).
 
@@ -3483,9 +3516,11 @@ def _delimit_deploy_impl(
         environment to point at to_sha (reversal-only).
       - "status": gate "deploy_status". READ-ONLY query of the deploy
         state store. No write, no probe.
-      - "site": project_path is path-sanitized FIRST (an escape returns
-        {"error": ...} before the gate). gate "deploy_site". LOCAL git ops
-        (add/commit/push) + a NETWORK Vercel build trigger.
+      - "site": repo_path is required and project_path resolves inside it.
+        gate "deploy_site". LOCAL scoped git ops + a NETWORK Vercel build.
+        The default uses only pre-staged changes; explicit paths are the only
+        way the tool stages files. A post-push Vercel timeout returns pending
+        with continuation identifiers instead of closing the transport.
       - "npm": gate "deploy_npm". A PRODUCTION DEPLOY — bumps package.json
         (LOCAL write), runs prepublishOnly, npm pack, then npm publish (a
         publicly-visible NETWORK write, effectively not undoable).
@@ -3509,10 +3544,9 @@ def _delimit_deploy_impl(
             image tag for "build".
         to_sha: SHA to roll back to. Used by "rollback" only. None lets the
             backend select the previous deployed SHA.
-        project_path: Path to the project. Used by "site" and "npm".
-            Default "." (cwd). For "site" it is sanitized and must not
-            escape the workspace root; for "npm" it must contain a
-            package.json.
+        repo_path: Required Git worktree root for every deploy action.
+        project_path: Repository-relative site/package directory. It must
+            remain inside repo_path.
         message: Git commit message. Used by "site" only.
         bump: Semver bump "patch" (default) / "minor" / "major". Used by
             "npm" only.
@@ -3534,64 +3568,141 @@ def _delimit_deploy_impl(
         failure, or any backend failure.
     """
     action = action.lower().strip()
-    valid_actions = ("plan", "build", "npm", "publish", "site", "status", "verify", "rollback")
+    valid_actions = (
+        "plan",
+        "build",
+        "npm",
+        "publish",
+        "site",
+        "status",
+        "verify",
+        "rollback",
+    )
     if action not in valid_actions:
         return {"error": f"Unknown action '{action}'. Valid: {', '.join(valid_actions)}"}
 
+    if not repo_path:
+        return _with_next_steps(
+            f"deploy_{action}",
+            {
+                "status": "repository_context_required",
+                "error": "repo_path is required for every deploy MCP action",
+                "app": app,
+                "hint": "Pass the explicit Git worktree root; deploy tools never derive it from MCP server cwd.",
+            },
+        )
+
+    if action in {"plan", "build", "publish", "verify", "rollback", "status"} and not app:
+        return _with_next_steps(
+            f"deploy_{action}",
+            {
+                "status": "app_identity_required",
+                "error": f"app is required for deploy action {action!r}",
+                "repo_path": str(Path(repo_path).expanduser().resolve()),
+            },
+        )
+
     if action == "plan":
         # Delegate to the shared chain logic
-        return _deploy_plan_chain(app=app, env=env, git_ref=git_ref)
+        return _deploy_plan_chain(
+            app=app,
+            env=env,
+            git_ref=git_ref,
+            repo_path=repo_path,
+            venture=venture,
+        )
 
     if action == "build":
         from ai.license import require_premium
+
         gate = require_premium("deploy_build")
         if gate:
             return gate
         from backends.deploy_bridge import build
-        return _with_next_steps("deploy_build", _safe_call(build, app=app, git_ref=git_ref))
+
+        return _with_next_steps(
+            "deploy_build",
+            _safe_call(build, app=app, git_ref=git_ref, repo_path=repo_path),
+        )
 
     if action == "publish":
         from ai.license import require_premium
+
         gate = require_premium("deploy_publish")
         if gate:
             return gate
         from backends.deploy_bridge import publish as deploy_publish_fn
-        return _with_next_steps("deploy_publish", _safe_call(deploy_publish_fn, app=app, git_ref=git_ref))
+
+        return _with_next_steps(
+            "deploy_publish",
+            _safe_call(deploy_publish_fn, app=app, git_ref=git_ref, repo_path=repo_path),
+        )
 
     if action == "verify":
         from ai.license import require_premium
+
         gate = require_premium("deploy_verify")
         if gate:
             return gate
         from backends.deploy_bridge import verify
-        return _safe_call(verify, app=app, env=env, git_ref=git_ref)
+
+        return _with_next_steps(
+            "deploy_verify",
+            _safe_call(
+                verify,
+                app=app,
+                env=env,
+                git_ref=git_ref,
+                repo_path=repo_path,
+                target_urls=target_urls,
+            ),
+        )
 
     if action == "rollback":
         from ai.license import require_premium
+
         gate = require_premium("deploy_rollback")
         if gate:
             return gate
         from backends.deploy_bridge import rollback
-        return _with_next_steps("deploy_rollback", _safe_call(rollback, app=app, env=env, to_sha=to_sha))
+
+        return _with_next_steps(
+            "deploy_rollback",
+            _safe_call(rollback, app=app, env=env, to_sha=to_sha, repo_path=repo_path),
+        )
 
     if action == "status":
         from ai.license import require_premium
+
         gate = require_premium("deploy_status")
         if gate:
             return gate
         from backends.deploy_bridge import status
-        return _with_next_steps("deploy_status", _safe_call(status, app=app, env=env))
+
+        return _with_next_steps(
+            "deploy_status",
+            _safe_call(status, app=app, env=env, repo_path=repo_path),
+        )
 
     if action == "site":
         try:
-            _sanitize_path(project_path, "project_path")
+            resolved_repo = _sanitize_path(repo_path or project_path, "repo_path")
+            if repo_path:
+                resolved_project = _sanitize_path(project_path, "project_path")
+                if not Path(project_path).is_absolute():
+                    resolved_project = (resolved_repo / project_path).resolve()
+                resolved_project.relative_to(resolved_repo)
+            else:
+                resolved_project = resolved_repo
         except ValueError as e:
             return _with_next_steps("deploy_site", {"error": str(e)})
         from ai.license import require_premium
+
         gate = require_premium("deploy_site")
         if gate:
             return gate
         from backends.tools_infra import deploy_site
+
         env_vars = {}
         if "delimit-ui" in project_path or "delimit-ui" in str(Path(project_path).resolve()):
             chatops_token = os.environ.get("CHATOPS_AUTH_TOKEN", "")
@@ -3599,31 +3710,78 @@ def _delimit_deploy_impl(
                 "NEXT_PUBLIC_CHATOPS_URL": "https://chatops.delimit.ai",
                 "NEXT_PUBLIC_CHATOPS_TOKEN": chatops_token,
             }
-        return _with_next_steps("deploy_site", deploy_site(project_path, message, env_vars))
+        return _with_next_steps(
+            "deploy_site",
+            deploy_site(
+                str(resolved_project),
+                message,
+                env_vars,
+                repo_path=str(resolved_repo),
+                app=app,
+                paths=paths,
+                staged_only=staged_only,
+                vercel_timeout=vercel_timeout,
+            ),
+        )
 
     if action == "npm":
         from ai.license import require_premium
+
         gate = require_premium("deploy_npm")
         if gate:
             return gate
         from backends.tools_infra import deploy_npm
-        return _with_next_steps("deploy_npm", deploy_npm(project_path, bump, tag, dry_run))
+
+        npm_project = repo_path or project_path
+        return _with_next_steps("deploy_npm", deploy_npm(npm_project, bump, tag, dry_run))
 
     return {"error": f"Unhandled action '{action}'"}
+
 
 
 delimit_deploy = mcp.tool()(_delimit_deploy_impl)
 
 # --- Thin wrappers (aliases) for backward compatibility ---
 
-def _deploy_plan_chain(app: str = "", env: str = "", git_ref: Optional[str] = None) -> Dict[str, Any]:
+def _deploy_plan_chain(
+    app: str = "",
+    env: str = "",
+    git_ref: Optional[str] = None,
+    repo_path: str = "",
+    venture: str = "",
+) -> Dict[str, Any]:
     """Shared deploy plan chain logic (Consensus 120).
     Called by both delimit_deploy_plan and _delimit_deploy_impl action=plan.
     """
     from ai.license import require_premium
+
     gate = require_premium("deploy_plan")
     if gate:
         return gate
+
+    if not repo_path:
+        return _with_next_steps(
+            "deploy_plan",
+            {
+                "status": "repository_context_required",
+                "error": "repo_path is required for deploy planning",
+                "app": app,
+                "hint": "Pass the Git worktree root explicitly; app is not a filesystem path.",
+            },
+        )
+    if not app:
+        return _with_next_steps(
+            "deploy_plan",
+            {
+                "status": "app_identity_required",
+                "error": "app is required for deploy planning",
+                "repo_path": str(Path(repo_path).expanduser().resolve()),
+            },
+        )
+    try:
+        repository = _sanitize_path(repo_path, "repo_path")
+    except ValueError as exc:
+        return _with_next_steps("deploy_plan", {"status": "invalid_repository", "error": str(exc)})
 
     from backends.tools_infra import security_audit
     from backends.deploy_bridge import plan as deploy_plan_fn
@@ -3636,45 +3794,67 @@ def _deploy_plan_chain(app: str = "", env: str = "", git_ref: Optional[str] = No
     # below would all read from misleading state. Halt before any chain
     # step runs.
     from backends.git_health import check_worktree_sanity
-    worktree_target = app if app and ("/" in app or app == "." or app.startswith(".")) else "."
+
+    worktree_target = str(repository)
     health = check_worktree_sanity(worktree_target)
     chain["steps"].append({"step": "worktree_precheck", "ok": health["ok"]})
     if not health["ok"]:
         chain["status"] = "blocked_worktree_unhealthy"
-        return _with_next_steps("deploy_plan", {
-            "status": "blocked",
-            "reason": f"Deploy plan halted: worktree unhealthy ({health['reason']})",
-            "worktree_health": health,
-            "chain": chain,
-        })
+        return _with_next_steps(
+            "deploy_plan",
+            {
+                "status": "blocked",
+                "reason": f"Deploy plan halted: worktree unhealthy ({health['reason']})",
+                "worktree_health": health,
+                "chain": chain,
+            },
+        )
 
     # Step 1: Security audit preflight
-    audit_target = app if app else "."
-    audit_result = _chain_call("deploy_plan", "security_audit", security_audit,
-                               required=True, target=audit_target)
+    audit_target = str(repository)
+    audit_result = _chain_call(
+        "deploy_plan",
+        "security_audit",
+        security_audit,
+        required=True,
+        target=audit_target,
+    )
     chain["steps"].append({"step": "security_audit", "ok": not _chain_is_error(audit_result)})
 
     if _chain_is_error(audit_result):
-        return _with_next_steps("deploy_plan", {
-            "status": "blocked",
-            "reason": "Deploy plan halted: security audit failed (fail-closed)",
-            "security_audit": audit_result,
-            "chain": chain,
-        })
+        return _with_next_steps(
+            "deploy_plan",
+            {
+                "status": "blocked",
+                "reason": "Deploy plan halted: security audit failed (fail-closed)",
+                "security_audit": audit_result,
+                "chain": chain,
+            },
+        )
 
     critical_count = _count_critical_findings(audit_result)
     if critical_count > 0:
         chain["status"] = "blocked_critical_findings"
-        return _with_next_steps("deploy_plan", {
-            "status": "blocked",
-            "reason": f"Deploy plan blocked: {critical_count} critical security finding(s)",
-            "security_audit": audit_result,
-            "critical_findings": critical_count,
-            "chain": chain,
-        })
+        return _with_next_steps(
+            "deploy_plan",
+            {
+                "status": "blocked",
+                "reason": f"Deploy plan blocked: {critical_count} critical security finding(s)",
+                "security_audit": audit_result,
+                "critical_findings": critical_count,
+                "chain": chain,
+            },
+        )
 
     # Step 2: Generate deploy plan
-    plan_result = _safe_call(deploy_plan_fn, app=app, env=env, git_ref=git_ref)
+    plan_result = _safe_call(
+        deploy_plan_fn,
+        app=app,
+        env=env,
+        git_ref=git_ref,
+        repo_path=str(repository),
+        venture=venture,
+    )
     chain["steps"].append({"step": "deploy_plan", "ok": not plan_result.get("error")})
 
     if plan_result.get("error"):
@@ -3685,8 +3865,15 @@ def _deploy_plan_chain(app: str = "", env: str = "", git_ref: Optional[str] = No
     gov_result = _delimit_gov_impl(
         action="evaluate",
         eval_action="deploy_plan",
-        context={"app": app, "env": env, "git_ref": git_ref or "", "critical_findings": 0},
-        repo=".",
+        context={
+            "app": app,
+            "env": env,
+            "git_ref": git_ref or "",
+            "critical_findings": 0,
+            "repo_path": str(repository),
+            "venture": venture,
+        },
+        repo=str(repository),
     )
     chain["steps"].append({"step": "gov_evaluate", "ok": not _chain_is_error(gov_result)})
 
@@ -3700,8 +3887,34 @@ def _deploy_plan_chain(app: str = "", env: str = "", git_ref: Optional[str] = No
     return _with_next_steps("deploy_plan", plan_result)
 
 
+
 @mcp.tool()
-def delimit_deploy_plan(app: Annotated[str, Field(description="Application name (project key in the deploy backend). Required.")] = "", env: Annotated[str, Field(description="Target environment, typically \"staging\" or \"production\".")] = "", git_ref: Annotated[Optional[str], Field(description="Git ref (branch/tag/SHA). Optional; defaults to the backend's notion of HEAD when omitted.")] = None) -> Dict[str, Any]:
+def delimit_deploy_plan(
+    app: Annotated[
+        str,
+        Field(description="Application identity (not a filesystem path). Required."),
+    ] = "",
+    env: Annotated[
+        str,
+        Field(description='Target environment, typically "staging" or "production".'),
+    ] = "",
+    git_ref: Annotated[
+        Optional[str],
+        Field(description="Git ref (branch/tag/SHA). Optional; defaults to HEAD."),
+    ] = None,
+    repo_path: Annotated[
+        str,
+        Field(
+            description="Explicit Git worktree root used for health, security, governance, evidence, and attribution."
+        ),
+    ] = "",
+    venture: Annotated[
+        str,
+        Field(
+            description="Optional ledger venture identity; repository context remains authoritative."
+        ),
+    ] = "",
+) -> Dict[str, Any]:
     """Generate a deploy plan with security preflight (Pro).
 
     When to use: as the first step in the deploy chain. The plan
@@ -3729,11 +3942,27 @@ def delimit_deploy_plan(app: Annotated[str, Field(description="Application name 
         a "chain" trace, and next_steps. status="blocked" with a reason
         when the security gate fails.
     """
-    return _deploy_plan_chain(app=app, env=env, git_ref=git_ref)
+    return _deploy_plan_chain(
+        app=app,
+        env=env,
+        git_ref=git_ref,
+        repo_path=repo_path,
+        venture=venture,
+    )
+
 
 
 @mcp.tool()
-def delimit_deploy_build(app: Annotated[str, Field(description="Application name (project key in the deploy backend).")] = "", git_ref: Annotated[Optional[str], Field(description="Git ref (branch/tag/SHA). Default None = backend HEAD.")] = None) -> Dict[str, Any]:
+def delimit_deploy_build(
+    app: Annotated[
+        str, Field(description="Application name (project key in the deploy backend).")
+    ] = "",
+    git_ref: Annotated[
+        Optional[str],
+        Field(description="Git ref (branch/tag/SHA). Default None = backend HEAD."),
+    ] = None,
+    repo_path: Annotated[str, Field(description="Explicit Git worktree root.")] = "",
+) -> Dict[str, Any]:
     """Build container images for an app at a specific git ref (Pro).
 
     When to use: as the second step of the deploy chain after
@@ -3773,11 +4002,21 @@ def delimit_deploy_build(app: Annotated[str, Field(description="Application name
         caller lacks Premium, or {"error": "..."} on builder
         failure.
     """
-    return _delimit_deploy_impl(action="build", app=app, git_ref=git_ref)
+    return _delimit_deploy_impl(action="build", app=app, git_ref=git_ref, repo_path=repo_path)
+
 
 
 @mcp.tool()
-def delimit_deploy_publish(app: Annotated[str, Field(description="Application name (project key in the deploy backend).")] = "", git_ref: Annotated[Optional[str], Field(description="Git ref the images were built at. Default None.")] = None) -> Dict[str, Any]:
+def delimit_deploy_publish(
+    app: Annotated[
+        str, Field(description="Application name (project key in the deploy backend).")
+    ] = "",
+    git_ref: Annotated[
+        Optional[str],
+        Field(description="Git ref the images were built at. Default None."),
+    ] = None,
+    repo_path: Annotated[str, Field(description="Explicit Git worktree root.")] = "",
+) -> Dict[str, Any]:
     """Publish previously built images to the registry (Pro).
 
     When to use: after delimit_deploy_build has produced images locally.
@@ -3798,11 +4037,30 @@ def delimit_deploy_publish(app: Annotated[str, Field(description="Application na
     Returns:
         Dict with publish status, registry refs, plus next_steps.
     """
-    return _delimit_deploy_impl(action="publish", app=app, git_ref=git_ref)
+    return _delimit_deploy_impl(action="publish", app=app, git_ref=git_ref, repo_path=repo_path)
+
 
 
 @mcp.tool()
-def delimit_deploy_verify(app: Annotated[str, Field(description="Application name.")] = "", env: Annotated[str, Field(description="Target environment (\"staging\" or \"production\").")] = "", git_ref: Annotated[Optional[str], Field(description="Optional git ref the deploy targets.")] = None) -> Dict[str, Any]:
+def delimit_deploy_verify(
+    app: Annotated[
+        str, Field(description="Application identity; selects only this app's targets.")
+    ] = "",
+    env: Annotated[str, Field(description='Target environment ("staging" or "production").')] = "",
+    git_ref: Annotated[
+        Optional[str], Field(description="Optional git ref the deploy targets.")
+    ] = None,
+    repo_path: Annotated[
+        str,
+        Field(description="Explicit Git worktree root containing deploy target configuration."),
+    ] = "",
+    target_urls: Annotated[
+        Optional[List[str]],
+        Field(
+            description="Optional app-specific HTTPS targets; never expands to the global fleet."
+        ),
+    ] = None,
+) -> Dict[str, Any]:
     """Probe a freshly-deployed revision's health — experimental (Pro).
 
     When to use: immediately after delimit_deploy_publish has rolled
@@ -3844,11 +4102,29 @@ def delimit_deploy_verify(app: Annotated[str, Field(description="Application nam
         license-gate payload if the caller lacks Premium, or
         {"error": "..."} on probe failure.
     """
-    return _delimit_deploy_impl(action="verify", app=app, env=env, git_ref=git_ref)
+    return _delimit_deploy_impl(
+        action="verify",
+        app=app,
+        env=env,
+        git_ref=git_ref,
+        repo_path=repo_path,
+        target_urls=target_urls,
+    )
+
 
 
 @mcp.tool()
-def delimit_deploy_rollback(app: Annotated[str, Field(description="Application name.")] = "", env: Annotated[str, Field(description="Target environment.")] = "", to_sha: Annotated[Optional[str], Field(description="Target SHA to roll back to. If None, the backend selects the previous deployed SHA.")] = None) -> Dict[str, Any]:
+def delimit_deploy_rollback(
+    app: Annotated[str, Field(description="Application name.")] = "",
+    env: Annotated[str, Field(description="Target environment.")] = "",
+    to_sha: Annotated[
+        Optional[str],
+        Field(
+            description="Target SHA to roll back to. If None, the backend selects the previous deployed SHA."
+        ),
+    ] = None,
+    repo_path: Annotated[str, Field(description="Explicit Git worktree root.")] = "",
+) -> Dict[str, Any]:
     """Roll back an environment to a previous SHA (Pro).
 
     When to use: when delimit_deploy_verify shows a regression and you
@@ -3872,11 +4148,18 @@ def delimit_deploy_rollback(app: Annotated[str, Field(description="Application n
     Returns:
         Dict with rollback status and next_steps.
     """
-    return _delimit_deploy_impl(action="rollback", app=app, env=env, to_sha=to_sha)
+    return _delimit_deploy_impl(
+        action="rollback", app=app, env=env, to_sha=to_sha, repo_path=repo_path
+    )
+
 
 
 @mcp.tool()
-def delimit_deploy_status(app: Annotated[str, Field(description="Application name.")] = "", env: Annotated[str, Field(description="Target environment.")] = "") -> Dict[str, Any]:
+def delimit_deploy_status(
+    app: Annotated[str, Field(description="Application name.")] = "",
+    env: Annotated[str, Field(description="Target environment.")] = "",
+    repo_path: Annotated[str, Field(description="Explicit Git worktree root.")] = "",
+) -> Dict[str, Any]:
     """Read the current rollout metadata for an app/env (Pro).
 
     When to use: to inspect the currently deployed SHA, rollout
@@ -3912,7 +4195,8 @@ def delimit_deploy_status(app: Annotated[str, Field(description="Application nam
         caller lacks Premium, or {"error": "..."} on backend
         failure.
     """
-    return _delimit_deploy_impl(action="status", app=app, env=env)
+    return _delimit_deploy_impl(action="status", app=app, env=env, repo_path=repo_path)
+
 
 
 # ─── Intel ──────────────────────────────────────────────────────────────
@@ -8369,8 +8653,36 @@ def delimit_license_status() -> Dict[str, Any]:
 
 @mcp.tool()
 def delimit_deploy_site(
-    project_path: Annotated[str, Field(description="Path to the site project. Default \".\" (cwd). Sanitized — must not escape the workspace root.")] = ".",
+    repo_path: Annotated[
+        str,
+        Field(
+            description="Required explicit Git worktree root; never derived from MCP server cwd."
+        ),
+    ] = "",
+    project_path: Annotated[
+        str,
+        Field(description="Site directory inside repo_path, or an absolute path inside it."),
+    ] = ".",
+    app: Annotated[
+        str,
+        Field(description="Deployment application identity, separate from filesystem context."),
+    ] = "",
     message: Annotated[str, Field(description="Git commit message for the deploy commit.")] = "",
+    paths: Annotated[
+        Optional[List[str]],
+        Field(
+            description="Explicit repo-relative paths to stage; set staged_only=false when used."
+        ),
+    ] = None,
+    staged_only: Annotated[
+        bool, Field(description="Deploy only the existing index. Safe default: true.")
+    ] = True,
+    vercel_timeout: Annotated[
+        int,
+        Field(
+            description="Seconds to wait for Vercel after push before returning pending (10-600)."
+        ),
+    ] = 60,
 ) -> Dict[str, Any]:
     """Ship a static / Next.js site via git push to the Vercel pipeline (Pro).
 
@@ -8391,20 +8703,21 @@ def delimit_deploy_site(
     hooks, and (for delimit-ui) automatic ChatOps env-var
     injection from CHATOPS_AUTH_TOKEN.
 
-    Side effects: gated by require_premium — unlicensed callers
-    receive a license payload and no deploy runs. `project_path` is
-    sanitised via _sanitize_path; paths escaping the workspace root
-    short-circuit with an error. On a licensed call, invokes
-    backends.tools_infra.deploy_site which performs LOCAL git
-    operations (add, commit, push) and triggers a NETWORK deploy
+    Side effects: requires repo_path and is gated by require_premium.
+    project_path must remain inside repo_path. The safe default commits only
+    the existing index; staged_only=false requires explicit repo-relative
+    paths and never uses git add -A. Vercel binding is pulled/validated before
+    Git mutation. A timeout after push returns status=pending, commit SHA, and
+    a delimit_deploy_verify continuation rather than raising. On success this
+    performs LOCAL git operations and triggers a NETWORK deploy
     (Vercel build webhook). For the delimit-ui project, automatically
     injects ChatOps env vars from the CHATOPS_AUTH_TOKEN environment
     variable into the build context. No rollback — use
     delimit_deploy_rollback if the deploy regresses.
 
     Args:
-        project_path: Path to the site project. Default "." (cwd).
-            Sanitized — must not escape the workspace root.
+        repo_path: Required explicit Git worktree root.
+        project_path: Site directory relative to repo_path.
         message: Git commit message for the deploy commit. Empty
             string is allowed but discouraged; use a meaningful
             message so the deploy history is auditable.
@@ -8416,15 +8729,39 @@ def delimit_deploy_site(
         or git operation failure, or a license-gate payload if the
         caller lacks Premium.
     """
-    return _delimit_deploy_impl(action="site", project_path=project_path, message=message)
+    return _delimit_deploy_impl(
+        action="site",
+        repo_path=repo_path,
+        project_path=project_path,
+        app=app,
+        message=message,
+        paths=paths,
+        staged_only=staged_only,
+        vercel_timeout=vercel_timeout,
+    )
+
 
 
 @mcp.tool()
 def delimit_deploy_npm(
-    project_path: Annotated[str, Field(description="Path to the npm project root. Default \".\" (cwd).")] = ".",
-    bump: Annotated[str, Field(description="Semver bump — \"patch\" (default), \"minor\", or \"major\".")] = "patch",
-    tag: Annotated[str, Field(description="npm dist-tag for the publish. Default \"latest\".")] = "latest",
-    dry_run: Annotated[bool, Field(description="If True, run the chain without publishing. Default False.")] = False,
+    repo_path: Annotated[
+        str,
+        Field(description="Required explicit Git worktree/package root; never derived from cwd."),
+    ] = "",
+    project_path: Annotated[
+        str,
+        Field(description="Deprecated compatibility field; repo_path is authoritative."),
+    ] = ".",
+    bump: Annotated[
+        str, Field(description='Semver bump — "patch" (default), "minor", or "major".')
+    ] = "patch",
+    tag: Annotated[
+        str, Field(description='npm dist-tag for the publish. Default "latest".')
+    ] = "latest",
+    dry_run: Annotated[
+        bool,
+        Field(description="If True, run the chain without publishing. Default False."),
+    ] = False,
 ) -> Dict[str, Any]:
     """Publish an npm package: version bump, pack, and push to registry (Pro).
 
@@ -8459,8 +8796,9 @@ def delimit_deploy_npm(
     bump and pack still happen so the chain can be exercised.
 
     Args:
-        project_path: Path to the npm project root. Default "."
-            (cwd). Must contain a package.json.
+        repo_path: Required explicit npm package/Git worktree root.
+        project_path: Deprecated compatibility field; ignored when repo_path
+            is supplied.
         bump: Semver bump — "patch" (default), "minor", or "major".
             Drives the resulting version string.
         tag: npm dist-tag for the publish. Default "latest". Use
@@ -8477,7 +8815,15 @@ def delimit_deploy_npm(
         caller lacks Premium, or {"error": "..."} on any step
         failure.
     """
-    return _delimit_deploy_impl(action="npm", project_path=project_path, bump=bump, tag=tag, dry_run=dry_run)
+    return _delimit_deploy_impl(
+        action="npm",
+        repo_path=repo_path,
+        project_path=project_path,
+        bump=bump,
+        tag=tag,
+        dry_run=dry_run,
+    )
+
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -13406,6 +13752,14 @@ def delimit_notify(channel: Annotated[str, Field(description="webhook, slack, or
                 "registered": True,
                 "led_ref": led_ref or None,
             }
+            # LED-3911 — stamp the per-draft discriminator into the email
+            # subject. Founder replies quote the subject, and the inbox
+            # matcher approves exactly the draft whose [draft_id:...] token
+            # the reply carries. 16 chars = full 10-char ULID timestamp +
+            # 6 random chars (an 8-char prefix collides for drafts created
+            # in the same millisecond — the batch case this token solves).
+            if subject and "[draft_id:" not in subject:
+                subject = f"{subject} [draft_id:{signed.draft_id[:16]}]"
         except Exception as e:
             # Draft registration must not break the notify itself —
             # the email still goes out, the draft just isn't tracked.

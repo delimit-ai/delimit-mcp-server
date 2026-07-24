@@ -12,3 +12,10 @@ fastmcp>=3.0
 pydantic>=2.0.0
 pyyaml>=6.0
 packaging>=23.0
+# LED-3840: security floor for the `mcp` transitive dep pulled by fastmcp.
+# fastmcp constrains mcp<2.0,>=1.24.0 and a fresh resolve can land on 1.26.0,
+# which carries CVE-2026-52870 / CVE-2026-52869 / CVE-2026-59950. 1.28.1 clears
+# all three. The gateway runs FastMCP over stdio (mcp.run() default; no
+# enable_tasks / SSE / StreamableHTTP / websocket transport), so none are
+# exploitable in our posture — this pin is defense-in-depth for fresh installs.
+mcp>=1.28.1

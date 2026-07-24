@@ -168,3 +168,31 @@ gateway/ai/x_ranker.py
 gateway/core/diff_engine_v2.py.bak
 gateway/ai/outreach_identity_firewall.py
 gateway/ai/fs_sector_denylist.txt
+# LED-1946 mailbox service — internal multi-tenant mailbox governance/execution
+# infra (execution permits, admission, secret resolution, pricing, transports).
+# Internal-only: never shipped in the public npm bundle. Classified 2026-07-24.
+gateway/ai/mailbox_action_plan.py
+gateway/ai/mailbox_admission_store.py
+gateway/ai/mailbox_anthropic_transport.py
+gateway/ai/mailbox_approval.py
+gateway/ai/mailbox_composition.py
+gateway/ai/mailbox_deliberation.py
+gateway/ai/mailbox_dispatch_gate.py
+gateway/ai/mailbox_execution_boundary.py
+gateway/ai/mailbox_execution_permit.py
+gateway/ai/mailbox_execution_worker.py
+gateway/ai/mailbox_gmail_adapter.py
+gateway/ai/mailbox_gmail_connector.py
+gateway/ai/mailbox_governance.py
+gateway/ai/mailbox_ingress.py
+gateway/ai/mailbox_model_request.py
+gateway/ai/mailbox_model_resolution.py
+gateway/ai/mailbox_openai_transport.py
+gateway/ai/mailbox_planner.py
+gateway/ai/mailbox_pricing.py
+gateway/ai/mailbox_registry.py
+gateway/ai/mailbox_runtime.py
+gateway/ai/mailbox_secret_resolver.py
+gateway/ai/mailbox_service.py
+gateway/ai/mailbox_service_daemon.py
+gateway/ai/mailbox_transport_receipt.py
