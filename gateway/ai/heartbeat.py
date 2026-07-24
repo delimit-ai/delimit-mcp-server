@@ -29,6 +29,7 @@ checks freshness").
 
 from __future__ import annotations
 
+import calendar
 import json
 import os
 import time
@@ -96,8 +97,13 @@ def _parse_iso(ts: str) -> Optional[float]:
     if not ts:
         return None
     try:
-        # %Y-%m-%dT%H:%M:%SZ — UTC, no fractional seconds.
-        return time.mktime(time.strptime(ts, "%Y-%m-%dT%H:%M:%SZ")) - time.timezone
+        # %Y-%m-%dT%H:%M:%SZ — UTC, no fractional seconds. The Z suffix
+        # means the stamp is UTC, so interpret the parsed struct as UTC.
+        # calendar.timegm() does exactly that; time.mktime() would treat
+        # it as LOCAL time and (with a DST-aware guess minus the non-DST
+        # time.timezone constant) inflate every age by exactly one DST
+        # hour — the LED-3894 false-stale bug.
+        return float(calendar.timegm(time.strptime(ts, "%Y-%m-%dT%H:%M:%SZ")))
     except (ValueError, TypeError):
         return None
 

@@ -118,6 +118,50 @@ IMAP_PORT = int(os.environ.get("DELIMIT_IMAP_PORT", "") or _INBOUND_CFG.get("ima
 IMAP_USER = os.environ.get("DELIMIT_IMAP_USER", "") or _INBOUND_CFG.get("imap_user", "")
 FORWARD_TO = _INBOUND_CFG.get("forward_to", "")
 
+
+def _load_founder_senders() -> set:
+    """Recognition allowlist of the founder's own sending addresses.
+
+    The inbox daemon treats an inbound email as a founder directive only when
+    the sender is in this set. It historically compared against FORWARD_TO
+    alone (a single address), so a directive sent from the founder's *other*
+    known address was classified owner-action but then silently forwarded and
+    never acknowledged or acted on. This widens recognition to a configurable
+    set while defaulting to {FORWARD_TO}, so existing single-address installs
+    are unaffected (backward compatible).
+
+    Sources (union, all lower-cased, de-duped):
+      - FORWARD_TO (always included when set)
+      - DELIMIT_FOUNDER_SENDERS env: comma/space-separated addresses
+      - ~/.delimit/secrets/founder-senders.json: {"addresses": [...]}
+    """
+    addrs = set()
+    if FORWARD_TO:
+        addrs.add(FORWARD_TO.strip().lower())
+    env_val = os.environ.get("DELIMIT_FOUNDER_SENDERS", "")
+    for a in env_val.replace(",", " ").split():
+        if a.strip():
+            addrs.add(a.strip().lower())
+    try:
+        cfg = _load_json_file(Path.home() / ".delimit" / "secrets" / "founder-senders.json")
+        vals = cfg.get("addresses") if isinstance(cfg, dict) else None
+        if isinstance(vals, list):
+            for a in vals:
+                if isinstance(a, str) and a.strip():
+                    addrs.add(a.strip().lower())
+    except Exception:
+        pass
+    return addrs
+
+
+FOUNDER_SENDERS = _load_founder_senders()
+
+
+def is_founder_sender(addr: str) -> bool:
+    """True when ``addr`` is one of the founder's recognized sending addresses."""
+    return bool(addr) and addr.strip().lower() in FOUNDER_SENDERS
+
+
 # Domains/senders whose emails require owner action
 OWNER_ACTION_DOMAINS = {
     "cooperpress.com",
@@ -141,7 +185,7 @@ OWNER_ACTION_DOMAINS = {
 
 OWNER_ACTION_SENDERS = set(
     filter(None, [os.environ.get("DELIMIT_OWNER_EMAIL", "")])
-)
+) | FOUNDER_SENDERS
 
 # Subject patterns that indicate owner-action (compiled once)
 import re as _re
