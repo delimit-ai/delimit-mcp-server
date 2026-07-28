@@ -196,3 +196,4 @@ gateway/ai/mailbox_secret_resolver.py
 gateway/ai/mailbox_service.py
 gateway/ai/mailbox_service_daemon.py
 gateway/ai/mailbox_transport_receipt.py
+gateway/ai/thinktank_pipeline.py
