@@ -1323,6 +1323,53 @@ describe('STR-2202 subagent flight-recorder (PostToolUse)', () => {
         assert.ok(s.includes('tasks.json'), 'has direct-write fallback');
     });
 
+    it('resolves neutral-cwd venture via the active-venture registry (LED-4244)', () => {
+        const claudeDir = path.join(tmpDir, '.claude');
+        fs.mkdirSync(claudeDir, { recursive: true });
+        const tool = { id: 'claude', name: 'Claude Code', configPath: path.join(claudeDir, 'settings.json') };
+
+        crossModelHooks.installClaudeHooks(tool, { session_start: true });
+
+        const recorderPath = path.join(claudeDir, 'hooks', 'delimit-agent-record');
+        const s = fs.readFileSync(recorderPath, 'utf-8');
+        // The bare basename assignment is gone; the resolver consults the
+        // registry the CLI maintains (LED-4057 acceptance follow-up).
+        assert.ok(s.includes('_resolve_venture'), 'resolver function present');
+        assert.ok(s.includes('active_venture.json'), 'registry consulted');
+        assert.ok(!s.includes('venture = os.path.basename'), 'bare basename assignment removed');
+
+        // Behavioral matrix: execute the generated resolver under a fake HOME.
+        const m = s.match(/def _resolve_venture[\s\S]*?\n\nventure = _resolve_venture\(cwd\)/);
+        assert.ok(m, 'resolver block extractable from generated script');
+        const pySnippet = m[0].replace(/\n\nventure = _resolve_venture\(cwd\)\s*$/, '');
+
+        const regHome = path.join(tmpDir, 'home-with-registry');
+        fs.mkdirSync(path.join(regHome, '.delimit'), { recursive: true });
+        fs.writeFileSync(
+            path.join(regHome, '.delimit', 'active_venture.json'),
+            JSON.stringify({ venture: 'wire-report', repoRoot: null })
+        );
+        const bareHome = path.join(tmpDir, 'home-without-registry');
+        fs.mkdirSync(bareHome, { recursive: true });
+
+        const harness =
+            `import os, json\n${pySnippet}\n` +
+            `print(_resolve_venture("/root"))\n` +               // neutral -> registry
+            `print(_resolve_venture(os.path.expanduser("~")))\n` + // own home -> registry
+            `print(_resolve_venture("/home/x/delimit-gateway"))\n` + // real venture dir wins
+            `print(_resolve_venture(""))\n`;                     // empty -> registry
+        const withReg = execSync('python3', { input: harness, env: { ...process.env, HOME: regHome } })
+            .toString().trim().split('\n');
+        assert.deepStrictEqual(withReg, ['wire-report', 'wire-report', 'delimit-gateway', 'wire-report']);
+
+        // Accepted floor without a registry: neutral cwds fall back to their
+        // basename ("/root" -> "root", the home dir -> its basename), empty
+        // falls to "all" — exactly the pre-LED-4244 behavior.
+        const noReg = execSync('python3', { input: harness, env: { ...process.env, HOME: bareHome } })
+            .toString().trim().split('\n');
+        assert.deepStrictEqual(noReg, ['root', 'home-without-registry', 'delimit-gateway', 'all']);
+    });
+
     it('is not installed when agent_record is false', () => {
         const claudeDir = path.join(tmpDir, '.claude');
         fs.mkdirSync(claudeDir, { recursive: true });
