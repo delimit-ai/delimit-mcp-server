@@ -3,7 +3,7 @@ const assert = require('node:assert');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { execSync } = require('child_process');
+const { execSync, spawnSync } = require('child_process');
 
 // CI environments do not have the full gateway/lib stack installed, so tests
 // that spawn the CLI via execSync or depend on uncommitted lib changes will
@@ -18,16 +18,27 @@ const crossModelHooks = require('../lib/cross-model-hooks');
 
 // Test helpers
 const ORIGINAL_HOME = process.env.HOME;
+const ORIGINAL_DELIMIT_HOME = process.env.DELIMIT_HOME;
+const ORIGINAL_NAMESPACE_ROOT = process.env.DELIMIT_NAMESPACE_ROOT;
 let tmpDir;
 
 function setupTmpHome() {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'delimit-hooks-test-'));
     process.env.HOME = tmpDir;
+    delete process.env.DELIMIT_HOME;
+    delete process.env.DELIMIT_NAMESPACE_ROOT;
     return tmpDir;
 }
 
 function teardownTmpHome() {
     process.env.HOME = ORIGINAL_HOME;
+    if (ORIGINAL_DELIMIT_HOME === undefined) delete process.env.DELIMIT_HOME;
+    else process.env.DELIMIT_HOME = ORIGINAL_DELIMIT_HOME;
+    if (ORIGINAL_NAMESPACE_ROOT === undefined) {
+        delete process.env.DELIMIT_NAMESPACE_ROOT;
+    } else {
+        process.env.DELIMIT_NAMESPACE_ROOT = ORIGINAL_NAMESPACE_ROOT;
+    }
     if (tmpDir && fs.existsSync(tmpDir)) {
         fs.rmSync(tmpDir, { recursive: true, force: true });
     }
@@ -134,6 +145,11 @@ describe('installClaudeHooks', () => {
         const sessionGroup = config.hooks.SessionStart[0];
         assert.ok(sessionGroup.hooks, 'SessionStart should use nested format');
         assert.ok(sessionGroup.hooks[0].command.includes('delimit') || sessionGroup.hooks[0].command.includes('hooks'));
+        assert.strictEqual(
+            sessionGroup.hooks[0].timeout,
+            20,
+            'outer budget covers 6s digest + 8s continuity with margin',
+        );
         assert.strictEqual(sessionGroup.if, undefined, 'SessionStart should have no if condition');
 
         // PreToolUse should have the spec-scoped hook in nested format
@@ -181,6 +197,54 @@ describe('installClaudeHooks', () => {
         assert.strictEqual(config.hooks.PreToolUse.length, 4, 'Should have exactly four PreToolUse hooks');
         // spec-lint + STR-2202 agent-record = 2
         assert.strictEqual(config.hooks.PostToolUse.length, 2, 'Should have exactly two PostToolUse hooks (spec-lint + agent-record)');
+    });
+
+    it('collapses seeded duplicate SessionStart delegates without dropping unrelated hooks', () => {
+        const claudeDir = path.join(tmpDir, '.claude');
+        fs.mkdirSync(claudeDir, { recursive: true });
+
+        const tool = {
+            id: 'claude',
+            name: 'Claude Code',
+            configPath: path.join(claudeDir, 'settings.json'),
+        };
+        const hookConfig = {
+            session_start: true,
+            pre_tool: false,
+            pre_commit: false,
+            conditional_hooks: false,
+            agent_record: false,
+        };
+
+        crossModelHooks.installClaudeHooks(tool, hookConfig);
+        const seeded = JSON.parse(fs.readFileSync(tool.configPath, 'utf-8'));
+        const exactGroup = seeded.hooks.SessionStart[0];
+        const exactCommand = exactGroup.hooks[0].command;
+        seeded.hooks.SessionStart.push({
+            matcher: '',
+            hooks: [
+                { ...exactGroup.hooks[0], timeout: 10 },
+                { type: 'command', command: '/usr/local/bin/user-session-start' },
+            ],
+        });
+        fs.writeFileSync(tool.configPath, JSON.stringify(seeded));
+
+        const changes = crossModelHooks.installClaudeHooks(tool, hookConfig);
+        const config = JSON.parse(fs.readFileSync(tool.configPath, 'utf-8'));
+        const commands = config.hooks.SessionStart.flatMap(
+            group => (group.hooks || []).map(hook => hook.command),
+        );
+        const exactDelegates = config.hooks.SessionStart.flatMap(
+            group => (group.hooks || []).filter(hook => hook.command === exactCommand),
+        );
+
+        assert.ok(changes.includes('SessionStart'), 'duplicate normalization is reported');
+        assert.strictEqual(exactDelegates.length, 1, 'exactly one Delimit delegate remains');
+        assert.strictEqual(exactDelegates[0].timeout, 20, 'canonical timeout is retained');
+        assert.ok(
+            commands.includes('/usr/local/bin/user-session-start'),
+            'unrelated hook from a mixed group is preserved',
+        );
     });
 
     it('preserves existing settings.json content', () => {
@@ -952,18 +1016,84 @@ describe('LED-1962 SessionStart auto-revive last soul', () => {
         // The marker printed into the new session, and the module it imports.
         assert.ok(script.includes('Auto-revived working context'), 'emits the auto-revive marker');
         assert.ok(script.includes('session_phoenix'), 'imports ai.session_phoenix');
-        assert.ok(script.includes('get_latest_soul'), 'revives the current-project soul');
-        // Cross-project fallback is OPT-IN and OFF by default — a soul from a
-        // different project/venture must not bleed into this (possibly public) session.
-        assert.ok(script.includes('DELIMIT_AUTO_REVIVE_GLOBAL=""'),
-            'cross-project fallback OFF by default');
-        assert.ok(script.includes('DELIMIT_AUTO_REVIVE_GLOBAL") == "1"'),
-            'global fallback is env-guarded (opt-in only)');
+        assert.ok(script.includes('from ai import session_phoenix as backend'),
+            'uses one reconcile+revive Session Phoenix delegate');
+        assert.ok(script.includes('CONTINUITY_PROTOCOL_VERSION'),
+            'rejects legacy backends without the event-bound protocol');
+        assert.ok(script.includes('"current_transcript_path": event.get("transcript_path"'),
+            'binds reconciliation to the SessionStart event transcript');
+        assert.ok(script.includes('"project_path": exact["project_path"]'),
+            'revives the exact reconciled project');
+        assert.ok(script.includes('"soul_id": exact["soul_id"]'),
+            'revives the exact reconciled soul');
+        assert.ok(script.includes('"transcript_path": ""'),
+            'does not re-resolve the receiver empty transcript');
+        assert.ok(script.includes('"session_id": event.get("session_id"'),
+            'passes the logical Claude session id');
+        assert.ok(script.includes('"chat_run_id": launcher_run'),
+            'passes the stable Delimit Chat run id');
+        assert.ok(!script.includes('get_latest_soul'), 'never reads a cwd soul directly');
+        assert.ok(!script.includes('find_most_recent_soul_across_projects'),
+            'never performs a blind global-most-recent revival');
+        // A soul from a different project/venture must never bleed into this
+        // session through a blind global-most-recent fallback.
+        assert.ok(!script.includes('DELIMIT_AUTO_REVIVE_GLOBAL'),
+            'generated hook has no blind global fallback switch');
         // Never-block contract: time-boxed + fails open, orchestrator-only.
-        assert.ok(script.includes("timeout 6 python3 - <<'RVEOF'"), 'revive is time-boxed');
-        assert.ok(/RVEOF' 2>\/dev\/null \|\| true/.test(script), 'revive fails open (|| true)');
+        assert.ok(script.includes("timeout 8 python3 - <<'PYEOF'"), 'delegate is time-boxed');
+        assert.ok(/PYEOF' 2>\/dev\/null \|\| true/.test(script), 'delegate fails open (|| true)');
         assert.ok(script.includes('"$DELIMIT_SESSION_TYPE" != "subagent"'),
             'revive skipped for subagents');
+        assert.ok(
+            script.indexOf("timeout 6 python3 - <<'DGEOF'")
+                < script.indexOf("timeout 8 python3 - <<'PYEOF'"),
+            'optional digest work runs before the delivery/ack phase',
+        );
+        assert.ok(
+            script.indexOf('=== Delimit Ready ===')
+                < script.indexOf("timeout 8 python3 - <<'PYEOF'"),
+            'continuity delivery is the final output-producing phase',
+        );
+        const config = JSON.parse(fs.readFileSync(tool.configPath, 'utf-8'));
+        assert.strictEqual(
+            config.hooks.SessionStart[0].hooks[0].timeout,
+            20,
+            'outer hook budget cannot expire after a valid 8s revive',
+        );
+    });
+
+    it('upgrades an existing SessionStart outer timeout to the safe budget', () => {
+        const claudeDir = path.join(tmpDir, '.claude');
+        const hooksDir = path.join(claudeDir, 'hooks');
+        fs.mkdirSync(hooksDir, { recursive: true });
+        const hookPath = path.join(hooksDir, 'delimit');
+        const tool = {
+            id: 'claude',
+            name: 'Claude Code',
+            configPath: path.join(claudeDir, 'settings.json'),
+        };
+        fs.writeFileSync(tool.configPath, JSON.stringify({
+            hooks: {
+                SessionStart: [{
+                    matcher: '',
+                    hooks: [{
+                        type: 'command',
+                        command: hookPath,
+                        timeout: 10,
+                    }],
+                }],
+            },
+        }));
+
+        const changes = crossModelHooks.installClaudeHooks(tool, {
+            session_start: true,
+        });
+        const config = JSON.parse(fs.readFileSync(tool.configPath, 'utf-8'));
+        assert.ok(changes.includes('SessionStart:timeout'));
+        assert.strictEqual(
+            config.hooks.SessionStart[0].hooks[0].timeout,
+            20,
+        );
     });
 
     it('omits the auto-revive block when session_auto_revive is false', () => {
@@ -974,12 +1104,13 @@ describe('LED-1962 SessionStart auto-revive last soul', () => {
         crossModelHooks.installClaudeHooks(tool, { session_start: true, session_auto_revive: false });
 
         const script = fs.readFileSync(path.join(claudeDir, 'hooks', 'delimit'), 'utf-8');
-        assert.ok(!script.includes('Auto-revived working context'),
-            'auto-revive marker omitted when flag is false');
-        assert.ok(!script.includes("<<'RVEOF'"), 'auto-revive block omitted when flag is false');
+        assert.ok(script.includes('if False:'),
+            'single delegate disables the revive branch when configured off');
+        assert.ok(!script.includes('if True:'),
+            'disabled configuration cannot enter the revive branch');
     });
 
-    it('enables cross-project fallback only when session_auto_revive_global is true', () => {
+    it('does not restore blind global fallback for the legacy config flag', () => {
         const claudeDir = path.join(tmpDir, '.claude');
         fs.mkdirSync(claudeDir, { recursive: true });
         const tool = { id: 'claude', name: 'Claude Code', configPath: path.join(claudeDir, 'settings.json') };
@@ -987,8 +1118,8 @@ describe('LED-1962 SessionStart auto-revive last soul', () => {
         crossModelHooks.installClaudeHooks(tool, { session_start: true, session_auto_revive_global: true });
 
         const script = fs.readFileSync(path.join(claudeDir, 'hooks', 'delimit'), 'utf-8');
-        assert.ok(script.includes('DELIMIT_AUTO_REVIVE_GLOBAL="1"'),
-            'cross-project fallback enabled when opted in');
+        assert.ok(!script.includes('DELIMIT_AUTO_REVIVE_GLOBAL'),
+            'legacy flag cannot re-enable unsafe global-most-recent revival');
         assert.ok(script.includes('Auto-revived working context'), 'still emits the revive block');
     });
 
@@ -1002,6 +1133,125 @@ describe('LED-1962 SessionStart auto-revive last soul', () => {
         const hookPath = path.join(claudeDir, 'hooks', 'delimit');
         // Throws (non-zero exit) if the generated script is not valid bash.
         execSync(`bash -n ${JSON.stringify(hookPath)}`, { stdio: 'pipe' });
+    });
+
+    it('executes one delegate and revives the exact reconciled soul once', () => {
+        const claudeDir = path.join(tmpDir, '.claude');
+        const serverDir = path.join(tmpDir, '.delimit', 'server', 'ai');
+        fs.mkdirSync(claudeDir, { recursive: true });
+        fs.mkdirSync(serverDir, { recursive: true });
+        fs.writeFileSync(path.join(serverDir, '__init__.py'), '');
+        fs.writeFileSync(path.join(serverDir, 'session_phoenix.py'), `
+import json, os
+CONTINUITY_PROTOCOL_VERSION = 2
+def _log(name, values):
+    with open(os.environ["FAKE_CALL_LOG"], "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"name": name, "values": values}) + "\\n")
+def reconcile_orphan(
+    transcript_path="", project_path="", current_transcript_path="",
+    session_id="", chat_run_id="", reason="",
+):
+    kwargs = locals()
+    _log("reconcile", kwargs)
+    return {
+        "status": "reconciled",
+        "capture_key": "abc123",
+        "salvaged_handoff": {
+            "project_path": "/portfolio/delimit-gateway",
+            "soul_id": "soul-exact",
+        },
+    }
+def revive(
+    project_path="", soul_id="", transcript_path="", session_id="",
+    chat_run_id="",
+):
+    kwargs = locals()
+    _log("revive", kwargs)
+    return {
+        "status": "revived",
+        "context": "EXACT LED-4057 CONTEXT",
+        "delivery_ack": {
+            "capture_key": "abc123",
+            "transcript_path": "/portfolio/root/orphan.jsonl",
+            "logical_session_id": "sender-session",
+            "launcher_run_id": chat_run_id,
+            "write_id": "generation-1",
+        },
+    }
+def acknowledge_revival(
+    capture_key="", transcript_path="", logical_session_id="",
+    launcher_run_id="", write_id="",
+):
+    kwargs = locals()
+    _log("acknowledge", kwargs)
+    return {"status": "acknowledged"}
+`);
+        const tool = {
+            id: 'claude',
+            name: 'Claude Code',
+            configPath: path.join(claudeDir, 'settings.json'),
+        };
+        crossModelHooks.installClaudeHooks(tool, {
+            session_start: true,
+            session_digest_echo: false,
+        });
+        const hookPath = path.join(claudeDir, 'hooks', 'delimit');
+        const callLog = path.join(tmpDir, 'calls.jsonl');
+        const event = {
+            transcript_path: '/portfolio/root/current-empty.jsonl',
+            session_id: 'receiver-session',
+            reason: 'session-start',
+        };
+        const hookEnv = {
+            ...process.env,
+            HOME: tmpDir,
+            DELIMIT_NAMESPACE_ROOT: path.join(tmpDir, '.delimit'),
+            DELIMIT_CHAT_RUN_ID: 'chat-run-4057',
+            FAKE_CALL_LOG: callLog,
+        };
+        delete hookEnv.DELIMIT_HOME;
+        const run = spawnSync(hookPath, [], {
+            input: JSON.stringify(event),
+            encoding: 'utf-8',
+            env: hookEnv,
+        });
+        assert.strictEqual(run.status, 0, run.stderr);
+        assert.strictEqual(
+            (run.stdout.match(/Auto-revived working context/g) || []).length,
+            1,
+            run.stdout,
+        );
+        assert.ok(run.stdout.includes('EXACT LED-4057 CONTEXT'));
+        const calls = fs.readFileSync(callLog, 'utf-8')
+            .trim().split('\n').map(line => JSON.parse(line));
+        assert.deepStrictEqual(
+            calls.map(call => call.name),
+            ['reconcile', 'revive', 'acknowledge'],
+        );
+        assert.strictEqual(
+            calls[0].values.current_transcript_path,
+            event.transcript_path,
+        );
+        assert.strictEqual(
+            calls[1].values.project_path,
+            '/portfolio/delimit-gateway',
+        );
+        assert.strictEqual(calls[1].values.soul_id, 'soul-exact');
+        assert.strictEqual(calls[1].values.transcript_path, '');
+        assert.strictEqual(calls[1].values.chat_run_id, 'chat-run-4057');
+        assert.strictEqual(calls[2].values.capture_key, 'abc123');
+        assert.strictEqual(calls[2].values.write_id, 'generation-1');
+        assert.strictEqual(calls[2].values.launcher_run_id, 'chat-run-4057');
+        const hookSource = fs.readFileSync(hookPath, 'utf-8');
+        assert.ok(
+            hookSource.indexOf('sys.stdout.flush()')
+                < hookSource.indexOf('call(acknowledge_revival, delivery_ack)'),
+            'delivery bytes are flushed before the generation is acknowledged',
+        );
+        assert.ok(
+            hookSource.includes('$DELIMIT_NAMESPACE_ROOT'),
+            'runtime namespace fallback is retained in the generated hook',
+        );
     });
 
     it('Codex instructions.md carries the strengthened first-action revive text', () => {
@@ -1175,7 +1425,7 @@ describe('SessionEnd hook install', () => {
         }
     });
 
-    it('the deployed script does a deterministic, no-LLM floor capture (git + ledger + transcript tail)', () => {
+    it('delegates project-bound finalization without inline cwd/global capture logic', () => {
         const claudeDir = path.join(tmpDir, '.claude');
         fs.mkdirSync(claudeDir, { recursive: true });
         const tool = { id: 'claude', name: 'Claude Code', configPath: path.join(claudeDir, 'settings.json') };
@@ -1186,14 +1436,70 @@ describe('SessionEnd hook install', () => {
         // Reads the SessionEnd event JSON from stdin for transcript_path.
         assert.ok(s.includes('SESSIONEND_EVENT_JSON'), 'reads the SessionEnd event JSON');
         assert.ok(s.includes('transcript_path'), 'reads transcript_path');
-        // Deterministic floor: git state + ledger + transcript tail, NO model call.
-        assert.ok(s.includes('rev-parse') && s.includes('status'), 'captures git state');
-        assert.ok(s.includes('operations.jsonl'), 'captures cheap ledger context');
-        assert.ok(s.includes('"source": "deterministic"'), 'floor is deterministic (no LLM)');
-        assert.ok(s.includes('.last_capture'), 'stamps .last_capture for next revive');
+        assert.ok(s.includes('from ai import session_phoenix as backend'),
+            'delegates to the canonical Session Phoenix capture API');
+        assert.ok(s.includes('CONTINUITY_PROTOCOL_VERSION'),
+            'rejects an older unsafe Session Phoenix backend');
+        assert.ok(s.includes('"session_id": event.get("session_id"'),
+            'passes the logical session id');
+        assert.ok(s.includes('"reason": event.get("reason"'),
+            'passes the SessionEnd reason');
+        assert.ok(s.includes('"trigger": "session-end"'), 'marks the finalizing trigger');
+        assert.ok(s.includes('"finalize": True'), 'finalizes the provisional Stop upsert');
+        assert.ok(s.includes('DELIMIT_CHAT_RUN_ID'), 'binds the capture to its launcher run');
+        for (const forbidden of [
+            '"venture": "all"',
+            'operations.jsonl',
+            'git commit',
+            '--no-verify',
+            'rev-parse',
+            'session_" + time.strftime',
+        ]) {
+            assert.ok(!s.includes(forbidden), `does not contain unsafe inline capture: ${forbidden}`);
+        }
         // Never-block contract: time-boxed + always exits 0.
         assert.ok(s.includes("timeout 8 python3"), 'time-boxed (<10s)');
         assert.ok(/exit 0\s*$/.test(s.trim()), 'always exits 0 (never blocks exit)');
+    });
+
+    it('Stop is a provisional thin upsert and all lifecycle scripts exclude legacy writers', () => {
+        const claudeDir = path.join(tmpDir, '.claude');
+        fs.mkdirSync(claudeDir, { recursive: true });
+        const tool = { id: 'claude', name: 'Claude Code', configPath: path.join(claudeDir, 'settings.json') };
+
+        crossModelHooks.installClaudeHooks(tool, { session_start: true });
+
+        const scriptNames = ['delimit', 'delimit-stop', 'delimit-session-end'];
+        const scripts = scriptNames
+            .map(name => fs.readFileSync(path.join(claudeDir, 'hooks', name), 'utf-8'));
+        const stop = scripts[1];
+        assert.ok(stop.includes('capture_floor_from_transcript'));
+        assert.ok(stop.includes('"trigger": "stop"'));
+        assert.ok(stop.includes('"finalize": False'));
+        assert.ok(stop.includes('"session_id": event.get("session_id"'));
+        assert.ok(stop.includes('backend-upgrade-required'), 'old unsafe backend fails closed');
+        assert.ok(stop.includes('already_captured:*|noop:*'),
+            'repeated Stop events report an existing durable floor as saved');
+
+        for (const script of scripts) {
+            assert.ok(
+                script.includes('$DELIMIT_NAMESPACE_ROOT'),
+                'every lifecycle hook honors the namespace fallback',
+            );
+            for (const forbidden of [
+                '"venture": "all"',
+                'operations.jsonl',
+                '--no-verify',
+                'find_most_recent_soul_across_projects',
+                'session_" + time.strftime',
+            ]) {
+                assert.ok(!script.includes(forbidden), `generated lifecycle hook excludes ${forbidden}`);
+            }
+        }
+        for (const name of scriptNames) {
+            const hookPath = path.join(claudeDir, 'hooks', name);
+            execSync(`bash -n ${JSON.stringify(hookPath)}`, { stdio: 'pipe' });
+        }
     });
 
     it('is idempotent — installing twice yields exactly one SessionEnd group', () => {
