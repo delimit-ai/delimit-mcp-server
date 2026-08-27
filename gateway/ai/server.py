@@ -9424,6 +9424,7 @@ def delimit_ledger_list(
         limit=limit,
         cursor=cursor or None,
         project_path=project,
+        strict_venture=True,  # LED-3925: isolate the surface that leaked cross-venture items
     )
     return _with_next_steps("ledger_list", result)
 
@@ -9728,7 +9729,13 @@ def delimit_soul_capture(
     Returns:
         Dict with the captured soul record, plus next_steps suggestions.
     """
-    from ai.session_phoenix import capture_soul as _capture
+    # STR-3724 #1 (Option B): full phoenix when installed; the public
+    # free-core shim otherwise. A fresh npm install (phoenix excluded) must
+    # degrade gracefully, never hard-error (ratified condition 3).
+    try:
+        from ai.session_phoenix import capture_soul as _capture
+    except ImportError:
+        from ai.session_continuity import capture_soul_core as _capture
 
     def _split(val: str) -> List[str]:
         if not val or not val.strip():
@@ -9784,8 +9791,14 @@ def delimit_revive(project_path: Annotated[str, Field(description="Project path 
     Returns:
         Dict with the resurrected soul state and next_steps.
     """
-    from ai.session_phoenix import revive as _revive
-    result = _revive(project_path=project_path, soul_id=soul_id, scope=scope)
+    # STR-3724 #1 (Option B): full phoenix when installed; core shim revive
+    # otherwise (fresh npm install — graceful, never hard-error).
+    try:
+        from ai.session_phoenix import revive as _revive
+        result = _revive(project_path=project_path, soul_id=soul_id, scope=scope)
+    except ImportError:
+        from ai.session_continuity import revive_basic
+        result = revive_basic(project_path=project_path)
     return _with_next_steps("revive", result)
 
 
@@ -15287,3 +15300,110 @@ def delimit_reddit_fetch_thread(thread_id: Annotated[str, Field(description="Red
     
     scored = score_and_classify([thread])
     return {"thread": scored[0] if scored else thread}
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  THINKTANK PIPELINE (LED-3916) — internal-only idea intake + BuildNow gate
+#  Gateway-only. Backing module ai.thinktank_pipeline is excluded from the
+#  npm bundle (scripts/bundle-internal-exclude.txt), so these degrade to a
+#  graceful "not_available" payload on customer installs.
+# ═══════════════════════════════════════════════════════════════════════
+
+
+@mcp.tool()
+def delimit_think(
+    idea: Annotated[str, Field(description="The raw idea to adjudicate. Required. One idea per call.")],
+    context: Annotated[str, Field(description="Optional founder context added to the deliberation (constraints, links, prior art). Default empty.")] = "",
+) -> Dict[str, Any]:
+    """Adjudicate a ThinkTank idea into a disposition record (internal).
+
+    When to use: to intake ONE new venture/product/feature idea and run
+    the standing pipeline — Rule-6 dedup, doctrine-seeded deliberation,
+    written disposition (BRAINSTORM / OPTION / PARK / KILL).
+    When NOT to use: to graduate a dispositioned idea (use delimit_build)
+    or run a generic panel with no ledger write (use delimit_deliberate).
+
+    Sibling contrast: unlike delimit_deliberate, which only runs the
+    panel, this dedups FIRST, seeds the standing constitution + design
+    laws + do-not-re-propose list, then writes a record; delimit_build
+    is the downstream gate.
+
+    Side effects: runs a multi-model deliberation in-process (strategic
+    scope, ≤3 rounds — the 30-min ceiling) and writes a disposition
+    record to the strategy ledger via ai.ledger_manager.add_item. A
+    Rule-6 dedup hit STOPS early — writes nothing, returns the existing
+    ref. Panel-cited incumbents are flagged UNVERIFIED. Gateway-only,
+    not shipped in the npm bundle.
+
+    Args:
+        idea: The raw idea to adjudicate. Required. One idea per call.
+        context: Optional founder context (constraints, links, prior
+            art) added to the deliberation. Default empty.
+
+    Returns:
+        Dedup hit: {status: "dedup_hit", existing_record, note}.
+        Else: {status: "disposition_written", record_id, verdict,
+        rationale, activation_evidence, kill_conditions,
+        unverified_incumbents, next_steps}. On npm installs:
+        {status: "not_available", error, hint}.
+    """
+    try:
+        from ai.thinktank_pipeline import run_think
+    except (ImportError, ModuleNotFoundError):
+        # LED-1261: backing module is gateway-only (excluded from npm bundle).
+        return _with_next_steps("think", {
+            "status": "not_available",
+            "error": "delimit_think is an internal Delimit feature not shipped in the npm bundle.",
+            "hint": "The ThinkTank idea pipeline is an internal Jamsons operating surface.",
+        })
+    return _with_next_steps("think", run_think(idea=idea, context=context))
+
+
+@mcp.tool()
+def delimit_build(
+    record_id: Annotated[str, Field(description="The ThinkTank disposition record id to graduate (e.g. \"STR-2287\"). Required.")],
+    founder_mandate_text: Annotated[str, Field(description="The explicit founder mandate, recorded VERBATIM. Required and never inferred; empty text is refused.")],
+) -> Dict[str, Any]:
+    """Fail-closed BuildNow graduation gate for a ThinkTank record (internal).
+
+    When to use: to graduate a dispositioned idea ONLY with an explicit
+    founder mandate — verifies mandate + graduatable disposition +
+    met/waived activation evidence + the SHIFT-1 / Reg-O / Freeze /
+    Autonomy-Risk re-checks.
+    When NOT to use: to score an idea (use delimit_think) or acknowledge
+    a handoff (use delimit_handoff_acknowledge).
+
+    Sibling contrast: delimit_think writes the disposition; this gate
+    graduates it. Unlike delimit_agent_dispatch, this NEVER executes
+    work — it only cuts a BUILDNOW-HANDOFF item once gates pass.
+
+    Side effects: read-only until every gate passes; then writes ONE
+    BUILDNOW-HANDOFF item to the ops ledger via
+    ai.ledger_manager.add_item. ANY unmet gate refuses fail-closed,
+    names the missing gate, and writes nothing. Reg-O and identity
+    trips are non-waivable; freeze is waivable only by an explicit
+    mandate exception. Gateway-only, not in the npm bundle.
+
+    Args:
+        record_id: ThinkTank record id to graduate (e.g. "STR-2287").
+            Required. Must be an OPTION/activated record; KILL/PARK is
+            refused.
+        founder_mandate_text: Explicit founder mandate, recorded
+            VERBATIM and never inferred. Required — empty is refused
+            "missing_founder_mandate". May carry a written activation
+            waiver or freeze-exception authorization.
+
+    Returns:
+        {gated: bool, refused_reason?, handoff_id?, bootstrap_context?,
+        next_steps}. On npm installs: {status: "not_available", ...}.
+    """
+    try:
+        from ai.thinktank_pipeline import run_build
+    except (ImportError, ModuleNotFoundError):
+        # LED-1261: backing module is gateway-only (excluded from npm bundle).
+        return _with_next_steps("build", {
+            "status": "not_available",
+            "error": "delimit_build is an internal Delimit feature not shipped in the npm bundle.",
+            "hint": "The BuildNow graduation gate is an internal Jamsons operating surface.",
+        })
+    return _with_next_steps("build", run_build(record_id=record_id, founder_mandate_text=founder_mandate_text))

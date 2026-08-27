@@ -1,7 +1,7 @@
 {
   "name": "delimit-cli",
   "mcpName": "io.github.delimit-ai/delimit-mcp-server",
-  "version": "4.16.4",
+  "version": "4.17.0",
   "description": "The merge gate for AI-written code, with signed, replayable attestation. Works with Claude Code, Codex, Cursor, and Gemini CLI.",
   "main": "index.js",
   "files": [
@@ -94,6 +94,7 @@
     "gateway/ai/seal/verifier.py",
     "gateway/ai/secrets_broker.py",
     "gateway/ai/server.py",
+    "gateway/ai/session_continuity.py",
     "gateway/ai/tdqs_lint.py",
     "gateway/ai/tenant_auth.py",
     "gateway/ai/tenant_data.py",

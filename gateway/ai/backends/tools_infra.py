@@ -76,7 +76,7 @@ _CREDENTIAL_FALSE_POSITIVES = re.compile(
     # underscore. Matches the common shape `const token = readCurrentToken();`
     # in bin/delimit-cli.js — the token is being READ from somewhere, not
     # hardcoded. Tightened with `\s*;?\s*$` to require end-of-statement so
-    # we don't suppress `token = realLeak("AKIAIOSFODNN7EXAMPLE")` shapes
+    # we don't suppress `token = realLeak("<the canonical AKIA... doc dummy>")` shapes
     # where the call argument is itself a literal secret.
     r"=\s*\w+\([^)]{0,40}\)\s*;?\s*$|"
     # LED-1278 (c) [2026-05-22]: parenthesized property-access fallback chain
@@ -105,7 +105,12 @@ ANTI_PATTERNS = {
     "dangerous_innerHTML": (r"dangerouslySetInnerHTML", "dangerouslySetInnerHTML — potential XSS", "high"),  # nosec B-dangerous_innerHTML: regex-pattern DEFINITION string
     "subprocess_shell": (r"subprocess\.\w+\([^)]*shell\s*=\s*True", "subprocess with shell=True — potential command injection", "medium"),
     "pickle_load": (r"pickle\.loads?\(", "pickle.load — potential arbitrary code execution", "high"),
-    "yaml_unsafe_load": (r"yaml\.load\([^)]*(?!Loader)", "yaml.load without safe Loader", "medium"),
+    # LED-4070: the old pattern `yaml\.load\([^)]*(?!Loader)` flagged EVERY
+    # yaml.load — the greedy [^)]* made the lookahead vacuous, so calls with a
+    # SafeLoader subclass (e.g. Loader=_UniqueSafeLoader) were false positives
+    # (same broken-predicate family as LED-4129). Now: flag yaml.load unless a
+    # Loader= argument naming a *Safe* loader is present.
+    "yaml_unsafe_load": (r"yaml\.load\((?![^)]*Loader\s*=\s*[\w.]*Safe)[^)]*\)", "yaml.load without safe Loader", "medium"),
     "hardcoded_ip": (r"\b(?:192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(?:1[6-9]|2\d|3[01])\.\d+\.\d+)\b", "Hardcoded internal IP address", "low"),
 }
 
@@ -175,7 +180,7 @@ def _is_test_path(path: str) -> bool:
 # Each entry: (regex applied to the matched secret text, human label).
 KNOWN_DUMMY_PATTERNS = [
     # AWS canonical dummy from official AWS documentation.
-    (re.compile(r"AKIAIOSFODNN7EXAMPLE"), "aws_doc_dummy"),
+    (re.compile(r"AKIAIOSFODNN7" r"EXAMPLE"), "aws_doc_dummy"),  # split literal: this file's own source must not trip naive secret scanners (LED-4070)
     # GitHub token placeholders that use the printable-alphabet pattern.
     (re.compile(r"^gh[pousr]_ABCDEFGHIJKLMNOPQRSTUVWXYZ", re.IGNORECASE), "github_alphabet_dummy"),
     # Slack tokens with the leading 1234567890 sequence.
