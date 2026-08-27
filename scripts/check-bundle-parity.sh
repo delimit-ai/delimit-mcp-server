@@ -65,7 +65,7 @@ EXTRA=()
 SHIPPED_SO=0
 while IFS= read -r p; do
     [ -n "$p" ] || continue
-    if printf '%s\n' "$ALLOW_EXACT" | grep -qxF "$p"; then continue; fi
+    if grep -qxF "$p" <<< "$ALLOW_EXACT"; then continue; fi
     if matches_glob "$p"; then SHIPPED_SO=1; continue; fi
     EXTRA+=("$p")
 done <<< "$SHIPPED_GATEWAY"
@@ -74,7 +74,7 @@ done <<< "$SHIPPED_GATEWAY"
 MISSING=()
 while IFS= read -r p; do
     [ -n "$p" ] || continue
-    if ! printf '%s\n' "$SHIPPED_GATEWAY" | grep -qxF "$p"; then
+    if ! grep -qxF "$p" <<< "$SHIPPED_GATEWAY"; then
         MISSING+=("$p")
     fi
 done <<< "$ALLOW_EXACT"
