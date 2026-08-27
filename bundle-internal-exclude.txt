@@ -197,3 +197,10 @@ gateway/ai/mailbox_service.py
 gateway/ai/mailbox_service_daemon.py
 gateway/ai/mailbox_transport_receipt.py
 gateway/ai/thinktank_pipeline.py
+gateway/ai/build_execute.py
+gateway/ai/outreach_arming_preflight.py
+gateway/ai/outreach_autonomy_conditions.py
+gateway/ai/outreach_comment_submit.py
+gateway/ai/outreach_funnel.py
+gateway/ai/reply_approval.py
+gateway/ai/reply_watch.py
