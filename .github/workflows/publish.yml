@@ -125,6 +125,16 @@ jobs:
             echo "::error::package.json version ($PKG_VERSION) does not match tag ($TAG_VERSION)"
             exit 1
           fi
+          # server.json feeds the MCP Registry record. It carries the version
+          # twice — top level and packages[0] — and both must track the tag, or
+          # the published registry entry points at an npm version that does not
+          # exist. Checked here so a mismatch fails BEFORE anything publishes.
+          SRV_VERSION=$(node -p "require('./server.json').version")
+          SRV_PKG_VERSION=$(node -p "require('./server.json').packages[0].version")
+          if [ "$SRV_VERSION" != "$TAG_VERSION" ] || [ "$SRV_PKG_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::server.json versions ($SRV_VERSION / $SRV_PKG_VERSION) do not match tag ($TAG_VERSION)"
+            exit 1
+          fi
 
       - name: Security check
         working-directory: npm-delimit
@@ -240,6 +250,27 @@ jobs:
           done
           echo "::error::delimit-cli@$PKG_VERSION not visible in registry after 6 attempts (~5min)"
           exit 1
+
+      # Publish the MCP Registry record. Without this the registry entry only
+      # ever changes when someone runs mcp-publisher by hand: the record sat at
+      # v4.1.38 from 2026-04 while npm reached 4.17.0, so registry consumers saw
+      # a stale description for ~5 months. Runs only on a tag, only after npm
+      # has been verified, and uses the existing id-token permission (no new
+      # secret). Non-blocking: a registry outage must not fail a good npm
+      # release, so this reports and continues.
+      - name: Publish to MCP Registry
+        if: startsWith(github.ref, 'refs/tags/v')
+        continue-on-error: true
+        working-directory: npm-delimit
+        run: |
+          set -euo pipefail
+          curl -sSL -o mcp-publisher.tar.gz \
+            "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz"
+          tar xzf mcp-publisher.tar.gz mcp-publisher
+          ./mcp-publisher login github-oidc
+          ./mcp-publisher validate server.json
+          ./mcp-publisher publish server.json
+          echo "published $(node -p "require('./server.json').name")@$(node -p "require('./server.json').version") to the MCP Registry"
 
   release:
     needs: publish
