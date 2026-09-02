@@ -1154,6 +1154,79 @@ class OpenAPIDiffEngine:
         if isinstance(old_ap, dict) and isinstance(new_ap, dict):
             self._compare_schema_deep(f"{path}.additionalProperties", old_ap, new_ap, None, context)
 
+    @staticmethod
+    def _composition_identity(member: Any) -> Tuple[str, str]:
+        """A stable identity for a composition branch, strongest signal first.
+
+        Returns (kind, key). Ordering matters: `$ref` and `title` are explicit
+        author-supplied identity; the property-name set is a structural
+        fallback for inline branches. A branch with no usable signal returns
+        ("", "") and is never matched by identity.
+        """
+        if not isinstance(member, dict):
+            return ("", "")
+        ref = member.get("$ref")
+        if isinstance(ref, str) and ref:
+            return ("ref", ref)
+        title = member.get("title")
+        if isinstance(title, str) and title:
+            return ("title", title)
+        const = member.get("const")
+        if isinstance(const, (str, int, float, bool)):
+            return ("const", str(const))
+        props = member.get("properties")
+        if isinstance(props, dict) and props:
+            return ("props", ",".join(sorted(props.keys())))
+        enum = member.get("enum")
+        if isinstance(enum, list) and enum:
+            return ("enum", ",".join(sorted(str(e) for e in enum)))
+        type_ = member.get("type")
+        if isinstance(type_, str) and type_:
+            return ("type", type_)
+        return ("", "")
+
+    def _align_composition_members(
+        self, old_members: List[Any], new_members: List[Any]
+    ) -> List[Tuple[int, int]]:
+        """Pair old/new composition branches by identity, then by position.
+
+        LED-4299. Yields (old_index, new_index) pairs to deep-diff. Branches
+        that match by identity are paired wherever they moved to, so pure
+        REORDERING produces no pairs that differ and therefore no changes.
+        Only the leftovers — branches with no identity counterpart — fall back
+        to positional pairing, and only in their original relative order, so a
+        genuinely rewritten branch is still compared and still reports its
+        real breaks.
+        """
+        pairs: List[Tuple[int, int]] = []
+        used_new: Set[int] = set()
+
+        # Pass 1: identity matches. Identical keys are consumed in order so
+        # duplicate branches (same identity twice) still pair 1:1.
+        new_by_identity: Dict[Tuple[str, str], List[int]] = {}
+        for j, nm in enumerate(new_members):
+            ident = self._composition_identity(nm)
+            if ident != ("", ""):
+                new_by_identity.setdefault(ident, []).append(j)
+
+        unmatched_old: List[int] = []
+        for i, om in enumerate(old_members):
+            ident = self._composition_identity(om)
+            candidates = new_by_identity.get(ident) if ident != ("", "") else None
+            if candidates:
+                j = candidates.pop(0)
+                used_new.add(j)
+                pairs.append((i, j))
+            else:
+                unmatched_old.append(i)
+
+        # Pass 2: positional fallback over what identity could not place.
+        leftover_new = [j for j in range(len(new_members)) if j not in used_new]
+        for i, j in zip(unmatched_old, leftover_new):
+            pairs.append((i, j))
+
+        return sorted(pairs)
+
     def _compare_composition(self, path: str, old_schema: Dict, new_schema: Dict, context: Optional[str]) -> None:
         """Handle allOf / oneOf / anyOf / discriminator (LED-3792).
 
@@ -1194,10 +1267,24 @@ class OpenAPIDiffEngine:
             elif len(new_members) > len(old_members):
                 self._add_advisory("composition_change", f"{path}.{keyword}", f"{keyword} member(s) added; not deep-diffed (LED-3792 follow-up)")
 
-            # Recurse into positionally-aligned members for deeper field diffs.
-            for i in range(min(len(old_members), len(new_members))):
-                if isinstance(old_members[i], dict) and isinstance(new_members[i], dict):
-                    self._compare_schema_deep(f"{path}.{keyword}[{i}]", old_members[i], new_members[i], None, context)
+            # Recurse into members aligned by IDENTITY, not array position.
+            #
+            # LED-4299. This used to pair old_members[i] with new_members[i].
+            # A composition array carries no positional contract — reordering
+            # branches, or inserting one, is a NON-BREAKING refactor — but
+            # positional pairing compares unrelated schemas, so every field of
+            # one reads as removed and every field of the other as added.
+            # Live blast radius (mantisbt/mantisbt PR #2264): 210 phantom
+            # BREAKING findings, 140 of which reappeared as additions at the
+            # same normalised path. The same comparison runs inside the
+            # customer-facing CI merge gate, so a consumer refactoring their
+            # oneOf branches would see their build blocked by a wall of
+            # fabricated breaks — the failure mode that destroys trust in a
+            # merge gate.
+            for old_idx, new_idx in self._align_composition_members(old_members, new_members):
+                om, nm = old_members[old_idx], new_members[new_idx]
+                if isinstance(om, dict) and isinstance(nm, dict):
+                    self._compare_schema_deep(f"{path}.{keyword}[{old_idx}]", om, nm, None, context)
 
         # Discriminator: propertyName change or mapping-key removal breaks
         # polymorphic (de)serialization.

@@ -69,7 +69,10 @@ while IFS= read -r abs; do
     case "$rel" in
         *__pycache__*|*.pyc|*.so) continue ;;
     esac
-    if ! printf '%s\n' "$CLASSIFIED_ALL" | grep -qxF "$rel"; then
+    # herestring, not a pipe: printf|grep -q takes SIGPIPE under pipefail and
+    # turns a SUCCESSFUL match into a nondeterministic "unclassified" (the
+    # 4.17.0 SIGPIPE fix reached parity+sync but not this guard; LED follow-up).
+    if ! grep -qxF "$rel" <<< "$CLASSIFIED_ALL"; then
         UNCLASSIFIED+=("$rel")
     fi
 done < <(find "$ROOT/ai" -type f 2>/dev/null | sort)

@@ -1,3 +1,50 @@
+## [4.18.0] - 2026-09-02
+
+### Changed
+- MCP tool descriptions: 16 previously undocumented parameters mirrored from their signature annotations, and 26 Pro-gated tools now state the prerequisite and the unlicensed-call response. Purely additive; no tool signature changed. Tool Definition Quality (Glama rubric) lifts from B to A on an unrounded mean.
+- `server.json` registry manifest: version lockstep with the package.
+
+### CI/CD
+- Publish the MCP Registry record on every release tag; publisher pinned to v1.8.1 and checksum-verified before execution; a registry-publish failure is surfaced as a workflow warning and job summary instead of being swallowed. (#190)
+- Tag gate also asserts both `server.json` version fields.
+- Bundle classification guard: fixed a `printf | grep -q` SIGPIPE flake that reported already-classified files as unclassified nondeterministically (same bug class fixed in the parity and sync scripts for 4.17.0).
+
+### Gateway bundle
+- Synced from gateway main `7f64fb0`. Includes the board revenue-truth work and the deliberation-engine fallback ladder; those surfaces are internal to the gateway and not customer-visible tools.
+
+### Known, unchanged
+- npm audit reports 3 high / 1 low advisories in production dependencies (axios, brace-expansion, js-yaml, body-parser — DoS class). Lockfile unchanged since 4.17.0; to be addressed separately.
+
+## [4.17.0] - 2026-08-27
+
+Cross-model continuity release. Session capture/revive now works on fresh
+installs via a new public continuity module, and captured souls carry
+deterministic provenance for reliable resume across model switches.
+
+### Added
+- `gateway/ai/session_continuity.py` — public session-continuity module and
+  SessionSoul schema owner: capture/revive works without any internal
+  modules, so fresh installs get working `delimit_soul_capture` /
+  `delimit_revive` out of the box.
+- Soul provenance fields (venture, transcript identity, capture key,
+  lifecycle status) — all additive with defaults: existing soul files on
+  disk deserialize unchanged.
+
+### Fixed
+- `server.py` soul tools fall back gracefully to the continuity module when
+  richer internal capture is unavailable (previously errored on fresh
+  installs).
+- `last_capture.py` derives a deterministic continuity floor from the
+  transcript (stable capture keys under concurrent capture).
+- Security-audit backend: fewer false positives on test fixtures and
+  documentation dummies; suppressed findings are reported, never silently
+  dropped.
+
+### Changed
+- Heartbeat registry gains service entries for the new scheduled
+  maintenance jobs.
+- Ledger manager maintenance (stale-dispatch grooming refinements).
+
 ## [4.16.3] - 2026-07-18
 
 Reliability + opsec release. Session-end auto-capture now installs correctly,

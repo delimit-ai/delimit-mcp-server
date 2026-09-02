@@ -52,6 +52,8 @@ DEFAULT_STALENESS_THRESHOLDS: Dict[str, int] = {
     "delimit-license-watch": 129600,
     # Drift check: daily. >36 hours = stale.
     "delimit-drift-check": 129600,
+    # STR-3724 #2 loop closure: daily churn-report PR cron (14:45 UTC).
+    "delimit-churn-reports": 129600,
     # stake.one INJ-claim: daily 13:00 UTC. >30 hours = stale.
     "stakeone-inj-claim": 108000,
     # Self-repair watcher: 1h pass loop (ai.self_repair_daemon). >2h = stale.
@@ -64,6 +66,11 @@ DEFAULT_STALENESS_THRESHOLDS: Dict[str, int] = {
     # relying on the 24h fallback which is too tight for a daily-at-14:00
     # cadence + RandomizedDelaySec slop.)
     "delimit-outreach-daemon": 108000,
+    # Reply-watch cron: */30 tick (scripts/reply_watch_cron.py). >90 min =
+    # stale — so a stopped cron (crontab removed / host down) is flagged as
+    # STALE by delimit_heartbeat_check, catching the "never runs" failure the
+    # in-run consecutive-error counter cannot see.
+    "delimit-reply-watch": 5400,
 }
 
 # Fallback for services not in the threshold map.
