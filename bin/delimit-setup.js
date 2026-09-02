@@ -944,6 +944,16 @@ if [ -z "$REAL" ]; then
         REAL=$(PATH=$(echo "$PATH" | tr ':' '\\n' | grep -v '.delimit/shims' | tr '\\n' ':') command -v agy 2>/dev/null || PATH=$(echo "$PATH" | tr ':' '\\n' | grep -v '.delimit/shims' | tr '\\n' ':') command -v antigravity 2>/dev/null)
     fi
 fi
+# Renamed binaries (<tool>-real) are honoured on the non-tty fast path above
+# but were missed here, so an interactive or pty launch on a host whose only
+# binary is /usr/bin/${toolName}-real printed the banner and exited 127
+# (4.18.0; this also silenced the Claude seat of the deliberation panel,
+# which spawns CLIs under a pty).
+if [ ! -x "$REAL" ]; then
+    for c in /usr/bin/${toolName}-real /usr/local/bin/${toolName}-real $HOME/.local/bin/${toolName}-real; do
+        [ -x "\$c" ] && REAL="\$c" && break
+    done
+fi
 [ -x "$REAL" ] && delimit_run_and_exit "$REAL" "$@"
 echo "[Delimit] ${toolName} not found in PATH" >&2
 case "${toolName}" in
