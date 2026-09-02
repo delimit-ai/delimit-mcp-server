@@ -273,8 +273,8 @@ delimit deliberate "Should we build rate limiting in-house or use a managed serv
 
 ### v4.18
 
-- **MCP Registry record published on every release** -- the official registry entry now tracks the npm version automatically. Publisher pinned and checksum-verified; the tag gate asserts both `server.json` version fields, so the record can never point at an npm version that does not exist.
-- **Tool descriptions** -- 16 previously undocumented parameters documented from their signatures; 26 Pro-gated tools state the prerequisite and the exact unlicensed return shape.
+- **MCP Registry record published on every release** -- the official registry entry now tracks the npm version automatically. Publisher pinned and checksum-verified; the tag gate asserts that both `server.json` version fields match the package version.
+- **Tool descriptions** -- 16 previously undocumented parameters documented from their signatures; 26 Pro-gated tools state the prerequisite and the unlicensed-call response.
 - **Release guards** -- bundle-classification guard no longer flakes on SIGPIPE.
 
 ### v4.17
@@ -284,6 +284,7 @@ delimit deliberate "Should we build rate limiting in-house or use a managed serv
 
 ### v4.16
 
+- **Fail-closed bundle allowlist** -- the npm package ships only explicitly reviewed gateway files; two CI guards block any unclassified or non-allowlisted file from entering the tarball.
 - **Session-end auto-capture** installs in the settings shape Claude Code expects, so end-of-session handoff fires instead of being silently dropped.
 - **Always-on commit-author audit** workflow catches identity drift on the repo.
 
