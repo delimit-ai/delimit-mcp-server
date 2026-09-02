@@ -259,18 +259,41 @@ jobs:
       # secret). Non-blocking: a registry outage must not fail a good npm
       # release, so this reports and continues.
       - name: Publish to MCP Registry
+        id: mcp_registry
         if: startsWith(github.ref, 'refs/tags/v')
         continue-on-error: true
         working-directory: npm-delimit
+        env:
+          # Pinned + checksum-verified (PR #190 review): this step runs with
+          # the job's OIDC token in scope, so an unpinned "latest" binary was
+          # an unacceptable supply-chain surface. Bump BOTH values together;
+          # the checksum comes from registry_<ver>_checksums.txt (sigstore-signed).
+          MCP_PUBLISHER_VERSION: "1.8.1"
+          MCP_PUBLISHER_SHA256: "a06c9096dcb9727c13555b6be26c7effa707b01f06a4c561ba7a3635443cf2cc"
         run: |
           set -euo pipefail
-          curl -sSL -o mcp-publisher.tar.gz \
-            "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz"
+          base="https://github.com/modelcontextprotocol/registry/releases/download/v${MCP_PUBLISHER_VERSION}"
+          curl -sSL -o mcp-publisher.tar.gz "$base/mcp-publisher_linux_amd64.tar.gz"
+          echo "${MCP_PUBLISHER_SHA256}  mcp-publisher.tar.gz" | sha256sum -c -
           tar xzf mcp-publisher.tar.gz mcp-publisher
           ./mcp-publisher login github-oidc
           ./mcp-publisher validate server.json
           ./mcp-publisher publish server.json
           echo "published $(node -p "require('./server.json').name")@$(node -p "require('./server.json').version") to the MCP Registry"
+
+      # continue-on-error above keeps a registry outage from failing a good
+      # npm release, but a swallowed failure is exactly how the record went
+      # stale for five months. Make it loud: a workflow warning AND a job
+      # summary line, so drift can never silently resume.
+      - name: Registry publish failed (visible)
+        if: startsWith(github.ref, 'refs/tags/v') && steps.mcp_registry.outcome == 'failure'
+        run: |
+          echo "::warning title=MCP Registry publish FAILED::The npm release succeeded but the MCP Registry record was NOT updated for ${{ github.ref_name }}. Run mcp-publisher publish manually. See job log."
+          {
+            echo "## :warning: MCP Registry publish FAILED"
+            echo ""
+            echo "npm published **${{ github.ref_name }}** but the registry record was not updated. The record will show a stale version until published manually."
+          } >> "$GITHUB_STEP_SUMMARY"
 
   release:
     needs: publish
