@@ -125,6 +125,16 @@ jobs:
             echo "::error::package.json version ($PKG_VERSION) does not match tag ($TAG_VERSION)"
             exit 1
           fi
+          # server.json feeds the MCP Registry record. It carries the version
+          # twice — top level and packages[0] — and both must track the tag, or
+          # the published registry entry points at an npm version that does not
+          # exist. Checked here so a mismatch fails BEFORE anything publishes.
+          SRV_VERSION=$(node -p "require('./server.json').version")
+          SRV_PKG_VERSION=$(node -p "require('./server.json').packages[0].version")
+          if [ "$SRV_VERSION" != "$TAG_VERSION" ] || [ "$SRV_PKG_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::server.json versions ($SRV_VERSION / $SRV_PKG_VERSION) do not match tag ($TAG_VERSION)"
+            exit 1
+          fi
 
       - name: Security check
         working-directory: npm-delimit
@@ -240,6 +250,50 @@ jobs:
           done
           echo "::error::delimit-cli@$PKG_VERSION not visible in registry after 6 attempts (~5min)"
           exit 1
+
+      # Publish the MCP Registry record. Without this the registry entry only
+      # ever changes when someone runs mcp-publisher by hand: the record sat at
+      # v4.1.38 from 2026-04 while npm reached 4.17.0, so registry consumers saw
+      # a stale description for ~5 months. Runs only on a tag, only after npm
+      # has been verified, and uses the existing id-token permission (no new
+      # secret). Non-blocking: a registry outage must not fail a good npm
+      # release, so this reports and continues.
+      - name: Publish to MCP Registry
+        id: mcp_registry
+        if: startsWith(github.ref, 'refs/tags/v')
+        continue-on-error: true
+        working-directory: npm-delimit
+        env:
+          # Pinned + checksum-verified (PR #190 review): this step runs with
+          # the job's OIDC token in scope, so an unpinned "latest" binary was
+          # an unacceptable supply-chain surface. Bump BOTH values together;
+          # the checksum comes from registry_<ver>_checksums.txt (sigstore-signed).
+          MCP_PUBLISHER_VERSION: "1.8.1"
+          MCP_PUBLISHER_SHA256: "a06c9096dcb9727c13555b6be26c7effa707b01f06a4c561ba7a3635443cf2cc"
+        run: |
+          set -euo pipefail
+          base="https://github.com/modelcontextprotocol/registry/releases/download/v${MCP_PUBLISHER_VERSION}"
+          curl -sSL -o mcp-publisher.tar.gz "$base/mcp-publisher_linux_amd64.tar.gz"
+          echo "${MCP_PUBLISHER_SHA256}  mcp-publisher.tar.gz" | sha256sum -c -
+          tar xzf mcp-publisher.tar.gz mcp-publisher
+          ./mcp-publisher login github-oidc
+          ./mcp-publisher validate server.json
+          ./mcp-publisher publish server.json
+          echo "published $(node -p "require('./server.json').name")@$(node -p "require('./server.json').version") to the MCP Registry"
+
+      # continue-on-error above keeps a registry outage from failing a good
+      # npm release, but a swallowed failure is exactly how the record went
+      # stale for five months. Make it loud: a workflow warning AND a job
+      # summary line, so drift can never silently resume.
+      - name: Registry publish failed (visible)
+        if: startsWith(github.ref, 'refs/tags/v') && steps.mcp_registry.outcome == 'failure'
+        run: |
+          echo "::warning title=MCP Registry publish FAILED::The npm release succeeded but the MCP Registry record was NOT updated for ${{ github.ref_name }}. Run mcp-publisher publish manually. See job log."
+          {
+            echo "## :warning: MCP Registry publish FAILED"
+            echo ""
+            echo "npm published **${{ github.ref_name }}** but the registry record was not updated. The record will show a stale version until published manually."
+          } >> "$GITHUB_STEP_SUMMARY"
 
   release:
     needs: publish
