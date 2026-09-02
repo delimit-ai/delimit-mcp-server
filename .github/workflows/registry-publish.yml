@@ -53,7 +53,15 @@ jobs:
         run: |
           set -euo pipefail
           V=$(node -p "require('./server.json').packages[0].version")
-          npm view "delimit-cli@$V" version
+          # `npm view <pkg>@<missing>` prints nothing and exits 0 on modern
+          # npm, so the bare call passed vacuously (PR #192 review). Compare
+          # the returned version to the expected one instead.
+          LIVE=$(npm view "delimit-cli@$V" version 2>/dev/null || true)
+          if [ "$LIVE" != "$V" ]; then
+            echo "::error::delimit-cli@$V is not live on npm (npm view returned '${LIVE:-nothing}'); publish npm first"
+            exit 1
+          fi
+          echo "npm has delimit-cli@$LIVE"
 
       - name: Publish to MCP Registry
         run: |
@@ -70,7 +78,7 @@ jobs:
             # Parse failures (a 502/503 HTML body mid-propagation) must count as
             # "not yet", not abort the step under set -e: the parser never throws.
             GOT=$(curl -s "https://registry.modelcontextprotocol.io/v0/servers?search=${NAME}&version=latest" \
-              | node -e "let out='';try{const d=JSON.parse(require('fs').readFileSync(0,'utf8'));out=(d.servers||[]).map(s=>(s.server||s).version).join(',')}catch(e){out='<unparseable:'+e.message.slice(0,40)+'>'}process.stdout.write(out)" \
+              | NAME="$NAME" node -e "let out='';try{const d=JSON.parse(require('fs').readFileSync(0,'utf8'));const hit=(d.servers||[]).map(s=>s.server||s).find(s=>s.name===process.env.NAME);out=hit?String(hit.version):'<no exact-name match>'}catch(e){out='<unparseable:'+e.message.slice(0,40)+'>'}process.stdout.write(out)" \
               || true)
             if [ "$GOT" = "$WANT" ]; then
               echo "registry record for $NAME reads $GOT"

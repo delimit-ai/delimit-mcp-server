@@ -1,3 +1,17 @@
+## [4.18.1] - 2026-09-02
+
+Maintenance release: a governance-shim fix for hosts with a renamed CLI binary, plus hardening of the release pipeline that 4.18.0 exposed.
+
+### Fixed
+- Governance shims (`delimit setup`): the interactive launch path now resolves a renamed `<tool>-real` binary (`/usr/bin`, `/usr/local/bin`, `~/.local/bin`) the same way the non-tty path already did. On a host whose only binary was `claude-real`, an interactive or pty launch printed the banner and exited 127 with "claude not found in PATH". Regression test renders the shipped template and exercises the pipe path, the pty path (via `script`), and the not-installed path.
+
+### CI/CD
+- `scripts/check-server-json.sh` (new, fail-closed) runs in the publish workflow before anything publishes: description at most 100 characters (the MCP Registry rejected 4.18.0's record with 422 after npm had already published), version parity between `server.json` and `package.json`, `io.github.delimit-ai/` namespace, and the registry's own schema validator under the pinned publisher binary.
+- `registry-publish.yml` (new): registry-only `workflow_dispatch` that publishes `server.json` from a chosen ref via GitHub Actions OIDC, never touches npm, asserts the referenced npm version is actually live (compares the returned version rather than trusting `npm view`'s exit code), and reads the record back by exact server name.
+
+### Docs
+- README "What's New" version block extended through v4.18 (it had stopped at v4.1).
+
 ## [4.18.0] - 2026-09-02
 
 ### Changed
