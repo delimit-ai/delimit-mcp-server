@@ -271,6 +271,23 @@ delimit deliberate "Should we build rate limiting in-house or use a managed serv
 
 3 free deliberations, then BYOK for unlimited. Works with Grok, Gemini, Claude, GPT-4o.
 
+### v4.18
+
+- **MCP Registry record published on every release** -- the official registry entry now tracks the npm version automatically. Publisher pinned and checksum-verified; the tag gate asserts that both `server.json` version fields match the package version.
+- **Tool descriptions** -- 16 previously undocumented parameters documented from their signatures; 26 Pro-gated tools state the prerequisite and the unlicensed-call response.
+- **Release guards** -- bundle-classification guard no longer flakes on SIGPIPE.
+
+### v4.17
+
+- **Cross-model continuity on fresh installs** -- `delimit_soul_capture` / `delimit_revive` work without any internal modules via the public `session_continuity` module; captured souls carry deterministic provenance (venture, transcript identity, capture key) for reliable resume across model switches. Existing soul files load unchanged.
+- **Security audit** -- fewer false positives on test fixtures and documentation dummies; suppressed findings are reported, never silently dropped.
+
+### v4.16
+
+- **Fail-closed bundle allowlist** -- the npm package ships only explicitly reviewed gateway files; two CI guards block any unclassified or non-allowlisted file from entering the tarball.
+- **Session-end auto-capture** installs in the settings shape Claude Code expects, so end-of-session handoff fires instead of being silently dropped.
+- **Always-on commit-author audit** workflow catches identity drift on the repo.
+
 ### v4.1
 
 - **TUI** -- terminal-native Ventures panel, real `delimit think` and `delimit build` commands
