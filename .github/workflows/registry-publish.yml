@@ -67,8 +67,11 @@ jobs:
           NAME=$(node -p "require('./server.json').name")
           WANT=$(node -p "require('./server.json').version")
           for attempt in 1 2 3 4; do
+            # Parse failures (a 502/503 HTML body mid-propagation) must count as
+            # "not yet", not abort the step under set -e: the parser never throws.
             GOT=$(curl -s "https://registry.modelcontextprotocol.io/v0/servers?search=${NAME}&version=latest" \
-              | node -p "const d=JSON.parse(require('fs').readFileSync(0,'utf8'));(d.servers||[]).map(s=>(s.server||s).version).join(',')")
+              | node -e "let out='';try{const d=JSON.parse(require('fs').readFileSync(0,'utf8'));out=(d.servers||[]).map(s=>(s.server||s).version).join(',')}catch(e){out='<unparseable:'+e.message.slice(0,40)+'>'}process.stdout.write(out)" \
+              || true)
             if [ "$GOT" = "$WANT" ]; then
               echo "registry record for $NAME reads $GOT"
               echo "## MCP Registry record updated: \`$NAME\` @ **$GOT**" >> "$GITHUB_STEP_SUMMARY"
