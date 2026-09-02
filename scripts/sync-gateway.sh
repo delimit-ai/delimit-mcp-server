@@ -75,7 +75,7 @@ while IFS= read -r abs; do
         *__pycache__*|*.pyc) continue ;;
     esac
     [ "$rel" = "$LICENSE_CORE_SRC" ] && continue
-    if ! printf '%s\n' "$ALLOW_PATHS" | grep -qxF "$rel"; then
+    if ! grep -qxF "$rel" <<< "$ALLOW_PATHS"; then
         rm -f "$abs"
         PRUNED=$((PRUNED+1))
     fi
@@ -117,7 +117,7 @@ LEAKED=0
 while IFS= read -r abs; do
     rel="gateway/${abs#"$NPM_ROOT/gateway/"}"
     [ "$rel" = "$LICENSE_CORE_SRC" ] && continue
-    if ! printf '%s\n' "$ALLOW_PATHS" | grep -qxF "$rel"; then
+    if ! grep -qxF "$rel" <<< "$ALLOW_PATHS"; then
         echo "  ❌ NON-ALLOWLISTED FILE SURVIVED SYNC: $rel"
         LEAKED=1
     fi

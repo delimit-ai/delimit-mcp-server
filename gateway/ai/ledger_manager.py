@@ -12,12 +12,15 @@ Ventures auto-registered at ~/.delimit/ventures.json on first use.
 import base64
 import json
 import hashlib
+import logging
 import os
 import re
 import subprocess
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 GLOBAL_DIR = Path.home() / ".delimit"
 VENTURES_FILE = GLOBAL_DIR / "ventures.json"
@@ -75,10 +78,41 @@ def _count_unresolved_p0(project_path: str = ".") -> int:
     return count
 
 
+def _resolve_nonventure_name(path: str, name: str) -> str:
+    """LED-3925 write-path fix: map a junk/ephemeral basename to a real slug.
+
+    The MCP server runs with cwd=~/.delimit/server, so ``_detect_venture``
+    used to stamp ``venture="server"`` on every gov/deliberate/consensus item
+    (90+ mis-attributed rows). Likewise ``/tmp/wire-report-*`` scratch trees
+    stamped ``venture="wire-report-morning-presentation"`` etc. This helper
+    extracts a known-venture token from the path (or the basename) so those
+    writes land on the correct sub-ledger instead of pooling in the central
+    store. When no token matches it returns ``"unsorted"`` — NEVER the raw
+    ``server`` / ``tmpXXXX`` / ephemeral basename.
+    """
+    blob = f"{path} {name}".lower()
+    if "wire-report" in blob or "wirereport" in blob or "wire.report" in blob \
+            or "wire-api" in blob or "wr-" in blob:
+        return "wire-report"
+    if "stake" in blob:  # stake / stakeone / stake-one / stake.one
+        return "stake-one"
+    if "domain" in blob or "electricgrill" in blob:
+        return "domainvested"
+    if "solicit" in blob:
+        return "solicitsignal"
+    if "delimit" in blob or name in ("server", ".delimit"):
+        return "delimit"
+    return "unsorted"
+
+
 def _detect_venture(project_path: str = ".") -> Dict[str, str]:
     """Auto-detect venture/project info from the directory."""
     p = Path(project_path).resolve()
     info = {"name": p.name, "path": str(p)}
+    # Track whether the name came from a real project signal (package.json,
+    # pyproject.toml, git remote) — those authoritative names are never
+    # remapped by the LED-3925 junk-name guard below.
+    name_from_project_signal = False
 
     # Try package.json
     pkg = p / "package.json"
@@ -87,6 +121,7 @@ def _detect_venture(project_path: str = ".") -> Dict[str, str]:
             d = json.loads(pkg.read_text())
             info["name"] = d.get("name", p.name)
             info["type"] = "node"
+            name_from_project_signal = True
         except Exception:
             pass
 
@@ -101,6 +136,7 @@ def _detect_venture(project_path: str = ".") -> Dict[str, str]:
                     if name:
                         info["name"] = name
                         info["type"] = "python"
+                        name_from_project_signal = True
                         break
         except Exception:
             pass
@@ -118,8 +154,31 @@ def _detect_venture(project_path: str = ".") -> Dict[str, str]:
             info["repo"] = url
             if not info.get("type"):
                 info["name"] = repo
+                name_from_project_signal = True
     except Exception:
         pass
+
+    # LED-3925 write-path resolution: if no authoritative project signal named
+    # this path AND the basename is an ephemeral / non-venture junk name
+    # (server, .delimit, tmp*), remap it to a real venture slug rather than
+    # stamping the junk basename onto every ledger write.
+    if not name_from_project_signal:
+        basename = p.name
+        # A dedicated venture namespace (~/.delimit/ventures/<name>) is an
+        # AUTHORITATIVE custom venture — the <name> after ventures/ is never
+        # junk, even though the path contains ".delimit" and may sit under
+        # /tmp during tests (which would otherwise mark it ephemeral and
+        # collapse every custom venture to "delimit").
+        parent = p.parent
+        is_dedicated_venture = (
+            parent.name == "ventures" and parent.parent.name == ".delimit"
+        )
+        if not is_dedicated_venture and (
+            _is_ephemeral_path(str(p))
+            or basename in ("server", ".delimit")
+            or basename.startswith("tmp")
+        ):
+            info["name"] = _resolve_nonventure_name(str(p), basename)
 
     return info
 
@@ -195,12 +254,24 @@ _VENTURE_CANONICAL = {
     "delimit-cli": "delimit",        # npm package name
     "delimit-gateway": "delimit",    # gateway repo
     ".delimit": "delimit",
+    "server": "delimit",             # LED-3925: MCP server cwd basename
     "wirereport": "wire-report",
+    "wire.report": "wire-report",    # LED-3925
+    "wire-api": "wire-report",       # LED-3925
+    "action-wire-report": "wire-report",  # LED-3925
+    "wirereportwnba": "wire-report",      # LED-3925
+    "wr-phase1": "wire-report",      # LED-3925
     "stakeone": "stake-one",
+    "stake.one": "stake-one",        # LED-3925
+    "domain-monetization": "domainvested",  # LED-3925 (matches focus_gate)
+    "domainvested-console": "domainvested",  # LED-3925
+    "electricgrill-com": "domainvested",     # LED-3925
+    "solicitsignal": "solicitsignal",        # LED-3925 (known slug)
 }
 _KNOWN_VENTURE_SLUGS = {
     "delimit", "wire-report", "domainvested",
     "livetube", "stake-one", "root", "unsorted",
+    "solicitsignal",
 }
 
 
@@ -908,6 +979,7 @@ def list_items(
     limit: int = 50,
     cursor: Optional[str] = None,
     project_path: str = ".",
+    strict_venture: bool = False,
 ) -> Dict[str, Any]:
     """List ledger items with optional filters, sort, projection, and cursor pagination.
 
@@ -937,6 +1009,13 @@ def list_items(
             If filters change between calls, the cursor is invalidated and the
             response begins at offset 0 with `cursor_invalidated=True`.
         project_path: ledger root (auto-detect when ".").
+        strict_venture: LED-3925. When True, drop rows whose ``venture`` field
+            does not match the queried venture (alias-collapsed). This isolates
+            queries that resolve to the shared central store — an unknown-slug
+            or legacy-layout query used to return EVERY venture's items. When
+            the queried venture cannot be determined the filter fails OPEN
+            (no filtering, logged) to avoid an empty result. Default False so
+            existing callers are unaffected.
 
     Returns:
         {
@@ -950,6 +1029,24 @@ def list_items(
     _ensure(project_path)
     ledger_dir = _project_ledger_dir(project_path)
     venture = _detect_venture(project_path)
+
+    # LED-3925 read-path scope: resolve the venture this query is scoped to.
+    # Fail OPEN (expected_venture stays None → no filtering) when it can't be
+    # determined, so strict mode never returns an empty result by accident.
+    expected_venture: Optional[str] = None
+    if strict_venture:
+        # Fail OPEN unless the QUERY resolves to a *recognized* canonical slug.
+        # An unrecognized / custom query venture must never filter (PR #325
+        # review, unanimous): dedicated ventures are already store-isolated, so
+        # strict mode only adds value for the recognized ventures that pool in
+        # the shared central store.
+        expected_venture = _canonical_venture_slug(venture.get("name", ""))
+        if not expected_venture:
+            logger.debug(
+                "list_items: strict_venture requested but venture %r is not a "
+                "recognized canonical slug; filter fails open",
+                venture.get("name", ""),
+            )
 
     if sort not in _VALID_SORT:
         return {"error": f"sort must be one of {list(_VALID_SORT)}"}
@@ -1041,6 +1138,19 @@ def list_items(
                 state[item_id] = {**item}
 
         filtered = list(state.values())
+
+        # LED-3925: strict venture scope. Drop ONLY rows POSITIVELY attributed
+        # to a *different recognized* canonical venture (PR #325 review,
+        # unanimous). A row whose venture tag is empty, junk, or an unrecognized
+        # legacy string (e.g. "tmpabc123") resolves to no canonical slug and
+        # STAYS VISIBLE — never-break-installs: existing users' legacy-tagged
+        # rows must not silently vanish. Applied BEFORE the breakdown snapshot
+        # so summary counts are venture-scoped too.
+        if strict_venture and expected_venture:
+            def _is_foreign(row: Dict[str, Any]) -> bool:
+                row_slug = _canonical_venture_slug(str(row.get("venture") or ""))
+                return row_slug is not None and row_slug != expected_venture
+            filtered = [i for i in filtered if not _is_foreign(i)]
 
         # Apply every filter EXCEPT status first, so the status breakdown can be
         # computed over this scoped-but-status-agnostic set.
@@ -1164,7 +1274,9 @@ def list_items(
 def get_context(project_path: str = ".") -> Dict[str, Any]:
     """Get a concise ledger summary for AI context — what's open, what's next."""
     venture = _detect_venture(project_path)
-    result = list_items(status="open", project_path=project_path)
+    # LED-3925: get_context is a venture-scoped summary — enforce strict scope
+    # so the top-5 "next up" never bleeds another venture's open items.
+    result = list_items(status="open", project_path=project_path, strict_venture=True)
     open_items = []
     for ledger_items in result["items"].values():
         open_items.extend(ledger_items)

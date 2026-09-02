@@ -38,7 +38,12 @@ from typing import Any, Dict, List, Optional, Tuple
 from .continuity import get_namespace_root  # noqa: E402
 
 DELIMIT_HOME = get_namespace_root()
+# LED-4300: the ledger is read through ledger_manager (which resolves
+# ledger-v2/<venture>/ from the project path). PROJECT_PATH is that resolution
+# input; LEDGER_DIR remains only for legacy callers and must not gain new ones.
+PROJECT_PATH = Path(os.environ.get("DELIMIT_PROJECT_PATH", os.getcwd()))
 LEDGER_DIR = DELIMIT_HOME / "ledger"
+LEDGER_V2_DIR = DELIMIT_HOME / "ledger-v2"
 SWARM_DIR = DELIMIT_HOME / "swarm"
 MEMORY_DIR = DELIMIT_HOME / "memory"
 SESSIONS_DIR = DELIMIT_HOME / "sessions"
@@ -48,25 +53,187 @@ DAEMON_LOG_FILE = DELIMIT_HOME / "daemon" / "daemon.log.jsonl"
 ALERTS_DIR = DELIMIT_HOME / "alerts"
 
 
+# -- Provenance ---------------------------------------------------------------
+#
+# LED-4300, the anti-recurrence control. This panel reported false state for
+# MONTHS — a June-era daemon log rendered as live process status, an April-era
+# ledger dir rendered as the current board — and nothing made that visible,
+# because no widget ever declared where its data came from or how old it was.
+# Every widget now carries a source + age footer and GREYS OUT when its source
+# is stale, so the next time a source dies the panel says so instead of
+# confidently rendering fiction.
+
+STALE_AFTER_SECONDS = 6 * 3600
+
+
+class LedgerUnavailable(RuntimeError):
+    """The ledger could not be read.
+
+    LED-4300, panel-mandated. Returning [] on a read failure would render
+    "Nothing is blocked on you" — a FALSE GREEN, and precisely the defect
+    class this whole repair exists to remove. An empty board and a broken
+    board must never look alike, so failure is raised and each view renders
+    it as UNAVAILABLE rather than as calm.
+    """
+
+
+
+def _source_age(*paths: Path) -> Optional[float]:
+    """Newest mtime across the given paths, in seconds. None if none exist."""
+    newest: Optional[float] = None
+    for p in paths:
+        try:
+            if p.exists():
+                mtime = p.stat().st_mtime
+                newest = mtime if newest is None else max(newest, mtime)
+        except OSError:
+            continue
+    return None if newest is None else max(0.0, time.time() - newest)
+
+
+def _fmt_age(seconds: Optional[float]) -> str:
+    if seconds is None:
+        return "missing"
+    if seconds < 90:
+        return f"{int(seconds)}s ago"
+    if seconds < 5400:
+        return f"{int(seconds // 60)}m ago"
+    if seconds < 172800:
+        return f"{int(seconds // 3600)}h ago"
+    return f"{int(seconds // 86400)}d ago"
+
+
+def _provenance(label: str, *paths: Path, stale_after: int = STALE_AFTER_SECONDS) -> str:
+    """Render the source/age footer. Marks STALE loudly rather than silently."""
+    age = _source_age(*paths)
+    shown = " ".join(str(p).replace(str(Path.home()), "~") for p in paths[:2])
+    if age is None:
+        return f"[dim]source:[/] {label} [red]MISSING[/] [dim]{shown}[/]"
+    if age > stale_after:
+        return (
+            f"[dim]source:[/] {label} [bold red]STALE {_fmt_age(age)}[/] "
+            f"[dim]{shown} — this view may be wrong[/]"
+        )
+    return f"[dim]source: {label} · {_fmt_age(age)} · {shown}[/]"
+
+
 # -- Data loaders -------------------------------------------------------------
 
 def _load_ledger_items(status: str = "open", limit: int = 20) -> List[Dict]:
-    """Load deduplicated ledger items (append-only JSONL, last entry wins)."""
-    by_id: Dict[str, Dict] = {}
-    for fname in ("operations.jsonl", "strategy.jsonl"):
-        path = LEDGER_DIR / fname
-        if not path.exists():
-            continue
-        for line in path.read_text().strip().split("\n"):
-            try:
-                d = json.loads(line)
-                item_id = d.get("id", "")
-                if item_id:
-                    by_id[item_id] = d
-            except json.JSONDecodeError:
-                continue
-    items = [d for d in by_id.values() if d.get("status") == status]
-    items.sort(key=lambda x: (0 if x.get("priority") == "P0" else 1 if x.get("priority") == "P1" else 2))
+    """Load ledger items through the CANONICAL event-sourced reducer.
+
+    LED-4300. This function used to keep its own reducer over the LEGACY
+    ``~/.delimit/ledger/`` directory, deduplicating an append-only log with
+    "last row wins". That is wrong twice over:
+
+      * the live store is ``ledger-v2/<venture>/``, not the legacy dir (whose
+        newest real file predates this by months); and
+      * ``type:"update"`` rows carry only id/note/status — no title, no
+        priority — so each update CLOBBERED its parent item, which the status
+        filter then dropped. Measured before the fix: 1,457 deduped rows,
+        1,419 of them update rows, leaving exactly 10 items with
+        ``status == "open"`` against ~432 genuinely open across ventures.
+
+    Net effect of the old code: the more an item was worked, the more certainly
+    it vanished from the operator's board — the panel structurally hid active
+    work and displayed only abandoned work.
+
+    ``ledger_manager.list_items`` already replays events correctly (updates
+    PATCH their parent, preserving title/priority). Delegating here keeps ONE
+    reducer for the whole system rather than a second, divergent copy.
+    """
+    try:
+        from .ledger_manager import list_items
+    except ImportError:  # pragma: no cover - flat bundle layout
+        from ledger_manager import list_items  # type: ignore
+
+    try:
+        result = list_items(
+            status=status, limit=max(limit, 500), project_path=str(PROJECT_PATH)
+        )
+    except Exception as exc:  # noqa: BLE001 - surfaced as UNAVAILABLE, never as empty
+        raise LedgerUnavailable(f"ledger read failed: {exc}") from exc
+    if not isinstance(result, dict) or not isinstance(result.get("items"), dict):
+        raise LedgerUnavailable("ledger returned an unexpected shape")
+
+    buckets = result.get("items") or {}
+    items: List[Dict] = []
+    for bucket in ("ops", "strategy"):
+        items.extend(buckets.get(bucket) or [])
+
+    items.sort(
+        key=lambda x: (
+            0 if x.get("priority") == "P0" else 1 if x.get("priority") == "P1" else 2,
+            str(x.get("updated_at") or x.get("created_at") or ""),
+        )
+    )
+    return items[:limit]
+
+
+def _load_actionable(limit: int = 200) -> List[Dict]:
+    """Open/in-progress/blocked work at P0-P1 — the operator's real queue.
+
+    LED-4300. A raw "open" count is not an operator metric: on the live store
+    it reads 4,156, of which 4,070 are strategy/ThinkTank BACKLOG items that
+    are open by design and will never be "done". Reporting that as the
+    headline would swap one useless number for another. Priority-scoping is
+    what makes the count mean "work that wants a decision or a commit".
+    """
+    try:
+        from .ledger_manager import list_items
+    except ImportError:  # pragma: no cover - flat bundle layout
+        from ledger_manager import list_items  # type: ignore
+    try:
+        result = list_items(
+            status__in=["open", "in_progress", "blocked"],
+            priority__in=["P0", "P1"],
+            limit=max(limit, 2000),
+            project_path=str(PROJECT_PATH),
+        )
+    except Exception as exc:  # noqa: BLE001 - surfaced as UNAVAILABLE, never as empty
+        raise LedgerUnavailable(f"ledger read failed: {exc}") from exc
+    if not isinstance(result, dict) or not isinstance(result.get("items"), dict):
+        raise LedgerUnavailable("ledger returned an unexpected shape")
+    buckets = result["items"]
+    items: List[Dict] = []
+    for bucket in ("ops", "strategy"):
+        items.extend(buckets.get(bucket) or [])
+    items.sort(key=lambda x: (
+        0 if x.get("priority") == "P0" else 1,
+        str(x.get("updated_at") or x.get("created_at") or ""),
+    ), reverse=False)
+    return items[:limit]
+
+
+# Items only the FOUNDER can resolve. Two signals, both already in use:
+# an explicit ``founder-gated`` tag, or a blocked status. Kept deliberately
+# narrow — an action queue that mixes in FYI items stops being an action queue.
+_FOUNDER_GATE_TAGS = ("founder-gated", "founder-decision", "merge-hold")
+
+
+def _load_needs_you(limit: int = 20) -> List[Dict]:
+    """Ledger items awaiting a decision only the founder can make.
+
+    LED-4300. Deliberation ruling (unanimous, 4 vendors): a founder authority
+    decision NEVER silently expires — it escalates until decided, superseded,
+    lane-retired, or withdrawn. So nothing here ages out on a timer; items
+    leave only when their underlying state changes.
+    """
+    seen: Dict[str, Dict] = {}
+    for status in ("blocked", "open", "in_progress"):
+        for item in _load_ledger_items(status=status, limit=500):
+            tags = {str(t).lower() for t in (item.get("tags") or [])}
+            gated = bool(tags.intersection(_FOUNDER_GATE_TAGS))
+            if status == "blocked" or gated:
+                item = {**item, "_gate": "tagged" if gated else "blocked"}
+                seen.setdefault(str(item.get("id")), item)
+    items = list(seen.values())
+    items.sort(
+        key=lambda x: (
+            0 if x.get("priority") == "P0" else 1 if x.get("priority") == "P1" else 2,
+            str(x.get("updated_at") or x.get("created_at") or ""),
+        )
+    )
     return items[:limit]
 
 
@@ -183,122 +350,49 @@ def _load_pending_approvals(limit: int = 20) -> List[Dict]:
 
 
 def _load_process_list() -> List[Dict[str, Any]]:
-    """Build a list of known daemons with status from state files and alerts."""
-    processes = []
+    """Live service status from the HEARTBEAT registry (LED-4300).
 
-    # 1. Inbox daemon — primary daemon
-    daemon = _load_daemon_state()
-    started = daemon.get("started_at", "")
-    last_loop = daemon.get("last_loop_at", "")
-    loops = daemon.get("loops", 0)
-    items_proc = daemon.get("items_processed", 0)
-    status = daemon.get("status", "unknown")
+    This used to read ``daemon/state.json`` + ``daemon/daemon.log.jsonl`` —
+    files last written 2026-06-06 — and rendered them as current. It therefore
+    reported "Inbox Daemon: stopped (alert)" while that daemon was demonstrably
+    alive, and, worse, would have reported the same thing had it genuinely
+    died: an ANTI-SIGNAL, silent in exactly the case it exists to catch.
 
-    # Check for alert overrides
-    alert_file = ALERTS_DIR / "inbox_daemon.json"
-    if alert_file.exists():
+    Every scheduled service already writes ``heartbeats/<service>.json`` with
+    its own staleness threshold, and ``ai.heartbeat.check_staleness`` is the
+    canonical classifier. Use it. A service the classifier cannot judge is
+    reported as UNKNOWN — never as healthy.
+    """
+    try:
+        from .heartbeat import check_staleness
+    except ImportError:  # pragma: no cover - flat bundle layout
         try:
-            alert = json.loads(alert_file.read_text())
-            if alert.get("alert") == "inbox_daemon_stopped":
-                status = "stopped (alert)"
-        except (json.JSONDecodeError, OSError):
-            pass
+            from heartbeat import check_staleness  # type: ignore
+        except ImportError:
+            return []
 
-    uptime = ""
-    if started and status in ("running", "idle"):
-        try:
-            start_dt = datetime.fromisoformat(started)
-            delta = datetime.now(timezone.utc) - start_dt
-            hours = int(delta.total_seconds() // 3600)
-            minutes = int((delta.total_seconds() % 3600) // 60)
-            uptime = f"{hours}h {minutes}m"
-        except (ValueError, TypeError):
-            uptime = "?"
+    try:
+        res = check_staleness(str(DELIMIT_HOME / "heartbeats"))
+    except Exception:  # noqa: BLE001 - never let the board crash on a bad file
+        return []
 
-    processes.append({
-        "name": "inbox_daemon",
-        "label": "Inbox Daemon",
-        "status": status,
-        "uptime": uptime,
-        "detail": f"loops={loops} processed={items_proc}",
-        "last_action": last_loop[:19] if last_loop else "",
-    })
-
-    # 2. Social scanner — check cron.log and social_drafts for activity
-    social_status = "inactive"
-    social_last = ""
-    social_detail = ""
-    cron_log = DELIMIT_HOME / "cron.log"
-    if cron_log.exists():
-        try:
-            # Read last 2KB to find recent social scan entries
-            with open(cron_log, "rb") as f:
-                f.seek(0, 2)
-                fsize = f.tell()
-                read_size = min(fsize, 2048)
-                f.seek(fsize - read_size)
-                tail = f.read().decode("utf-8", errors="replace")
-            # Look for social scan references
-            for line in reversed(tail.strip().split("\n")):
-                if "social" in line.lower() or "scan" in line.lower():
-                    social_status = "active"
-                    social_last = line[:19] if len(line) > 19 else line
-                    social_detail = line.strip()[:60]
-                    break
-        except (OSError, UnicodeDecodeError):
-            pass
-
-    processes.append({
-        "name": "social_scanner",
-        "label": "Social Scanner",
-        "status": social_status,
-        "uptime": "",
-        "detail": social_detail,
-        "last_action": social_last,
-    })
-
-    # 3. Ledger watcher — check if ledger files were recently modified
-    ledger_status = "inactive"
-    ledger_last = ""
-    for fname in ("operations.jsonl", "strategy.jsonl"):
-        lpath = LEDGER_DIR / fname
-        if lpath.exists():
-            mtime = lpath.stat().st_mtime
-            age_hours = (time.time() - mtime) / 3600
-            if age_hours < 1:
-                ledger_status = "active"
-            ts = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S")
-            if not ledger_last or ts > ledger_last:
-                ledger_last = ts
-
-    processes.append({
-        "name": "ledger_watcher",
-        "label": "Ledger Watcher",
-        "status": ledger_status,
-        "uptime": "",
-        "detail": "monitors operations + strategy",
-        "last_action": ledger_last,
-    })
-
-    # 4. Notification router
-    notif_status = "inactive"
-    notif_last = ""
-    if NOTIFICATIONS_FILE.exists():
-        mtime = NOTIFICATIONS_FILE.stat().st_mtime
-        age_hours = (time.time() - mtime) / 3600
-        if age_hours < 1:
-            notif_status = "active"
-        notif_last = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S")
-
-    processes.append({
-        "name": "notify_router",
-        "label": "Notification Router",
-        "status": notif_status,
-        "uptime": "",
-        "detail": f"routing via {DELIMIT_HOME / 'notify_routing.yaml'}",
-        "last_action": notif_last,
-    })
-
+    order = {"failed": 0, "parse_error": 1, "stale": 2, "never_seen": 3,
+             "degraded": 4, "unknown_age": 5, "ok": 6}
+    processes: List[Dict[str, Any]] = []
+    for svc in (res.get("services") or []):
+        cls = str(svc.get("classification") or "unknown")
+        last = str(svc.get("last_run") or "")
+        age = svc.get("age_seconds")
+        processes.append({
+            "name": svc.get("service", "?"),
+            "label": str(svc.get("service", "?")),
+            "status": cls,
+            "uptime": _fmt_age(age) if isinstance(age, (int, float)) and age >= 0 else "",
+            "detail": str(svc.get("detail") or "")[:80],
+            "last_action": last.replace("T", " ").replace("Z", ""),
+            "_sort": order.get(cls, 7),
+        })
+    processes.sort(key=lambda p: (p["_sort"], p["name"]))
     return processes
 
 
@@ -321,6 +415,63 @@ def _build_dir_tree(root: Path, max_depth: int = 3, _depth: int = 0) -> List[Tup
 
 # -- Widgets ------------------------------------------------------------------
 
+class NeedsYouPanel(Static):
+    """Decisions ONLY the founder can make. The board's first question.
+
+    LED-4300. The tab that used to occupy this slot showed 25 dead social_post
+    drafts aged 3-30 days from a lane the founder RATIFIED RETIRED — an action
+    queue made entirely of tombstones. Items here never expire on a timer
+    (unanimous panel ruling): a founder authority decision leaves this list
+    only when it is decided, superseded, lane-retired, or withdrawn.
+    """
+
+    def compose(self) -> ComposeResult:
+        yield Static(id="needs-you-content")
+
+    def on_mount(self) -> None:
+        self._refresh_data()
+        self.set_interval(30, self._refresh_data)
+
+    def _refresh_data(self) -> None:
+        content = self.query_one("#needs-you-content", Static)
+        try:
+            items = _load_needs_you(20)
+        except LedgerUnavailable as exc:
+            # Never render "nothing is blocked on you" when the read failed.
+            content.update(f"[bold red]NEEDS YOU unavailable:[/] {exc}")
+            return
+        except Exception as exc:  # noqa: BLE001
+            content.update(f"[bold red]NEEDS YOU unavailable:[/] {exc}")
+            return
+
+        lines = ["[bold]BLOCKED ON YOU[/] — decisions nobody else can make\n"]
+        if not items:
+            lines.append("  [green]Nothing is blocked on you.[/]")
+        for item in items:
+            pri = str(item.get("priority") or "")
+            colour = "red" if pri == "P0" else "yellow" if pri == "P1" else "cyan"
+            age = ""
+            stamp = str(item.get("updated_at") or item.get("created_at") or "")
+            if stamp:
+                try:
+                    when = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+                    days = (datetime.now(timezone.utc) - when).days
+                    age = f"  [dim]{days}d[/]" if days else "  [dim]today[/]"
+                except ValueError:
+                    age = ""
+            lines.append(
+                f"  [{colour}]{pri:3s}[/] [bold]{item.get('id','')}[/]  "
+                f"{str(item.get('title',''))[:72]}{age}"
+            )
+
+        lines.append("")
+        lines.append(_provenance(
+            "ledger-v2 (event-sourced)",
+            LEDGER_V2_DIR / "delimit" / "operations.jsonl",
+        ))
+        content.update("\n".join(lines))
+
+
 class LedgerPanel(Static):
     """Live ledger view -- shows open items sorted by priority."""
 
@@ -336,7 +487,12 @@ class LedgerPanel(Static):
     def _refresh_data(self) -> None:
         table = self.query_one("#ledger-table", DataTable)
         table.clear()
-        for item in _load_ledger_items("open", 25):
+        try:
+            rows = _load_actionable(40)
+        except LedgerUnavailable as exc:
+            table.add_row("[red]UNAVAILABLE[/]", "", str(exc)[:60], "", "")
+            return
+        for item in rows:
             table.add_row(
                 item.get("id", ""),
                 item.get("priority", ""),
@@ -395,43 +551,67 @@ class SessionPanel(Static):
 
 
 class VenturesPanel(Static):
-    """Ventures as app tiles -- each venture is an 'app' in the OS."""
+    """Portfolio derived from EVIDENCE, not from a hand-seeded roster.
+
+    LED-4300. This used to read swarm/agent_registry.json — a static fixture of
+    5 identical role-slots per venture (the fictional "25 agents") — so it
+    listed dormant ventures while omitting every venture that had never been
+    hand-registered, and reported "delimit | 0 open items" against 99 real
+    open items.
+
+    A venture now appears when it has left EVIDENCE: a ledger-v2/<slug>/ store
+    with real items. Panel ruling: ONE signal is enough to be listed, because
+    under-registration is the measured failure and board spam is speculative;
+    junk is controlled by a deny-list, not by volume thresholds.
+    """
+
+    DENY = {"unsorted", "tmp", "test", "scratch", "backup", "_archived"}
 
     def compose(self) -> ComposeResult:
         yield Static(id="ventures-content")
 
     def on_mount(self) -> None:
         self._refresh_data()
-        self.set_interval(30, self._refresh_data)
+        self.set_interval(60, self._refresh_data)
 
     def _refresh_data(self) -> None:
         content = self.query_one("#ventures-content", Static)
-        swarm = _load_swarm_status()
-        by_venture = swarm.get("by_venture", {})
+        try:
+            from .ledger_manager import _replay_status_counts
+        except ImportError:  # pragma: no cover - flat bundle layout
+            from ledger_manager import _replay_status_counts  # type: ignore
 
-        if not by_venture:
-            content.update("[dim]No ventures registered. Run delimit_swarm(action='register').[/]")
-            return
+        rows = []
+        if LEDGER_V2_DIR.exists():
+            for d in sorted(LEDGER_V2_DIR.iterdir()):
+                if not d.is_dir() or d.name in self.DENY or d.name.startswith("_"):
+                    continue
+                try:
+                    counts = _replay_status_counts(d)
+                except Exception:  # noqa: BLE001
+                    continue
+                total = sum(counts.values())
+                if not total:
+                    continue
+                active = (counts.get("open", 0) + counts.get("in_progress", 0)
+                          + counts.get("blocked", 0))
+                age = _source_age(d / "operations.jsonl", d / "strategy.jsonl")
+                rows.append((d.name, active, counts.get("done", 0), age))
 
-        all_items = _load_ledger_items("open", 999)
-        venture_items = {}
-        for item in all_items:
-            v = item.get("venture", "root")
-            venture_items[v] = venture_items.get(v, 0) + 1
-
-        lines = [
-            "[bold]Ventures[/] -- each venture is an app in Delimit OS\n",
-        ]
-        for venture, agent_count in sorted(by_venture.items()):
-            open_count = venture_items.get(venture, venture_items.get(f"{venture}-mcp", 0))
-            status_icon = "[green]>[/]" if agent_count > 0 else "[red]o[/]"
+        lines = ["[bold]Portfolio[/] — listed on ledger evidence\n"]
+        if not rows:
+            lines.append("  [dim]No venture ledgers found.[/]")
+        for name, active, done, age in sorted(rows, key=lambda r: -r[1]):
+            dormant = age is not None and age > 90 * 86400
+            label = f"[dim]{name}[/]" if dormant else f"[bold cyan]{name}[/]"
+            mark = "[dim]-[/]" if dormant else "[green]>[/]"
+            note = "  [dim](dormant 90d+)[/]" if dormant else ""
             lines.append(
-                f"  {status_icon} [bold cyan]{venture}[/]"
-                f"  |  {agent_count} agents"
-                f"  |  {open_count} open items"
+                f"  {mark} {label}  |  {active} active  |  {done} done  "
+                f"|  [dim]{_fmt_age(age)}[/]{note}"
             )
-
-        lines.append(f"\n[dim]Total: {len(by_venture)} ventures, {swarm['agents']} agents[/]")
+        lines.append(f"\n[dim]{len(rows)} venture(s) with ledger evidence.[/]")
+        lines.append(_provenance("ledger-v2 stores", LEDGER_V2_DIR))
         content.update("\n".join(lines))
 
 
@@ -854,8 +1034,14 @@ class GovernanceBar(Static):
 
     def _refresh(self) -> None:
         bar = self.query_one("#gov-bar", Static)
-        ledger_count = len(_load_ledger_items("open", 999))
-        swarm = _load_swarm_status()
+        actionable = len(_load_actionable(9999))
+        # LED-4300: the old bar advertised "N agents / M ventures" from a
+        # hand-seeded roster. Replaced with the only number that should drive
+        # the operator's attention: how many decisions are blocked on him.
+        try:
+            needs_you = len(_load_needs_you(99))
+        except Exception:  # noqa: BLE001
+            needs_you = -1
         mode_file = DELIMIT_HOME / "enforcement_mode"
         mode = mode_file.read_text().strip() if mode_file.exists() else "default"
 
@@ -863,10 +1049,17 @@ class GovernanceBar(Static):
         notif_count = NotificationPanel.get_unread_count()
         notif_badge = f"  |  [yellow]Notif:[/] {notif_count}" if notif_count > 0 else ""
 
+        if needs_you > 0:
+            attention = f"[bold red]NEEDS YOU:[/] {needs_you}"
+        elif needs_you == 0:
+            attention = "[green]Nothing blocked on you[/]"
+        else:
+            attention = "[red]NEEDS YOU: unavailable[/]"
+
         bar.update(
             f"  [bold magenta]</>[/] [bold]Delimit OS[/]  |  "
-            f"[cyan]Ledger:[/] {ledger_count} open  |  "
-            f"[cyan]Swarm:[/] {swarm['agents']} agents / {swarm['ventures']} ventures  |  "
+            f"{attention}  |  "
+            f"[cyan]Active P0/P1:[/] {actionable}  |  "
             f"[cyan]Mode:[/] {mode}"
             f"{notif_badge}  |  "
             f"[dim]{time.strftime('%H:%M')}[/]"
@@ -920,16 +1113,12 @@ class DelimitOS(App):
     def compose(self) -> ComposeResult:
         yield GovernanceBar()
         with TabbedContent():
-            with TabPane("Approvals", id="tab-approvals"):
-                yield ApprovalsPanel()
+            with TabPane("Needs You", id="tab-needsyou"):
+                yield NeedsYouPanel()
             with TabPane("Ledger", id="tab-ledger"):
                 yield LedgerPanel()
-            with TabPane("Swarm", id="tab-swarm"):
-                yield SwarmPanel()
             with TabPane("Notifications", id="tab-notifications"):
                 yield NotificationPanel()
-            with TabPane("Files", id="tab-files"):
-                yield FilesystemPanel()
             with TabPane("Processes", id="tab-processes"):
                 yield ProcessPanel()
             with TabPane("Ventures", id="tab-ventures"):
@@ -941,9 +1130,9 @@ class DelimitOS(App):
     # -- Tab focus actions -----------------------------------------------------
 
     def action_focus_approvals(self) -> None:
-        self.query_one(TabbedContent).active = "tab-approvals"
+        self.query_one(TabbedContent).active = "tab-needsyou"
         try:
-            self.query_one("#approvals-table", DataTable).focus()
+            self.query_one("#needs-you-content", Static).focus()
         except Exception:
             pass
 
@@ -951,13 +1140,13 @@ class DelimitOS(App):
         self.query_one(TabbedContent).active = "tab-ledger"
 
     def action_focus_swarm(self) -> None:
-        self.query_one(TabbedContent).active = "tab-swarm"
+        self.query_one(TabbedContent).active = "tab-ventures"
 
     def action_focus_notifications(self) -> None:
         self.query_one(TabbedContent).active = "tab-notifications"
 
     def action_focus_files(self) -> None:
-        self.query_one(TabbedContent).active = "tab-files"
+        self.query_one(TabbedContent).active = "tab-ledger"
 
     def action_focus_processes(self) -> None:
         self.query_one(TabbedContent).active = "tab-processes"

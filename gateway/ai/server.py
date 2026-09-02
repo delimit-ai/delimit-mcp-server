@@ -2535,6 +2535,9 @@ def delimit_os_status() -> Dict[str, Any]:
     Side effects: read-only on the OS backend; gated by require_premium.
     Calls backends.os_bridge.get_status.
 
+    Prerequisite: requires Delimit Pro. An unlicensed call returns
+    {"error": ..., "upgrade": "https://delimit.ai/pricing"} without running.
+
     Args:
         None.
 
@@ -2789,6 +2792,9 @@ def delimit_gov_policy(repo: Annotated[str, Field(description="Filesystem path t
     Side effects: read-only on policy storage; gated by require_premium
     (returns a license payload if the caller is unlicensed).
 
+    Prerequisite: requires Delimit Pro. An unlicensed call returns
+    {"error": ..., "upgrade": "https://delimit.ai/pricing"} without running.
+
     Args:
         repo: Filesystem path to the repository. Default "." (cwd).
 
@@ -2965,6 +2971,9 @@ def delimit_gov_verify(task_id: Annotated[str, Field(description="Identifier fro
     policy snapshot). The response is routed through _with_next_steps.
     Does not perform additional work — only validates and records the
     verdict.
+
+    Prerequisite: requires Delimit Pro. An unlicensed call returns
+    {"error": ..., "upgrade": "https://delimit.ai/pricing"} without running.
 
     Args:
         task_id: Identifier from delimit_gov_new_task / delimit_gov_run.
@@ -3205,6 +3214,9 @@ def delimit_memory_search(query: Annotated[str, Field(description="Natural-langu
     Side effects: read-only on the memory backend; gated by
     require_premium. Calls backends.memory_bridge.search.
 
+    Prerequisite: requires Delimit Pro. An unlicensed call returns
+    {"error": ..., "upgrade": "https://delimit.ai/pricing"} without running.
+
     Args:
         query: Natural-language search query. Required.
         limit: Maximum number of matching entries to return. Default 10.
@@ -3364,6 +3376,9 @@ def delimit_vault_search(query: Annotated[str, Field(description="Search query s
     Side effects: read-only on the vault backend; gated by
     require_premium. Calls backends.vault_bridge.search.
 
+    Prerequisite: requires Delimit Pro. An unlicensed call returns
+    {"error": ..., "upgrade": "https://delimit.ai/pricing"} without running.
+
     Args:
         query: Search query string. Required.
 
@@ -3393,6 +3408,9 @@ def delimit_vault_health() -> Dict[str, Any]:
 
     Side effects: read-only on the vault backend; gated by
     require_premium. Calls backends.vault_bridge.health.
+
+    Prerequisite: requires Delimit Pro. An unlicensed call returns
+    {"error": ..., "upgrade": "https://delimit.ai/pricing"} without running.
 
     Args:
         None.
@@ -3936,6 +3954,10 @@ def delimit_deploy_plan(
         env: Target environment, typically "staging" or "production".
         git_ref: Git ref (branch/tag/SHA). Optional; defaults to the
             backend's notion of HEAD when omitted.
+        repo_path: Explicit Git worktree root used for health, security,
+            governance, evidence, and attribution. Default ''.
+        venture: Optional ledger venture identity; repository context
+            remains authoritative. Default ''.
 
     Returns:
         Dict with the plan, security_audit_summary, gov_evaluate result,
@@ -3994,6 +4016,7 @@ def delimit_deploy_build(
             Required for a real build; empty errors at the backend.
         git_ref: Git ref (branch/tag/SHA). Default None = backend
             HEAD. The image tag derives from this ref.
+        repo_path: Explicit Git worktree root. Default "" = cwd.
 
     Returns:
         Dict with keys: app, git_ref, image_tags (list of produced
@@ -4030,9 +4053,13 @@ def delimit_deploy_publish(
     backends.deploy_bridge.publish, which performs network writes to
     the configured container registry.
 
+    Prerequisite: requires Delimit Pro. An unlicensed call returns
+    {"error": ..., "upgrade": "https://delimit.ai/pricing"} without running.
+
     Args:
         app: Application name (project key in the deploy backend).
         git_ref: Git ref the images were built at. Default None.
+        repo_path: Explicit Git worktree root. Default ''.
 
     Returns:
         Dict with publish status, registry refs, plus next_steps.
@@ -4094,6 +4121,10 @@ def delimit_deploy_verify(
         git_ref: Optional git ref the deploy targets — used to scope
             the verification to a specific SHA. Default None = use
             the current rollout.
+        repo_path: Explicit Git worktree root containing deploy target
+            configuration. Default "" = cwd.
+        target_urls: Optional app-specific HTTPS targets to probe. Never
+            expands to the global fleet. Default None.
 
     Returns:
         Dict with keys: verdict (healthy / unhealthy / partial),
@@ -4139,11 +4170,15 @@ def delimit_deploy_rollback(
     backends.deploy_bridge.rollback which mutates the running
     environment to point at to_sha.
 
+    Prerequisite: requires Delimit Pro. An unlicensed call returns
+    {"error": ..., "upgrade": "https://delimit.ai/pricing"} without running.
+
     Args:
         app: Application name.
         env: Target environment.
         to_sha: Target SHA to roll back to. If None, the backend selects
             the previous deployed SHA.
+        repo_path: Explicit Git worktree root. Default "" = cwd.
 
     Returns:
         Dict with rollback status and next_steps.
@@ -4184,9 +4219,13 @@ def delimit_deploy_status(
     store. No write, no probe, no notification. Response routed
     through _with_next_steps.
 
+    Prerequisite: requires Delimit Pro. An unlicensed call returns
+    {"error": ..., "upgrade": "https://delimit.ai/pricing"} without running.
+
     Args:
         app: Application name.
         env: Target environment ("staging" or "production").
+        repo_path: Explicit Git worktree root. Default "" = cwd.
 
     Returns:
         Dict with keys: app, env, current_sha, rollout_state (e.g.
@@ -4532,6 +4571,9 @@ def delimit_executor(
     gh_issue_comment. Every invocation is logged to
     ~/.delimit/workers/audit/executor.jsonl. Touch ~/.delimit/pause_executor
     to halt the autonomous path at the next tick.
+
+    Prerequisite: requires Delimit Pro. An unlicensed call returns
+    {"error": ..., "upgrade": "https://delimit.ai/pricing"} without running.
 
     Args:
         action: "run" (one), "poll" (scan + run all approved), "status"
@@ -5051,6 +5093,9 @@ def delimit_security_ingest(
     ledger (creates new items, optionally closes resolved ones).
     Computes a stable fingerprint per finding to enable diffing.
 
+    Prerequisite: requires Delimit Pro. An unlicensed call returns
+    {"error": ..., "upgrade": "https://delimit.ai/pricing"} without running.
+
     Args:
         tool: Scanner name — one of "trivy", "semgrep", "npm-audit",
             "pip-audit", "snyk", "codeql". Required.
@@ -5302,6 +5347,9 @@ def delimit_security_deliberate(
 
     Side effects: gated by require_premium. Calls multiple models via
     the deliberation panel. Updates ledger items with triage verdicts.
+
+    Prerequisite: requires Delimit Pro. An unlicensed call returns
+    {"error": ..., "upgrade": "https://delimit.ai/pricing"} without running.
 
     Args:
         findings: JSON string of findings to triage. Empty = pull from
@@ -5693,6 +5741,9 @@ def delimit_evidence_collect(target: Annotated[str, Field(description="Repositor
     Side effects: gated by require_premium. Writes a new evidence
     bundle via backends.repo_bridge.evidence_collect.
 
+    Prerequisite: requires Delimit Pro. An unlicensed call returns
+    {"error": ..., "upgrade": "https://delimit.ai/pricing"} without running.
+
     Args:
         target: Repository or task path. Default "." (cwd).
         evidence_type: Type of evidence — e.g. "deploy", "security",
@@ -5746,6 +5797,9 @@ def delimit_evidence_verify(bundle_id: Annotated[Optional[str], Field(descriptio
 
     Side effects: read-only on the evidence store; gated by
     require_premium. Calls backends.repo_bridge.evidence_verify.
+
+    Prerequisite: requires Delimit Pro. An unlicensed call returns
+    {"error": ..., "upgrade": "https://delimit.ai/pricing"} without running.
 
     Args:
         bundle_id: Evidence bundle id. Either this or bundle_path must
@@ -5973,6 +6027,9 @@ def delimit_release_plan(environment: Annotated[str, Field(description="Target e
     Side effects: read-only on git/repo state; gated by require_premium.
     Calls backends.tools_infra.release_plan.
 
+    Prerequisite: requires Delimit Pro. An unlicensed call returns
+    {"error": ..., "upgrade": "https://delimit.ai/pricing"} without running.
+
     Args:
         environment: Target environment, "production" or "staging".
             Default "production".
@@ -6090,6 +6147,9 @@ def delimit_release_status(environment: Annotated[str, Field(description="Target
     manifest for the environment. No write, no probe, no
     notification. Response routed through _with_next_steps.
 
+    Prerequisite: requires Delimit Pro. An unlicensed call returns
+    {"error": ..., "upgrade": "https://delimit.ai/pricing"} without running.
+
     Args:
         environment: Target environment. Default "production".
 
@@ -6206,6 +6266,9 @@ def delimit_cost_analyze(target: Annotated[str, Field(description="Project or in
     Side effects: read-only on the target. Gated by require_premium.
     Calls backends.tools_data.cost_analyze.
 
+    Prerequisite: requires Delimit Pro. An unlicensed call returns
+    {"error": ..., "upgrade": "https://delimit.ai/pricing"} without running.
+
     Args:
         target: Project or infrastructure path to analyze. Default "."
             (cwd).
@@ -6236,6 +6299,9 @@ def delimit_cost_optimize(target: Annotated[str, Field(description="Project or i
 
     Side effects: read-only on the target. Gated by require_premium.
     Calls backends.tools_data.cost_optimize.
+
+    Prerequisite: requires Delimit Pro. An unlicensed call returns
+    {"error": ..., "upgrade": "https://delimit.ai/pricing"} without running.
 
     Args:
         target: Project or infrastructure path to analyze. Default "."
@@ -6268,6 +6334,9 @@ def delimit_cost_alert(action: Annotated[str, Field(description="One of \"list\"
 
     Side effects: action="create"/"delete"/"toggle" write to the
     file-based alert store. action="list" is read-only.
+
+    Prerequisite: requires Delimit Pro. An unlicensed call returns
+    {"error": ..., "upgrade": "https://delimit.ai/pricing"} without running.
 
     Args:
         action: One of "list" (default), "create", "delete", "toggle".
@@ -6574,6 +6643,9 @@ def delimit_obs_metrics(query: Annotated[str, Field(description="Metric query na
     metrics store; no data is written, no ledger entry, no
     notification. The response is routed through _with_next_steps.
 
+    Prerequisite: requires Delimit Pro. An unlicensed call returns
+    {"error": ..., "upgrade": "https://delimit.ai/pricing"} without running.
+
     Args:
         query: Metric query name. Default "system" (general system
             metrics). Backend-specific values supported (e.g.
@@ -6620,6 +6692,9 @@ def delimit_obs_logs(query: Annotated[str, Field(description="Search string (bac
     backends.tools_infra.obs_logs which queries the backing log
     store; no data is written, no ledger entry, no notification. The
     response is routed through _with_next_steps.
+
+    Prerequisite: requires Delimit Pro. An unlicensed call returns
+    {"error": ..., "upgrade": "https://delimit.ai/pricing"} without running.
 
     Args:
         query: Search string in the backend's query syntax. Required;
@@ -8721,6 +8796,13 @@ def delimit_deploy_site(
         message: Git commit message for the deploy commit. Empty
             string is allowed but discouraged; use a meaningful
             message so the deploy history is auditable.
+        app: Deployment application identity, separate from filesystem
+            context. Default "".
+        paths: Explicit repo-relative paths to stage; set staged_only=False
+            when used. Default None.
+        staged_only: Deploy only the existing index. Safe default True.
+        vercel_timeout: Seconds to wait for Vercel after push before
+            returning status=pending. 10-600, default 60.
 
     Returns:
         Dict with keys: deploy_status, build_url (the Vercel build
@@ -8794,6 +8876,9 @@ def delimit_deploy_npm(
     NOT undoable except by an `unpublish` (heavily restricted by
     npm). dry_run=True suppresses step (4) only — the version
     bump and pack still happen so the chain can be exercised.
+
+    Prerequisite: requires Delimit Pro. An unlicensed call returns
+    {"error": ..., "upgrade": "https://delimit.ai/pricing"} without running.
 
     Args:
         repo_path: Required explicit npm package/Git worktree root.
@@ -9399,6 +9484,14 @@ def delimit_ledger_list(
         limit: Page size. Default 20.
         cursor: Opaque pagination token from prior next_cursor. Becomes
             invalid if filters change between calls.
+        created_before: ISO-8601 timestamp upper bound on creation time.
+            If omitted, no upper bound is applied. Default ''.
+        created_after: ISO-8601 timestamp lower bound on creation time.
+            If omitted, no lower bound is applied. Default ''.
+        updated_before: ISO-8601 timestamp upper bound on last-update
+            time. If omitted, no upper bound is applied. Default ''.
+        updated_after: ISO-8601 timestamp lower bound on last-update
+            time. If omitted, no lower bound is applied. Default ''.
 
     Returns:
         Dict with items, optional next_cursor, plus next_steps.
@@ -9424,6 +9517,7 @@ def delimit_ledger_list(
         limit=limit,
         cursor=cursor or None,
         project_path=project,
+        strict_venture=True,  # LED-3925: isolate the surface that leaked cross-venture items
     )
     return _with_next_steps("ledger_list", result)
 
@@ -9728,7 +9822,13 @@ def delimit_soul_capture(
     Returns:
         Dict with the captured soul record, plus next_steps suggestions.
     """
-    from ai.session_phoenix import capture_soul as _capture
+    # STR-3724 #1 (Option B): full phoenix when installed; the public
+    # free-core shim otherwise. A fresh npm install (phoenix excluded) must
+    # degrade gracefully, never hard-error (ratified condition 3).
+    try:
+        from ai.session_phoenix import capture_soul as _capture
+    except ImportError:
+        from ai.session_continuity import capture_soul_core as _capture
 
     def _split(val: str) -> List[str]:
         if not val or not val.strip():
@@ -9784,8 +9884,14 @@ def delimit_revive(project_path: Annotated[str, Field(description="Project path 
     Returns:
         Dict with the resurrected soul state and next_steps.
     """
-    from ai.session_phoenix import revive as _revive
-    result = _revive(project_path=project_path, soul_id=soul_id, scope=scope)
+    # STR-3724 #1 (Option B): full phoenix when installed; core shim revive
+    # otherwise (fresh npm install — graceful, never hard-error).
+    try:
+        from ai.session_phoenix import revive as _revive
+        result = _revive(project_path=project_path, soul_id=soul_id, scope=scope)
+    except ImportError:
+        from ai.session_continuity import revive_basic
+        result = revive_basic(project_path=project_path)
     return _with_next_steps("revive", result)
 
 
@@ -9813,6 +9919,9 @@ def delimit_models(
 
     Side effects: gated by require_premium. action="add" / "remove"
     write provider config; "list" / "detect" are read-only.
+
+    Prerequisite: requires Delimit Pro. An unlicensed call returns
+    {"error": ..., "upgrade": "https://delimit.ai/pricing"} without running.
 
     Args:
         action: One of "list" (default), "detect", "add", "remove".
@@ -10208,6 +10317,9 @@ def delimit_release_sync(action: Annotated[str, Field(description="Sub-action �
     Side effects: gated by require_premium. Calls ai.release_sync.audit
     (read-only audit) or ai.release_sync.get_release_config when
     action="config".
+
+    Prerequisite: requires Delimit Pro. An unlicensed call returns
+    {"error": ..., "upgrade": "https://delimit.ai/pricing"} without running.
 
     Args:
         action: Sub-action — "audit" (default) or "config".
@@ -13485,6 +13597,9 @@ def delimit_screen_record(mode: Annotated[str, Field(description="\"browser\" (d
     + MP4 (terminal) under ~/.delimit/recordings/. Gated by
     require_premium. Duration is capped at 120 seconds.
 
+    Prerequisite: requires Delimit Pro. An unlicensed call returns
+    {"error": ..., "upgrade": "https://delimit.ai/pricing"} without running.
+
     Args:
         mode: "browser" (default) or "terminal".
         url: URL to visit (browser mode only).
@@ -13538,6 +13653,9 @@ def delimit_screenshot(url: Annotated[str, Field(description="URL to screenshot.
 
     Side effects: gated by require_premium. Launches headless Chromium
     via Playwright and writes a PNG file under ~/.delimit/screenshots/.
+
+    Prerequisite: requires Delimit Pro. An unlicensed call returns
+    {"error": ..., "upgrade": "https://delimit.ai/pricing"} without running.
 
     Args:
         url: URL to screenshot. Required.
@@ -15287,3 +15405,110 @@ def delimit_reddit_fetch_thread(thread_id: Annotated[str, Field(description="Red
     
     scored = score_and_classify([thread])
     return {"thread": scored[0] if scored else thread}
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  THINKTANK PIPELINE (LED-3916) — internal-only idea intake + BuildNow gate
+#  Gateway-only. Backing module ai.thinktank_pipeline is excluded from the
+#  npm bundle (scripts/bundle-internal-exclude.txt), so these degrade to a
+#  graceful "not_available" payload on customer installs.
+# ═══════════════════════════════════════════════════════════════════════
+
+
+@mcp.tool()
+def delimit_think(
+    idea: Annotated[str, Field(description="The raw idea to adjudicate. Required. One idea per call.")],
+    context: Annotated[str, Field(description="Optional founder context added to the deliberation (constraints, links, prior art). Default empty.")] = "",
+) -> Dict[str, Any]:
+    """Adjudicate a ThinkTank idea into a disposition record (internal).
+
+    When to use: to intake ONE new venture/product/feature idea and run
+    the standing pipeline — Rule-6 dedup, doctrine-seeded deliberation,
+    written disposition (BRAINSTORM / OPTION / PARK / KILL).
+    When NOT to use: to graduate a dispositioned idea (use delimit_build)
+    or run a generic panel with no ledger write (use delimit_deliberate).
+
+    Sibling contrast: unlike delimit_deliberate, which only runs the
+    panel, this dedups FIRST, seeds the standing constitution + design
+    laws + do-not-re-propose list, then writes a record; delimit_build
+    is the downstream gate.
+
+    Side effects: runs a multi-model deliberation in-process (strategic
+    scope, ≤3 rounds — the 30-min ceiling) and writes a disposition
+    record to the strategy ledger via ai.ledger_manager.add_item. A
+    Rule-6 dedup hit STOPS early — writes nothing, returns the existing
+    ref. Panel-cited incumbents are flagged UNVERIFIED. Gateway-only,
+    not shipped in the npm bundle.
+
+    Args:
+        idea: The raw idea to adjudicate. Required. One idea per call.
+        context: Optional founder context (constraints, links, prior
+            art) added to the deliberation. Default empty.
+
+    Returns:
+        Dedup hit: {status: "dedup_hit", existing_record, note}.
+        Else: {status: "disposition_written", record_id, verdict,
+        rationale, activation_evidence, kill_conditions,
+        unverified_incumbents, next_steps}. On npm installs:
+        {status: "not_available", error, hint}.
+    """
+    try:
+        from ai.thinktank_pipeline import run_think
+    except (ImportError, ModuleNotFoundError):
+        # LED-1261: backing module is gateway-only (excluded from npm bundle).
+        return _with_next_steps("think", {
+            "status": "not_available",
+            "error": "delimit_think is an internal Delimit feature not shipped in the npm bundle.",
+            "hint": "The ThinkTank idea pipeline is an internal Jamsons operating surface.",
+        })
+    return _with_next_steps("think", run_think(idea=idea, context=context))
+
+
+@mcp.tool()
+def delimit_build(
+    record_id: Annotated[str, Field(description="The ThinkTank disposition record id to graduate (e.g. \"STR-2287\"). Required.")],
+    founder_mandate_text: Annotated[str, Field(description="The explicit founder mandate, recorded VERBATIM. Required and never inferred; empty text is refused.")],
+) -> Dict[str, Any]:
+    """Fail-closed BuildNow graduation gate for a ThinkTank record (internal).
+
+    When to use: to graduate a dispositioned idea ONLY with an explicit
+    founder mandate — verifies mandate + graduatable disposition +
+    met/waived activation evidence + the SHIFT-1 / Reg-O / Freeze /
+    Autonomy-Risk re-checks.
+    When NOT to use: to score an idea (use delimit_think) or acknowledge
+    a handoff (use delimit_handoff_acknowledge).
+
+    Sibling contrast: delimit_think writes the disposition; this gate
+    graduates it. Unlike delimit_agent_dispatch, this NEVER executes
+    work — it only cuts a BUILDNOW-HANDOFF item once gates pass.
+
+    Side effects: read-only until every gate passes; then writes ONE
+    BUILDNOW-HANDOFF item to the ops ledger via
+    ai.ledger_manager.add_item. ANY unmet gate refuses fail-closed,
+    names the missing gate, and writes nothing. Reg-O and identity
+    trips are non-waivable; freeze is waivable only by an explicit
+    mandate exception. Gateway-only, not in the npm bundle.
+
+    Args:
+        record_id: ThinkTank record id to graduate (e.g. "STR-2287").
+            Required. Must be an OPTION/activated record; KILL/PARK is
+            refused.
+        founder_mandate_text: Explicit founder mandate, recorded
+            VERBATIM and never inferred. Required — empty is refused
+            "missing_founder_mandate". May carry a written activation
+            waiver or freeze-exception authorization.
+
+    Returns:
+        {gated: bool, refused_reason?, handoff_id?, bootstrap_context?,
+        next_steps}. On npm installs: {status: "not_available", ...}.
+    """
+    try:
+        from ai.thinktank_pipeline import run_build
+    except (ImportError, ModuleNotFoundError):
+        # LED-1261: backing module is gateway-only (excluded from npm bundle).
+        return _with_next_steps("build", {
+            "status": "not_available",
+            "error": "delimit_build is an internal Delimit feature not shipped in the npm bundle.",
+            "hint": "The BuildNow graduation gate is an internal Jamsons operating surface.",
+        })
+    return _with_next_steps("build", run_build(record_id=record_id, founder_mandate_text=founder_mandate_text))

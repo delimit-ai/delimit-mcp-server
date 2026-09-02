@@ -1,3 +1,33 @@
+## [4.17.0] - 2026-08-27
+
+Cross-model continuity release. Session capture/revive now works on fresh
+installs via a new public continuity module, and captured souls carry
+deterministic provenance for reliable resume across model switches.
+
+### Added
+- `gateway/ai/session_continuity.py` — public session-continuity module and
+  SessionSoul schema owner: capture/revive works without any internal
+  modules, so fresh installs get working `delimit_soul_capture` /
+  `delimit_revive` out of the box.
+- Soul provenance fields (venture, transcript identity, capture key,
+  lifecycle status) — all additive with defaults: existing soul files on
+  disk deserialize unchanged.
+
+### Fixed
+- `server.py` soul tools fall back gracefully to the continuity module when
+  richer internal capture is unavailable (previously errored on fresh
+  installs).
+- `last_capture.py` derives a deterministic continuity floor from the
+  transcript (stable capture keys under concurrent capture).
+- Security-audit backend: fewer false positives on test fixtures and
+  documentation dummies; suppressed findings are reported, never silently
+  dropped.
+
+### Changed
+- Heartbeat registry gains service entries for the new scheduled
+  maintenance jobs.
+- Ledger manager maintenance (stale-dispatch grooming refinements).
+
 ## [4.16.3] - 2026-07-18
 
 Reliability + opsec release. Session-end auto-capture now installs correctly,
