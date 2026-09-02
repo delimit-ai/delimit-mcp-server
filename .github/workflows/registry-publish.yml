@@ -1,0 +1,81 @@
+name: Publish MCP Registry record
+
+# Registry-only republish. Use when the npm release is already live but the
+# MCP Registry record is stale or was rejected (v4.18.0: npm published, then
+# the registry returned 422 on a description over its 100-char cap, and a
+# manual publish from a workstation returned 403 because a personal login only
+# grants io.github.<user>/* — org records need the repo's OIDC identity).
+#
+# This never touches npm. It publishes ONLY server.json, from the ref given,
+# under the same pinned + checksum-verified publisher publish.yml uses.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref whose server.json to publish (tag or branch)'
+        required: false
+        default: 'main'
+        type: string
+
+permissions:
+  contents: read
+  id-token: write   # registry login via GitHub Actions OIDC
+
+jobs:
+  registry:
+    runs-on: ubuntu-latest
+    name: Publish server.json
+    env:
+      # Bump BOTH values together, and the same pair in publish.yml.
+      MCP_PUBLISHER_VERSION: "1.8.1"
+      MCP_PUBLISHER_SHA256: "a06c9096dcb9727c13555b6be26c7effa707b01f06a4c561ba7a3635443cf2cc"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref }}
+
+      - name: Fetch pinned mcp-publisher
+        run: |
+          set -euo pipefail
+          base="https://github.com/modelcontextprotocol/registry/releases/download/v${MCP_PUBLISHER_VERSION}"
+          curl -sSL -o mcp-publisher.tar.gz "$base/mcp-publisher_linux_amd64.tar.gz"
+          echo "${MCP_PUBLISHER_SHA256}  mcp-publisher.tar.gz" | sha256sum -c -
+          tar xzf mcp-publisher.tar.gz mcp-publisher
+
+      - name: Guard server.json
+        run: bash scripts/check-server-json.sh ./mcp-publisher
+
+      - name: Assert the npm version in server.json is live
+        # The record must point at a package that exists, or every registry
+        # consumer installs nothing. Registry-only republish means npm already
+        # happened; prove it rather than assume it.
+        run: |
+          set -euo pipefail
+          V=$(node -p "require('./server.json').packages[0].version")
+          npm view "delimit-cli@$V" version
+
+      - name: Publish to MCP Registry
+        run: |
+          set -euo pipefail
+          ./mcp-publisher login github-oidc
+          ./mcp-publisher publish server.json
+
+      - name: Read back the registry record
+        run: |
+          set -euo pipefail
+          NAME=$(node -p "require('./server.json').name")
+          WANT=$(node -p "require('./server.json').version")
+          for attempt in 1 2 3 4; do
+            GOT=$(curl -s "https://registry.modelcontextprotocol.io/v0/servers?search=${NAME}&version=latest" \
+              | node -p "const d=JSON.parse(require('fs').readFileSync(0,'utf8'));(d.servers||[]).map(s=>(s.server||s).version).join(',')")
+            if [ "$GOT" = "$WANT" ]; then
+              echo "registry record for $NAME reads $GOT"
+              echo "## MCP Registry record updated: \`$NAME\` @ **$GOT**" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            echo "attempt $attempt: registry reads '$GOT', want $WANT; sleeping $((attempt * 10))s"
+            sleep $((attempt * 10))
+          done
+          echo "::error::registry record did not read back as $WANT"
+          exit 1
