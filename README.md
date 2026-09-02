@@ -273,7 +273,7 @@ delimit deliberate "Should we build rate limiting in-house or use a managed serv
 
 ### v4.18
 
-- **MCP Registry record published on every release** -- the official registry entry now tracks the npm version automatically (it had sat at 4.1.38 since April). Publisher pinned and checksum-verified; a fail-closed `server.json` guard rejects an over-cap description or version drift before the tag publishes.
+- **MCP Registry record published on every release** -- the official registry entry now tracks the npm version automatically. Publisher pinned and checksum-verified; the tag gate asserts both `server.json` version fields, so the record can never point at an npm version that does not exist.
 - **Tool descriptions** -- 16 previously undocumented parameters documented from their signatures; 26 Pro-gated tools state the prerequisite and the exact unlicensed return shape.
 - **Release guards** -- bundle-classification guard no longer flakes on SIGPIPE.
 
