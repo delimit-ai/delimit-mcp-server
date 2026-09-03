@@ -15141,16 +15141,31 @@ def delimit_handoff_list(
 #  ENTRY POINT
 # ═══════════════════════════════════════════════════════════════════════
 
+def _parent_gone(original_ppid: int, current_ppid: int) -> bool:
+    """True when the client that spawned this server has died.
+
+    The only reliable signal is a CHANGE of parent: on Linux an orphan is
+    re-parented (to PID 1 or a subreaper), so ``current != original`` is
+    the whole test. The previous predicate also treated ``current == 1``
+    as death, which killed the server ~1 s after start whenever the
+    spawning client legitimately IS PID 1 — every container runtime that
+    execs the MCP client as the entrypoint (Glama's ``mcp-proxy`` image,
+    ``docker run … mcp-proxy -- python server.py``). Glama's build tests
+    failed on every release from 2026-06-25 to 4.18.1 for this reason.
+    """
+    return current_ppid != original_ppid
+
+
 async def run_mcp_server(server, server_name="delimit"):
     """Run the MCP server."""
-    
+
     # Fix for Issue #142 (Credit: Ryofukutani): Prevent zombie process on client disconnect
     if os.name == 'posix':
         import time
         def _monitor_parent():
             original_ppid = os.getppid()
             while True:
-                if os.getppid() != original_ppid or os.getppid() == 1:
+                if _parent_gone(original_ppid, os.getppid()):
                     os._exit(0)
                 time.sleep(1)
         threading.Thread(target=_monitor_parent, daemon=True, name="parent_monitor").start()
