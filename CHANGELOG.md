@@ -1,3 +1,14 @@
+## [4.18.2] - 2026-09-03
+
+Two fixes found by running Delimit as a stranger would: a fresh-user install test in an empty container, and Glama's own build log.
+
+### Fixed
+- MCP server: the parent-death monitor no longer exits when the spawning client is PID 1. The Issue #142 zombie fix treated `os.getppid() == 1` as "client died", which is the normal parent whenever the MCP client is a container entrypoint (Glama runs `mcp-proxy -- python gateway/ai/server.py` that way). Every Glama build test from 2026-06-25 through 4.18.1 failed on this; the first green Glama build followed this change. Zombie protection is preserved: the server still exits when its parent changes (orphan re-parenting). (delimit-gateway#415, #196)
+- `delimit deliberate` runs the installed deliberation engine instead of printing "use the MCP tool". It looked for a `deliberation.py` source file (installs carry the compiled module) and imported a function the engine does not export, so it never deliberated on a customer machine. It now resolves the engine as a module, runs it with the venv python that `delimit setup` created, passes the question via the environment, and renders the verdict, rounds, models and transcript path; the hosted free-tier sign-in requirement renders as "run `delimit signin`". (#195)
+
+### Docs
+- README Golden Path: "3 free, then bring your own key" → "3 hosted runs after `delimit signin` (free account), then bring your own keys", which is what the engine and the license quota enforce.
+
 ## [4.18.1] - 2026-09-02
 
 Maintenance release: a governance-shim fix for hosts with a renamed CLI binary, plus hardening of the release pipeline that 4.18.0 exposed.

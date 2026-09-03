@@ -1348,15 +1348,19 @@ describe('CLI deliberate command', () => {
 
     it('deliberate with a question saves pending.json', { skip: SKIP_IN_CI }, () => {
         const cliPath = path.join(__dirname, '..', 'bin', 'delimit-cli.js');
+        // Since #195 the command RUNS the installed engine when one exists, so
+        // this must use an empty HOME (no engine) or, on a developer box, it
+        // would start a real multi-model panel from inside the test suite.
+        const HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'delimit-deliberate-pending-'));
         const result = execSync(`node "${cliPath}" deliberate "Is this API change safe?" 2>&1`, {
             encoding: 'utf-8',
             timeout: 15000,
+            env: { ...process.env, HOME, DELIMIT_HOME: path.join(HOME, '.delimit') },
         });
         assert.ok(result.includes('Is this API change safe?'), 'Output should echo the question');
         assert.ok(result.includes('delimit_deliberate'), 'Output should mention the MCP tool');
 
-        // Verify pending.json was created
-        const HOME = process.env.HOME || os.homedir();
+        // Verify pending.json was created (engine absent -> question is parked)
         const pendingPath = path.join(HOME, '.delimit', 'deliberation', 'pending.json');
         assert.ok(fs.existsSync(pendingPath), 'pending.json should be created');
 
