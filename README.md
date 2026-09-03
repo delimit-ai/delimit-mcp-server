@@ -122,7 +122,7 @@ delimit_impact       → blast radius: scans your dependency manifest for downst
 
 ```bash
 npx delimit-cli deliberate "Is dropping the deprecated v1 /users field a safe MINOR?"
-#   tool: delimit_deliberate — 3 free, then bring your own key
+#   tool: delimit_deliberate — 3 hosted runs after `delimit signin` (free account), then bring your own keys
 ```
 
 **Capture the signed, replayable attestation.** After a gate event (deploy / security / test / audit), record the evidence bundle and verify it any time.
