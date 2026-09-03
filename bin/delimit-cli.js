@@ -6104,6 +6104,118 @@ program
     });
 
 // Deliberate command -- entry point for cross-model deliberation
+// ── `delimit deliberate`: resolve and drive the installed engine (LED-4391 #1) ──
+//
+// `delimit setup` installs the deliberation engine into ~/.delimit/server/ai
+// as a compiled module (deliberation.cpython-<py>-<platform>.so, from the
+// core-engine tarball) — never as deliberation.py source. The engine decides
+// hosted-vs-BYOK and the free-tier sign-in requirement itself; the CLI's job
+// is to find it, run it with the venv python that setup created, and render
+// what it says.
+function resolveDeliberationEngine() {
+    const serverDir = homeSubpath('server');
+    const aiDir = path.join(serverDir, 'ai');
+    let entries = [];
+    try {
+        entries = fs.readdirSync(aiDir);
+    } catch {
+        return null;
+    }
+    const hasEngine = entries.some((f) =>
+        f === 'deliberation.py' || /^deliberation\.cpython-[^/]+\.(so|pyd)$/.test(f) || /^deliberation\.[^/]+\.(so|pyd)$/.test(f)
+    );
+    if (!hasEngine) return null;
+    const venvPython = homeSubpath('venv', 'bin', 'python');
+    return {
+        serverDir,
+        python: fs.existsSync(venvPython) ? venvPython : 'python3',
+    };
+}
+
+function runEngineDeliberation(engine, question, { mode = 'dialogue', maxRounds = 2 } = {}) {
+    const { spawnSync } = require('child_process');
+    const deliberationsDir = homeSubpath('deliberations');
+    try { fs.mkdirSync(deliberationsDir, { recursive: true }); } catch { /* engine will fall back */ }
+    const savePath = path.join(deliberationsDir, `cli-${new Date().toISOString().replace(/[:.]/g, '-')}.md`);
+    // The question and options travel via the environment — no shell quoting
+    // of user text, no injection surface.
+    const script = [
+        'import json, os, sys',
+        'sys.path.insert(0, os.environ["DELIMIT_ENGINE_DIR"])',
+        'os.chdir(os.environ["DELIMIT_ENGINE_DIR"])',
+        'from ai.deliberation import deliberate',
+        'q = os.environ["DELIMIT_Q"]',
+        'mode = os.environ["DELIMIT_MODE"]',
+        'rounds = int(os.environ["DELIMIT_ROUNDS"])',
+        'save = os.environ["DELIMIT_SAVE"]',
+        'try:',
+        '    result = deliberate(question=q, mode=mode, max_rounds=rounds, save_path=save)',
+        'except TypeError:',
+        '    result = deliberate(question=q, mode=mode, max_rounds=rounds)',
+        'sys.stdout.write("__DELIMIT_JSON__" + json.dumps(result, default=str))',
+    ].join('\n');
+    const proc = spawnSync(engine.python, ['-c', script], {
+        encoding: 'utf-8',
+        timeout: 30 * 60 * 1000,
+        maxBuffer: 64 * 1024 * 1024,
+        env: {
+            ...process.env,
+            PYTHONPATH: engine.serverDir,
+            DELIMIT_ENGINE_DIR: engine.serverDir,
+            DELIMIT_Q: question,
+            DELIMIT_MODE: mode,
+            DELIMIT_ROUNDS: String(maxRounds),
+            DELIMIT_SAVE: savePath,
+        },
+    });
+    const stdout = proc.stdout || '';
+    const marker = stdout.lastIndexOf('__DELIMIT_JSON__');
+    if (proc.status !== 0 || marker < 0) {
+        const tail = ((proc.stderr || '') + '\n' + stdout).trim().split('\n').slice(-6).join('\n');
+        return { ran: false, error: tail || `engine exited with status ${proc.status}` };
+    }
+    try {
+        return { ran: true, result: JSON.parse(stdout.slice(marker + '__DELIMIT_JSON__'.length)), savePath };
+    } catch (e) {
+        return { ran: false, error: `engine returned unparseable output: ${e.message}` };
+    }
+}
+
+function renderDeliberationOutcome(outcome, question) {
+    if (!outcome.ran) {
+        console.log(chalk.yellow('The deliberation engine did not run:'));
+        console.log(chalk.dim(outcome.error));
+        console.log(`\nInside your AI assistant you can still run ${chalk.cyan(`delimit_deliberate: ${question}`)}`);
+        return;
+    }
+    const r = outcome.result || {};
+    if (r.error) {
+        outcome.ran = false; // engine refused — the question was not deliberated
+        if (r.oauth_required || r.reason === 'oauth_required') {
+            console.log(chalk.yellow('Hosted deliberations need a free delimit.ai account (3 runs per install).'));
+            console.log(`Run ${chalk.cyan('delimit signin')}, then re-run this command.`);
+            if (r.signin_url) console.log(chalk.dim(`Sign-in: ${r.signin_url}`));
+            console.log(chalk.dim('Or bring your own model keys: delimit models'));
+        } else if (r.status === 'premium_required' || /Delimit Pro/.test(String(r.error))) {
+            console.log(chalk.yellow(String(r.error)));
+            if (r.upgrade) console.log(chalk.dim(`Upgrade: ${r.upgrade}`));
+        } else {
+            console.log(chalk.red(`Error: ${r.error}`));
+            if (r.reason) console.log(chalk.dim(`Reason: ${r.reason}`));
+        }
+        return;
+    }
+    const verdict = r.final_verdict || (r.unanimous ? 'UNANIMOUS AGREEMENT' : 'NO CONSENSUS');
+    const rounds = Array.isArray(r.rounds) ? r.rounds.length : (r.rounds || 0);
+    const models = Array.isArray(r.models_used) ? r.models_used : [];
+    console.log(chalk.bold(`Verdict: ${verdict}`));
+    console.log(`Rounds: ${rounds}${r.agreed_at_round ? ` (agreed at round ${r.agreed_at_round})` : ''}`);
+    if (models.length) console.log(`${models.length} models: ${models.join(', ')}`);
+    if (r.summary) { console.log(''); console.log(r.summary); }
+    const transcript = r.save_path || r.transcript_path || outcome.savePath;
+    if (transcript && fs.existsSync(transcript)) console.log(chalk.dim(`\nTranscript: ${transcript}`));
+}
+
 program
     .command('deliberate [question...]')
     .description('Deliberate on a strategic question using cross-model consensus')
@@ -6150,49 +6262,30 @@ program
             console.log(chalk.blue.bold('\nDelimit Deliberation\n'));
             console.log(`Question: ${chalk.bold(question)}\n`);
 
-            // Try to run deliberation directly via the gateway
-            const gatewayScript = homeSubpath('server', 'ai', 'deliberation.py');
-            const scriptPath = fs.existsSync(gatewayScript) ? gatewayScript : null;
+            // Run the engine that `delimit setup` installed. Every install
+            // gets the deliberation engine as a compiled module
+            // (deliberation.cpython-*.so, downloaded with the core engine
+            // tarball); the previous code looked for the engine's Python
+            // SOURCE file and a function that the engine does not export,
+            // neither of which exists on any customer machine, so this
+            // command had only ever printed instructions (LED-4391 #1).
+            const engine = resolveDeliberationEngine();
 
-            if (scriptPath) {
-                console.log(chalk.dim('Running multi-model deliberation...\n'));
-                try {
-                    const escapedQ = question.replace(/'/g, "\\'");
-                    const pyCmd = `python3 -c "
-import sys, os, json
-sys.path.insert(0, os.path.dirname('${scriptPath}'))
-os.chdir(os.path.dirname('${scriptPath}'))
-from deliberation import run_deliberation
-result = run_deliberation('${escapedQ}', mode='${options.mode}', max_rounds=2)
-if result.get('verdict'):
-    print('VERDICT:', result['verdict'])
-if result.get('confidence'):
-    print('CONFIDENCE:', result['confidence'])
-if result.get('summary'):
-    print()
-    print(result['summary'])
-"`;
-                    const result = execSync(pyCmd, {
-                        encoding: 'utf-8',
-                        timeout: 120000,
-                        env: { ...process.env, PYTHONPATH: path.dirname(scriptPath) },
-                    });
-                    console.log(result);
-                } catch (e) {
-                    // Fallback: guide user to MCP tool
-                    console.log(chalk.yellow('Direct deliberation unavailable. Use the MCP tool instead:\n'));
-                    console.log(chalk.bold('In your AI assistant (Claude Code, Codex, or Gemini CLI):'));
-                    console.log(`   ${chalk.cyan(`delimit_deliberate: ${question}`)}\n`);
+            if (engine) {
+                console.log(chalk.dim(`Running multi-model deliberation (${options.mode})...\n`));
+                const outcome = runEngineDeliberation(engine, question, { mode: options.mode, maxRounds: 2 });
+                renderDeliberationOutcome(outcome, question);
+                if (outcome.ran) {
+                    return;
                 }
             } else {
-                console.log('To deliberate, use one of the following approaches:\n');
-                console.log(chalk.bold('1. In your AI assistant (Claude Code, Codex, or Gemini CLI):'));
+                console.log(chalk.yellow('Deliberation engine not installed yet.'));
+                console.log(`Run ${chalk.cyan('delimit setup')} first (it installs the engine), then re-run this command.\n`);
+                console.log(chalk.bold('Or, inside your AI assistant (Claude Code, Codex, or Gemini CLI):'));
                 console.log(`   ${chalk.cyan(`delimit_deliberate: ${question}`)}\n`);
-                console.log(chalk.bold('2. Using the MCP tool directly:'));
-                console.log(`   ${chalk.cyan(`Call delimit_deliberate with question="${question}"`)}\n`);
             }
 
-            // Save pending deliberation to file for reference
+            // Not run: park the question so the next session can pick it up.
             const deliberationDir = homeSubpath('deliberation');
             fs.mkdirSync(deliberationDir, { recursive: true });
             const pending = {
