@@ -114,12 +114,12 @@ describe('delimit wrap: free-tier receipt is the local attestation, not a 404 UR
         }
     });
 
-    it('CLI prints the attestation path and a Pro note, never the delimit.ai/att URL, on the free tier', { skip: SKIP_IN_CI }, () => {
+    it('CLI prints the attestation path and a not-uploaded note, never the delimit.ai/att URL, on the free tier', { skip: SKIP_IN_CI }, () => {
         const r = runCli(['wrap', '--', 'echo', 'funnel-cli'], { cwd: repo.dir, home });
         assert.equal(r.status, 0, r.out);
         assert.match(r.stdout, /attestation:\s+\S+\.json/, 'local attestation path is the receipt');
         assert.doesNotMatch(r.stdout, /delimit\.ai\/att\//, 'hosted replay URL must not be printed (it 404s)');
-        assert.match(r.stdout, /Pro feature/, 'says hosted replay is the Pro feature');
+        assert.match(r.stdout, /not available yet/, 'says hosted replay is not available yet, promising nothing to any tier');
         const replayLine = r.stdout.split('\n').find((l) => /^\s+replay:/.test(l)) || '';
         assert.doesNotMatch(replayLine, /—/, 'no em dashes in the new user-facing string');
     });
