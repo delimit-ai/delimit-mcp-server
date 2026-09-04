@@ -6745,7 +6745,7 @@ program
                 if (result.replay_hosted) {
                     console.log(chalk.gray(`  replay:      ${result.replay_url}`));
                 } else if (!result.tier || result.tier === 'free') {
-                    console.log(chalk.gray('  replay:      local only. Hosted, shareable replay is a Pro feature (https://delimit.ai/pricing)'));
+                    console.log(chalk.gray('  replay:      not uploaded (local attestation only; hosted replay is not available yet)'));
                 } else {
                     console.log(chalk.gray('  replay:      local only (this attestation was not uploaded)'));
                 }
