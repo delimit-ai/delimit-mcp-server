@@ -74,10 +74,12 @@ jobs:
           set -euo pipefail
           NAME=$(node -p "require('./server.json').name")
           WANT=$(node -p "require('./server.json').version")
+          # The name contains a slash (io.github.<org>/<repo>); encode it for the query string.
+          NAME_ENC=$(NAME="$NAME" node -p "encodeURIComponent(process.env.NAME)")
           for attempt in 1 2 3 4; do
             # Parse failures (a 502/503 HTML body mid-propagation) must count as
             # "not yet", not abort the step under set -e: the parser never throws.
-            GOT=$(curl -s "https://registry.modelcontextprotocol.io/v0/servers?search=${NAME}&version=latest" \
+            GOT=$(curl -s "https://registry.modelcontextprotocol.io/v0/servers?search=${NAME_ENC}&version=latest" \
               | NAME="$NAME" node -e "let out='';try{const d=JSON.parse(require('fs').readFileSync(0,'utf8'));const hit=(d.servers||[]).map(s=>s.server||s).find(s=>s.name===process.env.NAME);out=hit?String(hit.version):'<no exact-name match>'}catch(e){out='<unparseable:'+e.message.slice(0,40)+'>'}process.stdout.write(out)" \
               || true)
             if [ "$GOT" = "$WANT" ]; then

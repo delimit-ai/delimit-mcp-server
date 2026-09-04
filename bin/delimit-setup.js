@@ -819,12 +819,12 @@ SESSION_CWD="\$(pwd)"
     npm install -g "delimit-cli@\$LATE" >/dev/null 2>&1 && delimit-cli setup >/dev/null 2>&1; \\
   fi ) &
 DELIMIT_HOME="\${DELIMIT_HOME:-$HOME/.delimit}"
-TOOL_COUNT="0"
-if [ -f "$DELIMIT_HOME/server/ai/server.py" ]; then
-  DECORATED=$(grep -c '@mcp.tool' "$DELIMIT_HOME/server/ai/server.py" 2>/dev/null || echo "0")
-  IMPL=$(grep -c 'mcp.tool()(' "$DELIMIT_HOME/server/ai/server.py" 2>/dev/null || echo "0")
-  TOOL_COUNT=$((DECORATED + IMPL))
-fi
+# No tool count here: grepping @mcp.tool decorators over-counts what the
+# running server actually registers (tier/toolset gating), and a number the
+# user can compare against tools/list must agree (fresh-user install test
+# 2026-09-02, finding 6). Registration is not cheaply derivable from the file.
+MCP_STATUS="ready"
+[ -f "$DELIMIT_HOME/server/ai/server.py" ] || MCP_STATUS="not installed"
 echo ""
 printf "  \${PURPLE}\${BOLD}    ____  ________    ______  _____________\${RESET}\\n"
 printf "  \${PURPLE}\${BOLD}   / __ \\\\/ ____/ /   /  _/  |/  /  _/_  __/\${RESET}\\n"
@@ -837,7 +837,7 @@ echo ""
 printf "  \${PURPLE}\${BOLD}[Delimit]\${RESET} \${DIM}Executing governance check...\${RESET}\\n"
 sleep 0.1
 printf "  \${PURPLE}\${BOLD}[Delimit]\${RESET} \${ORANGE}Mode: advisory\${RESET}\\n"
-printf "  \${PURPLE}\${BOLD}[Delimit]\${RESET} \${DIM}MCP server: \${WHITE}\${TOOL_COUNT} tools\${RESET}\\n"
+printf "  \${PURPLE}\${BOLD}[Delimit]\${RESET} \${DIM}MCP server: \${WHITE}\${MCP_STATUS}\${RESET}\\n"
 printf "  \${MAGENTA}\${BOLD}[Delimit]\${RESET} \${MAGENTA}═══════════════════════════════════════════\${RESET}\\n"
 printf "  \${MAGENTA}\${BOLD}[Delimit]\${RESET} \${PURPLE}<\${MAGENTA}/\${ORANGE}>\${RESET} \${BOLD}GOVERNANCE ACTIVE: ${displayName.toUpperCase()}\${RESET}\\n"
 printf "  \${MAGENTA}\${BOLD}[Delimit]\${RESET} \${MAGENTA}═══════════════════════════════════════════\${RESET}\\n"
@@ -1375,12 +1375,8 @@ exit 127
         try {
             // Run the shim with DELIMIT_WRAPPED=true so it exits after banner
             // We simulate the banner directly instead
-            const toolCount = (() => {
-                try {
-                    const srv = fs.readFileSync(path.join(DELIMIT_HOME, 'server', 'ai', 'server.py'), 'utf-8');
-                    return (srv.match(/@mcp\.tool/g) || []).length + (srv.match(/mcp\.tool\(\)\(/g) || []).length;
-                } catch { return 0; }
-            })();
+            // Mirrors the shim: no decorator-derived tool count (over-counts vs tools/list).
+            const mcpStatus = fs.existsSync(path.join(DELIMIT_HOME, 'server', 'ai', 'server.py')) ? 'ready' : 'not installed';
             const version = require('../package.json').version;
             const purple = '\x1b[35m', magenta = '\x1b[91m', orange = '\x1b[33m';
             const bold2 = '\x1b[1m', dim2 = '\x1b[2m', reset = '\x1b[0m', green2 = '\x1b[32m';
@@ -1394,7 +1390,7 @@ exit 127
             console.log('');
             console.log(`  ${purple}${bold2}[Delimit]${reset} ${dim2}Executing governance check...${reset}`);
             console.log(`  ${purple}${bold2}[Delimit]${reset} ${orange}Mode: advisory${reset}`);
-            console.log(`  ${purple}${bold2}[Delimit]${reset} ${dim2}MCP server: ${toolCount} tools${reset}`);
+            console.log(`  ${purple}${bold2}[Delimit]${reset} ${dim2}MCP server: ${mcpStatus}${reset}`);
             console.log(`  ${magenta}${bold2}[Delimit]${reset} ${magenta}═══════════════════════════════════════════${reset}`);
             console.log(`  ${magenta}${bold2}[Delimit]${reset} ${purple}<${magenta}/${orange}>${reset} ${bold2}GOVERNANCE ACTIVE: CLAUDE${reset}`);
             console.log(`  ${magenta}${bold2}[Delimit]${reset} ${magenta}═══════════════════════════════════════════${reset}`);
