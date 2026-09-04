@@ -105,4 +105,19 @@ describe('shim: renamed <tool>-real binary is found on every launch path (LED-43
             assert.match(interactive, new RegExp(`/usr/bin/${tool}-real`), `${tool}: no -real fallback on the interactive path`);
         }
     });
+
+    // Fresh-user install test 2026-09-02, finding 6: the banner printed
+    // "MCP server: 229 tools" (count of @mcp.tool decorators + mcp.tool()()
+    // calls in server.py) while tools/list returned 210. A number the user can
+    // check must agree with the server, so the banner no longer carries one.
+    it('banner does not print a decorator-derived tool count', () => {
+        for (const tool of ['claude', 'codex', 'gemini']) {
+            const shim = renderShim(tool, tool);
+            const bannerLine = shim.split('\n').find((l) => l.startsWith('printf') && l.includes('MCP server:'));
+            assert.ok(bannerLine, `${tool}: MCP server banner line missing`);
+            assert.doesNotMatch(bannerLine, /TOOL_COUNT|\btools\b|[0-9]/, `${tool}: banner still carries a count: ${bannerLine}`);
+            assert.match(bannerLine, /MCP server: \$\{WHITE\}\$\{MCP_STATUS\}/);
+            assert.doesNotMatch(shim, /grep -c '@mcp\.tool'|grep -c 'mcp\.tool\(\)\('|TOOL_COUNT=/, `${tool}: shim still greps decorators to count tools`);
+        }
+    });
 });
