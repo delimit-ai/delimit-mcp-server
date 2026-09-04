@@ -8,7 +8,15 @@
 # fresh `delimit setup` installed only the 3 lines below, the fastmcp fallback
 # in delimit-setup.js never fired, and `import fastmcp` in ai/server.py killed
 # the MCP server on every clean install. Adding it closes that never-break-installs gap.
-fastmcp>=3.0
+#
+# Exact pin (fresh-user install test 2026-09-02, finding 7): `delimit setup`
+# resolves this file into its venv while the Docker image fell through to an
+# unpinned fallback, so the two surfaces ran different fastmcp majors ("3.1.0"
+# vs "4.0.2"). One version everywhere: this pin, the delimit-setup.js no-reqfile
+# fallback, and the Dockerfile fallback MUST all say the same fastmcp.
+# 3.1.0 accepts FastMCP(version=...) (serverInfo.version) and constrains
+# mcp<2.0,>=1.24.0, so the LED-3840 floor below still resolves.
+fastmcp==3.1.0
 pydantic>=2.0.0
 pyyaml>=6.0
 packaging>=23.0

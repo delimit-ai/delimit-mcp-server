@@ -581,7 +581,60 @@ def _emit_policy_event(tool_name: str, status: str, reason: str) -> None:
         pass  # Never let event tracking break tool execution
 
 
-mcp = FastMCP("delimit")
+# Version truth (LED-1889): the served version is DERIVED, never hand-edited.
+# Canonical source = the delimit-cli package manifest this server ships inside.
+# Resolution order (first hit wins), walking up from this file:
+#   1. a `VERSION` marker file (written into the bundle / installed
+#      ~/.delimit/server tree at publish/sync time)
+#   2. a `package.json` whose name is `delimit-cli` (npm bundle layout:
+#      gateway/ai/server.py ← ../../package.json)
+#   3. the pinned fallback below (last resort so the delimit_version return
+#      schema never changes shape — never-break-installs).
+_VERSION_FALLBACK = "4.15.0"
+
+
+def _resolve_version(start_path: Optional[str] = None) -> str:
+    """Resolve the shipped package version from the bundle's own manifest.
+
+    Read-only; any I/O or parse failure falls back to _VERSION_FALLBACK.
+    """
+    try:
+        here = Path(start_path or __file__).resolve()
+        for parent in list(here.parents)[:4]:
+            marker = parent / "VERSION"
+            if marker.is_file():
+                candidate = marker.read_text(encoding="utf-8").strip()
+                if candidate:
+                    return candidate
+            pkg = parent / "package.json"
+            if pkg.is_file():
+                try:
+                    data = json.loads(pkg.read_text(encoding="utf-8"))
+                except (json.JSONDecodeError, OSError):
+                    continue
+                if data.get("name") == "delimit-cli" and data.get("version"):
+                    return str(data["version"])
+    except Exception:
+        pass
+    return _VERSION_FALLBACK
+
+
+VERSION = _resolve_version()
+
+
+def _construct_mcp(name: str, version: str):
+    """Build the FastMCP app so the MCP ``initialize`` handshake reports OUR
+    version. Without ``version=`` fastmcp advertises its own library version
+    as ``serverInfo.version`` (fresh-user install test 2026-09-02, finding 6:
+    "3.1.0" on a setup venv, "4.0.2" in Docker). Older fastmcp releases
+    without the kwarg must still start (never-break-installs)."""
+    try:
+        return FastMCP(name, version=version)
+    except TypeError:
+        return FastMCP(name)
+
+
+mcp = _construct_mcp("delimit", VERSION)
 
 def _auto_configure_antigravity():
     try:
@@ -646,45 +699,6 @@ mcp.description = (
     "Use delimit_scan on new projects. Track all work via the ledger."
 )
 
-# Version truth (LED-1889): the served version is DERIVED, never hand-edited.
-# Canonical source = the delimit-cli package manifest this server ships inside.
-# Resolution order (first hit wins), walking up from this file:
-#   1. a `VERSION` marker file (written into the bundle / installed
-#      ~/.delimit/server tree at publish/sync time)
-#   2. a `package.json` whose name is `delimit-cli` (npm bundle layout:
-#      gateway/ai/server.py ← ../../package.json)
-#   3. the pinned fallback below (last resort so the delimit_version return
-#      schema never changes shape — never-break-installs).
-_VERSION_FALLBACK = "4.15.0"
-
-
-def _resolve_version(start_path: Optional[str] = None) -> str:
-    """Resolve the shipped package version from the bundle's own manifest.
-
-    Read-only; any I/O or parse failure falls back to _VERSION_FALLBACK.
-    """
-    try:
-        here = Path(start_path or __file__).resolve()
-        for parent in list(here.parents)[:4]:
-            marker = parent / "VERSION"
-            if marker.is_file():
-                candidate = marker.read_text(encoding="utf-8").strip()
-                if candidate:
-                    return candidate
-            pkg = parent / "package.json"
-            if pkg.is_file():
-                try:
-                    data = json.loads(pkg.read_text(encoding="utf-8"))
-                except (json.JSONDecodeError, OSError):
-                    continue
-                if data.get("name") == "delimit-cli" and data.get("version"):
-                    return str(data["version"])
-    except Exception:
-        pass
-    return _VERSION_FALLBACK
-
-
-VERSION = _resolve_version()
 
 # LED-044 + Consensus 118/119/120: Tool visibility tiers.
 # Tier cascade: SHOW_EXPERIMENTAL > SHOW_INTERNAL > SHOW_OPS > public (always visible).
