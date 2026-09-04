@@ -1,4 +1,5 @@
 const { describe, it, before, after } = require('node:test');
+const { execSync } = require('child_process');
 const assert = require('node:assert');
 const fs = require('fs');
 const path = require('path');
@@ -344,6 +345,34 @@ describe('delimit deliberate / think: engine helper fast-follows', () => {
             assert.equal(fs.readFileSync(recorder, 'utf-8'), `${serverDir}${path.delimiter}${preexisting}`);
         } finally {
             try { fs.rmSync(home, { recursive: true, force: true }); } catch {}
+        }
+    });
+});
+
+
+describe('delimit check --staged on an unborn HEAD keeps pre-commit isolation (PR #199 review)', () => {
+    it('sees only the staged spec, never an untracked or unstaged one', () => {
+        const home = fs.mkdtempSync(path.join(os.tmpdir(), 'delimit-unborn-staged-'));
+        const dir = path.join(home, 'repo');
+        fs.mkdirSync(dir, { recursive: true });
+        try {
+            execSync('git init -q', { cwd: dir });
+            const spec = (title) => `openapi: 3.0.0\ninfo:\n  title: ${title}\n  version: 1.0.0\npaths: {}\n`;
+            fs.writeFileSync(path.join(dir, 'staged-openapi.yaml'), spec('staged'));
+            fs.writeFileSync(path.join(dir, 'untracked-openapi.yaml'), spec('untracked'));
+            execSync('git add staged-openapi.yaml', { cwd: dir });
+            const r = spawnSync(process.execPath, [path.join(__dirname, '..', 'bin', 'delimit-cli.js'), 'check', '--staged'], {
+                cwd: dir, encoding: 'utf-8', timeout: 60000,
+                env: { ...process.env, HOME: home, DELIMIT_HOME: path.join(home, '.delimit'), CI: '1', NO_COLOR: '1' },
+                stdio: ['ignore', 'pipe', 'pipe'],
+            });
+            const out = r.stdout + r.stderr;
+            assert.doesNotMatch(out, /fatal:/, 'no raw git error');
+            assert.match(out, /checking staged files/, 'says it is checking staged files on an unborn HEAD');
+            assert.match(out, /staged-openapi\.yaml/, 'the staged spec is checked');
+            assert.doesNotMatch(out, /untracked-openapi\.yaml/, 'an untracked spec must not leak into a --staged run');
+        } finally {
+            fs.rmSync(home, { recursive: true, force: true });
         }
     });
 });

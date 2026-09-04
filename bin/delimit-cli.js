@@ -4883,12 +4883,26 @@ program
             }
         }
         if (noCommitsYet) {
-            console.log(chalk.gray('  No commits yet, checking working-tree files (nothing to compare against for breaking changes).\n'));
-            try {
-                const output = execSync('git ls-files --cached --others --exclude-standard', gitOpts).trim();
-                if (output) changedFiles = output.split('\n');
-            } catch {
-                // Fall back to scanning known spec locations below
+            // --staged must keep the pre-commit hook's isolation on the very
+            // first commit: only the index counts, never untracked or
+            // unstaged files. `git diff --cached` diffs the index against
+            // the empty tree on an unborn HEAD, so it works here.
+            if (opts.staged) {
+                console.log(chalk.gray('  No commits yet, checking staged files (nothing to compare against for breaking changes).\n'));
+                try {
+                    const output = execSync('git diff --cached --name-only', gitOpts).trim();
+                    if (output) changedFiles = output.split('\n');
+                } catch {
+                    // Fall back to scanning known spec locations below
+                }
+            } else {
+                console.log(chalk.gray('  No commits yet, checking working-tree files (nothing to compare against for breaking changes).\n'));
+                try {
+                    const output = execSync('git ls-files --cached --others --exclude-standard', gitOpts).trim();
+                    if (output) changedFiles = output.split('\n');
+                } catch {
+                    // Fall back to scanning known spec locations below
+                }
             }
         } else {
             try {
