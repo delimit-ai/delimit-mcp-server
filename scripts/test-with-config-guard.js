@@ -47,6 +47,7 @@ const TEST_FILES = [
     'tests/chat-repl-continuity.test.js',
     'tests/cli-deliberate-runs-engine.test.js',
     'tests/funnel-cli-leaks.test.js',
+    'tests/check-fail-closed-no-pyyaml.test.js',
 ];
 
 const cfgPath = resolveSharedConfigPath();

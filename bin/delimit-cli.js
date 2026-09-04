@@ -2743,13 +2743,26 @@ program
             return;
         }
 
-        // Check Python + yaml dependency
+        // Check Python + yaml dependency. Scoring below no longer needs PyYAML
+        // (specs are parsed in node and handed to python as JSON), so a refused
+        // install (PEP 668 on Debian 12) is reported in one line, never a
+        // Traceback, and scan carries on.
         try {
             execSync('python3 -c "import yaml"', { stdio: 'ignore', timeout: 5000 });
         } catch {
             console.log(chalk.yellow('  Installing Python dependency (pyyaml)...\n'));
-            try { execSync('pip3 install pyyaml -q', { stdio: 'ignore', timeout: 30000 }); } catch {}
+            let installed = false;
+            try {
+                execSync('pip3 install pyyaml -q', { stdio: 'ignore', timeout: 30000 });
+                execSync('python3 -c "import yaml"', { stdio: 'ignore', timeout: 5000 });
+                installed = true;
+            } catch {}
+            if (!installed) {
+                console.log(chalk.gray('  pyyaml could not be installed (pip refused or failed). Using the built-in YAML reader for scan, check and lint instead.\n'));
+            }
         }
+        // Spec health via the shared engine: works with or without PyYAML.
+        const scoreSpec = (specPath) => apiEngine.specHealth(specPath);
 
         // Detect if target is a spec file or a project directory
         const isFile = fs.existsSync(target) && fs.statSync(target).isFile();
@@ -2758,11 +2771,7 @@ program
             // Spec file — run spec health + show results
             console.log(chalk.gray(`  Analyzing ${target}...\n`));
             try {
-                const result = execSync(
-                    `python3 -c "import sys,json; sys.path.insert(0,'${serverDir}'); from core.spec_health import score_spec; import yaml; spec=yaml.safe_load(open('${target}')); r=score_spec(spec); print(json.dumps(r))"`,
-                    { encoding: 'utf-8', timeout: 15000, cwd: serverDir }
-                );
-                const health = JSON.parse(result);
+                const health = scoreSpec(target);
                 const gradeColors = { A: 'green', B: 'blue', C: 'yellow', D: 'red', F: 'red' };
                 const gradeColor = gradeColors[health.grade] || 'white';
                 console.log(`  ${chalk[gradeColor].bold(health.grade)} ${chalk.white.bold(health.overall_score + '/100')}  ${chalk.gray('Spec Health Score')}\n`);
@@ -2840,11 +2849,7 @@ program
                     const specFile = path.join(target, found[0]);
                     console.log(chalk.gray(`\n  Scoring ${found[0]}...\n`));
                     try {
-                        const healthResult = execSync(
-                            `python3 -c "import sys,json; sys.path.insert(0,'${serverDir}'); from core.spec_health import score_spec; import yaml; spec=yaml.safe_load(open('${specFile}')); r=score_spec(spec); print(json.dumps(r))"`,
-                            { encoding: 'utf-8', timeout: 15000, cwd: serverDir }
-                        );
-                        const health = JSON.parse(healthResult);
+                        const health = scoreSpec(specFile);
                         const gradeColors = { A: 'green', B: 'blue', C: 'yellow', D: 'red', F: 'red' };
                         const gradeColor = gradeColors[health.grade] || 'white';
                         console.log(`  ${chalk[gradeColor].bold(health.grade)} ${chalk.white.bold(health.overall_score + '/100')}  ${chalk.gray('Spec Health Score')}\n`);
@@ -2861,7 +2866,9 @@ program
                                 console.log(`  ${chalk.yellow('\u2192')} ${text}`);
                             });
                         }
-                    } catch {}
+                    } catch (e) {
+                        console.log(chalk.yellow(`  Scoring skipped: ${String((e && e.message) || e).split('\n')[0]}`));
+                    }
                 } else {
                     console.log(`  ${chalk.yellow('\u2014')} No OpenAPI specs found in this directory`);
                     console.log('');
@@ -2870,11 +2877,7 @@ program
                     if (fs.existsSync(demoSpec)) {
                         console.log(chalk.gray('  Running demo on a sample Pet Store API...\n'));
                         try {
-                            const demoResult = execSync(
-                                `python3 -c "import sys,json; sys.path.insert(0,'${serverDir}'); from core.spec_health import score_spec; import yaml; spec=yaml.safe_load(open('${demoSpec}')); r=score_spec(spec); print(json.dumps(r))"`,
-                                { encoding: 'utf-8', timeout: 15000, cwd: serverDir }
-                            );
-                            const health = JSON.parse(demoResult);
+                            const health = scoreSpec(demoSpec);
                             const gradeColors = { A: 'green', B: 'blue', C: 'yellow', D: 'red', F: 'red' };
                             const gradeColor = gradeColors[health.grade] || 'white';
                             console.log(`  ${chalk[gradeColor].bold(health.grade)} ${chalk.white.bold(health.overall_score + '/100')}  ${chalk.gray('Sample: Pet Store API')}\n`);
@@ -2887,7 +2890,9 @@ program
                             console.log('');
                             console.log(chalk.gray('  This is a demo. Point at your spec: npx delimit-cli scan openapi.yaml'));
                             console.log('');
-                        } catch {}
+                        } catch (e) {
+                            console.log(chalk.yellow(`  Demo scoring skipped: ${String((e && e.message) || e).split('\n')[0]}`));
+                        }
                     } else {
                         console.log(chalk.gray('  Tip: point at a spec file: npx delimit-cli scan openapi.yaml'));
                     }
@@ -4956,6 +4961,17 @@ program
         let totalWarnings = 0;
         let totalViolations = [];
         let allPassed = true;
+        // Fail closed (LED-4423): a spec the engine could not analyse is a
+        // gate failure, never a pass. Counted separately from breaking changes
+        // so the summary says what actually happened.
+        let totalUnanalysed = 0;
+        const failClosed = (specFile, reason) => {
+            allPassed = false;
+            totalUnanalysed += 1;
+            const firstLine = String(reason || 'unknown error').split('\n').map(s => s.trim()).filter(Boolean)[0] || 'unknown error';
+            totalViolations.push({ rule: 'analysis_failed', severity: 'error', message: `${specFile}: could not analyse: ${firstLine}`, path: specFile });
+            console.log(`  ${chalk.red('X')} ${specFile} ${chalk.red(`- could not analyse: ${firstLine}`)}`);
+        };
 
         for (const specFile of specFiles) {
             const fullPath = path.join(projectDir, specFile);
@@ -5011,10 +5027,11 @@ program
                         console.log(`    ${chalk.gray('Semver:')} ${bumpColor(bump)}`);
                     }
                 } else {
-                    console.log(`  ${chalk.green('+')} ${specFile} ${chalk.green('— clean')}`);
+                    const detail = (result && (result.error || result.message)) || 'engine returned no summary';
+                    failClosed(specFile, detail);
                 }
             } catch (err) {
-                console.log(`  ${chalk.green('+')} ${specFile} ${chalk.green('— clean')}`);
+                failClosed(specFile, (err && err.message) || err);
             } finally {
                 try { fs.unlinkSync(tmpBase); } catch {}
             }
@@ -5059,10 +5076,11 @@ program
         const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
         const secretCount = secretFindings.length;
         console.log('');
-        if (totalBreaking > 0 || secretCount > 0) {
+        if (totalBreaking > 0 || secretCount > 0 || totalUnanalysed > 0) {
             const parts = [];
             if (totalBreaking > 0) parts.push(`${totalBreaking} breaking change(s)`);
             if (secretCount > 0) parts.push(`${secretCount} leaked secret(s)`);
+            if (totalUnanalysed > 0) parts.push(`${totalUnanalysed} spec(s) could not be analysed`);
             console.log(chalk.red.bold(`  BLOCKED — ${parts.join(' + ')}`));
             if (totalBreaking > 0 && !opts.fix) {
                 console.log(chalk.gray('  Run with --fix to see migration guidance'));
@@ -5098,10 +5116,11 @@ program
                     head: headSha,
                     zero_config: zeroConfig,
                     policy_preset: preset,
-                    verdict: (totalBreaking > 0 || secretCount > 0) ? 'blocked' : 'passed',
+                    verdict: (totalBreaking > 0 || secretCount > 0 || totalUnanalysed > 0) ? 'blocked' : 'passed',
                     findings: {
                         breaking_changes: totalBreaking,
                         warnings: totalWarnings,
+                        unanalysed_specs: totalUnanalysed,
                         leaked_secrets: secretFindings.map(s => ({ file: s.file, label: s.label })),
                         spec_violations: (totalViolations || []).map(v => ({ message: v.message, severity: v.severity, path: v.path })),
                     },
