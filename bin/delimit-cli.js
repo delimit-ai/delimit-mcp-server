@@ -4872,6 +4872,11 @@ program
         const base = opts.base || 'HEAD';
         let changedFiles = [];
         let noCommitsYet = false;
+        // True once `git diff --cached` has answered for a --staged run. An
+        // EMPTY answer is then authoritative: nothing is staged, so the
+        // known-location spec scan below must not pull unstaged or untracked
+        // files into a pre-commit check (PR #199 review follow-up).
+        let stagedListed = false;
         if (!opts.base) {
             // A repo with no commits has no HEAD to diff against.
             try {
@@ -4892,6 +4897,7 @@ program
                 try {
                     const output = execSync('git diff --cached --name-only', gitOpts).trim();
                     if (output) changedFiles = output.split('\n');
+                    stagedListed = true;
                 } catch {
                     // Fall back to scanning known spec locations below
                 }
@@ -4911,6 +4917,7 @@ program
                     : `git diff --name-only ${base}`;
                 const output = execSync(gitCmd, gitOpts).trim();
                 if (output) changedFiles = output.split('\n');
+                if (opts.staged) stagedListed = true;
             } catch {
                 // Not a git repo or no changes — fall back to scanning all specs
             }
@@ -4931,8 +4938,10 @@ program
             } catch { return false; }
         });
 
-        // If no changed specs found, scan all known specs
-        if (specFiles.length === 0) {
+        // If no changed specs found, scan all known specs. Not for a --staged
+        // run whose index listing succeeded: an empty index means nothing to
+        // check, and scanning the tree would leak unstaged files into a hook.
+        if (specFiles.length === 0 && !(opts.staged && stagedListed)) {
             const candidates = [
                 'api/openapi.yaml', 'api/openapi.yml', 'api/openapi.json',
                 'openapi.yaml', 'openapi.yml', 'openapi.json',

@@ -235,7 +235,7 @@ describe('delimit doctor: banner version is derived from package.json', () => {
 // ---------------------------------------------------------------------------
 
 describe('delimit check: repo with no commits', () => {
-    it('prints one friendly line and never leaks "fatal: ambiguous argument"', { skip: SKIP_IN_CI }, () => {
+    it('prints one friendly line and never leaks "fatal: ambiguous argument"', { skip: false /* git + node only: runs on CI */ }, () => {
         const repo = makeTmpGitRepo({ prefix: 'delimit-funnel-check-', commit: false });
         const home = fs.mkdtempSync(path.join(os.tmpdir(), 'delimit-funnel-check-home-'));
         try {
@@ -252,7 +252,7 @@ describe('delimit check: repo with no commits', () => {
         }
     });
 
-    it('still diffs against HEAD in a repo that has commits', { skip: SKIP_IN_CI }, () => {
+    it('still diffs against HEAD in a repo that has commits', { skip: false /* git + node only: runs on CI */ }, () => {
         const repo = makeTmpGitRepo({ prefix: 'delimit-funnel-check2-' });
         const home = fs.mkdtempSync(path.join(os.tmpdir(), 'delimit-funnel-check2-home-'));
         try {
@@ -375,4 +375,37 @@ describe('delimit check --staged on an unborn HEAD keeps pre-commit isolation (P
             fs.rmSync(home, { recursive: true, force: true });
         }
     });
+});
+
+
+describe('delimit check --staged: an empty index is authoritative (PR #199 r2 follow-up)', () => {
+    function repo(withCommit) {
+        const home = fs.mkdtempSync(path.join(os.tmpdir(), 'delimit-empty-staged-'));
+        const dir = path.join(home, 'repo'); fs.mkdirSync(dir, { recursive: true });
+        execSync('git init -q', { cwd: dir });
+        if (withCommit) {
+            fs.writeFileSync(path.join(dir, 'README.md'), 'x\n');
+            execSync('git add README.md && git -c user.email=t@e.c -c user.name=t commit -qm init', { cwd: dir });
+        }
+        // An UNTRACKED spec at a known location: the old fallback would have scanned it.
+        fs.writeFileSync(path.join(dir, 'openapi.yaml'), 'openapi: 3.0.0\ninfo:\n  title: untracked\n  version: 1.0.0\npaths: {}\n');
+        return { home, dir };
+    }
+    function run(dir, home) {
+        return spawnSync(process.execPath, [path.join(__dirname, '..', 'bin', 'delimit-cli.js'), 'check', '--staged'], {
+            cwd: dir, encoding: 'utf-8', timeout: 60000, stdio: ['ignore', 'pipe', 'pipe'],
+            env: { ...process.env, HOME: home, DELIMIT_HOME: path.join(home, '.delimit'), CI: '1', NO_COLOR: '1' },
+        });
+    }
+    for (const [label, withCommit] of [['unborn HEAD', false], ['repo with commits', true]]) {
+        it(`${label}: nothing staged means nothing checked, the untracked spec is not scanned`, () => {
+            const { home, dir } = repo(withCommit);
+            try {
+                const r = run(dir, home); const out = r.stdout + r.stderr;
+                assert.strictEqual(r.status, 0, out);
+                assert.doesNotMatch(out, /openapi\.yaml/, 'untracked spec leaked into an empty --staged run');
+                assert.match(out, /Nothing to check/);
+            } finally { fs.rmSync(home, { recursive: true, force: true }); }
+        });
+    }
 });
