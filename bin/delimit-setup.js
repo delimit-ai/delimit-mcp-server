@@ -12,6 +12,11 @@ const fs = require('fs');
 const path = require('path');
 const { execSync } = require('child_process');
 const os = require('os');
+// Shared prompt gate: false when stdin/stdout is not a TTY, CI is set,
+// DELIMIT_NON_INTERACTIVE is set, or the user passed --yes. Every prompt
+// below falls back to its documented default when this is false.
+const { isInteractive } = require('../lib/interactive');
+const SETUP_INTERACTIVE = isInteractive({ yes: process.argv.includes('--yes') || process.argv.includes('-y') });
 const DELIMIT_HOME = path.join(os.homedir(), '.delimit');
 const MCP_CONFIG = path.join(os.homedir(), '.mcp.json');
 const CLAUDE_DIR = path.join(os.homedir(), '.claude');
@@ -134,7 +139,7 @@ async function main() {
     log(`  ${dim('Undo anytime:')} rm -rf ~/.delimit && delimit uninstall`);
     log('');
     const inquirerTop = (() => { try { return require('inquirer'); } catch { return null; } })();
-    if (inquirerTop && process.stdin.isTTY) {
+    if (inquirerTop && SETUP_INTERACTIVE) {
         try {
             const { proceed } = await inquirerTop.prompt([{
                 type: 'confirm',
@@ -496,7 +501,7 @@ async function main() {
     log(`    • Optional: governance wrapping + hooks`);
     log('');
     const inquirerMid = (() => { try { return require('inquirer'); } catch { return null; } })();
-    if (inquirerMid && process.stdin.isTTY) {
+    if (inquirerMid && SETUP_INTERACTIVE) {
         try {
             const { proceed } = await inquirerMid.prompt([{
                 type: 'confirm',
@@ -761,7 +766,7 @@ Run full governance compliance checks. Verify security, policy compliance, evide
         // First install — prompt
         const inquirer = (() => { try { return require('inquirer'); } catch { return null; } })();
         enableShims = true;
-        if (inquirer && process.stdin.isTTY) {
+        if (inquirer && SETUP_INTERACTIVE) {
             try {
                 const answer = await inquirer.prompt([{
                     type: 'confirm',
@@ -1055,7 +1060,7 @@ exit 127
             // Install hooks (auto-accept in non-interactive or prompt if TTY)
             let installHooks = true;
             const inq = (() => { try { return require('inquirer'); } catch { return null; } })();
-            if (inq && process.stdin.isTTY) {
+            if (inq && SETUP_INTERACTIVE) {
                 try {
                     const answer = await inq.prompt([{
                         type: 'confirm',

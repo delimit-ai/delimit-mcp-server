@@ -45,6 +45,8 @@ const TEST_FILES = [
     'tests/bundle-parity-guard.test.js',
     'tests/chat-repl-prebrief.test.js',
     'tests/chat-repl-continuity.test.js',
+    'tests/cli-deliberate-runs-engine.test.js',
+    'tests/funnel-cli-leaks.test.js',
 ];
 
 const cfgPath = resolveSharedConfigPath();
