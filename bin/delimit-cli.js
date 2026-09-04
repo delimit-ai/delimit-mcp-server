@@ -35,6 +35,13 @@ const AGENT_URL = `http://127.0.0.1:${process.env.DELIMIT_AGENT_PORT || 7823}`;
 const program = new Command();
 
 const yaml = require('js-yaml');
+const { isInteractive } = require('../lib/interactive');
+
+// Single source of truth for the CLI's own version (package.json). Hardcoded
+// version strings in banners drift (doctor printed "v4.20" on a 4.18.1 install).
+const CLI_VERSION = (() => {
+    try { return require('../package.json').version; } catch { return 'unknown'; }
+})();
 
 const continuityContext = resolveContinuityContext();
 process.env.DELIMIT_HOME = continuityContext.delimitHome;
@@ -725,25 +732,20 @@ program
         }
         console.log(chalk.blue('Deliberating...'));
         console.log(chalk.gray(`Question: ${question}`));
-        try {
-            const result = execSync(
-                `python3 -c "import sys; sys.path.insert(0, '${continuityContext.serverDir}'); from ai.deliberation import deliberate; import json; r = deliberate(question='${question.replace(/'/g, "\\'")}'); print(json.dumps(r, indent=2))"`,
-                { encoding: 'utf-8', timeout: 120000, cwd: continuityContext.serverDir }
-            );
-            const parsed = JSON.parse(result);
-            if (parsed.error) {
-                console.log(chalk.red(`Error: ${parsed.error}`));
-            } else if (parsed.synthesis) {
-                console.log(chalk.green('\nConsensus:'));
-                console.log(parsed.synthesis);
-                if (parsed.verdict) console.log(chalk.blue(`\nVerdict: ${parsed.verdict}`));
-                if (parsed.confidence) console.log(chalk.gray(`Confidence: ${parsed.confidence}`));
-            } else {
-                console.log(JSON.stringify(parsed, null, 2));
-            }
-        } catch (e) {
-            console.log(chalk.red(`Deliberation failed: ${e.message}`));
+        // Same engine path as `delimit deliberate`: the venv python that
+        // `delimit setup` created, question passed via env (no shell quoting),
+        // and the engine's real result keys rendered. The previous inline
+        // python3 call could not import the compiled engine and printed keys
+        // (synthesis / confidence) the engine never returns.
+        const engine = resolveDeliberationEngine();
+        if (!engine) {
+            console.log(chalk.yellow('Deliberation engine not installed yet.'));
+            console.log(`Run ${chalk.cyan('delimit setup')} first (it installs the engine), then re-run this command.`);
+            console.log(`Inside your AI assistant you can still run ${chalk.cyan(`delimit_deliberate: ${question}`)}`);
+            return;
         }
+        const outcome = runEngineDeliberation(engine, question, { mode: 'dialogue', maxRounds: 2 });
+        renderDeliberationOutcome(outcome, question);
     });
 
 program
@@ -1677,7 +1679,18 @@ program
         const configDir = path.join(process.cwd(), '.delimit');
         const policyFile = path.join(configDir, 'policies.yml');
 
+        // Non-interactive runs (piped stdin, CI=1, DELIMIT_NON_INTERACTIVE)
+        // behave exactly like --yes: every prompt below is skipped and its
+        // documented default is used. Prevents hangs / exit 130 in scripts.
+        if (!options.yes && !isInteractive()) {
+            options.yes = true;
+            options.autoYes = true;
+        }
+
         console.log(chalk.bold('\n  Delimit — API Governance Setup\n'));
+        if (options.autoYes) {
+            console.log(chalk.gray('  Non-interactive session detected, using defaults (same as --yes).\n'));
+        }
 
         if (fs.existsSync(policyFile)) {
             console.log(chalk.yellow('  Already initialized — .delimit/policies.yml exists'));
@@ -2457,7 +2470,8 @@ program
         console.log(`    ${chalk.green('npx delimit-cli setup')}    — configure AI assistants\n`);
 
         // Beta capture (LED-263)
-        try {
+        // The beta email prompt is skipped silently when non-interactive.
+        if (isInteractive()) try {
             const betaAns = await inquirer.prompt([{
                 type: 'input',
                 name: 'email',
@@ -2566,7 +2580,8 @@ program
         console.log(chalk.gray(`  Clean up: rm -rf delimit-demo\n`));
 
         // Beta capture
-        try {
+        // The beta email prompt is skipped silently when non-interactive.
+        if (isInteractive()) try {
             const betaAns = await inquirer.prompt([{
                 type: 'input',
                 name: 'email',
@@ -2764,7 +2779,12 @@ program
                         console.log(`  ${chalk.yellow('→')} ${text}`);
                     });
                 }
-                // Interactive next step picker
+                // Interactive next step picker (skipped when stdin is not a
+                // terminal / CI: inquirer would exit 130 on a closed stdin).
+                if (!isInteractive()) {
+                    console.log(chalk.gray('\n  Next: npx delimit-cli lint <spec>  |  npx delimit-cli init  |  npx delimit-cli ci\n'));
+                    return;
+                }
                 try {
                     const { next } = await inquirer.prompt([{
                         type: 'list',
@@ -2900,7 +2920,11 @@ program
                 }
                 console.log('');
 
-                // Interactive next step picker
+                // Interactive next step picker (skipped when non-interactive;
+                // the readiness checklist above already names each fix command).
+                if (!isInteractive()) {
+                    return;
+                }
                 try {
                     // Pre-select the first missing item
                     const firstMissing = checks.find(c => !c.done);
@@ -3293,7 +3317,8 @@ program
         console.log(chalk.gray(`    rm delimit-report.md             — clean up this report\n`));
 
         // Beta capture
-        try {
+        // The beta email prompt is skipped silently when non-interactive.
+        if (isInteractive()) try {
             const betaAns = await inquirer.prompt([{
                 type: 'input',
                 name: 'email',
@@ -4109,7 +4134,7 @@ program
         }
 
         // --- Human-readable output ---
-        console.log(chalk.bold('\n  Delimit Doctor v4.20\n'));
+        console.log(chalk.bold(`\n  Delimit Doctor v${CLI_VERSION}\n`));
 
         const icons = { pass: chalk.green('  ✓'), warn: chalk.yellow('  ⚠'), fail: chalk.red('  ✗') };
         const colors = { pass: chalk.green, warn: chalk.yellow, fail: chalk.red };
@@ -4840,17 +4865,41 @@ program
             } catch {}
         }
 
-        // Find changed spec files via git
+        // Find changed spec files via git. All git calls here capture stderr
+        // (stdio pipe) so a raw "fatal: ambiguous argument 'HEAD'" never
+        // reaches the user; the friendly line below is what they see instead.
+        const gitOpts = { cwd: projectDir, encoding: 'utf-8', timeout: 5000, stdio: ['ignore', 'pipe', 'pipe'] };
         const base = opts.base || 'HEAD';
         let changedFiles = [];
-        try {
-            const gitCmd = opts.staged
-                ? 'git diff --cached --name-only'
-                : `git diff --name-only ${base}`;
-            const output = execSync(gitCmd, { cwd: projectDir, encoding: 'utf-8', timeout: 5000 }).trim();
-            if (output) changedFiles = output.split('\n');
-        } catch {
-            // Not a git repo or no changes — fall back to scanning all specs
+        let noCommitsYet = false;
+        if (!opts.base) {
+            // A repo with no commits has no HEAD to diff against.
+            try {
+                execSync('git rev-parse --verify HEAD', gitOpts);
+            } catch (e) {
+                const msg = String((e && e.stderr) || (e && e.message) || '');
+                // Only an unborn HEAD qualifies; "not a git repo" keeps the old fallback.
+                if (/ambiguous argument|unknown revision|Needed a single revision|bad revision/i.test(msg)) noCommitsYet = true;
+            }
+        }
+        if (noCommitsYet) {
+            console.log(chalk.gray('  No commits yet, checking working-tree files (nothing to compare against for breaking changes).\n'));
+            try {
+                const output = execSync('git ls-files --cached --others --exclude-standard', gitOpts).trim();
+                if (output) changedFiles = output.split('\n');
+            } catch {
+                // Fall back to scanning known spec locations below
+            }
+        } else {
+            try {
+                const gitCmd = opts.staged
+                    ? 'git diff --cached --name-only'
+                    : `git diff --name-only ${base}`;
+                const output = execSync(gitCmd, gitOpts).trim();
+                if (output) changedFiles = output.split('\n');
+            } catch {
+                // Not a git repo or no changes — fall back to scanning all specs
+            }
         }
 
         // Filter to spec files
@@ -4900,8 +4949,9 @@ program
             // Get the base version from git
             let baseContent = null;
             try {
+                if (noCommitsYet) throw new Error('no base commit');
                 baseContent = execSync(`git show ${base}:${specFile}`, {
-                    cwd: projectDir, encoding: 'utf-8', timeout: 5000
+                    cwd: projectDir, encoding: 'utf-8', timeout: 5000, stdio: ['ignore', 'pipe', 'pipe'],
                 });
             } catch {
                 // File is new — no base version to compare
@@ -6125,11 +6175,28 @@ function resolveDeliberationEngine() {
         f === 'deliberation.py' || /^deliberation\.cpython-[^/]+\.(so|pyd)$/.test(f) || /^deliberation\.[^/]+\.(so|pyd)$/.test(f)
     );
     if (!hasEngine) return null;
-    const venvPython = homeSubpath('venv', 'bin', 'python');
+    // `delimit setup` creates the venv as ~/.delimit/venv; POSIX puts the
+    // interpreter under bin/, Windows under Scripts/ (matching the .pyd case
+    // above). Fall back to PATH python3 only when neither exists, and say so
+    // (a cpython-tagged compiled engine only imports under the interpreter it
+    // was built for, so the fallback usually cannot load it).
+    const candidates = [
+        homeSubpath('venv', 'bin', 'python'),
+        homeSubpath('venv', 'Scripts', 'python.exe'),
+    ];
+    const venvPython = candidates.find((p) => fs.existsSync(p));
     return {
         serverDir,
-        python: fs.existsSync(venvPython) ? venvPython : 'python3',
+        python: venvPython || (process.platform === 'win32' ? 'python' : 'python3'),
+        venv: !!venvPython,
     };
+}
+
+// Prepend the engine dir to any PYTHONPATH the user already has rather than
+// clobbering it (their site-packages / tooling must keep resolving).
+function withEnginePythonPath(serverDir) {
+    const existing = process.env.PYTHONPATH;
+    return existing ? `${serverDir}${path.delimiter}${existing}` : serverDir;
 }
 
 function runEngineDeliberation(engine, question, { mode = 'dialogue', maxRounds = 2 } = {}) {
@@ -6160,7 +6227,7 @@ function runEngineDeliberation(engine, question, { mode = 'dialogue', maxRounds 
         maxBuffer: 64 * 1024 * 1024,
         env: {
             ...process.env,
-            PYTHONPATH: engine.serverDir,
+            PYTHONPATH: withEnginePythonPath(engine.serverDir),
             DELIMIT_ENGINE_DIR: engine.serverDir,
             DELIMIT_Q: question,
             DELIMIT_MODE: mode,
@@ -6171,8 +6238,13 @@ function runEngineDeliberation(engine, question, { mode = 'dialogue', maxRounds 
     const stdout = proc.stdout || '';
     const marker = stdout.lastIndexOf('__DELIMIT_JSON__');
     if (proc.status !== 0 || marker < 0) {
-        const tail = ((proc.stderr || '') + '\n' + stdout).trim().split('\n').slice(-6).join('\n');
-        return { ran: false, error: tail || `engine exited with status ${proc.status}` };
+        let tail = ((proc.stderr || '') + '\n' + stdout).trim().split('\n').slice(-6).join('\n');
+        if (!tail) tail = `engine exited with status ${proc.status}`;
+        if (!engine.venv) {
+            tail += `\n(ran with ${engine.python} from PATH: no ~/.delimit/venv interpreter found. `
+                + 'The compiled engine is tagged to the Python that `delimit setup` installs; run `delimit setup` to restore it.)';
+        }
+        return { ran: false, error: tail };
     }
     try {
         return { ran: true, result: JSON.parse(stdout.slice(marker + '__DELIMIT_JSON__'.length)), savePath };
@@ -6665,8 +6737,18 @@ program
             }
             if (result.attestation_id) {
                 console.log();
+                // The local attestation file is the receipt. The hosted replay
+                // URL is printed only when the attestation was actually
+                // uploaded (replay_hosted); otherwise it would 404 and the
+                // first impression is "the receipt link is broken".
                 console.log(chalk.gray(`  attestation: ${result.attestation_path || '(not saved)'}`));
-                console.log(chalk.gray(`  replay:      ${result.replay_url}`));
+                if (result.replay_hosted) {
+                    console.log(chalk.gray(`  replay:      ${result.replay_url}`));
+                } else if (!result.tier || result.tier === 'free') {
+                    console.log(chalk.gray('  replay:      local only. Hosted, shareable replay is a Pro feature (https://delimit.ai/pricing)'));
+                } else {
+                    console.log(chalk.gray('  replay:      local only (this attestation was not uploaded)'));
+                }
             }
             if (result.handoff_suggestion) {
                 console.log();
