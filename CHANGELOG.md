@@ -1,3 +1,26 @@
+## [4.18.3] - 2026-09-04
+
+The fresh-user release: every change here was found by installing Delimit as a stranger would, in an empty Debian 12 container, and reading back what a first-time user actually sees. One of those findings was severe.
+
+### Fixed
+- **`delimit check` failed open when the Python helper could not run.** On a host whose system Python has no `yaml` module (Debian 12: `pip install` is refused under PEP 668), `check` printed a Traceback and then reported a spec with a removed endpoint as clean. Now: any helper error is a red "could not analyse" line, counts as a violation, and exits non-zero; and the zero-config path no longer needs PyYAML at all (specs are parsed in Node with the bundled `js-yaml`, and the helper installs a JSON-backed `yaml` shim for the bundled policy presets). Verified in that same container: the removed endpoint reads BLOCKED / MAJOR. (#202)
+- `delimit check --staged` on a repository with no commits now checks only the index, and an empty index is authoritative: untracked or unstaged files can no longer leak into a pre-commit hook run. (#199, #201)
+- `delimit wrap` no longer prints a hosted replay URL that returns 404; the receipt is the local attestation path, and the result carries `replay_hosted: false` until an upload path exists. (#199)
+- `scan`, `init` and `setup` detect a non-interactive session (`--yes`, `CI`, `DELIMIT_NON_INTERACTIVE`, or no terminal) and use the documented defaults instead of prompting; `scan` no longer exits 130 on closed stdin; the "Join the beta" prompt is skipped. Note: `delimit setup | tee log` now takes defaults rather than prompting, because stdout must be a terminal. (#199)
+- `delimit doctor` reports the installed version instead of a hardcoded one; `check` on a commit-less repository prints one friendly line instead of raw git errors. (#199)
+- `delimit deliberate` and `delimit think` resolve the venv interpreter on Windows too, prepend rather than overwrite `PYTHONPATH`, and explain when the fallback interpreter cannot load the compiled engine. (#199)
+- The MCP `initialize` handshake reports Delimit's own version instead of the fastmcp library version. (#200, delimit-gateway#416)
+- The governance shim banner says "MCP server: ready" instead of a decorator-derived tool count that disagreed with the real tool list. (#198)
+- `scan` reports a refused pyyaml install in one line instead of a Traceback. (#202)
+
+### Changed
+- fastmcp pinned to 3.1.0 in the bundled requirements and the Docker fallback, matching what `delimit setup` installs. (#198, #200)
+- The registry read-back in `registry-publish.yml` percent-encodes the server name. (#198)
+- Tests: the `delimit deliberate` test file added in 4.18.2 was never registered in the runner and had not been running in CI; it is registered now, together with the new fresh-install and fail-closed suites. (#199, #202)
+
+### Known
+- The compiled Pro engine shipped as v3.10.0 requires glibc 2.38 and cannot load on Debian 12 or Ubuntu 22.04 (hosted deliberation fails with an ImportError there; license gating uses the Python fallback). The build pipeline fix is delimit-gateway#417; rebuilt engine tarballs follow separately. Not changed by this release.
+
 ## [4.18.2] - 2026-09-03
 
 Two fixes found by running Delimit as a stranger would: a fresh-user install test in an empty container, and Glama's own build log.
