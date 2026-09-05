@@ -1,3 +1,8 @@
+## Unreleased
+
+### Fixed
+- Pro engine modules now resolve to v3.10.1, rebuilt on Ubuntu 22.04 so the compiled deliberation, governance and license modules load on Debian 12 and Ubuntu 22.04 (v3.10.0 required glibc 2.38 and failed to import there, which left hosted deliberation dead and license gating on the Python fallback). Existing installs pick the new engine up on their next `delimit setup`.
+
 ## [4.18.3] - 2026-09-04
 
 The fresh-user release: every change here was found by installing Delimit as a stranger would, in an empty Debian 12 container, and reading back what a first-time user actually sees. One of those findings was severe.
