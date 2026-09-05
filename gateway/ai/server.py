@@ -53,6 +53,25 @@ import traceback
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+# ─────────────────────────────────────────────────────────────────────
+#  Self-locating import path (2026-09-05, LED-4415)
+#
+#  Launchers that start this file directly (`python gateway/ai/server.py`,
+#  Docker ENTRYPOINTs, MCP directories building their own image) must be
+#  able to resolve the `ai` package WITHOUT a PYTHONPATH. Glama's hosted
+#  builds stopped applying PYTHONPATH and every release build after
+#  2026-09-03 died on the first `from ai...` import with
+#  "No module named 'ai'". The gateway root (parent of `ai/`) and `ai/`
+#  itself go on sys.path, in that order, matching the PYTHONPATH the
+#  Dockerfile sets; a launcher that does set PYTHONPATH sees no change.
+# ─────────────────────────────────────────────────────────────────────
+import sys as _sys
+_SERVER_FILE = Path(__file__).resolve()
+for _p in (str(_SERVER_FILE.parent), str(_SERVER_FILE.parent.parent)):
+    if _p not in _sys.path:
+        _sys.path.insert(0, _p)
+del _p
 from typing import Annotated, Any, Dict, List, Optional, Union
 
 from fastmcp import FastMCP
