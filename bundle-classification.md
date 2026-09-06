@@ -6,7 +6,9 @@ Rule applied: **when uncertain, INTERNAL-EXCLUDE.** Import-safety verified: no P
 `.py` has a top-level import of an INTERNAL `.py` (lazy imports inside tool bodies are
 fine — those internal tools simply no-op on a public install).
 
-Counts: **PUBLIC 135** source paths (+1 compiled `.so`) · **INTERNAL 147** paths.
+The canonical path sets live in `bundle-allowlist.txt` and
+`bundle-internal-exclude.txt`; the release guards derive their current counts
+from those files.
 
 ## FLAGGED FOR REVIEW (kept PUBLIC but borderline)
 These are Delimit *product* tools (the multi-model / governance surface), not
@@ -73,7 +75,6 @@ cross-venture or proprietary, so they ship — but confirm they should be public
 - `gateway/ai/backends/ui_bridge.py`
 - `gateway/ai/backends/vault_bridge.py`
 ### MCP server + public support modules
-- `gateway/ai/checksums.sha256`
 - `gateway/ai/cli_contract.py`
 - `gateway/ai/collision_detect.py`
 - `gateway/ai/context_fs.py`

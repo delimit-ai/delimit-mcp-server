@@ -34,7 +34,6 @@
     "gateway/ai/backends/tools_real.py",
     "gateway/ai/backends/ui_bridge.py",
     "gateway/ai/backends/vault_bridge.py",
-    "gateway/ai/checksums.sha256",
     "gateway/ai/cli_contract.py",
     "gateway/ai/collision_detect.py",
     "gateway/ai/context_fs.py",

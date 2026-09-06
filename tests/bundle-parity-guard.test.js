@@ -197,3 +197,20 @@ describe('check-bundle-parity.sh (fail-closed allowlist parity)', () => {
     assert.match(r.out, /overriding/i);
   });
 });
+
+describe('non-authoritative build artifacts', () => {
+  it('does not ship the source-tree Pro checksum manifest', () => {
+    const staleManifest = 'gateway/ai/checksums.sha256';
+    const pkg = JSON.parse(
+      fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8')
+    );
+    const allowlist = fs.readFileSync(
+      path.join(REPO_ROOT, 'bundle-allowlist.txt'),
+      'utf8'
+    );
+
+    assert.ok(!pkg.files.includes(staleManifest));
+    assert.ok(!allowlist.split(/\r?\n/).includes(staleManifest));
+    assert.ok(!fs.existsSync(path.join(REPO_ROOT, staleManifest)));
+  });
+});
