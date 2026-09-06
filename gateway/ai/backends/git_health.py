@@ -45,8 +45,58 @@ def _run(cmd: list, cwd: str, timeout: float = 2.0) -> str:
         return ""
 
 
+# Reasons that mean "git state is CORRUPT or unusable" (LED-1401 class) versus
+# "there is simply no git here". Callers that only need protection from
+# phantom-failure corruption (test_smoke, evidence_collect) block on the
+# former and proceed truthfully on the latter; deploy_plan blocks on both.
+BLOCKING_REASONS = frozenset({
+    "not_a_directory", "bare_repo_with_files", "not_a_worktree",
+    "stranded_worktree", "corrupt_status",
+})
+
+
+def resolve_worktree(path: str) -> Dict[str, Any]:
+    """Resolve the git worktree that ENCLOSES `path` (LED-2043 / LED-2129).
+
+    A nested project directory (``<repo>/console/api``) or a task artifact
+    directory is a legitimate test/evidence target even though its own
+    ``.git`` lives one or more levels up. Returns::
+
+        {"ok": True,  "root": "<abs worktree root>", "subdir": "console/api"}
+        {"ok": False, "reason": "not_a_repo" | "not_a_directory", "detail": ...}
+
+    ``subdir`` is "." when `path` is the root itself. Never raises.
+    """
+    p = Path(path)
+    if not p.exists() or not p.is_dir():
+        return {"ok": False, "reason": "not_a_directory",
+                "detail": f"{path} is not a directory.", "path": path}
+    resolved = p.resolve()
+    if (resolved / ".git").exists():
+        return {"ok": True, "root": str(resolved), "subdir": ".", "path": path}
+    top = _run(["git", "rev-parse", "--show-toplevel"], cwd=str(resolved))
+    if not top:
+        return {"ok": False, "reason": "not_a_repo",
+                "detail": f"{path} has no .git/ and no enclosing git worktree.",
+                "path": path}
+    root = Path(top).resolve()
+    try:
+        subdir = str(resolved.relative_to(root)) or "."
+    except ValueError:
+        return {"ok": False, "reason": "not_a_repo",
+                "detail": f"{path} resolved to {root}, which does not contain it.",
+                "path": path}
+    return {"ok": True, "root": str(root), "subdir": subdir, "path": path}
+
+
 def check_worktree_sanity(repo_path: str) -> Dict[str, Any]:
-    """Verify the directory at `repo_path` is a healthy git worktree.
+    """Verify the git worktree ENCLOSING `repo_path` is healthy.
+
+    `repo_path` may be the worktree root or any directory inside it
+    (LED-2043: nested ``console/api`` targets were rejected as
+    ``not_a_repo`` because only the root has ``.git``). The checks below
+    run against the resolved root; the returned dict carries ``root`` and
+    ``subdir`` so callers can run work from the requested directory.
 
     Checks (in order; cheapest first):
       1. Path exists and contains a `.git` directory (or file pointing to one)
@@ -66,23 +116,16 @@ def check_worktree_sanity(repo_path: str) -> Dict[str, Any]:
     Non-raising: errors return ok=False with a structured reason, so callers
     can decide whether to halt or warn.
     """
-    p = Path(repo_path)
-    if not p.exists() or not p.is_dir():
-        return {
-            "ok": False,
-            "reason": "not_a_directory",
-            "detail": f"{repo_path} is not a directory.",
-            "path": repo_path,
-        }
-
-    git_meta = p / ".git"
-    if not git_meta.exists():
-        return {
-            "ok": False,
-            "reason": "not_a_repo",
-            "detail": f"{repo_path} has no .git/ — not a git worktree.",
-            "path": repo_path,
-        }
+    located = resolve_worktree(repo_path)
+    if not located["ok"]:
+        out = dict(located)
+        out["blocking"] = located["reason"] in BLOCKING_REASONS
+        return out
+    requested = repo_path
+    root = located["root"]
+    subdir = located["subdir"]
+    repo_path = root          # every git probe below runs at the root
+    p = Path(root)
 
     # Bare-repo check first (LED-1401 signature: bare=true + source files
     # alongside). Checked BEFORE is-inside-work-tree because a bare repo
@@ -100,6 +143,9 @@ def check_worktree_sanity(repo_path: str) -> Dict[str, Any]:
                 f"&& cd /tmp/<repo>-fresh`"
             ),
             "path": repo_path,
+            "root": root,
+            "subdir": subdir,
+            "blocking": True,
         }
 
     # Inside-work-tree check
@@ -114,6 +160,9 @@ def check_worktree_sanity(repo_path: str) -> Dict[str, Any]:
                 f"Re-clone fresh: `git clone <url> /tmp/<repo>-fresh && cd /tmp/<repo>-fresh`"
             ),
             "path": repo_path,
+            "root": root,
+            "subdir": subdir,
+            "blocking": True,
         }
 
     # Worktree-list membership check (catches stranded sibling worktrees)
@@ -132,6 +181,9 @@ def check_worktree_sanity(repo_path: str) -> Dict[str, Any]:
                 f"orphaned: `git clone <url> /tmp/<repo>-fresh && cd /tmp/<repo>-fresh`"
             ),
             "path": repo_path,
+            "root": root,
+            "subdir": subdir,
+            "blocking": True,
             "worktree_list": worktrees,
         }
 
@@ -164,6 +216,9 @@ def check_worktree_sanity(repo_path: str) -> Dict[str, Any]:
                     f"`git clone <url> /tmp/<repo>-fresh && cd /tmp/<repo>-fresh`"
                 ),
                 "path": repo_path,
+            "root": root,
+            "subdir": subdir,
+            "blocking": True,
                 "overlap_count": len(overlap),
             }
 
@@ -171,5 +226,8 @@ def check_worktree_sanity(repo_path: str) -> Dict[str, Any]:
         "ok": True,
         "reason": "healthy",
         "detail": "git worktree is healthy",
-        "path": repo_path,
+        "path": requested,
+        "root": root,
+        "subdir": subdir,
+        "blocking": False,
     }
