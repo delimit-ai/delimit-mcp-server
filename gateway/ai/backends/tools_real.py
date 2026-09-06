@@ -329,6 +329,16 @@ def _parse_jest_output(stdout: str) -> Dict[str, int]:
     return counts
 
 
+def _path_inside(path: Path, boundary: Path) -> bool:
+    """True when `path` (resolved) is `boundary` or lies under it. Uses
+    Path.relative_to, never a string prefix: /repo2 is NOT inside /repo."""
+    try:
+        path.resolve().relative_to(boundary.resolve())
+        return True
+    except ValueError:
+        return False
+
+
 def test_smoke(project_path: str, test_suite: Optional[str] = None, timeout_seconds: Optional[int] = 120, extra_args: Optional[List[str]] = None, fail_fast: Optional[bool] = False) -> Dict[str, Any]:
     """Detect test framework and run tests. Returns pass/fail/error counts.
 
@@ -339,13 +349,34 @@ def test_smoke(project_path: str, test_suite: Optional[str] = None, timeout_seco
     if not project.is_dir():
         return {"error": "project_not_found", "message": f"Directory not found: {project_path}"}
 
+    # LED-2043 / LED-2129: the requested directory may be NESTED inside the
+    # git worktree (``<repo>/console/api``) or be a standalone artifact
+    # directory with no git at all. Resolve the enclosing worktree (for the
+    # venv search and path validation) but keep running from the requested
+    # directory so the project's own config, conftest and relative paths
+    # apply. Framework detection: the requested directory first; if it has
+    # no test config of its own, fall back to the worktree root and pass the
+    # subdirectory as the collection target so a root-level pytest never
+    # sweeps up unrelated (e.g. JavaScript) trees.
+    from .git_health import resolve_worktree
+    located = resolve_worktree(str(project))
+    worktree_root = Path(located["root"]) if located.get("ok") else None
+    run_cwd = project
+    target_subdir = None
+
     detected = _detect_test_framework(project)
+    if detected is None and worktree_root is not None and worktree_root != project:
+        detected = _detect_test_framework(worktree_root)
+        if detected is not None:
+            run_cwd = worktree_root
+            target_subdir = str(project.relative_to(worktree_root))
     if detected is None:
         return {
             "tool": "test.smoke",
             "status": "no_framework",
             "error": "No test framework detected. Looked for: pytest.ini, pyproject.toml, package.json scripts.test",
             "project_path": str(project),
+            "worktree_root": str(worktree_root) if worktree_root else None,
         }
 
     framework = detected["framework"]
@@ -355,15 +386,70 @@ def test_smoke(project_path: str, test_suite: Optional[str] = None, timeout_seco
     import shlex
     cmd_list = shlex.split(cmd)
 
-    # If a specific suite is requested, validate and append
+    # If a specific suite is requested, validate and append. Accepts a
+    # single node id, a space- or comma-separated string, or a list
+    # (LED-2043: "tests/test_a.py tests/test_b.py" was rejected as
+    # invalid). Each token must be a safe path/node id that stays inside
+    # the worktree root (or the requested directory when there is no git).
     if test_suite:
-        # Sanitize: only allow alphanumeric, slashes, dots, underscores, hyphens, colons
-        # LED-1077: removed redundant local `import re` — module imports re at the top,
-        # and the local import shadowed it, causing "local variable 're' referenced before assignment"
-        # on any code path that didn't pass through this branch before reaching re.search below.
-        if not re.match(r'^[\w/.\-:*\[\]]+$', test_suite):
-            return {"tool": "test.smoke", "status": "error", "error": f"Invalid test_suite: {test_suite}"}
-        cmd_list.append(test_suite)
+        tokens: List[str] = []
+        # Split on whitespace, and on commas only OUTSIDE square brackets so a
+        # parametrized node id such as tests/test_a.py::test_x[1,2] survives.
+        raw_items = list(test_suite) if isinstance(test_suite, (list, tuple)) else [
+            piece for chunk in re.split(r"\s+", str(test_suite).strip())
+            for piece in re.split(r",(?![^\[]*\])", chunk)
+        ]
+        boundary = (worktree_root or project).resolve()
+        for tok in raw_items:
+            tok = str(tok).strip()
+            if not tok:
+                continue
+            # LED-1077: module-level `re`; no local shadowing import here.
+            # Commas are allowed only inside a [...] parameter id (shell=False,
+            # so they are never interpreted); anywhere else they were separators.
+            if not re.match(r'^[\w/.\-:*\[\],]+$', tok) or ("," in tok.split("[", 1)[0]):
+                return {"tool": "test.smoke", "status": "error", "error": f"Invalid test_suite token: {tok}"}
+            rel = tok.split("::", 1)[0]
+            # Fail closed on any parent-directory component or absolute
+            # path, glob or not: a token never leaves the worktree.
+            parts = Path(rel).parts
+            if rel.startswith("/") or ".." in parts:
+                return {"tool": "test.smoke", "status": "error",
+                        "error": f"test_suite token escapes the worktree: {tok}"}
+            if "*" in rel:
+                # The command runs with shell=False, so a glob is NEVER
+                # expanded by a shell: expand it here (relative to the run
+                # directory), keep only matches inside the worktree, and
+                # fail closed when nothing matches. The static prefix is
+                # containment-checked first so a glob cannot probe outside.
+                first_wild = next(i for i, q in enumerate(parts) if "*" in q)
+                static = Path(*parts[:first_wild]) if first_wild else Path(".")
+                if not _path_inside((run_cwd / static).resolve(), boundary):
+                    return {"tool": "test.smoke", "status": "error",
+                            "error": f"test_suite token escapes the worktree: {tok}"}
+                pattern = str(Path(*parts[first_wild:]))
+                matches = sorted(
+                    m for m in (run_cwd / static).glob(pattern)
+                    if _path_inside(m.resolve(), boundary)
+                )
+                if not matches:
+                    return {"tool": "test.smoke", "status": "error",
+                            "error": f"test_suite glob matched nothing inside the worktree: {tok}"}
+                suffix = tok[len(rel):]          # keep any ::node id suffix
+                tokens.extend(str(m.relative_to(run_cwd)) + suffix for m in matches)
+                continue
+            else:
+                candidate = (run_cwd / rel).resolve()
+                if not _path_inside(candidate, boundary):
+                    return {"tool": "test.smoke", "status": "error",
+                            "error": f"test_suite token escapes the worktree: {tok}"}
+                if not candidate.exists():
+                    return {"tool": "test.smoke", "status": "error",
+                            "error": f"test_suite path not found (relative to {run_cwd}): {tok}"}
+            tokens.append(tok)
+        cmd_list.extend(tokens)
+    elif target_subdir:
+        cmd_list.append(target_subdir)
 
     # Apply fail-fast parameter
     if fail_fast:
@@ -398,11 +484,35 @@ def test_smoke(project_path: str, test_suite: Optional[str] = None, timeout_seco
         import sys as _sys
 
         chosen = None
-        # (1) Project-local venv.
-        for venv_dir in ["venv", ".venv", "env"]:
-            venv_python = project / venv_dir / "bin" / "python"
-            if venv_python.exists():
-                chosen = str(venv_python)
+        # (1) Project-local venv: the requested directory first, then each
+        #     ancestor up to (and including) the worktree root (LED-2043:
+        #     the pinned venv lived at the root while tests were requested
+        #     from console/api, so the system python ran them against an
+        #     incompatible FastAPI/Starlette). A venv only counts when it
+        #     can import pytest; an unrelated venv is skipped.
+        search_dirs = [project]
+        if worktree_root is not None and worktree_root != project:
+            root_resolved = worktree_root.resolve()
+            for parent in project.parents:          # `project` is already resolved
+                if not _path_inside(parent, root_resolved):
+                    break                            # never climb above the worktree
+                search_dirs.append(parent)
+                if parent == root_resolved:
+                    break
+        for base in search_dirs:
+            for venv_dir in ["venv", ".venv", "env"]:
+                venv_python = base / venv_dir / "bin" / "python"
+                if not venv_python.exists():
+                    continue
+                try:
+                    probe = subprocess.run([str(venv_python), "-c", "import pytest"],
+                                           capture_output=True, timeout=10)
+                except (subprocess.TimeoutExpired, OSError):
+                    continue
+                if probe.returncode == 0:
+                    chosen = str(venv_python)
+                    break
+            if chosen:
                 break
 
         # (2) System python3 if it has pytest. Probe with a fast import-
@@ -443,7 +553,7 @@ def test_smoke(project_path: str, test_suite: Optional[str] = None, timeout_seco
         result = subprocess.run(
             cmd_list,
             shell=False,
-            cwd=str(project),
+            cwd=str(run_cwd),
             capture_output=True,
             text=True,
             timeout=timeout_val,
@@ -496,7 +606,11 @@ def test_smoke(project_path: str, test_suite: Optional[str] = None, timeout_seco
         "all_passed": result.returncode == 0,
         "output": output,
         "command": cmd,
+        "resolved_command": cmd_list,
         "project_path": str(project),
+        "run_cwd": str(run_cwd),
+        "worktree_root": str(worktree_root) if worktree_root else None,
+        "python": cmd_list[0] if framework == "pytest" else None,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 

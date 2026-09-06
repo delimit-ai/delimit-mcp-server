@@ -5796,7 +5796,10 @@ def delimit_evidence_collect(target: Annotated[str, Field(description="Repositor
     # evidence_verify call. Same precheck as delimit_test_smoke.
     from backends.git_health import check_worktree_sanity
     health = check_worktree_sanity(target)
-    if not health["ok"]:
+    # LED-2043 / LED-2129: block only on CORRUPT git state; a nested
+    # target resolves to its enclosing worktree, and a standalone
+    # artifact directory is collected with an empty git_ref.
+    if not health["ok"] and health.get("blocking", True):
         return _with_next_steps("evidence_collect", {
             "error": "worktree_unhealthy",
             "reason": health["reason"],
@@ -7338,7 +7341,11 @@ def delimit_test_smoke(
     # invoking the test runner so the caller knows the report is real.
     from backends.git_health import check_worktree_sanity
     health = check_worktree_sanity(project_path)
-    if not health["ok"]:
+    # LED-2043 / LED-2129: block only on CORRUPT git state (the LED-1401
+    # class this precheck exists for). A nested directory resolves to its
+    # enclosing worktree; a standalone directory with no git at all runs
+    # with worktree_root=None recorded in the result.
+    if not health["ok"] and health.get("blocking", True):
         return _with_next_steps("test_smoke", {
             "error": "worktree_unhealthy",
             "reason": health["reason"],

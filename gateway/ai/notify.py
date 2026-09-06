@@ -357,8 +357,21 @@ def send_telegram(
     chat_id: str = "",
 ) -> Dict[str, Any]:
     """Send a Telegram message via bot API."""
-    bot_token = bot_token or os.environ.get("DELIMIT_TELEGRAM_BOT_TOKEN", "") or _load_secret_value("DELIMIT_TELEGRAM_BOT_TOKEN", "TELEGRAM_MONITOR_BOT_TOKEN")
-    chat_id = chat_id or os.environ.get("DELIMIT_TELEGRAM_CHAT_ID", "") or _load_secret_value("DELIMIT_TELEGRAM_CHAT_ID", "TELEGRAM_MONITOR_CHAT_ID")
+    bot_config = _load_json_file(
+        Path.home() / ".delimit" / "secrets" / "telegram-delimitai-bot.json"
+    )
+    bot_token = (
+        bot_token
+        or os.environ.get("DELIMIT_TELEGRAM_BOT_TOKEN", "")
+        or _load_secret_value("DELIMIT_TELEGRAM_BOT_TOKEN", "TELEGRAM_MONITOR_BOT_TOKEN")
+        or str(bot_config.get("token") or "")
+    )
+    chat_id = (
+        chat_id
+        or os.environ.get("DELIMIT_TELEGRAM_CHAT_ID", "")
+        or _load_secret_value("DELIMIT_TELEGRAM_CHAT_ID", "TELEGRAM_MONITOR_CHAT_ID")
+        or str(bot_config.get("chat_id") or "")
+    )
     if not bot_token or not chat_id:
         return {"error": "telegram bot token and chat id are required"}
 
