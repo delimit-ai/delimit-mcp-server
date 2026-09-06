@@ -1,5 +1,16 @@
 ## Unreleased
 
+## [4.18.5] - 2026-09-06
+
+### Fixed
+- `delimit setup` no longer downloads over or deletes Pro modules through a developer source symlink. Source-linked installs preserve the checkout-owned modules while normal package installs retain the existing managed-module path; setup also refreshes the installed `VERSION` marker outside the symlinked directory. (#208)
+- The MCP server resolves version truth from the lexical installed path before following a source symlink, so a source-linked developer install still reports the installed release rather than a source fallback. (delimit-gateway#438)
+
+### Packaging
+- Removed the stale source-tree `checksums.sha256` file from the public npm bundle. It named build artifacts absent from source and nothing read it at runtime; authoritative Pro checksums continue to be generated inside the actual release staging directory. (#209)
+
+## [4.18.4] - 2026-09-06
+
 ### Fixed
 - Codex setup now gives the Delimit MCP server a 30-minute tool-call window, so legitimate multi-round deliberations are not detached by the client's shorter default timeout while the panel is still responding.
 - The fresh-install funnel tests now strip inherited `GIT_*` variables before creating temporary repositories; when invoked from a Git pre-push hook, they can no longer turn the real package checkout into a bare repository or commit test fixtures onto the release branch.
