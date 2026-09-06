@@ -618,21 +618,41 @@ def _resolve_version(start_path: Optional[str] = None) -> str:
     Read-only; any I/O or parse failure falls back to _VERSION_FALLBACK.
     """
     try:
-        here = Path(start_path or __file__).resolve()
-        for parent in list(here.parents)[:4]:
-            marker = parent / "VERSION"
-            if marker.is_file():
-                candidate = marker.read_text(encoding="utf-8").strip()
-                if candidate:
-                    return candidate
-            pkg = parent / "package.json"
-            if pkg.is_file():
-                try:
-                    data = json.loads(pkg.read_text(encoding="utf-8"))
-                except (json.JSONDecodeError, OSError):
+        # Search the lexical launch path before resolving symlinks. The local
+        # developer install intentionally links ~/.delimit/server/ai to the
+        # gateway checkout while keeping its release marker at
+        # ~/.delimit/server/VERSION. Resolving first jumps into the checkout
+        # and silently loses that installed-version boundary.
+        lexical = Path(start_path or __file__).absolute()
+        locations = [lexical]
+        try:
+            resolved = lexical.resolve()
+            if resolved != lexical:
+                locations.append(resolved)
+        except (OSError, RuntimeError):
+            pass
+
+        seen_parents = set()
+        for here in locations:
+            for parent in list(here.parents)[:4]:
+                parent_key = str(parent)
+                if parent_key in seen_parents:
                     continue
-                if data.get("name") == "delimit-cli" and data.get("version"):
-                    return str(data["version"])
+                seen_parents.add(parent_key)
+
+                marker = parent / "VERSION"
+                if marker.is_file():
+                    candidate = marker.read_text(encoding="utf-8").strip()
+                    if candidate:
+                        return candidate
+                pkg = parent / "package.json"
+                if pkg.is_file():
+                    try:
+                        data = json.loads(pkg.read_text(encoding="utf-8"))
+                    except (json.JSONDecodeError, OSError):
+                        continue
+                    if data.get("name") == "delimit-cli" and data.get("version"):
+                        return str(data["version"])
     except Exception:
         pass
     return _VERSION_FALLBACK
