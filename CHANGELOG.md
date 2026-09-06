@@ -1,6 +1,8 @@
 ## Unreleased
 
 ### Fixed
+- Codex setup now gives the Delimit MCP server a 30-minute tool-call window, so legitimate multi-round deliberations are not detached by the client's shorter default timeout while the panel is still responding.
+- The fresh-install funnel tests now strip inherited `GIT_*` variables before creating temporary repositories; when invoked from a Git pre-push hook, they can no longer turn the real package checkout into a bare repository or commit test fixtures onto the release branch.
 - Pro engine modules now resolve to v3.10.1, rebuilt on Ubuntu 22.04 so the compiled deliberation, governance and license modules load on Debian 12 and Ubuntu 22.04 (v3.10.0 required glibc 2.38 and failed to import there, which left hosted deliberation dead and license gating on the Python fallback). Existing installs pick the new engine up on their next `delimit setup`.
 
 ## [4.18.3] - 2026-09-04

@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { spawnSync } = require('child_process');
-const { makeTmpGitRepo } = require('./_git-hermetic');
+const { gitEnv, makeTmpGitRepo } = require('./_git-hermetic');
 
 /**
  * Fresh-user install test of delimit-cli 4.18.1 (2026-09-02) found five
@@ -37,7 +37,7 @@ function runCli(args, { cwd, home, env = {}, timeout = 60000 } = {}) {
         timeout,
         stdio: ['ignore', 'pipe', 'pipe'],
         env: {
-            ...process.env,
+            ...gitEnv(cwd),
             HOME: home,
             DELIMIT_HOME: delimitHome,
             CI: '1',
@@ -356,14 +356,15 @@ describe('delimit check --staged on an unborn HEAD keeps pre-commit isolation (P
         const dir = path.join(home, 'repo');
         fs.mkdirSync(dir, { recursive: true });
         try {
-            execSync('git init -q', { cwd: dir });
+            const env = gitEnv(dir);
+            execSync('git init -q', { cwd: dir, env });
             const spec = (title) => `openapi: 3.0.0\ninfo:\n  title: ${title}\n  version: 1.0.0\npaths: {}\n`;
             fs.writeFileSync(path.join(dir, 'staged-openapi.yaml'), spec('staged'));
             fs.writeFileSync(path.join(dir, 'untracked-openapi.yaml'), spec('untracked'));
-            execSync('git add staged-openapi.yaml', { cwd: dir });
+            execSync('git add staged-openapi.yaml', { cwd: dir, env });
             const r = spawnSync(process.execPath, [path.join(__dirname, '..', 'bin', 'delimit-cli.js'), 'check', '--staged'], {
                 cwd: dir, encoding: 'utf-8', timeout: 60000,
-                env: { ...process.env, HOME: home, DELIMIT_HOME: path.join(home, '.delimit'), CI: '1', NO_COLOR: '1' },
+                env: { ...gitEnv(dir), HOME: home, DELIMIT_HOME: path.join(home, '.delimit'), CI: '1', NO_COLOR: '1' },
                 stdio: ['ignore', 'pipe', 'pipe'],
             });
             const out = r.stdout + r.stderr;
@@ -382,10 +383,11 @@ describe('delimit check --staged: an empty index is authoritative (PR #199 r2 fo
     function repo(withCommit) {
         const home = fs.mkdtempSync(path.join(os.tmpdir(), 'delimit-empty-staged-'));
         const dir = path.join(home, 'repo'); fs.mkdirSync(dir, { recursive: true });
-        execSync('git init -q', { cwd: dir });
+        const env = gitEnv(dir);
+        execSync('git init -q', { cwd: dir, env });
         if (withCommit) {
             fs.writeFileSync(path.join(dir, 'README.md'), 'x\n');
-            execSync('git add README.md && git -c user.email=t@e.c -c user.name=t commit -qm init', { cwd: dir });
+            execSync('git add README.md && git -c user.email=t@e.c -c user.name=t commit -qm init', { cwd: dir, env });
         }
         // An UNTRACKED spec at a known location: the old fallback would have scanned it.
         fs.writeFileSync(path.join(dir, 'openapi.yaml'), 'openapi: 3.0.0\ninfo:\n  title: untracked\n  version: 1.0.0\npaths: {}\n');
@@ -394,7 +396,7 @@ describe('delimit check --staged: an empty index is authoritative (PR #199 r2 fo
     function run(dir, home) {
         return spawnSync(process.execPath, [path.join(__dirname, '..', 'bin', 'delimit-cli.js'), 'check', '--staged'], {
             cwd: dir, encoding: 'utf-8', timeout: 60000, stdio: ['ignore', 'pipe', 'pipe'],
-            env: { ...process.env, HOME: home, DELIMIT_HOME: path.join(home, '.delimit'), CI: '1', NO_COLOR: '1' },
+            env: { ...gitEnv(dir), HOME: home, DELIMIT_HOME: path.join(home, '.delimit'), CI: '1', NO_COLOR: '1' },
         });
     }
     for (const [label, withCommit] of [['unborn HEAD', false], ['repo with commits', true]]) {

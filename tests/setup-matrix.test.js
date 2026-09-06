@@ -69,6 +69,7 @@ describe('setup matrix: config file structure', () => {
 command = "/usr/bin/python3"
 args = ["/home/test/.delimit/server/ai/server.py"]
 cwd = "/home/test/.delimit/server"
+tool_timeout_sec = 1800
 
 [mcp_servers.delimit.env]
 PYTHONPATH = "/home/test/.delimit/server"
@@ -80,6 +81,7 @@ PYTHONPATH = "/home/test/.delimit/server"
         assert.ok(result.includes('command'), 'Should have command key');
         assert.ok(result.includes('python'), 'Command should be python');
         assert.ok(result.includes('server.py'), 'Should reference server.py');
+        assert.ok(result.includes('tool_timeout_sec = 1800'), 'Should allow long deliberation calls');
     });
 
     it('Cursor: creates valid ~/.cursor/mcp.json with delimit entry', () => {

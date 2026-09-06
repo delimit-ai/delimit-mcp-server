@@ -440,6 +440,15 @@ describe('setup script structure', () => {
         // Cursor rules path unchanged.
         assert.ok(setupContent.includes('cursorRules'), 'Should handle cursor rules');
     });
+
+    it('setup gives the Delimit Codex MCP server enough time for deliberation', () => {
+        const setupPath = path.join(__dirname, '..', 'bin', 'delimit-setup.js');
+        const setupContent = fs.readFileSync(setupPath, 'utf-8');
+        assert.ok(
+            setupContent.includes('tool_timeout_sec = 1800'),
+            'Codex MCP setup must preserve the 30-minute deliberation transport window'
+        );
+    });
 });
 
 describe('spec auto-detection', () => {
