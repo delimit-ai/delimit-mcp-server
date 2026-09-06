@@ -71,6 +71,23 @@ function findSpecFiles(dir, depth = 0) {
     } catch {}
     return results;
 }
+
+/**
+ * Keep setup from mutating a developer's source checkout through the
+ * ~/.delimit/server/ai symlink. In source-linked mode the checkout owner is
+ * responsible for building/restoring Pro extensions; an automatic setup run
+ * must not download over them or delete them as stale.
+ */
+async function installProModulesUnlessSourceLinked(isSourceLinked, install) {
+    if (isSourceLinked) return false;
+    await install();
+    return true;
+}
+
+function writeInstalledVersionMarker(serverDir, version) {
+    fs.writeFileSync(path.join(serverDir, 'VERSION'), `${version}\n`);
+}
+
 async function main() {
     // Self-update check: ensure we're running the latest version (skip if already re-execed)
     const _pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf-8'));
@@ -182,51 +199,58 @@ async function main() {
             log(`  ${yellow('!')} Could not download. Clone manually: git clone https://github.com/delimit-ai/delimit-gateway.git ~/.delimit/server`);
         }
     }
+    // Keep the installed release boundary outside the optionally symlinked ai
+    // directory so version reporting remains truthful in dev mode too.
+    writeInstalledVersionMarker(path.join(DELIMIT_HOME, 'server'), _pkgNow.version);
     // Copy the MCP server file
     const serverSource = path.join(__dirname, '..', 'mcp-server.py');
     if (fs.existsSync(serverSource)) {
         fs.copyFileSync(serverSource, path.join(DELIMIT_HOME, 'server', 'mcp-server.py'));
     }
-    // Download compiled Pro modules (platform-specific)
-    const proDir = path.join(DELIMIT_HOME, 'server', 'ai');
-    const pyVer = (() => { try { return execSync(`${python} -c "import sys; print(f'cp{sys.version_info.major}{sys.version_info.minor}')"`, { encoding: 'utf-8' }).trim(); } catch { return 'cp310'; } })();
-    const arch = (() => { try { return execSync('uname -m', { encoding: 'utf-8' }).trim(); } catch { return 'x86_64'; } })();
-    const osName = process.platform === 'darwin' ? 'macos' : 'linux';
-    const artifact = `${osName}-${arch}-${pyVer}`;
-    const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf-8'));
-    const proVersion = pkg.proModuleVersion || '3.8.2';
-    const proUrl = `https://delimit.ai/releases/v${proVersion}/delimit-pro-${artifact}.tar.gz`;
-    try {
-        const proTarball = path.join(DELIMIT_HOME, 'pro.tar.gz');
-        execSync(`curl -sL "${proUrl}" -o "${proTarball}" --fail`, { stdio: 'pipe', timeout: 30000 });
-        execSync(`tar -xzf "${proTarball}" -C "${proDir}"`, { stdio: 'pipe' });
-        fs.unlinkSync(proTarball);
-        await logp(`  ${green('✓')} Pro modules installed (${artifact})`);
-    } catch {
-        log(`  ${dim('  Pro modules not available for ${artifact} — free tools work fine')}`);
-    }
-    // Re-copy gateway source AFTER Pro modules to ensure full files aren't overwritten by stubs
-    // Skip if dev symlinks are in place
-    if (fs.existsSync(gatewaySource) && !isDevSymlink) {
-        copyDir(gatewaySource, path.join(DELIMIT_HOME, 'server'));
-    }
-    // Remove stale .so binaries that shadow updated .py source files
-    // Python loads .so before .py, so old compiled stubs block new source
-    const aiDir = path.join(DELIMIT_HOME, 'server', 'ai');
-    if (fs.existsSync(aiDir)) {
+    const proModulesManaged = await installProModulesUnlessSourceLinked(isDevSymlink, async () => {
+        // Download compiled Pro modules (platform-specific)
+        const proDir = path.join(DELIMIT_HOME, 'server', 'ai');
+        const pyVer = (() => { try { return execSync(`${python} -c "import sys; print(f'cp{sys.version_info.major}{sys.version_info.minor}')"`, { encoding: 'utf-8' }).trim(); } catch { return 'cp310'; } })();
+        const arch = (() => { try { return execSync('uname -m', { encoding: 'utf-8' }).trim(); } catch { return 'x86_64'; } })();
+        const osName = process.platform === 'darwin' ? 'macos' : 'linux';
+        const artifact = `${osName}-${arch}-${pyVer}`;
+        const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf-8'));
+        const proVersion = pkg.proModuleVersion || '3.8.2';
+        const proUrl = `https://delimit.ai/releases/v${proVersion}/delimit-pro-${artifact}.tar.gz`;
         try {
-            const soFiles = fs.readdirSync(aiDir).filter(f => f.endsWith('.so'));
-            for (const so of soFiles) {
-                const pyName = so.replace(/\.cpython-\d+-.+\.so$/, '.py');
-                const pyPath = path.join(aiDir, pyName);
-                if (fs.existsSync(pyPath)) {
-                    fs.unlinkSync(path.join(aiDir, so));
+            const proTarball = path.join(DELIMIT_HOME, 'pro.tar.gz');
+            execSync(`curl -sL "${proUrl}" -o "${proTarball}" --fail`, { stdio: 'pipe', timeout: 30000 });
+            execSync(`tar -xzf "${proTarball}" -C "${proDir}"`, { stdio: 'pipe' });
+            fs.unlinkSync(proTarball);
+            await logp(`  ${green('✓')} Pro modules installed (${artifact})`);
+        } catch {
+            log(`  ${dim('  Pro modules not available for ${artifact} — free tools work fine')}`);
+        }
+        // Re-copy gateway source AFTER Pro modules to ensure full files aren't overwritten by stubs
+        if (fs.existsSync(gatewaySource)) {
+            copyDir(gatewaySource, path.join(DELIMIT_HOME, 'server'));
+        }
+        // Remove stale .so binaries that shadow updated .py source files
+        // Python loads .so before .py, so old compiled stubs block new source
+        const aiDir = path.join(DELIMIT_HOME, 'server', 'ai');
+        if (fs.existsSync(aiDir)) {
+            try {
+                const soFiles = fs.readdirSync(aiDir).filter(f => f.endsWith('.so'));
+                for (const so of soFiles) {
+                    const pyName = so.replace(/\.cpython-\d+-.+\.so$/, '.py');
+                    const pyPath = path.join(aiDir, pyName);
+                    if (fs.existsSync(pyPath)) {
+                        fs.unlinkSync(path.join(aiDir, so));
+                    }
                 }
-            }
-            if (soFiles.length > 0) {
-                await logp(`  ${green('✓')} Cleaned ${soFiles.length} stale compiled modules`);
-            }
-        } catch { /* ignore cleanup errors */ }
+                if (soFiles.length > 0) {
+                    await logp(`  ${green('✓')} Cleaned ${soFiles.length} stale compiled modules`);
+                }
+            } catch { /* ignore cleanup errors */ }
+        }
+    });
+    if (!proModulesManaged) {
+        await logp(`  ${green('✓')} Source-linked Pro modules preserved (dev mode)`);
     }
     // Install Python deps into isolated venv with pinned versions
     log(`  ${dim('  Installing Python dependencies...')}`);
@@ -1489,7 +1513,11 @@ function copyDir(src, dest) {
         }
     }
 }
-main().catch(err => {
-    console.error('Setup failed:', err.message);
-    process.exit(1);
-});
+if (require.main === module) {
+    main().catch(err => {
+        console.error('Setup failed:', err.message);
+        process.exit(1);
+    });
+}
+
+module.exports = { installProModulesUnlessSourceLinked, writeInstalledVersionMarker };
