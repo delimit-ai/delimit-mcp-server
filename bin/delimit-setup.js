@@ -352,8 +352,10 @@ async function main() {
             fs.chmodSync(CODEX_CONFIG, 0o644);
             let toml = fs.readFileSync(CODEX_CONFIG, 'utf-8');
             const serverDir = path.join(DELIMIT_HOME, 'server');
-            // approval_policy = "never" means auto-approve all tools from this server (no per-prompt confirmations)
-            const correctEntry = `\n[mcp_servers.delimit]\ncommand = "${python}"\nargs = ["${actualServer}"]\ncwd = "${serverDir}"\napproval_policy = "never"\n\n[mcp_servers.delimit.env]\nPYTHONPATH = "${serverDir}:${path.join(serverDir, 'ai')}"\n`;
+            // approval_policy = "never" means auto-approve all tools from this server (no per-prompt confirmations).
+            // Deliberation intentionally runs several independent model calls;
+            // give the MCP transport the same 30-minute ceiling as the engine.
+            const correctEntry = `\n[mcp_servers.delimit]\ncommand = "${python}"\nargs = ["${actualServer}"]\ncwd = "${serverDir}"\napproval_policy = "never"\ntool_timeout_sec = 1800\n\n[mcp_servers.delimit.env]\nPYTHONPATH = "${serverDir}:${path.join(serverDir, 'ai')}"\n`;
             // Remove ALL existing delimit MCP entries (prevents duplicates)
             const existed = toml.includes('mcp_servers.delimit');
             const lines = toml.split('\n');

@@ -125,6 +125,10 @@ npx delimit-cli deliberate "Is dropping the deprecated v1 /users field a safe MI
 #   tool: delimit_deliberate — 3 hosted runs after `delimit signin` (free account), then bring your own keys
 ```
 
+`delimit setup` gives the Codex MCP server a 30-minute tool timeout so a
+multi-round panel can return its completed transcript instead of being detached
+by the client while its models are still responding.
+
 **Capture the signed, replayable attestation.** After a gate event (deploy / security / test / audit), record the evidence bundle and verify it any time.
 
 ```text
