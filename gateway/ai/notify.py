@@ -355,6 +355,7 @@ def send_telegram(
     event_type: str = "",
     bot_token: str = "",
     chat_id: str = "",
+    buttons: Optional[List[List[Dict[str, Any]]]] = None,
 ) -> Dict[str, Any]:
     """Send a Telegram message via bot API."""
     bot_config = _load_json_file(
@@ -382,6 +383,8 @@ def send_telegram(
         "text": f"{prefix}{message}",
         "disable_web_page_preview": False,
     }
+    if buttons:
+        payload["reply_markup"] = {"inline_keyboard": buttons}
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     result = _post_json(url, payload)
     _record_notification({
@@ -1277,6 +1280,7 @@ def send_notification(
     event_type: str = "",
     to: str = "",
     from_account: str = "",
+    telegram_buttons: Optional[List[List[Dict[str, Any]]]] = None,
 ) -> Dict[str, Any]:
     """Route a notification to the appropriate channel."""
     if not message:
@@ -1336,7 +1340,11 @@ def send_notification(
             result["protocol_warnings"] = protocol_warnings
         return result
     elif channel == "telegram":
-        return send_telegram(message=message, event_type=event_type)
+        return send_telegram(
+            message=message,
+            event_type=event_type,
+            buttons=telegram_buttons,
+        )
     else:
         return {"error": f"Unknown channel: {channel}. Supported: webhook, slack, email, telegram"}
 
