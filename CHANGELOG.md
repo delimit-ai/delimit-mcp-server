@@ -1,5 +1,11 @@
 ## Unreleased
 
+### Security
+- Raised the production dependency floors for `axios` and `js-yaml`, and refreshed compatible transitive dependencies, removing all high-severity `npm audit` findings from both the source install and a freshly packed consumer install. The installed versions are `axios` 1.20.0, `js-yaml` 4.3.2, and `brace-expansion` 2.1.4.
+
+### Known
+- `npm audit` still reports three moderate findings through Express 4's `qs` dependency. Delimit's agent binds that HTTP surface to `127.0.0.1`; the clean upstream path is Express 5, which formally requires Node 18 and is being held for an explicit runtime-support decision. This patch retains Express 4, and the packed CLI plus loopback agent were exercised successfully under Node 14.21.3.
+
 ## [4.18.5] - 2026-09-06
 
 ### Fixed
