@@ -501,3 +501,41 @@ describe('postinstall telemetry', () => {
         assert.ok(pkg.files.includes('scripts/'), 'Should include scripts/ in published files');
     });
 });
+
+describe('setup continuity boundaries', () => {
+    const {
+        installProModulesUnlessSourceLinked,
+        writeInstalledVersionMarker,
+    } = require('../bin/delimit-setup');
+
+    it('never mutates Pro modules through a source-linked ai directory', async () => {
+        let mutationRan = false;
+        const managed = await installProModulesUnlessSourceLinked(true, async () => {
+            mutationRan = true;
+        });
+
+        assert.strictEqual(managed, false);
+        assert.strictEqual(mutationRan, false);
+    });
+
+    it('retains normal Pro module installation outside dev-symlink mode', async () => {
+        let mutationRan = false;
+        const managed = await installProModulesUnlessSourceLinked(false, async () => {
+            mutationRan = true;
+        });
+
+        assert.strictEqual(managed, true);
+        assert.strictEqual(mutationRan, true);
+    });
+
+    it('refreshes the installed VERSION marker exactly', () => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'delimit-version-marker-'));
+        try {
+            fs.writeFileSync(path.join(tmpDir, 'VERSION'), 'stale\n');
+            writeInstalledVersionMarker(tmpDir, '8.8.9');
+            assert.strictEqual(fs.readFileSync(path.join(tmpDir, 'VERSION'), 'utf-8'), '8.8.9\n');
+        } finally {
+            fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+    });
+});
