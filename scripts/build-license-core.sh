@@ -132,6 +132,36 @@ fi
 SO_SIZE="$(stat -c%s "$SO_FILE")"
 echo "   ✅ produced: $SO_FILE ($SO_SIZE bytes)"
 
+# ── Linux ABI compatibility guard ───────────────────────────────────
+# The public Linux artifact supports Ubuntu 22.04 (glibc 2.35). Building on
+# a floating runner can silently add newer symbol requirements even when the
+# extension imports on the build host. Inspect the artifact itself and fail
+# closed before npm can pack an incompatible binary.
+GLIBC_CEILING="2.35"
+if ! command -v readelf >/dev/null 2>&1; then
+    echo "❌ readelf not found; cannot verify Linux ABI compatibility"
+    exit 1
+fi
+
+GLIBC_REQUIREMENTS="$(
+    readelf --version-info "$SO_FILE" 2>/dev/null \
+        | grep -oE 'GLIBC_[0-9]+(\.[0-9]+)+' \
+        | sed 's/^GLIBC_//' \
+        | sort -Vu \
+        || true
+)"
+if [ -z "$GLIBC_REQUIREMENTS" ]; then
+    echo "❌ Could not determine GLIBC requirements for $SO_FILE"
+    exit 1
+fi
+
+MAX_GLIBC="$(printf '%s\n' "$GLIBC_REQUIREMENTS" | tail -n 1)"
+if [ "$(printf '%s\n%s\n' "$GLIBC_CEILING" "$MAX_GLIBC" | sort -V | tail -n 1)" != "$GLIBC_CEILING" ]; then
+    echo "❌ $SO_FILE requires GLIBC_$MAX_GLIBC; maximum supported is GLIBC_$GLIBC_CEILING (Ubuntu 22.04)"
+    exit 1
+fi
+echo "   ✅ GLIBC requirement $MAX_GLIBC <= $GLIBC_CEILING (Ubuntu 22.04 compatible)"
+
 # ── Bypass-identifier scan ───────────────────────────────────────────
 # Customers must not be able to `strings | grep` the .so for known
 # bypass class names. Fail the build if any leak through.

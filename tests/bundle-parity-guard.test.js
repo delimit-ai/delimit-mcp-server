@@ -215,7 +215,10 @@ describe('non-authoritative build artifacts', () => {
     assert.ok(!fs.existsSync(path.join(REPO_ROOT, staleManifest)));
   });
 
-  function makeLicenseBuildFixture({ failCompile = false } = {}) {
+  function makeLicenseBuildFixture({
+    failCompile = false,
+    glibcVersion = '2.34',
+  } = {}) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'license-build-fix-'));
     fs.mkdirSync(path.join(dir, 'scripts'), { recursive: true });
     fs.copyFileSync(
@@ -253,15 +256,33 @@ exit 2
 `
     );
     fs.chmodSync(fakePython, 0o755);
-    return { dir, fakePython };
+
+    const fakeReadelf = path.join(dir, 'readelf');
+    fs.writeFileSync(
+      fakeReadelf,
+      `#!/bin/bash
+set -eu
+if [ "\${1:-}" = "--version-info" ]; then
+  printf 'Version needs section: Name: GLIBC_${glibcVersion} Flags: none Version: 1\\n'
+  exit 0
+fi
+exit 2
+`
+    );
+    fs.chmodSync(fakeReadelf, 0o755);
+    return {
+      dir,
+      fakePython,
+      env: { PYTHON: fakePython, PATH: `${dir}:${process.env.PATH}` },
+    };
   }
 
   it('restores the reviewed license stub and removes compiler intermediates', () => {
-    const { dir, fakePython } = makeLicenseBuildFixture();
+    const { dir, env } = makeLicenseBuildFixture();
     const stub = path.join(dir, 'gateway', 'ai', 'license_core.pyi');
     const reviewed = fs.readFileSync(stub);
 
-    const r = runScript(dir, 'build-license-core.sh', { PYTHON: fakePython });
+    const r = runScript(dir, 'build-license-core.sh', env);
     assert.strictEqual(r.code, 0, r.out);
     assert.deepStrictEqual(fs.readFileSync(stub), reviewed);
     assert.ok(!fs.existsSync(path.join(dir, 'gateway', 'ai', 'license_core.py')));
@@ -278,14 +299,15 @@ exit 2
       )
     );
     assert.match(r.out, /restored reviewed license_core\.pyi byte-for-byte/i);
+    assert.match(r.out, /GLIBC requirement 2\.34 <= 2\.35/i);
   });
 
   it('restores the reviewed stub and removes binary output after compile failure', () => {
-    const { dir, fakePython } = makeLicenseBuildFixture({ failCompile: true });
+    const { dir, env } = makeLicenseBuildFixture({ failCompile: true });
     const stub = path.join(dir, 'gateway', 'ai', 'license_core.pyi');
     const reviewed = fs.readFileSync(stub);
 
-    const r = runScript(dir, 'build-license-core.sh', { PYTHON: fakePython });
+    const r = runScript(dir, 'build-license-core.sh', env);
     assert.notStrictEqual(r.code, 0, 'a compiler failure must fail the build');
     assert.deepStrictEqual(fs.readFileSync(stub), reviewed);
     assert.ok(fs.existsSync(path.join(dir, 'gateway', 'ai', 'license_core.py')));
@@ -301,6 +323,65 @@ exit 2
         )
       )
     );
+  });
+
+  it('fails closed and removes binary output that requires newer glibc', () => {
+    const { dir, env } = makeLicenseBuildFixture({ glibcVersion: '2.38' });
+    const stub = path.join(dir, 'gateway', 'ai', 'license_core.pyi');
+    const reviewed = fs.readFileSync(stub);
+
+    const r = runScript(dir, 'build-license-core.sh', env);
+    assert.notStrictEqual(
+      r.code,
+      0,
+      'a too-new GLIBC requirement must fail the build'
+    );
+    assert.match(
+      r.out,
+      /requires GLIBC_2\.38; maximum supported is GLIBC_2\.35/i
+    );
+    assert.deepStrictEqual(fs.readFileSync(stub), reviewed);
+    assert.ok(fs.existsSync(path.join(dir, 'gateway', 'ai', 'license_core.py')));
+    assert.ok(
+      !fs.existsSync(
+        path.join(
+          dir,
+          'gateway',
+          'ai',
+          'license_core.cpython-310-x86_64-linux-gnu.so'
+        )
+      )
+    );
+  });
+});
+
+describe('native release runner compatibility', () => {
+  it('pins every native build job to Ubuntu 22.04', () => {
+    const workflow = fs.readFileSync(
+      path.join(REPO_ROOT, '.github', 'workflows', 'publish.yml'),
+      'utf8'
+    );
+    const nativeBuildJobs = ['validate', 'publish'];
+
+    for (const [index, job] of nativeBuildJobs.entries()) {
+      const start = workflow.indexOf(`  ${job}:`);
+      const nextJob = nativeBuildJobs[index + 1];
+      const end = nextJob
+        ? workflow.indexOf(`  ${nextJob}:`, start + 1)
+        : workflow.indexOf('  release:', start + 1);
+      const body = workflow.slice(start, end);
+      assert.ok(start >= 0 && end > start, `workflow job ${job} must exist`);
+      assert.match(
+        body,
+        /runs-on: ubuntu-22\.04/,
+        `${job} must build native artifacts on Ubuntu 22.04`
+      );
+      assert.doesNotMatch(
+        body,
+        /runs-on: ubuntu-latest/,
+        `${job} must not use a floating Linux ABI`
+      );
+    }
   });
 });
 

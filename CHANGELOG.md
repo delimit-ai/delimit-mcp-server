@@ -1,3 +1,13 @@
+## [4.18.8] - 2026-09-07
+
+### Fixed
+- Build and publish the Linux native license module on pinned Ubuntu 22.04,
+  restoring compatibility with its glibc 2.35 baseline. Version 4.18.7 was
+  built on a floating runner and its published module required GLIBC 2.38.
+- Fail native packaging when the compiled module requires a newer glibc than
+  Ubuntu 22.04 provides, so runner-image drift cannot silently raise the
+  package's minimum Linux version again.
+
 ## [4.18.7] - 2026-09-07
 
 ### Security
