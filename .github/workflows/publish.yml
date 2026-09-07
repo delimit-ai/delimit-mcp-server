@@ -21,7 +21,9 @@ permissions:
 
 jobs:
   validate:
-    runs-on: ubuntu-latest
+    # license_core.so supports Ubuntu 22.04 (glibc 2.35). A floating runner
+    # produced v4.18.7 with a GLIBC_2.38 requirement that older hosts reject.
+    runs-on: ubuntu-22.04
     name: Pre-publish Validation
     steps:
       - name: Checkout npm-delimit
@@ -181,7 +183,8 @@ jobs:
 
   publish:
     needs: validate
-    runs-on: ubuntu-latest
+    # Keep the actual npm artifact on the same minimum Linux ABI as validation.
+    runs-on: ubuntu-22.04
     name: Publish
     steps:
       - name: Checkout npm-delimit

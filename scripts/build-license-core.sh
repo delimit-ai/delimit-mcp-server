@@ -132,6 +132,75 @@ fi
 SO_SIZE="$(stat -c%s "$SO_FILE")"
 echo "   ✅ produced: $SO_FILE ($SO_SIZE bytes)"
 
+# ── Linux ABI compatibility guard ───────────────────────────────────
+# The public Linux artifact supports Ubuntu 22.04 (glibc 2.35). Building on
+# a floating runner can silently add newer symbol requirements even when the
+# extension imports on the build host. Inspect the artifact itself and fail
+# closed before npm can pack an incompatible binary.
+GLIBC_CEILING="2.35"
+if ! command -v readelf >/dev/null 2>&1; then
+    echo "❌ readelf not found; cannot verify Linux ABI compatibility"
+    exit 1
+fi
+
+if ! READELF_OUTPUT="$(readelf --version-info "$SO_FILE" 2>/dev/null)"; then
+    echo "❌ readelf could not inspect $SO_FILE"
+    exit 1
+fi
+
+# Reject every non-numeric GLIBC requirement. Tags such as
+# GLIBC_ABI_DT_RELR can accompany otherwise-old numeric symbols, while
+# GLIBC_PRIVATE is intentionally not a portable ABI. A numeric-only ceiling
+# check would incorrectly accept either artifact.
+if ! GLIBC_TAGS="$(
+    printf '%s\n' "$READELF_OUTPUT" \
+        | grep -oE 'Name:[[:space:]]+GLIBC_[^[:space:]]+' \
+        | sed -E 's/^Name:[[:space:]]+//'
+)"; then
+    echo "❌ Could not parse GLIBC requirements for $SO_FILE"
+    exit 1
+fi
+
+GLIBC_NUMERIC_REQUIREMENTS=()
+UNSUPPORTED_GLIBC_REQUIREMENTS=()
+while IFS= read -r GLIBC_TAG; do
+    [ -n "$GLIBC_TAG" ] || continue
+    if [[ "$GLIBC_TAG" =~ ^GLIBC_([0-9]+(\.[0-9]+)+)$ ]]; then
+        GLIBC_NUMERIC_REQUIREMENTS+=("${BASH_REMATCH[1]}")
+    else
+        UNSUPPORTED_GLIBC_REQUIREMENTS+=("$GLIBC_TAG")
+    fi
+done <<< "$GLIBC_TAGS"
+
+if [ "${#UNSUPPORTED_GLIBC_REQUIREMENTS[@]}" -gt 0 ]; then
+    echo "❌ $SO_FILE requires unsupported GLIBC version tag(s):"
+    printf '%s\n' "${UNSUPPORTED_GLIBC_REQUIREMENTS[@]}"
+    exit 1
+fi
+
+if [ "${#GLIBC_NUMERIC_REQUIREMENTS[@]}" -eq 0 ]; then
+    echo "❌ Could not determine GLIBC requirements for $SO_FILE"
+    exit 1
+fi
+
+if ! GLIBC_REQUIREMENTS="$(printf '%s\n' "${GLIBC_NUMERIC_REQUIREMENTS[@]}" | sort -Vu)"; then
+    echo "❌ Could not sort GLIBC requirements for $SO_FILE"
+    exit 1
+fi
+
+MAX_GLIBC="$(printf '%s\n' "$GLIBC_REQUIREMENTS" | tail -n 1)"
+if ! GLIBC_CEILING_COMPARISON="$(
+    printf '%s\n%s\n' "$GLIBC_CEILING" "$MAX_GLIBC" | sort -V | tail -n 1
+)"; then
+    echo "❌ Could not compare GLIBC requirements for $SO_FILE"
+    exit 1
+fi
+if [ "$GLIBC_CEILING_COMPARISON" != "$GLIBC_CEILING" ]; then
+    echo "❌ $SO_FILE requires GLIBC_$MAX_GLIBC; maximum supported is GLIBC_$GLIBC_CEILING (Ubuntu 22.04)"
+    exit 1
+fi
+echo "   ✅ GLIBC requirement $MAX_GLIBC <= $GLIBC_CEILING (Ubuntu 22.04 compatible)"
+
 # ── Bypass-identifier scan ───────────────────────────────────────────
 # Customers must not be able to `strings | grep` the .so for known
 # bypass class names. Fail the build if any leak through.

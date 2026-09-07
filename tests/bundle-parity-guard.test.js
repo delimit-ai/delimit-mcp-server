@@ -215,7 +215,15 @@ describe('non-authoritative build artifacts', () => {
     assert.ok(!fs.existsSync(path.join(REPO_ROOT, staleManifest)));
   });
 
-  function makeLicenseBuildFixture({ failCompile = false } = {}) {
+  function makeLicenseBuildFixture({
+    failCompile = false,
+    glibcVersion = '2.34',
+    glibcSuffix = '',
+    glibcAbi = '',
+    readelfExit = 0,
+    glibcSedExit = 0,
+    glibcSortExit = 0,
+  } = {}) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'license-build-fix-'));
     fs.mkdirSync(path.join(dir, 'scripts'), { recursive: true });
     fs.copyFileSync(
@@ -253,15 +261,64 @@ exit 2
 `
     );
     fs.chmodSync(fakePython, 0o755);
-    return { dir, fakePython };
+
+    const fakeReadelf = path.join(dir, 'readelf');
+    fs.writeFileSync(
+      fakeReadelf,
+      `#!/bin/bash
+set -eu
+if [ "\${1:-}" = "--version-info" ]; then
+  printf 'Version needs section: Name: GLIBC_${glibcVersion}${glibcSuffix} Flags: none Version: 1\\n'
+  if [ -n '${glibcAbi}' ]; then
+    printf 'Version needs section: Name: GLIBC_ABI_${glibcAbi} Flags: none Version: 2\\n'
+  fi
+  exit ${readelfExit}
+fi
+exit 2
+`
+    );
+    fs.chmodSync(fakeReadelf, 0o755);
+
+    const fakeSed = path.join(dir, 'sed');
+    fs.writeFileSync(
+      fakeSed,
+      `#!/bin/bash
+set -eu
+if [ '${glibcSedExit}' -ne 0 ]; then
+  cat >/dev/null
+  printf 'GLIBC_2.34\\n'
+  exit ${glibcSedExit}
+fi
+exec /usr/bin/sed "$@"
+`
+    );
+    fs.chmodSync(fakeSed, 0o755);
+
+    const fakeSort = path.join(dir, 'sort');
+    fs.writeFileSync(
+      fakeSort,
+      `#!/bin/bash
+set -eu
+if [ "\${1:-}" = "-Vu" ] && [ '${glibcSortExit}' -ne 0 ]; then
+  exit ${glibcSortExit}
+fi
+exec /usr/bin/sort "$@"
+`
+    );
+    fs.chmodSync(fakeSort, 0o755);
+    return {
+      dir,
+      fakePython,
+      env: { PYTHON: fakePython, PATH: `${dir}:${process.env.PATH}` },
+    };
   }
 
   it('restores the reviewed license stub and removes compiler intermediates', () => {
-    const { dir, fakePython } = makeLicenseBuildFixture();
+    const { dir, env } = makeLicenseBuildFixture();
     const stub = path.join(dir, 'gateway', 'ai', 'license_core.pyi');
     const reviewed = fs.readFileSync(stub);
 
-    const r = runScript(dir, 'build-license-core.sh', { PYTHON: fakePython });
+    const r = runScript(dir, 'build-license-core.sh', env);
     assert.strictEqual(r.code, 0, r.out);
     assert.deepStrictEqual(fs.readFileSync(stub), reviewed);
     assert.ok(!fs.existsSync(path.join(dir, 'gateway', 'ai', 'license_core.py')));
@@ -278,14 +335,15 @@ exit 2
       )
     );
     assert.match(r.out, /restored reviewed license_core\.pyi byte-for-byte/i);
+    assert.match(r.out, /GLIBC requirement 2\.34 <= 2\.35/i);
   });
 
   it('restores the reviewed stub and removes binary output after compile failure', () => {
-    const { dir, fakePython } = makeLicenseBuildFixture({ failCompile: true });
+    const { dir, env } = makeLicenseBuildFixture({ failCompile: true });
     const stub = path.join(dir, 'gateway', 'ai', 'license_core.pyi');
     const reviewed = fs.readFileSync(stub);
 
-    const r = runScript(dir, 'build-license-core.sh', { PYTHON: fakePython });
+    const r = runScript(dir, 'build-license-core.sh', env);
     assert.notStrictEqual(r.code, 0, 'a compiler failure must fail the build');
     assert.deepStrictEqual(fs.readFileSync(stub), reviewed);
     assert.ok(fs.existsSync(path.join(dir, 'gateway', 'ai', 'license_core.py')));
@@ -301,6 +359,182 @@ exit 2
         )
       )
     );
+  });
+
+  it('fails closed and removes binary output that requires newer glibc', () => {
+    const { dir, env } = makeLicenseBuildFixture({ glibcVersion: '2.38' });
+    const stub = path.join(dir, 'gateway', 'ai', 'license_core.pyi');
+    const reviewed = fs.readFileSync(stub);
+
+    const r = runScript(dir, 'build-license-core.sh', env);
+    assert.notStrictEqual(
+      r.code,
+      0,
+      'a too-new GLIBC requirement must fail the build'
+    );
+    assert.match(
+      r.out,
+      /requires GLIBC_2\.38; maximum supported is GLIBC_2\.35/i
+    );
+    assert.deepStrictEqual(fs.readFileSync(stub), reviewed);
+    assert.ok(fs.existsSync(path.join(dir, 'gateway', 'ai', 'license_core.py')));
+    assert.ok(
+      !fs.existsSync(
+        path.join(
+          dir,
+          'gateway',
+          'ai',
+          'license_core.cpython-310-x86_64-linux-gnu.so'
+        )
+      )
+    );
+  });
+
+  it('fails closed when readelf returns partial output and a non-zero status', () => {
+    const { dir, env } = makeLicenseBuildFixture({ readelfExit: 7 });
+
+    const r = runScript(dir, 'build-license-core.sh', env);
+    assert.notStrictEqual(
+      r.code,
+      0,
+      'partial parseable output must not mask a readelf failure'
+    );
+    assert.match(r.out, /readelf could not inspect/i);
+    assert.ok(fs.existsSync(path.join(dir, 'gateway', 'ai', 'license_core.py')));
+    assert.ok(
+      !fs.existsSync(
+        path.join(
+          dir,
+          'gateway',
+          'ai',
+          'license_core.cpython-310-x86_64-linux-gnu.so'
+        )
+      )
+    );
+  });
+
+  it('rejects non-numeric GLIBC ABI requirements unsupported by Ubuntu 22.04', () => {
+    const { dir, env } = makeLicenseBuildFixture({ glibcAbi: 'DT_RELR' });
+
+    const r = runScript(dir, 'build-license-core.sh', env);
+    assert.notStrictEqual(
+      r.code,
+      0,
+      'GLIBC_ABI_DT_RELR must not pass a numeric-only ceiling check'
+    );
+    assert.match(r.out, /unsupported GLIBC version tag/i);
+    assert.match(r.out, /GLIBC_ABI_DT_RELR/);
+    assert.ok(fs.existsSync(path.join(dir, 'gateway', 'ai', 'license_core.py')));
+    assert.ok(
+      !fs.existsSync(
+        path.join(
+          dir,
+          'gateway',
+          'ai',
+          'license_core.cpython-310-x86_64-linux-gnu.so'
+        )
+      )
+    );
+  });
+
+  it('rejects a non-numeric suffix after an otherwise-compatible GLIBC version', () => {
+    const { dir, env } = makeLicenseBuildFixture({ glibcSuffix: '+CUSTOM' });
+
+    const r = runScript(dir, 'build-license-core.sh', env);
+    assert.notStrictEqual(
+      r.code,
+      0,
+      'a complete non-numeric GLIBC tag must not be truncated to a numeric prefix'
+    );
+    assert.match(r.out, /unsupported GLIBC version tag/i);
+    assert.match(r.out, /GLIBC_2\.34\+CUSTOM/);
+    assert.ok(fs.existsSync(path.join(dir, 'gateway', 'ai', 'license_core.py')));
+    assert.ok(
+      !fs.existsSync(
+        path.join(
+          dir,
+          'gateway',
+          'ai',
+          'license_core.cpython-310-x86_64-linux-gnu.so'
+        )
+      )
+    );
+  });
+
+  it('fails closed when GLIBC requirement sorting fails', () => {
+    const { dir, env } = makeLicenseBuildFixture({ glibcSortExit: 7 });
+
+    const r = runScript(dir, 'build-license-core.sh', env);
+    assert.notStrictEqual(
+      r.code,
+      0,
+      'a GLIBC parser failure must not be treated as an empty requirement set'
+    );
+    assert.match(r.out, /could not sort GLIBC requirements/i);
+    assert.ok(fs.existsSync(path.join(dir, 'gateway', 'ai', 'license_core.py')));
+    assert.ok(
+      !fs.existsSync(
+        path.join(
+          dir,
+          'gateway',
+          'ai',
+          'license_core.cpython-310-x86_64-linux-gnu.so'
+        )
+      )
+    );
+  });
+
+  it('fails closed when extraction emits partial output and exits one', () => {
+    const { dir, env } = makeLicenseBuildFixture({ glibcSedExit: 1 });
+
+    const r = runScript(dir, 'build-license-core.sh', env);
+    assert.notStrictEqual(
+      r.code,
+      0,
+      'partial parser output must not be mistaken for a valid GLIBC requirement'
+    );
+    assert.match(r.out, /could not parse GLIBC requirements/i);
+    assert.ok(fs.existsSync(path.join(dir, 'gateway', 'ai', 'license_core.py')));
+    assert.ok(
+      !fs.existsSync(
+        path.join(
+          dir,
+          'gateway',
+          'ai',
+          'license_core.cpython-310-x86_64-linux-gnu.so'
+        )
+      )
+    );
+  });
+});
+
+describe('native release runner compatibility', () => {
+  it('pins every native build job to Ubuntu 22.04', () => {
+    const workflow = fs.readFileSync(
+      path.join(REPO_ROOT, '.github', 'workflows', 'publish.yml'),
+      'utf8'
+    );
+    const nativeBuildJobs = ['validate', 'publish'];
+
+    for (const [index, job] of nativeBuildJobs.entries()) {
+      const start = workflow.indexOf(`  ${job}:`);
+      const nextJob = nativeBuildJobs[index + 1];
+      const end = nextJob
+        ? workflow.indexOf(`  ${nextJob}:`, start + 1)
+        : workflow.indexOf('  release:', start + 1);
+      const body = workflow.slice(start, end);
+      assert.ok(start >= 0 && end > start, `workflow job ${job} must exist`);
+      assert.match(
+        body,
+        /runs-on: ubuntu-22\.04/,
+        `${job} must build native artifacts on Ubuntu 22.04`
+      );
+      assert.doesNotMatch(
+        body,
+        /runs-on: ubuntu-latest/,
+        `${job} must not use a floating Linux ABI`
+      );
+    }
   });
 });
 
