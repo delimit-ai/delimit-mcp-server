@@ -9,7 +9,7 @@ COPY gateway/requirements.txt ./
 # image run the same fastmcp (fresh-user install test 2026-09-02, finding 7:
 # the unpinned fallback landed on 4.0.2 while setup venvs ran 3.1.0).
 RUN pip install --no-cache-dir -r requirements.txt 2>/dev/null \
-    || pip install --no-cache-dir fastmcp==3.1.0 pyyaml==6.0.3 pydantic==2.12.5 packaging==26.0 "mcp>=1.28.1"
+    || pip install --no-cache-dir fastmcp==3.2.4 pyyaml==6.0.3 pydantic==2.12.5 packaging==26.0 "mcp>=1.28.1"
 
 # Copy the MCP server
 COPY gateway/ ./gateway/

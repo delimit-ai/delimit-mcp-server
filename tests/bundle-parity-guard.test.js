@@ -26,6 +26,7 @@ const os = require('node:os');
 const path = require('node:path');
 
 const REPO_ROOT = path.join(__dirname, '..');
+const FASTMCP_PIN = 'fastmcp==3.2.4';
 
 function writeFile(dir, rel, body = '# content\n') {
   const p = path.join(dir, rel);
@@ -212,5 +213,33 @@ describe('non-authoritative build artifacts', () => {
     assert.ok(!pkg.files.includes(staleManifest));
     assert.ok(!allowlist.split(/\r?\n/).includes(staleManifest));
     assert.ok(!fs.existsSync(path.join(REPO_ROOT, staleManifest)));
+  });
+});
+
+describe('FastMCP fresh-install security parity (LED-4530)', () => {
+  it('pins the patched runtime in the shipped requirements', () => {
+    const requirements = fs.readFileSync(
+      path.join(REPO_ROOT, 'gateway', 'requirements.txt'),
+      'utf8'
+    );
+    assert.ok(requirements.split(/\r?\n/).includes(FASTMCP_PIN));
+    assert.doesNotMatch(requirements, /fastmcp==3\.1\.0/);
+  });
+
+  it('uses the identical pin in every setup and container fallback', () => {
+    const dockerfile = fs.readFileSync(path.join(REPO_ROOT, 'Dockerfile'), 'utf8');
+    const setup = fs.readFileSync(
+      path.join(REPO_ROOT, 'bin', 'delimit-setup.js'),
+      'utf8'
+    );
+
+    assert.ok(dockerfile.includes(FASTMCP_PIN));
+    assert.strictEqual(
+      (setup.match(/fastmcp==3\.2\.4/g) || []).length,
+      3,
+      'venv, global, and manual recovery paths must share the patched pin'
+    );
+    assert.doesNotMatch(dockerfile, /fastmcp==3\.1\.0/);
+    assert.doesNotMatch(setup, /fastmcp==3\.1\.0/);
   });
 });

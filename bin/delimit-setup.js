@@ -270,17 +270,17 @@ async function main() {
             // the delimit_test_smoke deploy-gate step fails to run cleanly.
             execSync(`"${venvPy}" -m pip install --quiet pytest 2>/dev/null`, { stdio: 'pipe' });
         } else {
-            execSync(`"${venvPy}" -m pip install --quiet fastmcp==3.1.0 pyyaml==6.0.3 pydantic==2.12.5 packaging==26.0 pytest 2>/dev/null`, { stdio: 'pipe' });
+            execSync(`"${venvPy}" -m pip install --quiet fastmcp==3.2.4 pyyaml==6.0.3 pydantic==2.12.5 packaging==26.0 pytest 2>/dev/null`, { stdio: 'pipe' });
         }
         python = venvPy;  // Use venv python for MCP config
         await logp(`  ${green('✓')} Python dependencies installed (isolated venv)`);
     } catch {
         log(`  ${yellow('!')} venv install failed — trying global pip`);
         try {
-            execSync(`${python} -m pip install --quiet fastmcp==3.1.0 pyyaml==6.0.3 pydantic==2.12.5 packaging==26.0 pytest 2>/dev/null`, { stdio: 'pipe' });
+            execSync(`${python} -m pip install --quiet fastmcp==3.2.4 pyyaml==6.0.3 pydantic==2.12.5 packaging==26.0 pytest 2>/dev/null`, { stdio: 'pipe' });
             await logp(`  ${green('✓')} Python dependencies installed (global)`);
         } catch {
-            log(`  ${yellow('!')} pip install failed — run manually: pip install fastmcp pyyaml pydantic packaging pytest`);
+            log(`  ${yellow('!')} pip install failed — run manually: pip install fastmcp==3.2.4 pyyaml pydantic packaging pytest`);
         }
     }
     // LED-1084 week 2: build the content-grounding feature whitelist.
