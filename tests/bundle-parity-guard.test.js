@@ -218,6 +218,7 @@ describe('non-authoritative build artifacts', () => {
   function makeLicenseBuildFixture({
     failCompile = false,
     glibcVersion = '2.34',
+    glibcSuffix = '',
     glibcAbi = '',
     readelfExit = 0,
     glibcSortExit = 0,
@@ -266,7 +267,7 @@ exit 2
       `#!/bin/bash
 set -eu
 if [ "\${1:-}" = "--version-info" ]; then
-  printf 'Version needs section: Name: GLIBC_${glibcVersion} Flags: none Version: 1\\n'
+  printf 'Version needs section: Name: GLIBC_${glibcVersion}${glibcSuffix} Flags: none Version: 1\\n'
   if [ -n '${glibcAbi}' ]; then
     printf 'Version needs section: Name: GLIBC_ABI_${glibcAbi} Flags: none Version: 2\\n'
   fi
@@ -407,6 +408,30 @@ exec /usr/bin/sort "$@"
     );
     assert.match(r.out, /unsupported GLIBC version tag/i);
     assert.match(r.out, /GLIBC_ABI_DT_RELR/);
+    assert.ok(fs.existsSync(path.join(dir, 'gateway', 'ai', 'license_core.py')));
+    assert.ok(
+      !fs.existsSync(
+        path.join(
+          dir,
+          'gateway',
+          'ai',
+          'license_core.cpython-310-x86_64-linux-gnu.so'
+        )
+      )
+    );
+  });
+
+  it('rejects a non-numeric suffix after an otherwise-compatible GLIBC version', () => {
+    const { dir, env } = makeLicenseBuildFixture({ glibcSuffix: '+CUSTOM' });
+
+    const r = runScript(dir, 'build-license-core.sh', env);
+    assert.notStrictEqual(
+      r.code,
+      0,
+      'a complete non-numeric GLIBC tag must not be truncated to a numeric prefix'
+    );
+    assert.match(r.out, /unsupported GLIBC version tag/i);
+    assert.match(r.out, /GLIBC_2\.34\+CUSTOM/);
     assert.ok(fs.existsSync(path.join(dir, 'gateway', 'ai', 'license_core.py')));
     assert.ok(
       !fs.existsSync(

@@ -155,7 +155,8 @@ fi
 GLIBC_TAGS=""
 if GLIBC_TAGS="$(
     printf '%s\n' "$READELF_OUTPUT" \
-        | grep -oE 'GLIBC_[A-Za-z0-9_.-]+'
+        | grep -oE 'Name:[[:space:]]+GLIBC_[^[:space:]]+' \
+        | sed -E 's/^Name:[[:space:]]+//'
 )"; then
     :
 else
