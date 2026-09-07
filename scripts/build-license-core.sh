@@ -143,8 +143,13 @@ if ! command -v readelf >/dev/null 2>&1; then
     exit 1
 fi
 
+if ! READELF_OUTPUT="$(readelf --version-info "$SO_FILE" 2>/dev/null)"; then
+    echo "❌ readelf could not inspect $SO_FILE"
+    exit 1
+fi
+
 GLIBC_REQUIREMENTS="$(
-    readelf --version-info "$SO_FILE" 2>/dev/null \
+    printf '%s\n' "$READELF_OUTPUT" \
         | grep -oE 'GLIBC_[0-9]+(\.[0-9]+)+' \
         | sed 's/^GLIBC_//' \
         | sort -Vu \

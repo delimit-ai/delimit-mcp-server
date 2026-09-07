@@ -218,6 +218,7 @@ describe('non-authoritative build artifacts', () => {
   function makeLicenseBuildFixture({
     failCompile = false,
     glibcVersion = '2.34',
+    readelfExit = 0,
   } = {}) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'license-build-fix-'));
     fs.mkdirSync(path.join(dir, 'scripts'), { recursive: true });
@@ -264,7 +265,7 @@ exit 2
 set -eu
 if [ "\${1:-}" = "--version-info" ]; then
   printf 'Version needs section: Name: GLIBC_${glibcVersion} Flags: none Version: 1\\n'
-  exit 0
+  exit ${readelfExit}
 fi
 exit 2
 `
@@ -341,6 +342,29 @@ exit 2
       /requires GLIBC_2\.38; maximum supported is GLIBC_2\.35/i
     );
     assert.deepStrictEqual(fs.readFileSync(stub), reviewed);
+    assert.ok(fs.existsSync(path.join(dir, 'gateway', 'ai', 'license_core.py')));
+    assert.ok(
+      !fs.existsSync(
+        path.join(
+          dir,
+          'gateway',
+          'ai',
+          'license_core.cpython-310-x86_64-linux-gnu.so'
+        )
+      )
+    );
+  });
+
+  it('fails closed when readelf returns partial output and a non-zero status', () => {
+    const { dir, env } = makeLicenseBuildFixture({ readelfExit: 7 });
+
+    const r = runScript(dir, 'build-license-core.sh', env);
+    assert.notStrictEqual(
+      r.code,
+      0,
+      'partial parseable output must not mask a readelf failure'
+    );
+    assert.match(r.out, /readelf could not inspect/i);
     assert.ok(fs.existsSync(path.join(dir, 'gateway', 'ai', 'license_core.py')));
     assert.ok(
       !fs.existsSync(
