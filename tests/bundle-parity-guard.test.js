@@ -221,6 +221,7 @@ describe('non-authoritative build artifacts', () => {
     glibcSuffix = '',
     glibcAbi = '',
     readelfExit = 0,
+    glibcSedExit = 0,
     glibcSortExit = 0,
   } = {}) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'license-build-fix-'));
@@ -277,6 +278,21 @@ exit 2
 `
     );
     fs.chmodSync(fakeReadelf, 0o755);
+
+    const fakeSed = path.join(dir, 'sed');
+    fs.writeFileSync(
+      fakeSed,
+      `#!/bin/bash
+set -eu
+if [ '${glibcSedExit}' -ne 0 ]; then
+  cat >/dev/null
+  printf 'GLIBC_2.34\\n'
+  exit ${glibcSedExit}
+fi
+exec /usr/bin/sed "$@"
+`
+    );
+    fs.chmodSync(fakeSed, 0o755);
 
     const fakeSort = path.join(dir, 'sort');
     fs.writeFileSync(
@@ -455,6 +471,29 @@ exec /usr/bin/sort "$@"
       'a GLIBC parser failure must not be treated as an empty requirement set'
     );
     assert.match(r.out, /could not sort GLIBC requirements/i);
+    assert.ok(fs.existsSync(path.join(dir, 'gateway', 'ai', 'license_core.py')));
+    assert.ok(
+      !fs.existsSync(
+        path.join(
+          dir,
+          'gateway',
+          'ai',
+          'license_core.cpython-310-x86_64-linux-gnu.so'
+        )
+      )
+    );
+  });
+
+  it('fails closed when extraction emits partial output and exits one', () => {
+    const { dir, env } = makeLicenseBuildFixture({ glibcSedExit: 1 });
+
+    const r = runScript(dir, 'build-license-core.sh', env);
+    assert.notStrictEqual(
+      r.code,
+      0,
+      'partial parser output must not be mistaken for a valid GLIBC requirement'
+    );
+    assert.match(r.out, /could not parse GLIBC requirements/i);
     assert.ok(fs.existsSync(path.join(dir, 'gateway', 'ai', 'license_core.py')));
     assert.ok(
       !fs.existsSync(

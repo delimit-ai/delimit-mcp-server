@@ -152,21 +152,13 @@ fi
 # GLIBC_ABI_DT_RELR can accompany otherwise-old numeric symbols, while
 # GLIBC_PRIVATE is intentionally not a portable ABI. A numeric-only ceiling
 # check would incorrectly accept either artifact.
-GLIBC_TAGS=""
-if GLIBC_TAGS="$(
+if ! GLIBC_TAGS="$(
     printf '%s\n' "$READELF_OUTPUT" \
         | grep -oE 'Name:[[:space:]]+GLIBC_[^[:space:]]+' \
         | sed -E 's/^Name:[[:space:]]+//'
 )"; then
-    :
-else
-    GLIBC_PARSE_STATUS=$?
-    # grep status 1 means a valid parse with no matching tags. Any other
-    # failure means the artifact was not inspected reliably and must not ship.
-    if [ "$GLIBC_PARSE_STATUS" -ne 1 ]; then
-        echo "❌ Could not parse GLIBC requirements for $SO_FILE"
-        exit 1
-    fi
+    echo "❌ Could not parse GLIBC requirements for $SO_FILE"
+    exit 1
 fi
 
 GLIBC_NUMERIC_REQUIREMENTS=()
