@@ -266,7 +266,9 @@ exit 2
 set -eu
 if [ "\${1:-}" = "--version-info" ]; then
   printf 'Version needs section: Name: GLIBC_${glibcVersion} Flags: none Version: 1\\n'
-  printf 'Version needs section: Name: GLIBC_ABI_${glibcAbi} Flags: none Version: 2\\n'
+  if [ -n '${glibcAbi}' ]; then
+    printf 'Version needs section: Name: GLIBC_ABI_${glibcAbi} Flags: none Version: 2\\n'
+  fi
   exit ${readelfExit}
 fi
 exit 2
@@ -389,7 +391,7 @@ exit 2
       0,
       'GLIBC_ABI_DT_RELR must not pass a numeric-only ceiling check'
     );
-    assert.match(r.out, /unsupported GLIBC ABI tag/i);
+    assert.match(r.out, /unsupported GLIBC version tag/i);
     assert.match(r.out, /GLIBC_ABI_DT_RELR/);
     assert.ok(fs.existsSync(path.join(dir, 'gateway', 'ai', 'license_core.py')));
     assert.ok(

@@ -148,18 +148,20 @@ if ! READELF_OUTPUT="$(readelf --version-info "$SO_FILE" 2>/dev/null)"; then
     exit 1
 fi
 
-# Ubuntu 22.04's glibc 2.35 exposes no GLIBC_ABI_* version tags. In
-# particular, GLIBC_ABI_DT_RELR can accompany otherwise-old numeric symbols,
-# so a numeric-only ceiling check would incorrectly accept that artifact.
-GLIBC_ABI_REQUIREMENTS="$(
+# Reject every non-numeric GLIBC requirement. Tags such as
+# GLIBC_ABI_DT_RELR can accompany otherwise-old numeric symbols, while
+# GLIBC_PRIVATE is intentionally not a portable ABI. A numeric-only ceiling
+# check would incorrectly accept either artifact.
+UNSUPPORTED_GLIBC_REQUIREMENTS="$(
     printf '%s\n' "$READELF_OUTPUT" \
-        | grep -oE 'GLIBC_ABI_[A-Za-z0-9_.-]+' \
+        | grep -oE 'GLIBC_[A-Za-z0-9_.-]+' \
+        | grep -vE '^GLIBC_[0-9]+(\.[0-9]+)+$' \
         | sort -u \
         || true
 )"
-if [ -n "$GLIBC_ABI_REQUIREMENTS" ]; then
-    echo "❌ $SO_FILE requires unsupported GLIBC ABI tag(s):"
-    echo "$GLIBC_ABI_REQUIREMENTS"
+if [ -n "$UNSUPPORTED_GLIBC_REQUIREMENTS" ]; then
+    echo "❌ $SO_FILE requires unsupported GLIBC version tag(s):"
+    echo "$UNSUPPORTED_GLIBC_REQUIREMENTS"
     exit 1
 fi
 
