@@ -1,9 +1,32 @@
-## Unreleased
+## [4.18.7] - 2026-09-07
 
 ### Security
-- Pin FastMCP 3.2.4 across bundled requirements, setup fallbacks, and the
-  container fallback, clearing PYSEC-2026-2475 and PYSEC-2026-2476 for fresh
-  installs while preserving the tested FastMCP 3.x runtime line.
+- Fresh `delimit setup` installs now pin FastMCP 3.2.4 in their isolated
+  environment and fallback paths, clearing PYSEC-2026-2475 and
+  PYSEC-2026-2476 while preserving the tested FastMCP 3.x runtime line.
+- Bind Python dependency audits to the requested repository manifest. A
+  Delimit security audit can no longer report vulnerabilities from the host
+  interpreter as though they belonged to the project being inspected.
+
+### Fixed
+- `delimit setup` now invokes its installer instead of exiting successfully
+  without creating the MCP server or assistant configuration.
+- Setup removes the Pro archive's checksum manifest after composing the final
+  installed tree, instead of retaining hashes invalidated by the npm overlay.
+- Native license-core compilation now restores the reviewed type stub
+  byte-for-byte and removes failed or intermediate compiler output, preventing
+  generated files from silently replacing committed npm bundle artifacts.
+- Package documentation no longer advertises hosted attestation replay URLs
+  that currently return 404. `delimit wrap` receipts are described by their
+  live behavior: written locally and verifiable offline.
+- Session Phoenix hooks now capture and revive the actual project and preserve
+  structured handoff lists across Claude Code, Codex, Gemini CLI, and Cursor.
+  Session-end capture no longer stages or commits a user's repository.
+- Free-tier `delimit_test_coverage` is described as free again; its stale Pro
+  marker could make agents skip a tool that was already available.
+- Handoff prose preserves embedded commas instead of splitting one decision or
+  blocker into several fragments. Native lists and JSON arrays remain the
+  explicit multi-entry forms.
 
 ## [4.18.6] - 2026-09-06
 

@@ -297,6 +297,35 @@ def _coerce_list_arg(
     raise ValueError(f"{field_name} must be a list or string")
 
 
+def _coerce_prose_list_arg(
+    value: Optional[Union[str, List[str]]],
+    field_name: str,
+) -> Optional[List[str]]:
+    """Accept structured prose without treating punctuation as structure.
+
+    Native lists and JSON list strings remain the unambiguous way to pass
+    multiple entries.  A plain string is one entry, so commas inside a
+    decision, blocker, or next step survive the handoff intact.
+    """
+    if value is None:
+        return None
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        if text.startswith("["):
+            try:
+                return _coerce_list_arg(text, field_name)
+            except ValueError:
+                # Bracket-prefixed prose such as "[LED-4500] ..." is common
+                # in handoffs. Only valid JSON arrays are structural.
+                return [text]
+        return [text]
+    raise ValueError(f"{field_name} must be a list or string")
+
+
 def _coerce_dict_arg(
     value: Optional[Union[str, Dict[str, Any]]],
     field_name: str,
@@ -7293,7 +7322,7 @@ def delimit_test_generate(project_path: Annotated[str, Field(description="Projec
 
 @mcp.tool()
 def delimit_test_coverage(project_path: Annotated[str, Field(description="Path to the project root. Required.")], threshold: Annotated[int, Field(description="Coverage percentage threshold for pass/fail. Default 80.")] = 80) -> Dict[str, Any]:
-    """Analyze test coverage for a project (experimental) (Pro).
+    """Analyze test coverage for a project (experimental).
 
     When to use: to surface coverage by file/folder against a threshold
     when you need a pass/fail signal for CI.
@@ -7304,7 +7333,7 @@ def delimit_test_coverage(project_path: Annotated[str, Field(description="Path t
     all; delimit_test_generate writes test scaffolds; this measures
     coverage of existing tests.
 
-    Side effects: read-only inspection. Gated by require_premium.
+    Side effects: read-only inspection.
     Calls backends.ui_bridge.test_coverage. Marked experimental —
     coverage runner detection is heuristic.
 
@@ -9732,8 +9761,9 @@ def delimit_session_handoff(
     git state; this writes a structured handoff with explicit fields.
 
     Side effects: writes a handoff record via
-    ai.ledger_manager.session_handoff. Coerces list inputs from comma
-    strings via _coerce_list_arg. LED-3731: also refreshes a lightweight
+    ai.ledger_manager.session_handoff. Identifier/path fields retain legacy
+    comma-list coercion. Prose decisions and blockers preserve commas in a
+    plain string; native/JSON lists carry multiple entries. LED-3731: also refreshes a lightweight
     pointer-soul for `project_path` (default = cwd) so the NEXT
     delimit_revive for that project returns THIS handoff's state rather
     than a stale older soul.
@@ -9743,8 +9773,10 @@ def delimit_session_handoff(
         items_completed: Completed ledger item ids
             (e.g. ["LED-164"]) as list or comma string.
         items_added: Newly added item ids as list or comma string.
-        key_decisions: Key decisions or consensus results.
-        blockers: What's blocked and why.
+        key_decisions: Key decisions or consensus results. A plain string is
+            one entry; use a native/JSON list for multiple entries.
+        blockers: What's blocked and why. A plain string is one entry; use a
+            native/JSON list for multiple entries.
         files_changed: Key files that were modified.
         venture: Venture context. Empty = auto-detect.
         project_path: Project path whose revive soul this handoff should
@@ -9762,11 +9794,11 @@ def delimit_session_handoff(
     except ValueError:
         items_added = None
     try:
-        key_decisions = _coerce_list_arg(key_decisions, "key_decisions") if key_decisions else None
+        key_decisions = _coerce_prose_list_arg(key_decisions, "key_decisions") if key_decisions else None
     except ValueError:
         key_decisions = None
     try:
-        blockers = _coerce_list_arg(blockers, "blockers") if blockers else None
+        blockers = _coerce_prose_list_arg(blockers, "blockers") if blockers else None
     except ValueError:
         blockers = None
     try:
@@ -9840,10 +9872,10 @@ def delimit_ventures() -> Dict[str, Any]:
 @mcp.tool()
 def delimit_soul_capture(
     active_task: Annotated[str, Field(description="What you're currently working on (one line).")] = "",
-    decisions: Annotated[str, Field(description="Comma-separated key decisions made this session.")] = "",
-    key_context: Annotated[str, Field(description="Comma-separated important context for next session.")] = "",
-    blockers: Annotated[str, Field(description="Comma-separated blockers.")] = "",
-    next_steps: Annotated[str, Field(description="Comma-separated next steps.")] = "",
+    decisions: Annotated[Optional[Union[str, List[str]]], Field(description="Key decisions as one string, a native list, or a JSON list string.")] = "",
+    key_context: Annotated[Optional[Union[str, List[str]]], Field(description="Important context as one string, a native list, or a JSON list string.")] = "",
+    blockers: Annotated[Optional[Union[str, List[str]]], Field(description="Blockers as one string, a native list, or a JSON list string.")] = "",
+    next_steps: Annotated[Optional[Union[str, List[str]]], Field(description="Next steps as one string, a native list, or a JSON list string.")] = "",
     task_status: Annotated[str, Field(description="One of \"in_progress\", \"blocked\", \"almost_done\".")] = "in_progress",
     tokens_used: Annotated[int, Field(description="Estimated tokens consumed this session.")] = 0,
     context_fullness: Annotated[float, Field(description="0.0-1.0 representing context-window fullness.")] = 0.0,
@@ -9863,15 +9895,16 @@ def delimit_soul_capture(
     git state and active task pointers, used by delimit_revive.
 
     Side effects: writes a soul record via ai.session_phoenix.capture_soul.
-    Auto-detects git state and the current model. Splits comma-string
-    inputs into lists internally.
+    Auto-detects git state and the current model. Plain strings become one
+    entry (with embedded commas preserved); native/JSON lists carry multiple
+    entries.
 
     Args:
         active_task: What you're currently working on (one line).
-        decisions: Comma-separated key decisions made this session.
-        key_context: Comma-separated important context for next session.
-        blockers: Comma-separated blockers.
-        next_steps: Comma-separated next steps.
+        decisions: Key decisions as one string, native list, or JSON list.
+        key_context: Important context as one string, native list, or JSON list.
+        blockers: Blockers as one string, native list, or JSON list.
+        next_steps: Next steps as one string, native list, or JSON list.
         task_status: One of "in_progress", "blocked", "almost_done".
         tokens_used: Estimated tokens consumed this session.
         context_fullness: 0.0-1.0 representing context-window fullness.
@@ -9890,17 +9923,15 @@ def delimit_soul_capture(
     except ImportError:
         from ai.session_continuity import capture_soul_core as _capture
 
-    def _split(val: str) -> List[str]:
-        if not val or not val.strip():
-            return []
-        return [s.strip() for s in val.split(",") if s.strip()]
+    def _prose_entries(val: Optional[Union[str, List[str]]], field_name: str) -> List[str]:
+        return _coerce_prose_list_arg(val, field_name) or []
 
     soul = _capture(
         active_task=active_task,
-        decisions=_split(decisions),
-        key_context=_split(key_context),
-        blockers=_split(blockers),
-        next_steps=_split(next_steps),
+        decisions=_prose_entries(decisions, "decisions"),
+        key_context=_prose_entries(key_context, "key_context"),
+        blockers=_prose_entries(blockers, "blockers"),
+        next_steps=_prose_entries(next_steps, "next_steps"),
         source_model=_detect_model(),
         project_path=project_path,
         task_status=task_status,

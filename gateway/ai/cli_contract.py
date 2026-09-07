@@ -1,7 +1,7 @@
 """LED-1415 — CLI subprocess contract.
 
-The deliberation engine drives 4 model CLIs as subprocesses
-(claude / codex / gemini / cursor) and treats their stdout as model
+The deliberation engine drives model CLIs as subprocesses
+(claude / codex / gemini / antigravity / cursor) and treats their stdout as model
 verdict text. Three classes of bug have surfaced in this pipeline:
 
   1. Banner contamination — the Delimit governance shim leaks ASCII
@@ -28,11 +28,11 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 
-# The 4 known CLIs the deliberation engine targets. cursor is included
+# The known CLIs the deliberation engine targets. cursor is included
 # even though it's not yet installed in the dev environment — adding
 # it to the contract surface now means the validator is ready when it
 # lands; smoke skips when the binary isn't present.
-KNOWN_CLI_NAMES = ("claude", "codex", "gemini", "cursor")
+KNOWN_CLI_NAMES = ("claude", "codex", "gemini", "antigravity", "cursor")
 
 
 # Minimum scrubbed-response length we'll accept as "looks like a real
@@ -108,7 +108,7 @@ def validate_cli_contract(
     is contract-clean.
 
     Args:
-        cli_name: which CLI produced this (claude/codex/gemini/cursor);
+        cli_name: which CLI produced this (claude/codex/gemini/antigravity/cursor);
             used in the failure messages.
         raw_stdout: subprocess.stdout bytes decoded to str.
         raw_stderr: subprocess.stderr bytes decoded to str. The
@@ -166,7 +166,8 @@ def validate_cli_contract(
         # Bracketed prefix is almost always a tool-emitted status line
         # (e.g. "[Delimit]" / "[claude error: ...]") not a model verdict.
         if not any(scrubbed.lower().startswith(p) for p in (
-            "[delimit", "[scrub:", "[claude", "[codex", "[gemini", "[cursor",
+            "[delimit", "[scrub:", "[claude", "[codex", "[gemini",
+            "[antigravity", "[cursor",
         )):
             # Unknown bracketed prefix — surface for inspection
             failures.append(f"unknown_bracketed_prefix:{scrubbed[:40]!r}")

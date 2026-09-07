@@ -214,6 +214,94 @@ describe('non-authoritative build artifacts', () => {
     assert.ok(!allowlist.split(/\r?\n/).includes(staleManifest));
     assert.ok(!fs.existsSync(path.join(REPO_ROOT, staleManifest)));
   });
+
+  function makeLicenseBuildFixture({ failCompile = false } = {}) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'license-build-fix-'));
+    fs.mkdirSync(path.join(dir, 'scripts'), { recursive: true });
+    fs.copyFileSync(
+      path.join(REPO_ROOT, 'scripts', 'build-license-core.sh'),
+      path.join(dir, 'scripts', 'build-license-core.sh')
+    );
+    writeFile(dir, 'gateway/ai/license_core.py', 'VALUE = 1\n');
+    writeFile(
+      dir,
+      'gateway/ai/license_core.pyi',
+      '# reviewed stub; generated output must never replace these bytes\nVALUE: int\n'
+    );
+
+    const fakePython = path.join(dir, 'fake-python');
+    fs.writeFileSync(
+      fakePython,
+      `#!/bin/bash
+set -eu
+if [ "\${1:-}" = "-c" ]; then
+  printf '3.10\\n'
+  exit 0
+fi
+if [ "\${1:-}" = "-m" ] && [ "\${2:-}" = "nuitka" ] && [ "\${3:-}" = "--version" ]; then
+  printf '2.5.9\\n'
+  exit 0
+fi
+if [ "\${1:-}" = "-m" ] && [ "\${2:-}" = "nuitka" ]; then
+  printf '# unreviewed generated stub\\n' > license_core.pyi
+  mkdir -p license_core.build
+  printf 'generated intermediate\\n' > license_core.c
+  printf 'compiled test artifact\\n' > license_core.cpython-310-x86_64-linux-gnu.so
+  exit ${failCompile ? 7 : 0}
+fi
+exit 2
+`
+    );
+    fs.chmodSync(fakePython, 0o755);
+    return { dir, fakePython };
+  }
+
+  it('restores the reviewed license stub and removes compiler intermediates', () => {
+    const { dir, fakePython } = makeLicenseBuildFixture();
+    const stub = path.join(dir, 'gateway', 'ai', 'license_core.pyi');
+    const reviewed = fs.readFileSync(stub);
+
+    const r = runScript(dir, 'build-license-core.sh', { PYTHON: fakePython });
+    assert.strictEqual(r.code, 0, r.out);
+    assert.deepStrictEqual(fs.readFileSync(stub), reviewed);
+    assert.ok(!fs.existsSync(path.join(dir, 'gateway', 'ai', 'license_core.py')));
+    assert.ok(!fs.existsSync(path.join(dir, 'gateway', 'ai', 'license_core.build')));
+    assert.ok(!fs.existsSync(path.join(dir, 'gateway', 'ai', 'license_core.c')));
+    assert.ok(
+      fs.existsSync(
+        path.join(
+          dir,
+          'gateway',
+          'ai',
+          'license_core.cpython-310-x86_64-linux-gnu.so'
+        )
+      )
+    );
+    assert.match(r.out, /restored reviewed license_core\.pyi byte-for-byte/i);
+  });
+
+  it('restores the reviewed stub and removes binary output after compile failure', () => {
+    const { dir, fakePython } = makeLicenseBuildFixture({ failCompile: true });
+    const stub = path.join(dir, 'gateway', 'ai', 'license_core.pyi');
+    const reviewed = fs.readFileSync(stub);
+
+    const r = runScript(dir, 'build-license-core.sh', { PYTHON: fakePython });
+    assert.notStrictEqual(r.code, 0, 'a compiler failure must fail the build');
+    assert.deepStrictEqual(fs.readFileSync(stub), reviewed);
+    assert.ok(fs.existsSync(path.join(dir, 'gateway', 'ai', 'license_core.py')));
+    assert.ok(!fs.existsSync(path.join(dir, 'gateway', 'ai', 'license_core.build')));
+    assert.ok(!fs.existsSync(path.join(dir, 'gateway', 'ai', 'license_core.c')));
+    assert.ok(
+      !fs.existsSync(
+        path.join(
+          dir,
+          'gateway',
+          'ai',
+          'license_core.cpython-310-x86_64-linux-gnu.so'
+        )
+      )
+    );
+  });
 });
 
 describe('FastMCP fresh-install security parity (LED-4530)', () => {

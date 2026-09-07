@@ -19,10 +19,10 @@ $ delimit wrap -- claude "fix the flaky test in tests/api.spec.ts"
 ✓ changed_files        1
 ✓ attestation signed   att_a05050eb8e13277e
                        delimit.attestation.v1 · HMAC-SHA256
-                       replay → https://delimit.ai/att/att_a05050eb8e13277e
+                       receipt → .delimit/attestations/att_a05050eb8e13277e.json
 ```
 
-Every wrapped run emits a `delimit.attestation.v1` bundle: repo head before/after, changed files, gate results, HMAC-SHA256 signature, and a replay URL. Advisory by default; flip to enforcing when you're ready.
+Every wrapped run emits a local `delimit.attestation.v1` bundle: repo head before/after, changed files, gate results, and an HMAC-SHA256 signature. Verify it offline with `delimit seal-verify`; hosted replay is not available yet. Advisory by default; flip to enforcing when you're ready.
 
 ---
 
@@ -138,7 +138,7 @@ delimit_seal_verify        → check a Delimit Seal receipt against its bundled 
                              Layer-0 constitution — offline-verifiable
 ```
 
-Every receipt is offline-verifiable: `npx delimit-cli seal-verify <receipt.json>`, or open its `delimit.ai/att/<id>` replay URL.
+Every receipt is offline-verifiable with `npx delimit-cli seal-verify <receipt.json>`. Hosted receipt replay is not available yet.
 
 ### 3. Context that survives sessions and models
 
@@ -216,7 +216,7 @@ npx delimit-cli init        # Sets up governance + drift baseline
 
 *Gate every AI-assisted invocation. Ship the receipts.*
 
-- **`delimit wrap`** — pipe `claude -p`, `cursor`, `aider`, `codex`, or any AI-assisted CLI through a signed governance gate. Snapshots the git diff before/after, runs lint + tests, HMAC-signs an `att_*` attestation, emits a public replay URL. Advisory by default; `--enforce` blocks CI on policy violations; `--max-time <s>` is a kill switch that tags the attestation as a `liability_incident` and prints a cross-model handoff command.
+- **`delimit wrap`** — pipe `claude -p`, `cursor`, `aider`, `codex`, or any AI-assisted CLI through a signed governance gate. Snapshots the git diff before/after, runs lint + tests, HMAC-signs an `att_*` attestation, and writes the receipt locally for offline verification. Advisory by default; `--enforce` blocks CI on policy violations; `--max-time <s>` is a kill switch that tags the attestation as a `liability_incident` and prints a cross-model handoff command.
 - **`delimit trust-page`** — renders a directory of attestations into a static HTML trust page + JSON Feed 1.1 feed. Single file, no framework, offline-renderable. Deploy anywhere.
 - **`delimit ai-sbom`** — aggregates attestations into a CycloneDX 1.6 bill-of-materials with AI-specific fields (detected models per vendor, tool-call surface, policy gate counts). Pipe straight into procurement.
 - **Cross-model by construction** — `wrap` is agnostic to the producer. Same attestation schema whether the pipe upstream is Claude Code, Cursor, Aider, Codex, or Gemini CLI. Switch producers without losing the audit chain.
@@ -224,7 +224,7 @@ npx delimit-cli init        # Sets up governance + drift baseline
 ```bash
 # Gate any AI-assisted CLI
 delimit wrap -- claude -p "add tests for payments"
-#   → att_7d556843c84fb881 signed, replay: https://delimit.ai/att/att_7d556843c84fb881
+#   → att_7d556843c84fb881 signed, receipt written locally
 
 # Kill switch + handoff after 60s wall-clock
 delimit wrap --max-time 60 -- cursor edit "refactor auth middleware"
@@ -397,8 +397,8 @@ access-logged via `delimit_secret_access_log`) rather than in dotfiles.
 Our own releases ship under the same discipline: every release carries a
 signed, replayable Seal receipt (see the latest
 [release assets](https://github.com/delimit-ai/delimit-mcp-server/releases) —
-verify with `npx delimit-cli seal-verify <receipt.json>` or at its
-`delimit.ai/att/<id>` replay URL), plus SLSA provenance on npm.
+verify with `npx delimit-cli seal-verify <receipt.json>`), plus SLSA
+provenance on npm.
 
 ---
 

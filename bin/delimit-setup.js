@@ -88,6 +88,21 @@ function writeInstalledVersionMarker(serverDir, version) {
     fs.writeFileSync(path.join(serverDir, 'VERSION'), `${version}\n`);
 }
 
+/**
+ * checksums.sha256 authenticates the files inside the downloaded Pro archive.
+ * Setup then deliberately composes a hybrid installed tree by overlaying the
+ * npm bundle and removing compiled modules shadowed by public Python sources.
+ * The archive manifest cannot truthfully describe that final tree, and no
+ * supported runtime verification path consumes it, so do not retain it as an
+ * apparently authoritative installed-state manifest.
+ */
+function removeArchiveOnlyProManifest(proDir) {
+    const manifest = path.join(proDir, 'checksums.sha256');
+    if (!fs.existsSync(manifest)) return false;
+    fs.unlinkSync(manifest);
+    return true;
+}
+
 async function main() {
     // Self-update check: ensure we're running the latest version (skip if already re-execed)
     const _pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf-8'));
@@ -247,6 +262,9 @@ async function main() {
                     await logp(`  ${green('✓')} Cleaned ${soFiles.length} stale compiled modules`);
                 }
             } catch { /* ignore cleanup errors */ }
+        }
+        if (removeArchiveOnlyProManifest(proDir)) {
+            await logp(`  ${green('✓')} Removed archive-only Pro checksum manifest after bundle overlay`);
         }
     });
     if (!proModulesManaged) {
@@ -1520,4 +1538,9 @@ if (require.main === module) {
     });
 }
 
-module.exports = { installProModulesUnlessSourceLinked, writeInstalledVersionMarker };
+module.exports = {
+    main,
+    installProModulesUnlessSourceLinked,
+    writeInstalledVersionMarker,
+    removeArchiveOnlyProManifest,
+};

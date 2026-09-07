@@ -34,6 +34,17 @@ VENTURES_FILE = GLOBAL_DIR / "ventures.json"
 P0_SOFT_QUOTA_DEFAULT = 50
 
 
+def _utc_timestamp(fmt: str = "%Y-%m-%dT%H:%M:%SZ") -> str:
+    """Return a UTC timestamp for persisted ledger/session metadata.
+
+    ``time.strftime`` uses the process's local timezone when no time tuple is
+    supplied.  Appending ``Z`` to that value falsely labels local wall time as
+    UTC, which can reorder append-only evidence during replay.  Always pass an
+    explicit UTC tuple anywhere this module persists a timestamp.
+    """
+    return time.strftime(fmt, time.gmtime())
+
+
 def _p0_soft_quota() -> int:
     """Resolve the active P0 quota threshold from env. 0 disables warnings."""
     raw = os.environ.get("DELIMIT_P0_SOFT_QUOTA", "")
@@ -221,7 +232,7 @@ def _register_venture(info: Dict[str, str]):
             "path": path,
             "repo": _strip_url_userinfo(info.get("repo", "")),
             "type": info.get("type", ""),
-            "registered_at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "registered_at": _utc_timestamp(),
         }
         VENTURES_FILE.write_text(json.dumps(ventures, indent=2))
 
@@ -459,7 +470,7 @@ def _append(path: Path, entry: Dict) -> Dict:
     items = _read_ledger(path)
     prev_hash = items[-1].get("hash", "genesis") if items else "genesis"
     entry["hash"] = hashlib.sha256(f"{prev_hash}{json.dumps(entry, sort_keys=True)}".encode()).hexdigest()[:16]
-    entry["created_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ")
+    entry["created_at"] = _utc_timestamp()
 
     with open(path, "a") as f:
         f.write(json.dumps(entry) + "\n")
@@ -535,7 +546,7 @@ def _check_source_is_ledger_item(
             _shadow_log.parent.mkdir(parents=True, exist_ok=True)
             with _shadow_log.open("a") as _f:
                 _f.write(json.dumps({
-                    "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "ts": _utc_timestamp(),
                     "title": title,
                     "source": source,
                     "ledger": ledger,
@@ -774,7 +785,7 @@ def update_item(
         update = {
             "id": item_id,
             "type": "update",
-            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "updated_at": _utc_timestamp(),
             "worked_by": worked_by or _detect_model(),
         }
         if status:
@@ -1325,7 +1336,7 @@ def query_ledger(query: str, project_path: str = ".") -> Dict[str, Any]:
 
         # Filter by time if mentioned
         if "today" in q:
-            today = time.strftime("%Y-%m-%d")
+            today = _utc_timestamp("%Y-%m-%d")
             items = [i for i in items if i.get("updated_at", "").startswith(today) or i.get("created_at", "").startswith(today)]
         elif "week" in q or "7 day" in q:
             cutoff = time.time() - 7 * 86400
@@ -1436,7 +1447,7 @@ def link_items(
         "to": to_id,
         "type": link_type,
         "note": note,
-        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "created_at": _utc_timestamp(),
     }
 
     with open(links_file, "a") as f:
@@ -1567,10 +1578,10 @@ def session_handoff(
     """
     SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
 
-    session_id = f"session_{time.strftime('%Y%m%d_%H%M%S')}"
+    session_id = f"session_{_utc_timestamp('%Y%m%d_%H%M%S')}"
     handoff = {
         "id": session_id,
-        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "timestamp": _utc_timestamp(),
         "venture": venture or "all",
         "summary": summary,
         "items_completed": items_completed or [],
@@ -1721,7 +1732,7 @@ def _apply_field_update(
         "id": item_id,
         "type": "update",
         field: new_value,
-        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "updated_at": _utc_timestamp(),
         "worked_by": _detect_model(),
     }
     if note:
@@ -1903,7 +1914,7 @@ def _apply_tag_update(item_id: str, new_tags: List[str], note: Optional[str], pr
         "id": item_id,
         "type": "update",
         "tags": new_tags,
-        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "updated_at": _utc_timestamp(),
     }
     if note:
         update_event["note"] = note

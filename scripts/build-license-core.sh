@@ -15,6 +15,50 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 NPM_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 AI_DIR="$NPM_ROOT/gateway/ai"
 SRC="$AI_DIR/license_core.py"
+STUB="$AI_DIR/license_core.pyi"
+STUB_BACKUP=""
+BUILD_STARTED=0
+BUILD_SUCCEEDED=0
+
+cleanup_generated_intermediates() {
+    rm -rf -- \
+        "$AI_DIR/license_core.build" \
+        "$AI_DIR/license_core.dist" \
+        "$AI_DIR/license_core.onefile-build"
+    rm -f -- \
+        "$AI_DIR/license_core.c" \
+        "$AI_DIR/license_core.const" \
+        "$AI_DIR/license_core.o"
+}
+
+restore_reviewed_stub() {
+    if [ -n "$STUB_BACKUP" ] && [ -f "$STUB_BACKUP" ]; then
+        cp -p -- "$STUB_BACKUP" "$STUB"
+    fi
+}
+
+cleanup() {
+    local status=$?
+
+    if [ "$BUILD_STARTED" -eq 1 ]; then
+        cleanup_generated_intermediates || status=1
+    fi
+    restore_reviewed_stub || status=1
+
+    # A failed compile must not leave a stale or partially generated binary
+    # that a later pack could mistake for reviewed output.
+    if [ "$BUILD_STARTED" -eq 1 ] && [ "$BUILD_SUCCEEDED" -ne 1 ]; then
+        find "$AI_DIR" -maxdepth 1 -type f \
+            -name 'license_core.cpython-*-*.so' -delete
+    fi
+
+    if [ -n "$STUB_BACKUP" ]; then
+        rm -f -- "$STUB_BACKUP"
+    fi
+
+    trap - EXIT
+    exit "$status"
+}
 
 # ── Platform gate ────────────────────────────────────────────────────
 UNAME_S="$(uname -s)"
@@ -29,6 +73,17 @@ if [ ! -f "$SRC" ]; then
     echo "❌ Source not found: $SRC"
     exit 1
 fi
+
+if [ ! -f "$STUB" ]; then
+    echo "❌ Reviewed type stub not found: $STUB"
+    exit 1
+fi
+
+# Nuitka rewrites license_core.pyi in place. Preserve the reviewed bundle
+# artifact before invoking the compiler and restore it on every exit path.
+STUB_BACKUP="$(mktemp "${TMPDIR:-/tmp}/delimit-license-core-pyi.XXXXXX")"
+cp -p -- "$STUB" "$STUB_BACKUP"
+trap cleanup EXIT
 
 # ── Toolchain check ──────────────────────────────────────────────────
 PY="${PYTHON:-python3}"
@@ -50,8 +105,21 @@ echo "   nuitka=$NUITKA_VER"
 
 # ── Compile ──────────────────────────────────────────────────────────
 echo "🔨 Compiling license_core.py → .so (this takes ~30s)..."
+BUILD_STARTED=1
+find "$AI_DIR" -maxdepth 1 -type f \
+    -name 'license_core.cpython-*-*.so' -delete
+cleanup_generated_intermediates
 cd "$AI_DIR"
 "$PY" -m nuitka --module --quiet --remove-output --output-dir=. license_core.py
+
+# The generated stub is not authoritative. Restore the committed/reviewed
+# bytes before any later packaging guard can inspect or ship the tree.
+restore_reviewed_stub
+if ! cmp -s -- "$STUB_BACKUP" "$STUB"; then
+    echo "❌ Failed to restore reviewed license_core.pyi byte-for-byte"
+    exit 1
+fi
+echo "   ✅ restored reviewed license_core.pyi byte-for-byte"
 
 # ── Verify output ────────────────────────────────────────────────────
 SO_FILE="$(ls -1 license_core.cpython-*-*.so 2>/dev/null | head -1 || true)"
@@ -82,4 +150,5 @@ echo "   ✅ strings-grep clean (no bypass identifiers)"
 rm -f "$AI_DIR/license_core.py"
 echo "   ✅ removed plaintext license_core.py from bundle"
 
+BUILD_SUCCEEDED=1
 echo "✅ build-license-core complete: $SO_FILE"

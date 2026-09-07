@@ -428,10 +428,27 @@ def security_audit(target: str = ".", include_tests: bool = False) -> Dict[str, 
     cwd = str(target_path) if target_path.is_dir() else str(target_path.parent)
 
     # Python: pip-audit
-    if (target_path / "requirements.txt").exists() or (target_path / "pyproject.toml").exists() or (target_path / "setup.py").exists():
+    requirements_file = target_path / "requirements.txt"
+    pyproject_file = target_path / "pyproject.toml"
+    setup_file = target_path / "setup.py"
+    python_project = requirements_file.exists() or pyproject_file.exists()
+    if python_project:
         pip_audit = shutil.which("pip-audit")
         if pip_audit:
-            r = _run_cmd([pip_audit, "--format", "json", "--desc"], timeout=60, cwd=cwd)
+            # Bind dependency resolution to the requested target.  Invoking
+            # pip-audit without a requirements/project argument audits the
+            # ambient interpreter instead, which can both miss project CVEs
+            # and falsely attribute unrelated host packages to this repo.
+            manifest_args = (
+                ["--requirement", str(requirements_file)]
+                if requirements_file.exists()
+                else [str(target_path)]
+            )
+            r = _run_cmd(
+                [pip_audit, *manifest_args, "--format", "json", "--desc"],
+                timeout=60,
+                cwd=cwd,
+            )
             tools_used.append("pip-audit")
             if r["returncode"] == 0 or r["stdout"].strip():
                 try:
@@ -455,6 +472,11 @@ def security_audit(target: str = ".", include_tests: bool = False) -> Dict[str, 
                     pass
         else:
             tools_used.append("pip-audit (not installed)")
+    elif setup_file.exists():
+        # pip-audit's local-project mode supports pyproject.toml, not a bare
+        # legacy setup.py.  Report that limitation instead of falling back to
+        # an unbound audit of the host interpreter.
+        tools_used.append("pip-audit (setup.py-only target unsupported)")
 
     # Node: npm audit
     if (target_path / "package.json").exists():
