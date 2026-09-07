@@ -220,6 +220,7 @@ describe('non-authoritative build artifacts', () => {
     glibcVersion = '2.34',
     glibcAbi = '',
     readelfExit = 0,
+    glibcSortExit = 0,
   } = {}) {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'license-build-fix-'));
     fs.mkdirSync(path.join(dir, 'scripts'), { recursive: true });
@@ -275,6 +276,19 @@ exit 2
 `
     );
     fs.chmodSync(fakeReadelf, 0o755);
+
+    const fakeSort = path.join(dir, 'sort');
+    fs.writeFileSync(
+      fakeSort,
+      `#!/bin/bash
+set -eu
+if [ "\${1:-}" = "-Vu" ] && [ '${glibcSortExit}' -ne 0 ]; then
+  exit ${glibcSortExit}
+fi
+exec /usr/bin/sort "$@"
+`
+    );
+    fs.chmodSync(fakeSort, 0o755);
     return {
       dir,
       fakePython,
@@ -393,6 +407,29 @@ exit 2
     );
     assert.match(r.out, /unsupported GLIBC version tag/i);
     assert.match(r.out, /GLIBC_ABI_DT_RELR/);
+    assert.ok(fs.existsSync(path.join(dir, 'gateway', 'ai', 'license_core.py')));
+    assert.ok(
+      !fs.existsSync(
+        path.join(
+          dir,
+          'gateway',
+          'ai',
+          'license_core.cpython-310-x86_64-linux-gnu.so'
+        )
+      )
+    );
+  });
+
+  it('fails closed when GLIBC requirement sorting fails', () => {
+    const { dir, env } = makeLicenseBuildFixture({ glibcSortExit: 7 });
+
+    const r = runScript(dir, 'build-license-core.sh', env);
+    assert.notStrictEqual(
+      r.code,
+      0,
+      'a GLIBC parser failure must not be treated as an empty requirement set'
+    );
+    assert.match(r.out, /could not sort GLIBC requirements/i);
     assert.ok(fs.existsSync(path.join(dir, 'gateway', 'ai', 'license_core.py')));
     assert.ok(
       !fs.existsSync(
