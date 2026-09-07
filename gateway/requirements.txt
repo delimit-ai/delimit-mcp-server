@@ -9,11 +9,10 @@
 # in delimit-setup.js never fired, and `import fastmcp` in ai/server.py killed
 # the MCP server on every clean install. Adding it closes that never-break-installs gap.
 #
-# Exact pin (fresh-user install test 2026-09-02, finding 7): `delimit setup`
-# resolves this file into its venv while the Docker image fell through to an
-# unpinned fallback, so the two surfaces ran different fastmcp majors ("3.1.0"
-# vs "4.0.2"). One version everywhere: this pin, the delimit-setup.js no-reqfile
-# fallback, and the Dockerfile fallback MUST all say the same fastmcp.
+# Exact Gateway runtime pin (fresh-user install test 2026-09-02, finding 7).
+# scripts/sync-gateway.sh exports this file into the paired npm repository;
+# that repository owns and guards its bundled requirements, delimit-setup.js,
+# and Dockerfile fallback pins before package release (LED-4530 / npm PR #214).
 # 3.2.4 accepts FastMCP(version=...), constrains mcp<2.0,>=1.24.0, and clears
 # PYSEC-2026-2475 / PYSEC-2026-2476 (fixed in fastmcp 3.2.0).
 fastmcp==3.2.4

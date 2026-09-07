@@ -5798,7 +5798,11 @@ program
             console.log(chalk.yellow('\nRun without --dry-run to apply these changes.\n'));
             return;
         }
-        require('./delimit-setup.js');
+        const { main: runSetup } = require('./delimit-setup.js');
+        return runSetup().catch((err) => {
+            console.error(`Setup failed: ${err.message}`);
+            process.exitCode = 1;
+        });
     });
 
 // Activate license key

@@ -18,6 +18,7 @@ import os
 import smtplib
 import urllib.request
 import urllib.error
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from email.mime.text import MIMEText
 from pathlib import Path
@@ -25,6 +26,16 @@ from typing import Any, Dict, List, Optional
 
 import threading
 import time as _time
+
+try:
+    import fcntl  # type: ignore[import-not-found]
+except ImportError:  # Windows has no fcntl.
+    fcntl = None  # type: ignore[assignment]
+
+try:
+    import msvcrt  # type: ignore[import-not-found]
+except ImportError:  # POSIX has no msvcrt.
+    msvcrt = None  # type: ignore[assignment]
 
 try:
     import yaml as _yaml
@@ -47,6 +58,7 @@ logger = logging.getLogger("delimit.ai.notify")
 HISTORY_FILE = Path.home() / ".delimit" / "notifications.jsonl"
 INBOX_ROUTING_FILE = Path.home() / ".delimit" / "inbox_routing.jsonl"
 OWNER_ACTIONS_FILE = Path.home() / ".delimit" / "owner_actions.jsonl"
+_owner_actions_lock = threading.Lock()
 
 def _load_json_file(path: Path) -> Dict[str, Any]:
     try:
@@ -245,8 +257,67 @@ def _quarantine_record(entry: Dict[str, Any]) -> None:
         pass
 
 
-def record_owner_action(entry: Dict[str, Any]) -> None:
-    """Append an owner-action record for dashboard and async fanout."""
+def _fsync_parent_directory(path: Path) -> None:
+    """Persist a directory entry where the host exposes POSIX semantics.
+
+    Windows has neither ``O_DIRECTORY`` nor a supported directory-fsync
+    equivalent.  The file itself is still flushed and fsynced on every host;
+    POSIX keeps the existing parent-directory durability guarantee.
+    """
+    directory_flag = getattr(os, "O_DIRECTORY", None)
+    if directory_flag is None:
+        return
+    directory_fd = os.open(path, os.O_RDONLY | directory_flag)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+@contextmanager
+def _owner_action_cross_process_lock(data_file):
+    """Hold an OS-backed lock around owner-action check-and-append.
+
+    POSIX can lock the data file directly.  Windows byte-range locking needs
+    a stable byte, so it uses a persistent sibling lock file; never unlinking
+    that file prevents two processes from locking different filesystem
+    objects during rotation or startup races.
+    """
+    if fcntl is not None:
+        fcntl.flock(data_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(data_file.fileno(), fcntl.LOCK_UN)
+        return
+
+    if msvcrt is None:
+        raise OSError("cross-process file locking is unavailable")
+
+    lock_path = OWNER_ACTIONS_FILE.with_name(OWNER_ACTIONS_FILE.name + ".lock")
+    with open(lock_path, "a+b") as lock_file:
+        lock_file.seek(0, os.SEEK_END)
+        if lock_file.tell() == 0:
+            lock_file.write(b"\0")
+            lock_file.flush()
+        lock_file.seek(0)
+        msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+        try:
+            yield
+        finally:
+            lock_file.seek(0)
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+
+
+def record_owner_action(entry: Dict[str, Any]) -> bool:
+    """Durably append one owner action, idempotently when it has an ID.
+
+    The owner-action file is shared by independent pollers and services.  A
+    process lock always keeps the duplicate check and append in one critical
+    section; POSIX ``flock`` or Windows ``msvcrt.locking`` additionally makes
+    it cross-process.  A pre-existing matching ``interaction_id`` is already
+    durable evidence and therefore returns ``True``.
+    """
     try:
         OWNER_ACTIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
         payload = {
@@ -254,10 +325,32 @@ def record_owner_action(entry: Dict[str, Any]) -> None:
             "status": "open",
             **entry,
         }
-        with open(OWNER_ACTIONS_FILE, "a", encoding="utf-8") as f:
-            f.write(json.dumps(payload) + "\n")
+        interaction_id = str(payload.get("interaction_id") or "").strip()
+        with _owner_actions_lock:
+            with open(OWNER_ACTIONS_FILE, "a+", encoding="utf-8") as f:
+                with _owner_action_cross_process_lock(f):
+                    if interaction_id:
+                        f.seek(0)
+                        for line in f:
+                            try:
+                                existing = json.loads(line)
+                            except (TypeError, json.JSONDecodeError):
+                                continue
+                            if (
+                                isinstance(existing, dict)
+                                and str(existing.get("interaction_id") or "").strip()
+                                == interaction_id
+                            ):
+                                return True
+                    f.seek(0, os.SEEK_END)
+                    f.write(json.dumps(payload) + "\n")
+                    f.flush()
+                    os.fsync(f.fileno())
+                    _fsync_parent_directory(OWNER_ACTIONS_FILE.parent)
+        return True
     except OSError as e:
         logger.warning("Failed to record owner action: %s", e)
+        return False
 
 
 def _post_json(url: str, payload: Dict[str, Any], timeout: int = 10) -> Dict[str, Any]:
@@ -1970,7 +2063,7 @@ def get_inbox_status(
             "unseen_count": len(unseen_ids),
             "recent_messages": recent_msgs,
             "routing_history_count": len(routing_history),
-            "routing_history": routing_history[-5:],
+            "routing_history": routing_history[-limit:],
         }
 
     except Exception as e:

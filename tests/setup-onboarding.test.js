@@ -3,6 +3,7 @@ const assert = require('node:assert');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { spawnSync } = require('child_process');
 
 // Load the upsert and content functions by evaluating the relevant parts of setup
 // We replicate the key functions here for isolated testing.
@@ -504,9 +505,66 @@ describe('postinstall telemetry', () => {
 
 describe('setup continuity boundaries', () => {
     const {
+        main,
         installProModulesUnlessSourceLinked,
         writeInstalledVersionMarker,
+        removeArchiveOnlyProManifest,
     } = require('../bin/delimit-setup');
+
+    it('exports the setup entry point invoked by the primary CLI', () => {
+        assert.strictEqual(typeof main, 'function');
+    });
+
+    it('routes `delimit setup --yes` to the exported setup entry point', () => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'delimit-setup-route-'));
+        const marker = path.join(tmpDir, 'setup-called.json');
+        const preload = path.join(tmpDir, 'preload.js');
+        const setupPath = path.join(__dirname, '..', 'bin', 'delimit-setup.js');
+        const cliPath = path.join(__dirname, '..', 'bin', 'delimit-cli.js');
+
+        fs.writeFileSync(preload, `
+const fs = require('fs');
+const target = require.resolve(${JSON.stringify(setupPath)});
+require.cache[target] = {
+    id: target,
+    filename: target,
+    loaded: true,
+    exports: {
+        main: async () => {
+            fs.writeFileSync(
+                ${JSON.stringify(marker)},
+                JSON.stringify(process.argv.slice(2))
+            );
+        },
+    },
+};
+`);
+
+        try {
+            const result = spawnSync(
+                process.execPath,
+                ['--require', preload, cliPath, 'setup', '--yes'],
+                {
+                    encoding: 'utf8',
+                    env: {
+                        ...process.env,
+                        HOME: tmpDir,
+                        DELIMIT_HOME: path.join(tmpDir, '.delimit'),
+                        DELIMIT_NO_TELEMETRY: '1',
+                    },
+                }
+            );
+
+            assert.strictEqual(result.status, 0, result.stderr || result.stdout);
+            assert.ok(fs.existsSync(marker), 'setup main must be called by the CLI');
+            assert.deepStrictEqual(
+                JSON.parse(fs.readFileSync(marker, 'utf8')),
+                ['setup', '--yes']
+            );
+        } finally {
+            fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+    });
 
     it('never mutates Pro modules through a source-linked ai directory', async () => {
         let mutationRan = false;
@@ -534,6 +592,23 @@ describe('setup continuity boundaries', () => {
             fs.writeFileSync(path.join(tmpDir, 'VERSION'), 'stale\n');
             writeInstalledVersionMarker(tmpDir, '8.8.9');
             assert.strictEqual(fs.readFileSync(path.join(tmpDir, 'VERSION'), 'utf-8'), '8.8.9\n');
+        } finally {
+            fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+    });
+
+    it('removes the Pro archive manifest after composing the installed tree', () => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'delimit-pro-manifest-'));
+        const manifest = path.join(tmpDir, 'checksums.sha256');
+        const compiledModule = path.join(tmpDir, 'deliberation.cpython-310-x86_64-linux-gnu.so');
+        try {
+            fs.writeFileSync(manifest, 'archive-only hashes\n');
+            fs.writeFileSync(compiledModule, 'compiled module\n');
+
+            assert.strictEqual(removeArchiveOnlyProManifest(tmpDir), true);
+            assert.ok(!fs.existsSync(manifest));
+            assert.ok(fs.existsSync(compiledModule), 'only the invalidated manifest is removed');
+            assert.strictEqual(removeArchiveOnlyProManifest(tmpDir), false);
         } finally {
             fs.rmSync(tmpDir, { recursive: true, force: true });
         }
