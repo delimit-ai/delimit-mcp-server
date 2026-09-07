@@ -665,7 +665,7 @@ def _construct_mcp(name: str, version: str):
     """Build the FastMCP app so the MCP ``initialize`` handshake reports OUR
     version. Without ``version=`` fastmcp advertises its own library version
     as ``serverInfo.version`` (fresh-user install test 2026-09-02, finding 6:
-    "3.1.0" on a setup venv, "4.0.2" in Docker). Older fastmcp releases
+    "3.2.4" on a setup venv, "4.0.2" in Docker). Older fastmcp releases
     without the kwarg must still start (never-break-installs)."""
     try:
         return FastMCP(name, version=version)

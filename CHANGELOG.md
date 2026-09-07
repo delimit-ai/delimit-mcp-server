@@ -1,5 +1,10 @@
 ## Unreleased
 
+### Security
+- Pin FastMCP 3.2.4 across bundled requirements, setup fallbacks, and the
+  container fallback, clearing PYSEC-2026-2475 and PYSEC-2026-2476 for fresh
+  installs while preserving the tested FastMCP 3.x runtime line.
+
 ## [4.18.6] - 2026-09-06
 
 ### Security

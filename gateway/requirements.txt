@@ -14,9 +14,9 @@
 # unpinned fallback, so the two surfaces ran different fastmcp majors ("3.1.0"
 # vs "4.0.2"). One version everywhere: this pin, the delimit-setup.js no-reqfile
 # fallback, and the Dockerfile fallback MUST all say the same fastmcp.
-# 3.1.0 accepts FastMCP(version=...) (serverInfo.version) and constrains
-# mcp<2.0,>=1.24.0, so the LED-3840 floor below still resolves.
-fastmcp==3.1.0
+# 3.2.4 accepts FastMCP(version=...), constrains mcp<2.0,>=1.24.0, and clears
+# PYSEC-2026-2475 / PYSEC-2026-2476 (fixed in fastmcp 3.2.0).
+fastmcp==3.2.4
 pydantic>=2.0.0
 pyyaml>=6.0
 packaging>=23.0
