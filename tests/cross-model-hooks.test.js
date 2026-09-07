@@ -1062,6 +1062,29 @@ describe('LED-1962 SessionStart auto-revive last soul', () => {
         );
     });
 
+    it('preserves startup status and critical handoff post-flight before continuity delivery', () => {
+        const claudeDir = path.join(tmpDir, '.claude');
+        fs.mkdirSync(claudeDir, { recursive: true });
+        const tool = { id: 'claude', name: 'Claude Code', configPath: path.join(claudeDir, 'settings.json') };
+
+        crossModelHooks.installClaudeHooks(tool, { session_start: true });
+
+        const script = fs.readFileSync(path.join(claudeDir, 'hooks', 'delimit'), 'utf-8');
+        assert.ok(script.includes('=== Delimit Status ==='), 'startup status remains visible');
+        assert.ok(script.includes('Governance: active | policy=project'), 'governance probe remains');
+        assert.ok(script.includes('Server: ready ($TOOLS tools)'), 'server/tool probe remains');
+        assert.ok(script.includes('MCP: delimit registered'), 'MCP probe remains');
+        assert.ok(script.includes('Recent sessions (revive full state via'), 'session index remains');
+        assert.ok(script.includes('Session: subagent (scoped)'), 'subagent index remains scoped');
+        assert.ok(script.includes('Handoff post-flight:'), 'critical handoff post-flight remains');
+        assert.ok(script.includes('from ai.handoff_preflight import preflight_check'),
+            'post-flight still delegates to the canonical validator');
+        assert.ok(
+            script.indexOf('Handoff post-flight:') < script.indexOf('acknowledge_revival'),
+            'optional diagnostics run before the final continuity delivery/ack phase',
+        );
+    });
+
     it('upgrades an existing SessionStart outer timeout to the safe budget', () => {
         const claudeDir = path.join(tmpDir, '.claude');
         const hooksDir = path.join(claudeDir, 'hooks');
@@ -1368,6 +1391,29 @@ describe('STR-2202 subagent flight-recorder (PostToolUse)', () => {
         const noReg = execSync('python3', { input: harness, env: { ...process.env, HOME: bareHome } })
             .toString().trim().split('\n');
         assert.deepStrictEqual(noReg, ['root', 'home-without-registry', 'delimit-gateway', 'all']);
+
+        // Namespace isolation: DELIMIT_HOME is the active namespace root and
+        // must outrank a stale registry under the user's default ~/.delimit.
+        const namespacedHome = path.join(tmpDir, 'namespaced-home');
+        const namespaceRoot = path.join(tmpDir, 'namespace-root');
+        fs.mkdirSync(path.join(namespacedHome, '.delimit'), { recursive: true });
+        fs.mkdirSync(namespaceRoot, { recursive: true });
+        fs.writeFileSync(
+            path.join(namespacedHome, '.delimit', 'active_venture.json'),
+            JSON.stringify({ venture: 'stale-global-venture' })
+        );
+        fs.writeFileSync(
+            path.join(namespaceRoot, 'active_venture.json'),
+            JSON.stringify({ venture: 'namespace-venture' })
+        );
+        const namespaced = execSync('python3', {
+            input: harness,
+            env: { ...process.env, HOME: namespacedHome, DELIMIT_HOME: namespaceRoot },
+        }).toString().trim().split('\n');
+        assert.deepStrictEqual(
+            namespaced,
+            ['namespace-venture', 'namespace-venture', 'delimit-gateway', 'namespace-venture'],
+        );
     });
 
     it('is not installed when agent_record is false', () => {
