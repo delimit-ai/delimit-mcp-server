@@ -109,8 +109,11 @@ FAIL=0
 scan_one() {
     local regex="$1" reason="$2" hits
     hits=$(list_files | while IFS= read -r f; do
-        "$GREP" -nEi "$regex" "$f" 2>/dev/null | sed "s|^|$f:|"
-    done | "$GREP" -vEi "$SUPPRESSORS" || true)
+        # Force text mode. Source artifacts can contain NUL bytes, and grep's
+        # binary-file shortcut must never collapse a match into an unauditable
+        # "binary file matches" result.
+        "$GREP" -anEi "$regex" "$f" 2>/dev/null | sed "s|^|$f:|"
+    done | "$GREP" -avEi "$SUPPRESSORS" || true)
     if [ -n "$hits" ]; then
         echo "$hits" | while IFS= read -r line; do
             echo "$line" | awk -v reason="$reason" '{

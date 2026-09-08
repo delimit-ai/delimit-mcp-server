@@ -32,6 +32,18 @@ const {
 const SANDBOX = path.join(os.tmpdir(), 'delimit-wrap-test-' + crypto.randomBytes(4).toString('hex'));
 const ATT_HOME = path.join(SANDBOX, '.delimit-home');
 const ORIG_HOME = os.homedir();
+const ORIG_GIT_ENV = Object.fromEntries(
+    Object.entries(process.env).filter(([key]) => key.startsWith('GIT_')),
+);
+
+function replaceProcessGitEnv(nextEnv) {
+    for (const key of Object.keys(process.env)) {
+        if (key.startsWith('GIT_')) delete process.env[key];
+    }
+    for (const [key, value] of Object.entries(nextEnv)) {
+        if (key.startsWith('GIT_')) process.env[key] = value;
+    }
+}
 
 function setupSandboxRepo() {
     fs.mkdirSync(SANDBOX, { recursive: true });
@@ -43,6 +55,10 @@ function setupSandboxRepo() {
     // package checkout's .git/config. GIT_CEILING_DIRECTORIES + redirected
     // global/system config make escape impossible even if SANDBOX is wrong.
     const env = gitEnv(SANDBOX);
+    // `runWrap` launches its own Git processes and inherits process.env. Git
+    // hooks export pointers to the caller's repository, so sanitize the test
+    // process too—not only the explicit setup commands below.
+    replaceProcessGitEnv(env);
     const git = (cmd) => execSync(cmd, { cwd: SANDBOX, env, stdio: ['ignore', 'pipe', 'pipe'] });
     // Fresh git repo
     git('git init -q');
@@ -54,6 +70,7 @@ function setupSandboxRepo() {
 
 function teardownSandbox() {
     process.env.HOME = ORIG_HOME;
+    replaceProcessGitEnv(ORIG_GIT_ENV);
     try { fs.rmSync(SANDBOX, { recursive: true, force: true }); } catch {}
 }
 

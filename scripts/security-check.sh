@@ -19,25 +19,39 @@ FAIL=0
 # "!"-exclusions) and never writes a tarball, so it is re-entrancy-safe.
 # We copy those exact files into TMPDIR/package/ and keep the proven scan
 # blocks below byte-for-byte.
-TMPDIR=$(mktemp -d)
-mkdir -p "$TMPDIR/package"
-npm pack --dry-run --json 2>/dev/null \
-  | node -e 'const d=JSON.parse(require("fs").readFileSync(0,"utf8"));process.stdout.write((d[0].files||[]).map(f=>f.path).join("\n"))' \
-  | while IFS= read -r f; do
-      [ -n "$f" ] || continue
-      mkdir -p "$TMPDIR/package/$(dirname "$f")"
-      cp "$f" "$TMPDIR/package/$f" 2>/dev/null || true
-    done
+SCAN_TMP_DIR=$(mktemp -d)
+cleanup_scan_tmp() {
+    if [ -n "${SCAN_TMP_DIR:-}" ] && [ -d "$SCAN_TMP_DIR" ]; then
+        rm -r "$SCAN_TMP_DIR"
+    fi
+}
+trap cleanup_scan_tmp EXIT
+mkdir -p "$SCAN_TMP_DIR/package"
+if ! npm pack --dry-run --json 2>/dev/null \
+    | node -e 'const d=JSON.parse(require("fs").readFileSync(0,"utf8"));for(const f of d[0].files||[])process.stdout.write(f.path+"\0")' \
+    | while IFS= read -r -d '' f; do
+        [ -n "$f" ] || continue
+        mkdir -p "$SCAN_TMP_DIR/package/$(dirname "$f")"
+        if ! cp "$f" "$SCAN_TMP_DIR/package/$f" 2>/dev/null; then
+            echo "security-check: failed to copy npm-packed file: $f" >&2
+            exit 1
+        fi
+      done; then
+    echo "security-check: npm pack enumeration/copy pipeline failed" >&2
+    exit 1
+fi
 
-if [ -z "$(find "$TMPDIR/package" -type f -print -quit)" ]; then
+if [ -z "$(find "$SCAN_TMP_DIR/package" -type f -print -quit)" ]; then
     echo "❌ security-check: could not enumerate shipped files (npm pack --dry-run --json returned nothing)"
-    rm -rf "$TMPDIR"
     exit 1
 fi
 
 # 1. Credential patterns
 echo -n "  Credentials... "
-if grep -rEi '(password|passwd|secret|api_key|apikey)\s*[:=]\s*["\x27][^"\x27]{4,}' "$TMPDIR/package/" --include="*.py" --include="*.js" --include="*.json" 2>/dev/null | grep -v 'environ\|getenv\|process\.env\|os\.environ\|<configured\|example\|placeholder\|REDACTED\|\${credentials\|credentials\.\|security-scan-ignore'; then
+# Force text mode: source artifacts can contain literal NUL bytes, and grep's
+# default binary-file shortcut would otherwise conceal the exact line and
+# collapse it into an unauditable "binary file matches" result.
+if grep -raEi '(password|passwd|secret|api_key|apikey)\s*[:=]\s*["\x27][^"\x27]{4,}' "$SCAN_TMP_DIR/package/" --include="*.py" --include="*.js" --include="*.json" 2>/dev/null | grep -av 'environ\|getenv\|process\.env\|os\.environ\|<configured\|example\|placeholder\|REDACTED\|\${credentials\|credentials\.\|security-scan-ignore'; then
     echo "❌ FOUND CREDENTIALS"
     FAIL=1
 else
@@ -47,7 +61,7 @@ fi
 # 2. Blocklist terms
 echo -n "  Blocklist... "
 BLOCKLIST="jamsonsholdings|Bladabah|Domainvested26|Delimit26|home/jamsons|infracore|crypttrx|\.wr_env"  # delimit-security-allow: pattern definitions of the prepublish guard itself
-if grep -rEi "$BLOCKLIST" "$TMPDIR/package/" --include="*.py" --include="*.js" --include="*.json" 2>/dev/null; then
+if grep -raEi "$BLOCKLIST" "$SCAN_TMP_DIR/package/" --include="*.py" --include="*.js" --include="*.json" 2>/dev/null; then
     echo "❌ BLOCKED TERMS FOUND"
     FAIL=1
 else
@@ -56,7 +70,7 @@ fi
 
 # 3. PII (email addresses that aren't examples)
 echo -n "  PII... "
-if grep -rEi '[a-z0-9._%+-]+@(gmail|yahoo|hotmail|outlook|proton|jamsons|wire\.report|domainvested)' "$TMPDIR/package/" --include="*.py" --include="*.js" --include="*.json" 2>/dev/null | grep -v "example\|placeholder\|<configured\|noreply\|e\.g\.\|docstring\|Args:\|Credential resolution"; then
+if grep -raEi '[a-z0-9._%+-]+@(gmail|yahoo|hotmail|outlook|proton|jamsons|wire\.report|domainvested)' "$SCAN_TMP_DIR/package/" --include="*.py" --include="*.js" --include="*.json" 2>/dev/null | grep -av "example\|placeholder\|<configured\|noreply\|e\.g\.\|docstring\|Args:\|Credential resolution"; then
     echo "❌ PII FOUND"
     FAIL=1
 else
@@ -66,7 +80,7 @@ fi
 # 4. Proprietary files that shouldn't ship
 echo -n "  Proprietary files... "
 PROPRIETARY="social_target\.py|social\.py|founding_users\.py|inbox_daemon\.py|deliberation\.py"
-if find "$TMPDIR/package/" -name "*.py" | grep -Ei "$PROPRIETARY" 2>/dev/null; then
+if find "$SCAN_TMP_DIR/package/" -name "*.py" | grep -Ei "$PROPRIETARY" 2>/dev/null; then
     echo "❌ PROPRIETARY FILES IN PACKAGE"
     FAIL=1
 else
@@ -74,7 +88,8 @@ else
 fi
 
 # Cleanup
-rm -rf "$TMPDIR"
+cleanup_scan_tmp
+trap - EXIT
 
 # 5. Bundle parity — no package.json-blocked path present in the committed
 #    gateway/ bundle. Scans #1–#4 above only inspect the npm TARBALL file list
