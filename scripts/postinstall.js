@@ -1,22 +1,21 @@
 #!/usr/bin/env node
 /**
- * Postinstall — anonymous install ping + setup hint.
+ * Postinstall — setup hint + optional install ping.
  *
  * v4.5.2 (LED-1188) install hardening:
  *   - Top-level try/catch ensures NO postinstall failure can ever block
- *     `npm install delimit-cli`. Per the customer-protection rule in
- *     /root/.claude/CLAUDE.md, npm publish is a production deploy and a
- *     postinstall crash on a Pro user's machine is a customer-facing
- *     incident regardless of root cause.
+ *     `npm install delimit-cli`. A postinstall crash on a user's machine is a
+ *     customer-facing incident regardless of root cause.
  *   - EROFS / EACCES / EPERM / ENOSPC / ENOENT on stdout writes soft-fail
  *     silently. (Some sandbox installers redirect stdout to a read-only
  *     pipe.)
- *   - Network telemetry stays best-effort; no crash if DNS / TLS / proxy
- *     misbehaves. DELIMIT_NO_TELEMETRY=1 honored as kill switch.
+ *   - Network telemetry is explicit opt-in and stays best-effort; no crash if
+ *     DNS / TLS / proxy misbehaves. DELIMIT_NO_TELEMETRY=1 is a hard override.
  *   - Idempotent — re-running install is a no-op, never corrupts state.
  *     This file does not write to ~/.delimit/; that's bin/delimit-setup.js.
  *
- * No PII. Silent fail. Never blocks install.
+ * No account/user identifiers in the JSON body. The endpoint still receives
+ * ordinary HTTPS connection metadata. Silent fail. Never blocks install.
  */
 
 (function postinstall() {
@@ -56,11 +55,14 @@
         safeLog('');
     } catch (_) { /* never block install on a print failure */ }
 
-    // --- 2. anonymous install telemetry ------------------------------------
-    // Honor opt-out and corporate proxy environments. The HTTPS request is
-    // silent-fail at every level (DNS / TCP / TLS / write / response).
-    const tele = (process.env.DELIMIT_NO_TELEMETRY || '').toLowerCase();
-    if (tele === '1' || tele === 'true' || tele === 'yes') return;
+    // --- 2. optional install telemetry -------------------------------------
+    // No network by default. An affirmative DELIMIT_TELEMETRY value is
+    // required, while DELIMIT_NO_TELEMETRY always wins when both are set.
+    // The HTTPS request is silent-fail at every level.
+    const enabledValues = new Set(['1', 'true', 'yes']);
+    const disabled = (process.env.DELIMIT_NO_TELEMETRY || '').toLowerCase();
+    const enabled = (process.env.DELIMIT_TELEMETRY || '').toLowerCase();
+    if (enabledValues.has(disabled) || !enabledValues.has(enabled)) return;
 
     try {
         const https = require('https');

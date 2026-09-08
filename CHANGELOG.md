@@ -1,3 +1,14 @@
+## [Unreleased]
+
+### Security
+- Install telemetry is now explicit opt-in; the hard-off environment switch
+  still wins when both controls are set.
+- Prepublish identity and credential scans now inspect every npm-packed file,
+  fail closed on copy errors, and report exact matches in NUL-bearing source.
+- The guarded and raw test entry points now execute the same complete suite.
+- Disposable security-scan fixtures now clear inherited Git hook pointers, so
+  a test launched by pre-push cannot mutate the caller's index or config.
+
 ## [4.18.8] - 2026-09-07
 
 ### Fixed

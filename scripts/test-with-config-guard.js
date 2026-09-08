@@ -24,6 +24,7 @@ const REPO_ROOT = path.resolve(__dirname, '..');
 
 // The full file list (kept in sync with the underlying `node --test` invocation).
 const TEST_FILES = [
+    'tests/clean-tree-guard.test.js',
     'tests/_config-sentinel.test.js',
     'tests/setup-onboarding.test.js',
     'tests/setup-matrix.test.js',
@@ -43,6 +44,7 @@ const TEST_FILES = [
     'tests/migration-2092-banner.test.js',
     'tests/control-browser.test.js',
     'tests/bundle-parity-guard.test.js',
+    'tests/security-scans-binary-text.test.js',
     'tests/chat-repl-prebrief.test.js',
     'tests/chat-repl-continuity.test.js',
     'tests/cli-deliberate-runs-engine.test.js',
