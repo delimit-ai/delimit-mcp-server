@@ -11,10 +11,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-      - run: python -m pip install 'mcp==1.28.1'
+      - run: python -m pip install 'mcp==1.28.1' 'pytest==9.0.3'
       - run: python -m unittest discover -s tests -p test_muse_mcp.py -v
         env:
           PYTHONDONTWRITEBYTECODE: '1'
+      - run: python -m pytest -q tests/test_legacy_nested_soul_recovery.py tests/test_public_handoff_fallback.py
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+          PYTHONPATH: gateway
 
   test:
     runs-on: ubuntu-latest

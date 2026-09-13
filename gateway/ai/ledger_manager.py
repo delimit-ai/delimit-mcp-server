@@ -17,12 +17,23 @@ import os
 import re
 import subprocess
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-GLOBAL_DIR = Path.home() / ".delimit"
+
+def _delimit_home() -> Path:
+    """Resolve the customer-selected Delimit state root."""
+    for env_key in ("DELIMIT_HOME", "DELIMIT_NAMESPACE_ROOT"):
+        val = os.environ.get(env_key, "").strip()
+        if val:
+            return Path(val).expanduser()
+    return Path.home() / ".delimit"
+
+
+GLOBAL_DIR = _delimit_home()
 VENTURES_FILE = GLOBAL_DIR / "ventures.json"
 
 # LED-1145 Phase 2 #3: P0 quota soft warning. The soft block fires when an
@@ -235,18 +246,6 @@ def _register_venture(info: Dict[str, str]):
             "registered_at": _utc_timestamp(),
         }
         VENTURES_FILE.write_text(json.dumps(ventures, indent=2))
-
-
-# LED-1188 / Plan-C: env-aware home so DELIMIT_HOME / DELIMIT_NAMESPACE_ROOT
-# overrides apply to the ledger paths same as everywhere else. Falls back
-# to ~/.delimit when neither env var is set (back-compat with v4.5.1 and
-# all prior versions).
-def _delimit_home() -> Path:
-    for env_key in ("DELIMIT_HOME", "DELIMIT_NAMESPACE_ROOT"):
-        val = os.environ.get(env_key, "").strip()
-        if val:
-            return Path(val)
-    return Path.home() / ".delimit"
 
 
 CENTRAL_LEDGER_DIR = _delimit_home() / "ledger"
@@ -1561,9 +1560,10 @@ def session_handoff(
     return a month-old soul instead of the state written minutes earlier (this
     bit a real wire-report session). To close the gap, a handoff now ALSO
     refreshes a lightweight pointer-soul in the souls store for the SAME
-    project via ``session_phoenix.capture_soul`` (no soul-schema duplication),
-    keyed by the same project identity ``revive`` uses. That makes the newest
-    handoff win the next revive.
+    project via ``session_phoenix.capture_soul`` when present, or the shipped
+    Free core otherwise (one shared schema, no duplication), keyed by the same
+    project identity ``revive`` uses. That makes the newest handoff win the
+    next revive.
 
     ``project_path`` (additive, default = cwd) selects which project's soul is
     refreshed so handoff + revive agree on identity. ``refresh_soul=False``
@@ -1571,14 +1571,24 @@ def session_handoff(
     path, which manages its own capture stamping). The refresh is
     best-effort and NEVER raises into the handoff write — matching
     session_phoenix's "never blocks revive" contract. The ephemeral-path guard
-    (LED-3759) is inherited automatically: ``capture_soul`` routes through
-    ``session_phoenix._project_dir``, which redirects ephemeral (/tmp/pytest)
-    paths to a throwaway store, so a test handoff never pollutes the real
-    souls store. No storage-format change to either store.
+    (LED-3759) is inherited automatically from either capture backend, which
+    redirects ephemeral (/tmp/pytest) paths to a throwaway store so a test
+    handoff never pollutes the real souls store. The additive
+    ``soul_refresh_status`` field reports
+    ``refreshed``, ``failed``, or ``skipped``; failures also include a bounded
+    ``soul_refresh_error`` instead of being silently reported as full success.
+    No storage-format change to either store.
     """
-    SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    SESSIONS_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if os.name != "nt":
+        SESSIONS_DIR.chmod(0o700)
 
-    session_id = f"session_{_utc_timestamp('%Y%m%d_%H%M%S')}"
+    # The human-readable UTC prefix keeps history sortable, while the random
+    # suffix prevents two agents handing off in the same second from replacing
+    # one another at the shared sessions path.
+    session_id = (
+        f"session_{_utc_timestamp('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:12]}"
+    )
     handoff = {
         "id": session_id,
         "timestamp": _utc_timestamp(),
@@ -1592,30 +1602,64 @@ def session_handoff(
     }
 
     path = SESSIONS_DIR / f"{session_id}.json"
-    path.write_text(json.dumps(handoff, indent=2))
-
-    # LED-1705: stamp the deterministic-floor coordinator so the Stop hook
-    # treats this model-invoked handoff as the fresh, richer artifact and
-    # skips writing a deterministic floor over it.
+    payload = json.dumps(handoff, indent=2)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    descriptor = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+        0o600,
+    )
     try:
-        try:
-            from ai.last_capture import stamp_capture
-        except ImportError:  # pragma: no cover - flat import layout
-            from last_capture import stamp_capture
-        stamp_capture(source="model", session_id=session_id)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        if os.name != "nt":
+            path.chmod(0o600)
     except Exception:
-        pass
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+        raise
 
     # LED-3731: refresh a pointer-soul so the NEXT revive for this project
     # returns THIS handoff's state, not an older soul. Best-effort; a failure
     # here must never break the handoff write.
     soul_id = ""
+    soul_refresh_status = "skipped"
+    soul_refresh_error = ""
     if refresh_soul:
+        soul_refresh_status = "failed"
         try:
             try:
+                from ai.session_continuity import resolve_project_path, _session_phoenix_is_absent
+            except ModuleNotFoundError as exc:  # pragma: no cover - flat bundle layout
+                if exc.name not in {"ai", "ai.session_continuity"}:
+                    raise
+                from session_continuity import resolve_project_path, _session_phoenix_is_absent  # type: ignore
+            resolved_project_path = resolve_project_path(project_path)
+            try:
                 from ai.session_phoenix import capture_soul
-            except ImportError:  # pragma: no cover - flat import layout
-                from session_phoenix import capture_soul  # type: ignore
+            except ModuleNotFoundError as exc:  # pragma: no cover - flat import layout
+                if not _session_phoenix_is_absent(exc):
+                    raise
+                try:
+                    from session_phoenix import capture_soul  # type: ignore
+                except ModuleNotFoundError as exc:
+                    if not _session_phoenix_is_absent(exc):
+                        raise
+                    # Public npm installs intentionally omit the richer
+                    # session_phoenix backend.  The shipped free-core contract
+                    # owns the same SessionSoul schema + store layout, so a
+                    # normal session_handoff must refresh revive through it
+                    # instead of silently saving only to the disjoint sessions
+                    # directory.
+                    try:
+                        from ai.session_continuity import capture_soul_core as capture_soul
+                    except ImportError:  # pragma: no cover - flat bundle layout
+                        from session_continuity import capture_soul_core as capture_soul  # type: ignore
             soul = capture_soul(
                 active_task=summary,
                 decisions=list(key_decisions or []),
@@ -1623,16 +1667,42 @@ def session_handoff(
                 blockers=list(blockers or []),
                 next_steps=list(items_added or []),
                 source_model=source_model,
-                project_path=project_path or "",
+                project_path=resolved_project_path,
                 task_status="in_progress",
             )
             soul_id = getattr(soul, "soul_id", "") or ""
-        except Exception:
+            if soul_id:
+                soul_refresh_status = "refreshed"
+            else:
+                soul_refresh_error = "capture returned no soul_id"
+        except Exception as exc:
             soul_id = ""
+            soul_refresh_error = f"{type(exc).__name__}: {exc}"[:500]
 
-    result = {"saved": session_id, "path": str(path), "handoff": handoff}
+    # LED-1705: only a successfully refreshed, revivable soul may suppress the
+    # deterministic Stop-hook floor. A sessions/ handoff by itself is not read
+    # by revive; stamping a failed, no-id, or explicitly skipped refresh would
+    # hide the only recovery path while falsely claiming capture succeeded.
+    if soul_id:
+        try:
+            try:
+                from ai.last_capture import stamp_capture
+            except ImportError:  # pragma: no cover - flat import layout
+                from last_capture import stamp_capture
+            stamp_capture(source="model", session_id=session_id)
+        except Exception:
+            pass
+
+    result = {
+        "saved": session_id,
+        "path": str(path),
+        "handoff": handoff,
+        "soul_refresh_status": soul_refresh_status,
+    }
     if soul_id:
         result["soul_id"] = soul_id
+    if soul_refresh_error:
+        result["soul_refresh_error"] = soul_refresh_error
     return result
 
 

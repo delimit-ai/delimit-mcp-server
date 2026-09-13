@@ -48,6 +48,15 @@ gateway/ai/deliberation.py
 gateway/ai/delimit_daemon.py
 gateway/ai/dv_mention_tracker.py
 gateway/ai/evidence_merge_hook.py
+gateway/ai/email_candidate.py
+gateway/ai/email_outreach.py
+gateway/ai/email_reply_assessment.py
+gateway/ai/email_reply_send.py
+gateway/ai/founder_email_intake.py
+gateway/ai/fresh_x.py
+gateway/ai/github_owner_reply.py
+gateway/ai/selling_workflow_status.py
+gateway/ai/social_capability/historical_grounding.py
 gateway/ai/focus_gate.py
 gateway/ai/founding_users.py
 gateway/ai/gemini_vertex_shim.py

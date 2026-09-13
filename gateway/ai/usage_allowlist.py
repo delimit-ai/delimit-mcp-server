@@ -51,6 +51,53 @@ USAGE_ALLOWLIST: frozenset[str] = frozenset({
 })
 
 
+# LED-4907: owner-confirmed practice, corroborated by saved multi-model review
+# transcripts. This is a process fact only, not evidence of a particular
+# review's access, execution, quality, frequency or result. Keep it separate
+# from the third-party tool inventory and from untrusted conversation text.
+DELIMIT_FIRST_PARTY_PRACTICES: tuple[str, ...] = (
+    "The founder uses multiple models to review work.",
+)
+
+
+def format_first_party_practices_for_prompt() -> str:
+    """Render the fixed, narrowly evidenced practice and its use boundaries.
+
+    Never mine memory, source text, our previous posts, rejected drafts or owner
+    draft feedback for additional first-party facts. Those inputs have different
+    provenance and cannot silently extend this inventory.
+    """
+    facts = "\n".join(f"- {fact}" for fact in DELIMIT_FIRST_PARTY_PRACTICES)
+    return (
+        "FOUNDER FIRST-PARTY PRACTICE (documented process context, not respondent evidence):\n"
+        + (facts or "- No first-party practice is documented in this inventory.")
+        + "\nUSE BOUNDARIES:\n"
+        "- Mention a documented practice ONLY when it is materially relevant to the exact "
+        "reply. Self-reference is optional, not a required opener. If irrelevant, omit it.\n"
+        "- When relevant, acknowledge the actual practice plainly instead of feigning novelty "
+        "or pretending the idea is unfamiliar. Do not force a product or tool name merely to "
+        "establish that this generic practice is used. Keep the account's voice.\n"
+        "- This establishes PROCESS ONLY. It does not establish routine frequency, named model "
+        "roles, equal code or evidence access, test execution, a detected error, better outcomes, "
+        "superiority to a person or checklist, or guaranteed detection. Never imply those "
+        "results from the fact of using multiple models.\n"
+        "- Do not invent a human-versus-model or checklist comparison. Use such a comparison "
+        "only when the source grounds it and it materially helps answer the actual point.\n"
+        "- A suggestion is not a report of actual use. If use is unknown and that fact matters "
+        "to the next decision, ask whether they tried it rather than presuming an incident "
+        "or asking them to defend the approach. Do not force that question when an "
+        "acknowledgement is sufficient.\n"
+        "- Our earlier posts, rejected copy, source assertions and regeneration feedback are "
+        "not additional documented first-party practices. Do not infer experience from them "
+        "or convert our practice into evidence of the respondent's pain or demand.\n"
+        "- Selected-stage, disclosure, no-pitch, Free qualification and safety rules still "
+        "control. This context does not authorize a product mention, invitation or stage change. "
+        "A useful acknowledgement can stand alone; ask at most one question only when its "
+        "answer could change the next permitted decision. Never invent experience if no "
+        "relevant documented practice is supplied.\n"
+    )
+
+
 # First-person experience clauses that imply the speaker has lived/used the
 # named subject. Detection here means "the draft is claiming standing to
 # speak from use" — which must be backed by an allowlist match to be allowed.
