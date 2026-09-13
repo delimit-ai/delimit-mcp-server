@@ -5752,6 +5752,7 @@ program
     .description('Install Delimit MCP governance tools into all AI assistants')
     .option('--dry-run', 'Preview config changes without writing anything')
     .option('--yes', 'Skip all prompts and accept defaults')
+    .option('--harness-shims', 'Opt in to additional Muse and Copilot interactive command shims')
     .action((options) => {
         if (options.dryRun) {
             const os = require('os');
@@ -5795,11 +5796,14 @@ program
             console.log(`\n  ${chalk.cyan('~/.delimit/venv/')} — Isolated Python virtual environment`);
             console.log(`  ${chalk.cyan('~/.delimit/ledger/')} — Persistent task ledger`);
 
+            console.log(options.harnessShims
+                ? '  Muse/Copilot command shims: opt-in requested; custom files are preserved.'
+                : '  Muse/Copilot command shims: refresh existing managed shims only; no new command shadowing.');
             console.log(chalk.yellow('\nRun without --dry-run to apply these changes.\n'));
             return;
         }
         const { main: runSetup } = require('./delimit-setup.js');
-        return runSetup().catch((err) => {
+        return runSetup({harnessShims: options.harnessShims === true}).catch((err) => {
             console.error(`Setup failed: ${err.message}`);
             process.exitCode = 1;
         });

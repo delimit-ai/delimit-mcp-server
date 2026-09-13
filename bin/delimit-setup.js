@@ -103,7 +103,7 @@ function removeArchiveOnlyProManifest(proDir) {
     return true;
 }
 
-async function main() {
+async function main(options = {}) {
     // Self-update check: ensure we're running the latest version (skip if already re-execed)
     const _pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf-8'));
     if (!process.env.DELIMIT_SETUP_UPDATED) {
@@ -1028,9 +1028,18 @@ exit 127
             }
             // The new explicit harness shims deliberately do not reuse the
             // legacy template's config chmod or background auto-updater.
-            require('../lib/harness-launch').installHarnessShims({
-                delimitHome: DELIMIT_HOME, packageRoot: path.resolve(__dirname, '..'),
-            });
+            try {
+                const result = require('../lib/harness-launch').installHarnessShims({
+                    delimitHome: DELIMIT_HOME, packageRoot: path.resolve(__dirname, '..'),
+                    includeNew: options.harnessShims === true || process.argv.includes('--harness-shims'),
+                });
+                if (result.skipped.length) log(yellow('  Preserved custom harness shims: ' + result.skipped.join(', ')));
+            } catch (err) {
+                if (options.harnessShims === true || process.argv.includes('--harness-shims')) {
+                    throw new Error('Requested harness shims were not installed; resolve the collision or filesystem error and rerun setup.');
+                }
+                log(yellow('  Explicit harness shims not installed: ' + err.message));
+            }
             // Governance is enforced via PATH ordering — $HOME/.delimit/shims
             // is prepended to PATH (see below), so `claude`/`codex`/`gemini`
             // resolve to our shim first, and the shim then PATH-strips itself

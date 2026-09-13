@@ -5,6 +5,26 @@ const os = require('os');
 const path = require('path');
 const h = require('../lib/harness-launch');
 
+test('actual setup block propagates explicit shim failures to its CLI error handler', () => {
+    const vm = require('vm');
+    const source = fs.readFileSync(path.join(__dirname, '../bin/delimit-setup.js'), 'utf8');
+    const start = source.indexOf('            try {', source.indexOf('// The new explicit harness shims'));
+    const end = source.indexOf('            // Governance is enforced via PATH ordering', start);
+    assert(start > 0 && end > start);
+    const block = source.slice(start, end);
+    for (const explicit of [true, false]) {
+        const warnings = [];
+        const context = {options: {harnessShims: explicit}, process: {argv: []},
+            DELIMIT_HOME: '/synthetic', __dirname, path,
+            require: () => ({installHarnessShims: () => {throw new Error('fixture collision');}}),
+            log: message => warnings.push(message), yellow: message => message};
+        if (explicit) assert.throws(() => vm.runInNewContext(block, context), /Requested harness shims were not installed/);
+        else {vm.runInNewContext(block, context); assert.equal(warnings.length, 1);}
+    }
+    const cli = fs.readFileSync(path.join(__dirname, '../bin/delimit-cli.js'), 'utf8');
+    assert.match(cli, /return runSetup\([\s\S]*?\.catch\(\(err\) => \{[\s\S]*?process\.exitCode = 1/);
+});
+
 function fixture(t) {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'delimit-harness-'));
     t.after(() => fs.rmSync(root, {recursive: true, force: true}));
@@ -27,6 +47,22 @@ test('Muse uses Standard, correct project and bounded bootstrap without permissi
     assert(!c.args.includes('--no-foreign-personal-context')); // exec-only, not TUI
     assert(!c.args.some(a=>/--(yolo|disable-approval|disable-sandbox|trust-workspace)/.test(a)));
     assert(c.args.at(-1).includes('supported Delimit tooling')); assert(Buffer.byteLength(c.args.at(-1))<16384);
+});
+test('both instruction sources are referenced without modifying or exporting their contents', t=>{
+    const f=fixture(t);
+    const contents={'AGENTS.md':'Unique agents guidance\n','CLAUDE.md':'Unique private Claude guidance\n'};
+    for(const [name,body] of Object.entries(contents))fs.writeFileSync(path.join(f.repo,name),body);
+    assert.equal(h.launchExplicitHarness('muse',f.opts),0);
+    const prompt=f.calls.at(-1).args.at(-1);
+    for(const [name,body] of Object.entries(contents)) {
+        const file=path.join(f.repo,name);
+        assert(prompt.includes(file));
+        assert(prompt.includes(require('crypto').createHash('sha256').update(body).digest('hex')));
+        assert(!prompt.includes(body.trim()));
+        assert.equal(fs.readFileSync(file,'utf8'),body);
+    }
+    assert(prompt.includes('Read every listed source completely'));
+    assert(prompt.includes('Preserve native scope/precedence'));
 });
 test('Copilot interactive arguments do not use noninteractive prompt or allow-all', t=>{
     const f=fixture(t); assert.equal(h.launchExplicitHarness('copilot',f.opts),0);
@@ -102,6 +138,38 @@ test('interactive sessions scrub inherited git routing without changing parent e
     assert.deepEqual(f.opts.env,before);
     for(const call of f.calls) for(const key of keys) assert.equal(call.opts.env[key],undefined);
     assert.equal(f.calls.at(-1).opts.cwd,f.repo);
+});
+
+test('default setup does not create newly shadowed commands',t=>{
+    const f=fixture(t), dh=path.join(f.home,'.delimit');
+    assert.deepEqual(h.installHarnessShims({delimitHome:dh,packageRoot:__dirname,includeNew:false}),{installed:[],skipped:[]});
+    assert(!fs.existsSync(path.join(dh,'shims')));
+});
+test('default setup refreshes managed shims and preserves custom ones',t=>{
+    const f=fixture(t), dh=path.join(f.home,'.delimit');
+    h.installHarnessShims({delimitHome:dh,packageRoot:'old-package'});
+    fs.writeFileSync(path.join(dh,'shims/muse'),'owner custom script');
+    assert.deepEqual(h.installHarnessShims({delimitHome:dh,packageRoot:'new-package',includeNew:false}),{installed:['copilot'],skipped:['muse']});
+    assert.equal(fs.readFileSync(path.join(dh,'shims/muse'),'utf8'),'owner custom script');
+    assert(fs.readFileSync(path.join(dh,'shims/copilot'),'utf8').includes('new-package'));
+});
+test('explicit install preflights every collision before replacing any shim',t=>{
+    const f=fixture(t), dh=path.join(f.home,'.delimit');
+    h.installHarnessShims({delimitHome:dh,packageRoot:'old-package'});
+    const copilot=fs.readFileSync(path.join(dh,'shims/copilot'),'utf8');
+    fs.writeFileSync(path.join(dh,'shims/muse'),'owner custom script');
+    assert.throws(()=>h.installHarnessShims({delimitHome:dh,packageRoot:'new-package'}),/no harness shims were changed/);
+    assert.equal(fs.readFileSync(path.join(dh,'shims/copilot'),'utf8'),copilot);
+});
+test('explicit install does not follow a symlink to a managed-looking file',t=>{
+    const f=fixture(t), dh=path.join(f.home,'.delimit');
+    fs.mkdirSync(path.join(dh,'shims'),{recursive:true});
+    const target=path.join(f.root,'owner-file');
+    const content='#!/usr/bin/env node\n// Delimit explicit harness shim\nowner-data';
+    fs.writeFileSync(target,content);fs.symlinkSync(target,path.join(dh,'shims/muse'));
+    assert.throws(()=>h.installHarnessShims({delimitHome:dh,packageRoot:__dirname}),/unrecognized muse/);
+    assert(!fs.existsSync(path.join(dh,'shims/copilot')));
+    assert.equal(fs.readFileSync(target,'utf8'),content);
 });
 
 for(const [id,args] of [['copilot',['-p','synthetic task','--model','some-model']],

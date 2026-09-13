@@ -26,6 +26,7 @@ describe('LED-4057 delimit chat project-bound continuity', () => {
         const repl = new DelimitChatREPL({
             chatRunId: 'run-led-4057',
             sessionPhoenixRoot: backendRoot,
+            continuityHome: backendRoot,
             spawnSync: (command, args, spawnOptions) => {
                 calls.push({ command, args, spawnOptions });
                 return {
@@ -66,8 +67,9 @@ describe('LED-4057 delimit chat project-bound continuity', () => {
 
     test('capture success is based on structured backend status, not process exit', () => {
         for (const status of ['captured', 'updated', 'deduplicated', 'finalized', 'already_captured', 'noop']) {
-            const { repl } = replReturning({ status });
+            const { repl } = replReturning({ status, soul_id: 'exact-soul' });
             assert.strictEqual(repl.captureSucceeded(repl.captureSoulForMigration('claude')), true);
+            assert.strictEqual(repl.captureSucceeded({ status }), false, 'bare status is not durable evidence');
         }
 
         for (const status of ['ambiguous', 'blocked_ambiguity', 'unavailable', 'error', 'skipped']) {
@@ -263,5 +265,71 @@ describe('LED-4057 delimit chat project-bound continuity', () => {
         assert.strictEqual(payload.trigger, 'launcher-clean-exit');
         assert.strictEqual(payload.transcript_path, '');
         assert.strictEqual(repl.captureSucceeded(result), false);
+    });
+
+    test('compiled backend layout is not rejected for lacking Python source', () => {
+        fs.unlinkSync(path.join(backendRoot, 'ai', 'session_phoenix.py'));
+        fs.writeFileSync(path.join(backendRoot, 'ai', 'session_phoenix.so'), 'fixture');
+        const { repl, calls } = replReturning({ status: 'finalized', soul_id: 'compiled-soul' });
+        assert.strictEqual(repl.finalizeSession('codex').saved, true);
+        assert.strictEqual(calls.length, 1);
+    });
+
+    test('uses the installed backend interpreter when executable', () => {
+        const python = path.join(backendRoot, 'venv', 'bin', 'python');
+        fs.mkdirSync(path.dirname(python), { recursive: true });
+        fs.writeFileSync(python, '#!/bin/sh\nexit 0\n', { mode: 0o700 });
+        const { repl, calls } = replReturning({ status: 'finalized', soul_id: 's1' });
+        repl.finalizeSession('claude');
+        assert.strictEqual(calls[0].command, python);
+    });
+
+    test('unbound exit records honest recovery metadata without replacing saved context', () => {
+        const sessions = path.join(backendRoot, 'sessions');
+        fs.mkdirSync(sessions);
+        const prior = path.join(sessions, 'existing-rich-handoff.json');
+        fs.writeFileSync(prior, '{"summary":"rich context must survive"}');
+        const { repl, calls } = replReturning({ status: 'not_found', reason: 'no_event_bound_floor' });
+        const result = repl.finalizeSession('codex');
+        assert.strictEqual(result.saved, false);
+        const receipt = JSON.parse(fs.readFileSync(result.receipt, 'utf8'));
+        assert.strictEqual(receipt.context_captured, false);
+        assert.strictEqual(receipt.chat_run_id, 'run-led-4057');
+        assert.strictEqual(receipt.reason, 'no_event_bound_floor');
+        assert.strictEqual(fs.statSync(result.receipt).mode & 0o777, 0o600);
+        assert.strictEqual(fs.readFileSync(prior, 'utf8'), '{"summary":"rich context must survive"}');
+        assert.strictEqual(calls.length, 1, 'never retries with a guessed project or empty soul');
+        const payload = JSON.parse(calls[0].args[2]);
+        assert.strictEqual(payload.project_path, '');
+        assert.strictEqual(payload.transcript_path, '');
+        assert.match(repl.formatSessionExit(result), /no_event_bound_floor/);
+        assert.doesNotMatch(repl.formatSessionExit(result), /Session saved/);
+    });
+
+    test('backend errors and unsafe receipt paths remain honest, without leaking raw errors', () => {
+        const other = path.join(backendRoot, 'other');
+        fs.mkdirSync(other);
+        fs.symlinkSync(other, path.join(backendRoot, 'sessions'));
+        const { repl } = replReturning({ status: 'error', error: 'SECRET private exception text' });
+        const result = repl.finalizeSession('claude');
+        assert.strictEqual(result.receipt_error, 'recovery_receipt_unavailable');
+        assert.strictEqual(result.reason, 'backend_error');
+        assert.deepStrictEqual(fs.readdirSync(other), []);
+        assert.doesNotMatch(repl.formatSessionExit(result), /SECRET/);
+    });
+
+    test('real Python bridge finalizes synthetic evidence without inference', () => {
+        fs.writeFileSync(path.join(backendRoot, 'ai', '__init__.py'), '');
+        fs.writeFileSync(path.join(backendRoot, 'ai', 'session_phoenix.py'), [
+            'CONTINUITY_PROTOCOL_VERSION = 2',
+            'def capture_floor_from_transcript(chat_run_id="", finalize=False):',
+            '    assert chat_run_id == "synthetic-run" and finalize',
+            '    return {"status": "finalized", "soul_id": "synthetic-only"}',
+        ].join('\n'));
+        const repl = new DelimitChatREPL({
+            sessionPhoenixRoot: backendRoot, continuityHome: backendRoot, chatRunId: 'synthetic-run',
+        });
+        assert.strictEqual(repl.finalizeSession('codex').saved, true);
+        assert.strictEqual(fs.existsSync(path.join(backendRoot, 'sessions')), false);
     });
 });
