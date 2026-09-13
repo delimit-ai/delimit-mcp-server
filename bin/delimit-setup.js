@@ -1026,6 +1026,11 @@ exit 127
                 fs.writeFileSync(shimPath, shimTemplate(tool, display));
                 fs.chmodSync(shimPath, '755');
             }
+            // The new explicit harness shims deliberately do not reuse the
+            // legacy template's config chmod or background auto-updater.
+            require('../lib/harness-launch').installHarnessShims({
+                delimitHome: DELIMIT_HOME, packageRoot: path.resolve(__dirname, '..'),
+            });
             // Governance is enforced via PATH ordering — $HOME/.delimit/shims
             // is prepended to PATH (see below), so `claude`/`codex`/`gemini`
             // resolve to our shim first, and the shim then PATH-strips itself
