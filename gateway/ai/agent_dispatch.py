@@ -58,7 +58,7 @@ def _effective_agents_dir(venture: str = "") -> Path:
     return AGENTS_DIR
 
 VALID_PRIORITIES = {"P0", "P1", "P2"}
-VALID_ASSIGNEES = {"claude", "codex", "gemini", "any"}
+VALID_ASSIGNEES = {"claude", "codex", "gemini", "copilot", "any"}
 VALID_STATUSES = {"dispatched", "in_progress", "done", "handed_off", "failed"}
 
 # LED-876: auto-pause when dead-letter queue depth (stuck 'dispatched' tasks)
@@ -103,7 +103,8 @@ TASK_TYPE_ROUTER = {
 ROUTER_DEFAULT_ASSIGNEE = "gemini"
 
 # STR-2202: concrete (non-"any") assignees the rank resolver may pick.
-_CONCRETE_ASSIGNEES = VALID_ASSIGNEES - {"any"}
+# Copilot is an explicit execution harness, not an automatic rank target.
+_CONCRETE_ASSIGNEES = frozenset({"claude", "codex", "gemini"})
 
 # STR-2202: minimum recorded outcomes for a model before prompt_drift.rank is
 # trusted to resolve assignee="any". Below this the data is too thin, so we
@@ -370,8 +371,10 @@ def dispatch_task(
         # it falls back to the static TASK_TYPE_ROUTER when data is thin or on
         # any error (fail-safe — resolution never blocks the dispatch).
         routed = _resolve_any_assignee(task_type)
-        if routed in VALID_ASSIGNEES and routed != "any":
+        if routed in _CONCRETE_ASSIGNEES:
             assignee = routed
+        else:
+            assignee = ROUTER_DEFAULT_ASSIGNEE
 
     priority = priority.upper().strip() if priority else "P1"
     if priority not in VALID_PRIORITIES:
@@ -578,7 +581,17 @@ def _build_agent_prompt(task: Dict[str, Any]) -> str:
         for c in task["constraints"]:
             lines.append(f"- {c}")
 
-    lines.append(f"\n**When done:** Call `delimit_agent_complete` with task_id='{task['id']}' and your result.")
+    if task.get("assignee") == "copilot":
+        lines.append(
+            "\n**When done:** Return to the Delimit coordinator with a completion packet "
+            f"for task_id='{task['id']}'. Include the actual inspected evidence, changed "
+            "files, tests/results, commit/PR if any, and unresolved risks. Do not call "
+            "`delimit_agent_complete`, do not claim durable mutation, and do not bypass "
+            "coordination through shell commands. The coordinator verifies the work and "
+            "calls completion."
+        )
+    else:
+        lines.append(f"\n**When done:** Call `delimit_agent_complete` with task_id='{task['id']}' and your result.")
 
     return "\n".join(lines)
 

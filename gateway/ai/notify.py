@@ -15,7 +15,9 @@ import imaplib
 import json
 import logging
 import os
+import re as _re
 import smtplib
+import stat
 import urllib.request
 import urllib.error
 from contextlib import contextmanager
@@ -58,6 +60,16 @@ logger = logging.getLogger("delimit.ai.notify")
 HISTORY_FILE = Path.home() / ".delimit" / "notifications.jsonl"
 INBOX_ROUTING_FILE = Path.home() / ".delimit" / "inbox_routing.jsonl"
 OWNER_ACTIONS_FILE = Path.home() / ".delimit" / "owner_actions.jsonl"
+DIRECT_COMMERCIAL_OUTBOUND_EMAIL_EVENT_TYPES = frozenset(
+    {
+        "customer_checkin",
+        "customer_discovery_lapsed_trial",
+        "customer_discovery_outreach",
+        "peer_discovery_outreach",
+        "commercial_email_followup",
+    }
+)
+_notification_history_lock = threading.Lock()
 _owner_actions_lock = threading.Lock()
 
 def _load_json_file(path: Path) -> Dict[str, Any]:
@@ -200,7 +212,6 @@ OWNER_ACTION_SENDERS = set(
 ) | FOUNDER_SENDERS
 
 # Subject patterns that indicate owner-action (compiled once)
-import re as _re
 OWNER_ACTION_SUBJECT_PATTERNS = [
     _re.compile(r"social\s+draft", _re.IGNORECASE),
     _re.compile(r"show\s+hn", _re.IGNORECASE),
@@ -223,14 +234,40 @@ NON_OWNER_SENDERS = {
 }
 
 
-def _record_notification(entry: Dict[str, Any]) -> None:
-    """Append a notification record to the history file."""
+def _record_notification(entry: Dict[str, Any]) -> bool:
+    """Durably append and byte-verify one notification-history record."""
     try:
         HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with open(HISTORY_FILE, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry) + "\n")
-    except OSError as e:
+        encoded = (json.dumps(entry) + "\n").encode("utf-8")
+        with _notification_history_lock:
+            descriptor = os.open(
+                HISTORY_FILE,
+                os.O_RDWR
+                | os.O_CREAT
+                | os.O_APPEND
+                | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+            )
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                os.close(descriptor)
+                raise OSError("notification history is not a regular file")
+            with os.fdopen(descriptor, "a+b") as history_file:
+                with _notification_history_cross_process_lock(history_file):
+                    if hasattr(os, "fchmod"):
+                        os.fchmod(history_file.fileno(), 0o600)
+                    history_file.seek(0, os.SEEK_END)
+                    offset = history_file.tell()
+                    history_file.write(encoded)
+                    history_file.flush()
+                    os.fsync(history_file.fileno())
+                    history_file.seek(offset)
+                    if history_file.read(len(encoded)) != encoded:
+                        raise OSError("notification receipt read-back mismatch")
+                    _fsync_parent_directory(HISTORY_FILE.parent)
+        return True
+    except (OSError, TypeError, ValueError) as e:
         logger.warning("Failed to record notification: %s", e)
+        return False
 
 
 _QUARANTINE_FILE = Path.home() / ".delimit" / "notifications_quarantine.jsonl"
@@ -295,6 +332,35 @@ def _owner_action_cross_process_lock(data_file):
         raise OSError("cross-process file locking is unavailable")
 
     lock_path = OWNER_ACTIONS_FILE.with_name(OWNER_ACTIONS_FILE.name + ".lock")
+    with open(lock_path, "a+b") as lock_file:
+        lock_file.seek(0, os.SEEK_END)
+        if lock_file.tell() == 0:
+            lock_file.write(b"\0")
+            lock_file.flush()
+        lock_file.seek(0)
+        msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+        try:
+            yield
+        finally:
+            lock_file.seek(0)
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+
+
+@contextmanager
+def _notification_history_cross_process_lock(data_file):
+    """Serialize notification receipt appends across independent senders."""
+    if fcntl is not None:
+        fcntl.flock(data_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(data_file.fileno(), fcntl.LOCK_UN)
+        return
+
+    if msvcrt is None:
+        raise OSError("cross-process file locking is unavailable")
+
+    lock_path = HISTORY_FILE.with_name(HISTORY_FILE.name + ".lock")
     with open(lock_path, "a+b") as lock_file:
         lock_file.seek(0, os.SEEK_END)
         if lock_file.tell() == 0:
@@ -815,7 +881,7 @@ def _render_html_email(subject: str, body: str, event_type: str) -> str:
                 in_list = False
             # Close any open draft box
             html_lines.append('</div>')
-            html_lines.append(f'<hr style="border:none;border-top:1px solid #E5E7EB;margin:16px 0">')
+            html_lines.append('<hr style="border:none;border-top:1px solid #E5E7EB;margin:16px 0">')
             continue
 
         # Section headers (ALL CAPS lines or lines ending with colon that are short)
@@ -997,6 +1063,7 @@ def send_email(
     timestamp = datetime.now(timezone.utc).isoformat()
     event_key = (event_type or "").lower()
     subject_lower = (subject or "").lower()
+    direct_commercial = event_type in DIRECT_COMMERCIAL_OUTBOUND_EMAIL_EVENT_TYPES
 
     # Batch automated scan output — daemon heartbeats, scan summaries
     # NOTE: social_draft sends IMMEDIATELY — those are the actionable emails
@@ -1008,11 +1075,26 @@ def send_email(
     )
 
     # Only these event types send immediately (founder needs to see them now)
-    is_urgent = (not force_digest) and any(tag in event_key + subject_lower
-                    for tag in ("p0", "urgent", "alert", "critical", "approve",
-                                "founder_directive", "gate_failure",
-                                "security", "deploy", "action",
-                                "completed", "social_draft"))
+    is_urgent = direct_commercial or (
+        (not force_digest)
+        and any(
+            tag in event_key + subject_lower
+            for tag in (
+                "p0",
+                "urgent",
+                "alert",
+                "critical",
+                "approve",
+                "founder_directive",
+                "gate_failure",
+                "security",
+                "deploy",
+                "action",
+                "completed",
+                "social_draft",
+            )
+        )
+    )
 
     global _last_digest_flush
     with _email_throttle_lock:
@@ -1159,6 +1241,37 @@ def send_email(
     message_id = f"<{_uuid.uuid4().hex}@{domain}>"
     msg["Message-ID"] = message_id
 
+    receipt_projection = {
+        "channel": "email",
+        "event_type": event_type,
+        "to": smtp_to,
+        "from": smtp_from,
+        "subject": subj,
+        "message": email_body,
+        "timestamp": timestamp,
+        "message_id": message_id,
+    }
+    if direct_commercial:
+        # Persist intent before touching SMTP. If the process dies after the
+        # provider accepts the message, an authenticated recipient reply to
+        # this unguessable Message-ID can safely prove that the prepared send
+        # escaped. A recorded failure always overrides that inference.
+        prepared = {
+            **receipt_projection,
+            "success": None,
+            "delivery_status": "prepared",
+        }
+        if not _record_notification(prepared):
+            return {
+                "channel": "email",
+                "delivered": False,
+                "timestamp": timestamp,
+                "message_id": message_id,
+                "receipt_status": "preparation_failed",
+                "reconciliation_required": True,
+                "error": "Direct-commercial receipt preparation failed; SMTP was not attempted.",
+            }
+
     try:
         with smtplib.SMTP(smtp_host, smtp_port, timeout=10) as server:
             if smtp_user and smtp_pass:
@@ -1166,18 +1279,24 @@ def send_email(
                 server.login(smtp_user, smtp_pass)
             server.sendmail(smtp_from, [smtp_to], msg.as_string())
 
-        record = {
-            "channel": "email",
-            "event_type": event_type,
-            "to": smtp_to,
-            "from": smtp_from,
-            "subject": subj,
-            "message": email_body,
-            "timestamp": timestamp,
-            "success": True,
-            "message_id": message_id,
-        }
-        _record_notification(record)
+        record = {**receipt_projection, "success": True}
+        if direct_commercial:
+            record["delivery_status"] = "delivered"
+        receipt_recorded = _record_notification(record)
+
+        if direct_commercial and not receipt_recorded:
+            return {
+                "channel": "email",
+                "delivered": True,
+                "timestamp": timestamp,
+                "subject": subj,
+                "to": smtp_to,
+                "from": smtp_from,
+                "message_id": message_id,
+                "receipt_status": "prepared_only",
+                "receipt_durable": False,
+                "reconciliation_required": True,
+            }
 
         return {
             "channel": "email",
@@ -1187,25 +1306,39 @@ def send_email(
             "to": smtp_to,
             "from": smtp_from,
             "message_id": message_id,
+            **(
+                {"receipt_status": "delivered", "receipt_durable": True}
+                if direct_commercial
+                else {}
+            ),
         }
     except Exception as e:
         record = {
-            "channel": "email",
-            "event_type": event_type,
-            "to": smtp_to,
-            "from": smtp_from,
-            "message": email_body,
-            "timestamp": timestamp,
+            **receipt_projection,
             "success": False,
             "error": str(e),
         }
-        _record_notification(record)
-        return {
+        if direct_commercial:
+            record["delivery_status"] = "failed"
+        receipt_recorded = _record_notification(record)
+        result = {
             "channel": "email",
             "delivered": False,
             "timestamp": timestamp,
             "error": str(e),
         }
+        if direct_commercial:
+            result.update(
+                {
+                    "message_id": message_id,
+                    "receipt_status": (
+                        "failed" if receipt_recorded else "prepared_only"
+                    ),
+                    "receipt_durable": receipt_recorded,
+                    "reconciliation_required": not receipt_recorded,
+                }
+            )
+        return result
 
 
 # ═════════════════════════════════════════════════════════════════════

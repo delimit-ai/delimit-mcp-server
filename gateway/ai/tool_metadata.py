@@ -264,6 +264,7 @@ DEFAULT_TOOLSET = "full"
 CORE_PROFILE_EXTRA = {
     "delimit_deliberate",       # multi-model consensus (moat)
     "delimit_revive",           # session revival / continuity
+    "delimit_soul_capture",     # session capture / continuity
     "delimit_gov_evaluate",     # policy evaluation
     "delimit_security_audit",   # merge-gate: security
     "delimit_test_smoke",       # merge-gate: tests actually ran

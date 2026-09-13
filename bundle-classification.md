@@ -10,6 +10,22 @@ The canonical path sets live in `bundle-allowlist.txt` and
 `bundle-internal-exclude.txt`; the release guards derive their current counts
 from those files.
 
+## Additional internal selling modules
+
+These extend the existing excluded social/inbox boundary, not the public MCP
+product. An AST import audit of all 123 allowlisted Python files at gateway
+revision `16d27aa10f93fc791f401a1fb82fc581e4a350a4` found no references to them.
+
+- `ai/email_candidate.py`: prospect-contact preparation.
+- `ai/email_outreach.py`: founder-operated cold-email pipeline.
+- `ai/email_reply_assessment.py`: private email reply assessment.
+- `ai/email_reply_send.py`: founder-operated SMTP reply transport.
+- `ai/founder_email_intake.py`: authenticated portfolio email routing.
+- `ai/fresh_x.py`: owner-requested social discovery.
+- `ai/github_owner_reply.py`: owner-operated public reply publishing.
+- `ai/selling_workflow_status.py`: internal selling-lane diagnostics.
+- `ai/social_capability/historical_grounding.py`: internal social-copy review.
+
 ## FLAGGED FOR REVIEW (kept PUBLIC but borderline)
 These are Delimit *product* tools (the multi-model / governance surface), not
 cross-venture or proprietary, so they ship — but confirm they should be public:
