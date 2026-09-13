@@ -3,6 +3,19 @@ name: Tests
 on: [push, pull_request]
 
 jobs:
+  scoped-mcp:
+    runs-on: ubuntu-latest
+    name: Scoped MCP synthetic protocol tests
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - run: python -m pip install 'mcp==1.28.1'
+      - run: python -m unittest discover -s tests -p test_muse_mcp.py -v
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+
   test:
     runs-on: ubuntu-latest
     strategy:
