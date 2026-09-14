@@ -1362,6 +1362,16 @@ NEXT_STEPS_REGISTRY: Dict[str, List[Dict[str, Any]]] = {
     "agent_check": [
         {"tool": "delimit_agent_policy", "reason": "Update the model's policy if needed", "suggested_args": {}, "is_premium": True},
     ],
+    "agent_poll": [
+        {"tool": "delimit_agent_answer", "reason": "Answer a bound worker question and resume its session", "suggested_args": {}, "is_premium": True},
+        {"tool": "delimit_agent_complete", "reason": "Accept and close a completed worker task", "suggested_args": {}, "is_premium": True},
+    ],
+    "agent_answer": [
+        {"tool": "delimit_agent_poll", "reason": "Check the resumed worker's output", "suggested_args": {}, "is_premium": True},
+    ],
+    "agent_cancel": [
+        {"tool": "delimit_agent_status", "reason": "Verify the cancellation was recorded", "suggested_args": {}, "is_premium": True},
+    ],
     "drift_check": [
         {"tool": "delimit_lint", "reason": "Run lint to review detected drift", "suggested_args": {}, "is_premium": False},
         {"tool": "delimit_notify", "reason": "Alert team about detected drift", "suggested_args": {}, "is_premium": True},
@@ -3704,6 +3714,13 @@ def _delimit_deploy_impl(
     vercel_timeout: int = 60,
     # app-specific verification targets
     target_urls: Optional[List[str]] = None,
+    # LED-5321 M4: optional deployment-binding inputs (verify only).
+    intended_release: Optional[str] = None,
+    service_unit: Optional[str] = None,
+    expected_host: Optional[str] = None,
+    observation: Optional[Union[str, Dict[str, Any]]] = None,
+    observation_max_age_s: int = 300,
+    deployment_health: Optional[Union[str, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Unified deployment entry point — dispatches to one of eight actions (Pro).
 
@@ -3882,6 +3899,15 @@ def _delimit_deploy_impl(
             return gate
         from backends.deploy_bridge import verify
 
+        try:
+            _obs = _coerce_dict_arg(observation, "observation") if observation else None
+        except ValueError as e:
+            return _with_next_steps("deploy_verify", {"error": str(e)})
+        try:
+            _health = _coerce_dict_arg(deployment_health, "deployment_health") if deployment_health else None
+        except ValueError as e:
+            return _with_next_steps("deploy_verify", {"error": str(e)})
+
         return _with_next_steps(
             "deploy_verify",
             _safe_call(
@@ -3891,6 +3917,12 @@ def _delimit_deploy_impl(
                 git_ref=git_ref,
                 repo_path=repo_path,
                 target_urls=target_urls,
+                intended_release=intended_release,
+                service_unit=service_unit,
+                expected_host=expected_host,
+                observation=_obs,
+                observation_max_age_s=observation_max_age_s,
+                deployment_health=_health,
             ),
         )
 
@@ -4305,6 +4337,26 @@ def delimit_deploy_verify(
             description="Optional app-specific HTTPS targets; never expands to the global fleet."
         ),
     ] = None,
+    intended_release: Annotated[
+        Optional[str], Field(description="Optional exact sha/tag under test for deployment binding (LED-5321 M4).")
+    ] = None,
+    service_unit: Annotated[
+        Optional[str], Field(description="Optional intended systemd unit for deployment binding.")
+    ] = None,
+    expected_host: Annotated[
+        Optional[str], Field(description="Optional intended host for deployment binding.")
+    ] = None,
+    observation: Annotated[
+        Optional[Union[str, Dict[str, Any]]],
+        Field(description="Optional observation dict (unit/host/pid/cmdline/environ/exec_start/observed_at/health) or JSON string."),
+    ] = None,
+    observation_max_age_s: Annotated[
+        int, Field(description="Max observation age in seconds (default 300).")
+    ] = 300,
+    deployment_health: Annotated[
+        Optional[Union[str, Dict[str, Any]]],
+        Field(description="Optional startup/semantic health dict or JSON string."),
+    ] = None,
 ) -> Dict[str, Any]:
     """Probe a freshly-deployed revision's health — experimental (Pro).
 
@@ -4343,6 +4395,11 @@ def delimit_deploy_verify(
             configuration. Default "" = cwd.
         target_urls: Optional app-specific HTTPS targets to probe. Never
             expands to the global fleet. Default None.
+        intended_release/service_unit/expected_host/observation/
+            observation_max_age_s/deployment_health: optional
+            deployment-binding inputs (LED-5321 M4). When supplied, the
+            result also carries binding + verified (bool) + mismatch
+            (exact reason). A healthy OLD process no longer passes.
 
     Returns:
         Dict with keys: verdict (healthy / unhealthy / partial),
@@ -4358,6 +4415,12 @@ def delimit_deploy_verify(
         git_ref=git_ref,
         repo_path=repo_path,
         target_urls=target_urls,
+        intended_release=intended_release,
+        service_unit=service_unit,
+        expected_host=expected_host,
+        observation=observation,
+        observation_max_age_s=observation_max_age_s,
+        deployment_health=deployment_health,
     )
 
 
@@ -9254,6 +9317,10 @@ def delimit_ledger_update(
     blocked_by: Annotated[str, Field(description="Item id that blocks this one (e.g. \"LED-025\").")] = "",
     blocks: Annotated[str, Field(description="Item id that this one blocks (e.g. \"STR-005\").")] = "",
     worked_by: Annotated[str, Field(description="AI model working on this. Empty = auto-detect.")] = "",
+    evidence: Annotated[Optional[Union[str, Dict[str, Any]]], Field(description="Optional evidence object {class, kind, ref, observed_at, observed_by} (LED-5321 M4). Dict or JSON string.")] = None,
+    review_transcript: Annotated[str, Field(description="Optional transcript path for independently_reviewed binding.")] = "",
+    review_diff_path: Annotated[str, Field(description="Optional diff file path the transcript must bind to.")] = "",
+    review_diff_text: Annotated[str, Field(description="Optional inline diff text the transcript must bind to.")] = "",
 ) -> Dict[str, Any]:
     """Update any field on an existing ledger item.
 
@@ -9282,6 +9349,12 @@ def delimit_ledger_update(
         blocked_by: Item id that blocks this one (e.g. "LED-025").
         blocks: Item id that this one blocks (e.g. "STR-005").
         worked_by: AI model working on this. Empty = auto-detect.
+        evidence: Optional evidence object (LED-5321 M4). When status moves
+            to done (or a note asserts merged/deployed/published/verified)
+            and no evidence is passed, the record is stored as
+            evidence.class="assertion".
+        review_transcript/review_diff_path/review_diff_text: optional
+            review-binding inputs for independently_reviewed promotion.
 
     Returns:
         Dict with the update result and next_steps.
@@ -9290,6 +9363,10 @@ def delimit_ledger_update(
         labels = _coerce_list_arg(labels, "labels") if labels else None
     except ValueError:
         labels = None
+    try:
+        evidence = _coerce_dict_arg(evidence, "evidence") if evidence else None
+    except ValueError as e:
+        return _with_next_steps("ledger_update", {"error": str(e)})
     from ai.ledger_manager import update_item
     project = _resolve_venture(venture)
     result = update_item(
@@ -9298,6 +9375,10 @@ def delimit_ledger_update(
         assignee=assignee or None, due_date=due_date or None, labels=labels,
         blocked_by=blocked_by or None, blocks=blocks or None,
         project_path=project, worked_by=worked_by,
+        evidence=evidence,
+        review_transcript=review_transcript or None,
+        review_diff_path=review_diff_path or None,
+        review_diff_text=review_diff_text or None,
     )
     return _with_next_steps("ledger_update", result)
 
@@ -9309,6 +9390,10 @@ def delimit_ledger_done(
     venture: Annotated[str, Field(description="Project name or path. Empty = auto-detect.")] = "",
     commit_sha: Annotated[str, Field(description="LED-1408: optional merge-commit SHA proving the fix shipped. Recorded as ship_proof on the event; verified=True flag set on the item.")] = "",
     pr_url: Annotated[str, Field(description="LED-1408: optional GitHub PR URL proving the fix shipped. Parsed into pr_owner/pr_repo/pr_number; verified=True flag set on the item.")] = "",
+    evidence: Annotated[Optional[Union[str, Dict[str, Any]]], Field(description="Optional evidence object {class, kind, ref, observed_at, observed_by} (LED-5321 M4). Dict or JSON string.")] = None,
+    review_transcript: Annotated[str, Field(description="Optional transcript path for independently_reviewed binding.")] = "",
+    review_diff_path: Annotated[str, Field(description="Optional diff file path the transcript must bind to.")] = "",
+    review_diff_text: Annotated[str, Field(description="Optional inline diff text the transcript must bind to.")] = "",
 ) -> Dict[str, Any]:
     """Mark a ledger item as done (convenience wrapper).
 
@@ -9333,11 +9418,18 @@ def delimit_ledger_done(
         venture: Project name or path. Empty = auto-detect.
         commit_sha: Optional merge-commit SHA (LED-1408 ship proof).
         pr_url: Optional GitHub PR URL (LED-1408 ship proof).
+        evidence: Optional evidence object (LED-5321 M4). Without it the
+            close is stored as evidence.class="assertion" (never silently
+            verified); verified_states advances only on verified+ref.
 
     Returns:
         Dict with the update result (including ship_proof when proof was
         supplied) and next_steps.
     """
+    try:
+        evidence = _coerce_dict_arg(evidence, "evidence") if evidence else None
+    except ValueError as e:
+        return _with_next_steps("ledger_done", {"error": str(e)})
     from ai.ledger_manager import update_item
     project = _resolve_venture(venture)
     result = update_item(
@@ -9347,6 +9439,10 @@ def delimit_ledger_done(
         project_path=project,
         commit_sha=commit_sha or None,
         pr_url=pr_url or None,
+        evidence=evidence,
+        review_transcript=review_transcript or None,
+        review_diff_path=review_diff_path or None,
+        review_diff_text=review_diff_text or None,
     )
     return _with_next_steps("ledger_done", result)
 
@@ -9884,6 +9980,15 @@ def delimit_session_handoff(
     files_changed: Annotated[Optional[Union[str, List[str]]], Field(description="Key files that were modified.")] = None,
     venture: Annotated[str, Field(description="Venture context. Empty = auto-detect.")] = "",
     project_path: Annotated[str, Field(description="Project path whose revive soul this handoff should refresh. Empty = auto-detect from cwd.")] = "",
+    logical_session_id: Annotated[str, Field(description="Idempotency key for the canonical close. Re-closing with the same id updates/returns the same soul+handoff+receipt instead of duplicating. Empty = fresh close.")] = "",
+    task_description: Annotated[str, Field(description="Receipt task line. Empty = reuse summary.")] = "",
+    completed: Annotated[Optional[Union[str, List[str]]], Field(description="Receipt completed items. Empty = reuse items_completed.")] = None,
+    not_completed: Annotated[Optional[Union[str, List[str]]], Field(description="Receipt not-completed items. Empty = reuse items_added.")] = None,
+    assumptions: Annotated[Optional[Union[str, List[str]]], Field(description="Receipt assumptions.")] = None,
+    next_action: Annotated[str, Field(description="Receipt next action for the receiving session.")] = "",
+    to_model: Annotated[str, Field(description="Receipt recipient model. Default any.")] = "any",
+    priority: Annotated[str, Field(description="Receipt priority (P0/P1/P2). Default P1.")] = "P1",
+    source_model: Annotated[str, Field(description="Closing model identity. Empty = auto-detect. Any model may close; no supervisor is assumed.")] = "",
 ) -> Dict[str, Any]:
     """Save a session summary for cross-session continuity.
 
@@ -9897,10 +10002,13 @@ def delimit_session_handoff(
     this writes a structured handoff with explicit fields. Session Phoenix,
     when installed, enriches soul capture with git and transcript state.
 
-    Side effects: writes a handoff record via
-    ai.ledger_manager.session_handoff. Identifier/path fields retain legacy
-    comma-list coercion. Prose decisions and blockers preserve commas in a
-    plain string; native/JSON lists carry multiple entries. LED-3731: also refreshes a lightweight
+    Side effects: performs the ONE canonical session close via
+    ai.ledger_manager.session_handoff: refreshes the soul, writes the
+    handoff record, creates the handoff receipt, then reads every written
+    record back and reports `verified` (LED-5321 M3). Identifier/path
+    fields retain legacy comma-list coercion. Prose decisions and blockers
+    preserve commas in a plain string; native/JSON lists carry multiple
+    entries. LED-3731: also refreshes a lightweight
     pointer-soul for `project_path` (default = cwd) so the NEXT
     delimit_revive for that project returns THIS handoff's state rather
     than a stale older soul.
@@ -9918,9 +10026,22 @@ def delimit_session_handoff(
         venture: Venture context. Empty = auto-detect.
         project_path: Project path whose revive soul this handoff should
             refresh. Empty = auto-detect from cwd.
+        logical_session_id: Idempotency key. Re-closing with the same id
+            updates/returns the same records (no duplicate receipts).
+        task_description: Receipt task line. Empty = reuse summary.
+        completed: Receipt completed items. Empty = reuse items_completed.
+        not_completed: Receipt not-completed items. Empty = reuse items_added.
+        assumptions: Receipt assumptions.
+        next_action: Receipt next action for the receiving session.
+        to_model: Receipt recipient model. Default any.
+        priority: Receipt priority. Default P1.
+        source_model: Closing model identity. Empty = auto-detect; any
+            model may close (no hardcoded supervisor).
 
     Returns:
-        Dict with the saved handoff record.
+        Dict with the saved handoff record plus the canonical-close
+        verification (`verified`, `soul_id`, `handoff_id`, `receipt_id`,
+        `readback`).
     """
     try:
         items_completed = _coerce_list_arg(items_completed, "items_completed") if items_completed else None
@@ -9942,16 +10063,33 @@ def delimit_session_handoff(
         files_changed = _coerce_list_arg(files_changed, "files_changed") if files_changed else None
     except ValueError:
         files_changed = None
+    try:
+        completed = _coerce_prose_list_arg(completed, "completed") if completed else None
+    except ValueError:
+        completed = None
+    try:
+        not_completed = _coerce_prose_list_arg(not_completed, "not_completed") if not_completed else None
+    except ValueError:
+        not_completed = None
+    try:
+        assumptions = _coerce_prose_list_arg(assumptions, "assumptions") if assumptions else None
+    except ValueError:
+        assumptions = None
     from ai.ledger_manager import session_handoff
     return session_handoff(
         summary=summary, items_completed=items_completed, items_added=items_added,
         key_decisions=key_decisions, blockers=blockers, files_changed=files_changed,
-        venture=venture, project_path=project_path, source_model=_detect_model(),
+        venture=venture, project_path=project_path,
+        source_model=source_model or _detect_model(),
+        logical_session_id=logical_session_id,
+        task_description=task_description, completed=completed,
+        not_completed=not_completed, assumptions=assumptions,
+        next_action=next_action, to_model=to_model, priority=priority,
     )
 
 
 @mcp.tool()
-def delimit_session_history(limit: Annotated[int, Field(description="Number of recent sessions to return. Default 5.")] = 5) -> Dict[str, Any]:
+def delimit_session_history(limit: Annotated[int, Field(description="Number of recent sessions to return. Default 5.")] = 5, project_path: Annotated[str, Field(description="Project to scope the pending-receipts/dispatch/handoff snapshot to. Empty = aggregate.")] = "", venture: Annotated[str, Field(description="Venture to scope the snapshot to. Empty = auto-detect.")] = "") -> Dict[str, Any]:
     """Load recent session handoffs for context recovery.
 
     When to use: at session start to see what previous sessions left —
@@ -9966,13 +10104,17 @@ def delimit_session_history(limit: Annotated[int, Field(description="Number of r
 
     Args:
         limit: Number of recent sessions to return. Default 5.
+        project_path: Project to scope the pending-receipts/dispatch/
+            latest-handoff snapshot to. Empty = aggregate.
+        venture: Venture to scope the snapshot to. Empty = auto-detect.
 
     Returns:
         Dict with recent session summaries (items_completed, decisions,
-        blockers per session) and next_steps.
+        blockers per session) and next_steps, plus (LED-5321 M3)
+        `pending_receipts`, `open_dispatches`, and `latest_handoff_id`.
     """
     from ai.ledger_manager import session_history
-    return session_history(limit=limit)
+    return session_history(limit=limit, project_path=project_path, venture=venture)
 
 
 @mcp.tool()
@@ -14358,8 +14500,15 @@ def _delimit_agent_impl(
     # complete params
     result: str = "",
     files_changed: str = "",
+    accept_uncertain: bool = False,
+    # LED-5321 M4: optional review-binding inputs (complete only).
+    review_transcript: str = "",
+    review_diff_path: str = "",
+    review_diff_text: str = "",
     # handoff params
     to_model: str = "",
+    # dispatch launch params (LED-5321 M5)
+    launch: Optional[Union[str, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Manage the agent-task lifecycle — dispatches to one of four actions.
 
@@ -14390,8 +14539,12 @@ def _delimit_agent_impl(
     writes). action="dispatch" / "complete" / "handoff" WRITE to the agent
     task store and append to its audit log. CRITICAL: action="dispatch"
     records intent only — it persists a task plus a formatted agent_prompt
-    and does NOT spawn or run a subagent. Per the operating model, actual
-    execution is the caller's responsibility via the Agent tool
+    and does NOT spawn or run a subagent — UNLESS the launch parameter is
+    given with assignee "muse", in which case the worker IS started through
+    the contained launcher (scripts/launch_contained_worker.sh, sandbox on,
+    never --yolo) and the task records the session binding with status
+    "running". Without launch, per the operating model, actual execution is
+    the caller's responsibility via the Agent tool
     (subagent_type=engineering); this is the planning + audit surface.
     Dispatch additionally enforces deterministic guards before writing: a
     kill switch (refuses if ~/.delimit/pause_dispatch exists), a dead-
@@ -14413,6 +14566,8 @@ def _delimit_agent_impl(
         assignee: Target model "claude"/"codex"/"gemini"/"any"
             (action="dispatch" only). Default "any", resolved to a
             concrete model by the router. Invalid values are rejected.
+            Explicit-only "muse"/"copilot" name harnesses; only "muse"
+            supports the launch parameter.
         priority: "P0"/"P1"/"P2" (action="dispatch" only). Default "P1";
             invalid values are rejected.
         tools_needed: Comma-separated MCP tools the work will need
@@ -14428,14 +14583,24 @@ def _delimit_agent_impl(
         result: Summary of what was done (action="complete" only).
         files_changed: Comma-separated modified file paths
             (action="complete" only). Coerced to a list.
+        accept_uncertain: Close an "uncertain" worker task anyway
+            (action="complete" only). Default False; uncertain outcomes
+            require an explicit True. Ignored for other statuses.
         to_model: Target model for the transfer (action="handoff" only).
             Required; validated against the allowed models.
+        launch: Optional tracked-launch spec (action="dispatch" only),
+            as a dict or JSON object string with workspace (git worktree
+            path, required), prompt_file (required), max_steps (default
+            220), network ("proxy-only"/"restricted"/"enabled", default
+            "proxy-only"). Coerced via _coerce_dict_arg. Only assignee
+            "muse" launches; other runtimes record "launch_unsupported".
 
     Returns:
         Dict whose shape depends on action — see the per-action alias
         (delimit_agent_dispatch / _status / _complete / _handoff) for the
         exact keys. All responses carry a next_steps field from
-        _with_next_steps. dispatch → {status: "dispatched" | "deduped",
+        _with_next_steps. dispatch → {status: "dispatched" | "deduped" |
+        "running" | "launch_refused" | "launch_unsupported",
         task_id, task, agent_prompt, message}; status → a single task
         {status: "ok", task} for a known id, or an active-task summary
         {status: "ok", active_count, completed_count, active_tasks,
@@ -14460,6 +14625,10 @@ def _delimit_agent_impl(
         from ai.agent_dispatch import dispatch_task
         tools_list = _coerce_list_arg(tools_needed, "tools_needed")
         constraints_list = _coerce_list_arg(constraints, "constraints")
+        try:
+            launch_spec = _coerce_dict_arg(launch, "launch")
+        except ValueError as e:
+            return _with_next_steps("agent_dispatch", {"error": str(e)})
         return _with_next_steps("agent_dispatch", _safe_call(
             dispatch_task,
             title=title,
@@ -14469,6 +14638,7 @@ def _delimit_agent_impl(
             tools_needed=tools_list,
             constraints=constraints_list,
             context=context,
+            launch=launch_spec,
         ))
 
     if action == "status":
@@ -14485,6 +14655,10 @@ def _delimit_agent_impl(
             task_id=task_id,
             result=result,
             files_changed=files_list,
+            accept_uncertain=accept_uncertain,
+            review_transcript=review_transcript,
+            review_diff_path=review_diff_path,
+            review_diff_text=review_diff_text,
         ))
 
     if action == "handoff":
@@ -14504,9 +14678,10 @@ delimit_agent = mcp.tool()(_delimit_agent_impl)
 # --- Thin wrappers (aliases) for backward compatibility ---
 
 @mcp.tool()
-def delimit_agent_dispatch(title: Annotated[str, Field(description="Short task title. Required.")], description: Annotated[str, Field(description="Longer task description.")] = "", assignee: Annotated[str, Field(description="Worker — \"claude\", \"codex\", \"gemini\", explicit-only \"copilot\", or \"any\" (default). Copilot names a harness, not a model family; any excludes Copilot.")] = "any",
+def delimit_agent_dispatch(title: Annotated[str, Field(description="Short task title. Required.")], description: Annotated[str, Field(description="Longer task description.")] = "", assignee: Annotated[str, Field(description="Worker — \"claude\", \"codex\", \"gemini\", explicit-only \"copilot\"/\"muse\", or \"any\" (default). Copilot/Muse name harnesses, not model families; any excludes both. Only \"muse\" supports launch.")] = "any",
                            priority: Annotated[str, Field(description="One of \"P0\" (immediate), \"P1\" (default), \"P2\".")] = "P1", tools_needed: Annotated[str, Field(description="Comma-separated MCP tools the work will need.")] = "",
-                           constraints: Annotated[str, Field(description="Comma-separated constraints (e.g. \"no force push\").")] = "", context: Annotated[str, Field(description="Background info to seed the executor.")] = "") -> Dict[str, Any]:
+                           constraints: Annotated[str, Field(description="Comma-separated constraints (e.g. \"no force push\").")] = "", context: Annotated[str, Field(description="Background info to seed the executor.")] = "",
+                           launch: Annotated[Optional[Union[str, Dict[str, Any]]], Field(description="Optional tracked-launch spec: dict or JSON string with workspace, prompt_file, max_steps, network. Only assignee \"muse\" launches.")] = None) -> Dict[str, Any]:
     """Record an engineering-task dispatch with full audit trail.
 
     When to use: as the PLANNING + AUDIT surface when the
@@ -14515,54 +14690,71 @@ def delimit_agent_dispatch(title: Annotated[str, Field(description="Short task t
     actual execution is performed by the Agent tool with
     subagent_type=engineering; this tool records the intent,
     assignee, constraints, and eventual outcome so the dispatch is
-    replayable from the ledger.
+    replayable from the ledger. With assignee "muse" plus the launch
+    parameter, the worker IS started as a tracked contained process
+    whose session, lease, questions, and terminal state are bound to
+    the task record.
     When NOT to use: as an autonomous queue processor expecting
-    auto-execution — this records dispatch but does NOT run the
-    work. Real autonomous queue execution is deferred to a future
-    capability (LED-193 daemon) with strict sandboxing + founder-
-    approval semantics. Also do not use for conversational tasks,
-    sub-5-minute work, or work where no function exists yet.
+    auto-execution — without launch this records dispatch but does
+    NOT run the work. Real autonomous queue execution is deferred to
+    a future capability (LED-193 daemon) with strict sandboxing +
+    founder-approval semantics. Also do not use for conversational
+    tasks, sub-5-minute work, or work where no function exists yet.
 
     Sibling contrast: delimit_agent_status reads dispatched task
     state; delimit_agent_handoff transfers a recorded task to a
     different model; delimit_agent_complete closes the task with
-    results. Compared to delimit_ledger_add, this is the engineering-
-    work surface with assignee, tools_needed, and constraints
-    schema; ledger items are free-form.
+    results; delimit_agent_poll / _answer / _cancel operate a
+    launched worker. Compared to delimit_ledger_add, this is the
+    engineering-work surface with assignee, tools_needed, and
+    constraints schema; ledger items are free-form.
 
     Side effects: writes a new task record to disk via
     ai.agent_dispatch.dispatch_task (a JSON record in the agent
     tasks file plus an audit log entry). String list inputs
     (`tools_needed`, `constraints`) are coerced from comma strings
-    to lists. NO subagent is spawned by this call — the caller is
-    responsible for invoking the Agent tool separately. This lifecycle
-    surface is not license-gated in the current build.
+    to lists; `launch` is coerced from a JSON string or dict via
+    _coerce_dict_arg. Without launch, NO subagent is spawned by this
+    call — the caller is responsible for invoking the Agent tool
+    separately. With launch + assignee "muse", the contained worker
+    launcher IS invoked (sandbox on, never --yolo) and the task
+    records the session binding. This lifecycle surface is not
+    license-gated in the current build.
 
     Args:
         title: Short task title. Required.
         description: Longer task description.
         assignee: Worker — "claude", "codex", "gemini", explicit-only
-            "copilot", or "any" (default). Copilot identifies the CLI
-            harness, not a distinct underlying model family. "any" retains
-            the existing automatic candidates and never selects Copilot.
-            Copilot returns evidence to the coordinator for completion.
+            "copilot"/"muse", or "any" (default). Copilot/Muse identify
+            CLI harnesses, not distinct underlying model families. "any"
+            retains the existing automatic candidates and never selects
+            Copilot or Muse. Copilot returns evidence to the coordinator
+            for completion.
         priority: One of "P0" (immediate), "P1" (default), "P2".
         tools_needed: Comma-separated MCP tools the work will need
             (used for sandboxing hints).
         constraints: Comma-separated constraints (e.g. "no force
             push", "read-only", "no-deploy").
         context: Background info to seed the executor.
+        launch: Optional tracked-launch spec, as a dict or JSON
+            object string: workspace (git worktree path, required),
+            prompt_file (required), max_steps (default 220), network
+            ("proxy-only"/"restricted"/"enabled", default "proxy-only").
+            Only assignee "muse" launches (status "running"); other
+            runtimes record "launch_unsupported", and missing sandbox
+            preconditions record "launch_refused".
 
     Returns:
         Dict with keys: task_id (AGT-XXXXXXXX), task (record
         metadata: title, description, assignee, priority,
-        tools_needed, constraints, context, status="dispatched",
-        created_at), agent_prompt (formatted prompt for the
-        executor), plus a next_steps field.
+        tools_needed, constraints, context, status, created_at),
+        agent_prompt (formatted prompt for the executor), plus a
+        next_steps field. status is "dispatched" without launch,
+        else "running" / "launch_refused" / "launch_unsupported".
     """
     return _delimit_agent_impl(action="dispatch", title=title, description=description,
                          assignee=assignee, priority=priority, tools_needed=tools_needed,
-                         constraints=constraints, context=context)
+                         constraints=constraints, context=context, launch=launch)
 
 
 @mcp.tool()
@@ -14591,7 +14783,11 @@ def delimit_agent_status(task_id: Annotated[str, Field(description="Specific tas
 
 @mcp.tool()
 def delimit_agent_complete(task_id: Annotated[str, Field(description="Task id from delimit_agent_dispatch. Required.")], result: Annotated[str, Field(description="Summary of what was done.")] = "",
-                           files_changed: Annotated[str, Field(description="Comma-separated paths of modified files.")] = "") -> Dict[str, Any]:
+                           files_changed: Annotated[str, Field(description="Comma-separated paths of modified files.")] = "",
+                           accept_uncertain: Annotated[bool, Field(description="If True, close an \"uncertain\" worker task anyway. Default False.")] = False,
+                           review_transcript: Annotated[str, Field(description="Optional deliberation transcript path for review binding (LED-5321 M4).")] = "",
+                           review_diff_path: Annotated[str, Field(description="Optional diff file path the transcript must bind to.")] = "",
+                           review_diff_text: Annotated[str, Field(description="Optional inline diff text the transcript must bind to.")] = "") -> Dict[str, Any]:
     """Close a dispatched agent task by recording the outcome.
 
     When to use: at the end of an engineering subagent's work, to
@@ -14599,25 +14795,31 @@ def delimit_agent_complete(task_id: Annotated[str, Field(description="Task id fr
     record. This is the closing step of the dispatch lifecycle
     (delimit_agent_dispatch -> [subagent runs] -> this).
     Without calling this, the task remains "dispatched" in the
-    ledger and dashboards will count it as in-flight.
+    ledger and dashboards will count it as in-flight. For tracked
+    muse workers, call delimit_agent_poll first: completed outputs
+    close here, and uncertain outputs (worker died mid-run) close
+    here only with accept_uncertain=True.
     When NOT to use: to hand off ownership to a different model
     (use delimit_agent_handoff), to dispatch a fresh task
     (delimit_agent_dispatch), or to read task status without
     closing (delimit_agent_status). Also: do not call repeatedly on
     the same task_id — the backend treats a second complete as an
-    error.
+    error. Do not use on cancelled, still-running, or refused
+    worker tasks — the backend rejects those.
 
     Sibling contrast: delimit_agent_handoff transfers active
     ownership to another model (task stays open); this closes
     ownership entirely. delimit_agent_status is the read-only
-    sibling.
+    sibling. delimit_agent_poll observes a launched worker without
+    closing; this accepts and closes.
 
     Side effects: writes a completion record via
     ai.agent_dispatch.complete_task — the task's status flips from
     "dispatched" to "completed", `result` and `files_changed` are
     persisted, and an audit log entry is appended. `files_changed`
-    is coerced from a comma string to a list. No license gate on
-    this lifecycle surface. No notification — pair
+    is coerced from a comma string to a list. Tracked-launch tasks
+    may only close from "completed"/"uncertain" worker states. No
+    license gate on this lifecycle surface. No notification — pair
     with delimit_notify if the operator needs to be told.
 
     Args:
@@ -14627,14 +14829,25 @@ def delimit_agent_complete(task_id: Annotated[str, Field(description="Task id fr
             recommended for the audit trail.
         files_changed: Comma-separated paths of modified files
             (becomes a list after _coerce_list_arg).
+        accept_uncertain: If True, close an "uncertain" worker task
+            anyway (the outcome is unknown — inspect the worker
+            output first). Default False. Ignored for other statuses.
 
     Returns:
         Dict with keys: task_id echo, status (now "completed"),
         completed_at timestamp, result echo, files_changed (list),
         plus a next_steps field. Returns {"error": "..."} on
-        unknown task_id or already-completed task.
+        unknown task_id, already-completed task, cancelled/running
+        worker tasks, or uncertain tasks without accept_uncertain.
+        LED-5321 M4: a worker's "done" is an assertion, never merged/
+        deployed proof. When review_transcript + a diff are supplied, the
+        completion records review_binding {bound, reason} so a later commit
+        cannot inherit an earlier review.
     """
-    return _delimit_agent_impl(action="complete", task_id=task_id, result=result, files_changed=files_changed)
+    return _delimit_agent_impl(action="complete", task_id=task_id, result=result, files_changed=files_changed,
+                               accept_uncertain=accept_uncertain,
+                               review_transcript=review_transcript, review_diff_path=review_diff_path,
+                               review_diff_text=review_diff_text)
 
 
 @mcp.tool()
@@ -14664,6 +14877,155 @@ def delimit_agent_handoff(task_id: Annotated[str, Field(description="Existing ta
         Dict with the handoff record and next_steps.
     """
     return _delimit_agent_impl(action="handoff", task_id=task_id, to_model=to_model, context=context)
+
+
+@mcp.tool()
+def delimit_agent_poll(task_id: Annotated[str, Field(description="Task id of a launched worker (AGT-xxx). Required.")]) -> Dict[str, Any]:
+    """Read a tracked worker's output without inference (explicit poll).
+
+    When to use: after delimit_agent_dispatch with launch starts a
+    muse worker, to check whether it finished. Call it explicitly —
+    there is no polling loop in the server. A finished worker
+    exposes its final text here; a worker that died mid-run (e.g.
+    model stream idle timeout) surfaces as "uncertain", never as a
+    silent completion. When the final text carries a QUESTION: block
+    from the worker, this call binds it to the task with a handoff
+    receipt — answer it with delimit_agent_answer.
+    When NOT to use: to read audit-only dispatches (use
+    delimit_agent_status), to close a task (use
+    delimit_agent_complete), or in a tight loop — one explicit call
+    per check; the worker transcript is re-read each time.
+
+    Sibling contrast: delimit_agent_status reads the stored task
+    record without touching worker output; this reads the worker's
+    JSONL transcript and advances running → completed/uncertain.
+    delimit_agent_complete accepts and closes; delimit_agent_cancel
+    aborts.
+
+    Side effects: reads the worker's JSONL transcript plus its rc
+    sidecar (no model inference) and writes the observed outcome to
+    the task record via ai.agent_dispatch.poll_worker, with an audit
+    entry per call. Recording a worker QUESTION: block additionally
+    creates a handoff receipt addressed to the lease owner.
+
+    Args:
+        task_id: Task id of a launched worker (AGT-xxx). Required;
+            empty or unknown ids return an error.
+
+    Returns:
+        Dict with keys: task_id echo, status ("running" when the
+        worker has no rc file yet, "completed" with final_text when
+        run.terminal.completed was observed, "uncertain" with a
+        reason when run.terminal.failed was observed or the output
+        is malformed), task (updated record), plus question_id and
+        receipt_id when a QUESTION: block was bound, and a
+        next_steps field.
+    """
+    from ai.agent_dispatch import poll_worker
+    return _with_next_steps("agent_poll", _safe_call(
+        poll_worker, task_id=task_id,
+    ))
+
+
+@mcp.tool()
+def delimit_agent_answer(task_id: Annotated[str, Field(description="Task id carrying the bound question (AGT-xxx). Required.")], question_id: Annotated[str, Field(description="Question id from delimit_agent_poll (Q-xxx). Required.")],
+                         answer: Annotated[str, Field(description="Answer text for the worker. Required.")], owner_backed: Annotated[bool, Field(description="If True, the answer carries an owner decision. Default False (routine lead answer).")] = False) -> Dict[str, Any]:
+    """Answer a bound worker question and resume its muse session.
+
+    When to use: after delimit_agent_poll binds a worker QUESTION:
+    block (question_id + receipt_id) to the task. The lead answers
+    routine technical questions directly (owner_backed=False); only
+    pass owner_backed=True when the answer carries a reserved owner
+    decision. For muse workers the SAME session is resumed with the
+    answer as its prompt file, so question → answer → task stays
+    bound even if the lead process was replaced.
+    When NOT to use: to ask the worker something new (that is a
+    fresh dispatch), to close the task (use delimit_agent_complete),
+    or to abort the worker (use delimit_agent_cancel). Do not answer
+    twice — the backend rejects a second answer to the same
+    question_id.
+
+    Sibling contrast: delimit_agent_poll surfaces the question;
+    this resolves it. delimit_agent_status shows the waiting
+    question and its receipt; delimit_agent_complete closes the
+    task after the resumed worker finishes.
+
+    Side effects: persists the answer on the question record
+    (owner_backed recorded exactly as given, never inferred),
+    acknowledges the question's handoff receipt with the answer
+    text, and — for muse tasks whose worker already reached
+    completed/uncertain — resumes the SAME session via the
+    contained launcher with the answer as the prompt file (a fresh
+    output prefix per resume; prior transcripts preserved). No
+    relaunch happens while the worker is still running.
+
+    Args:
+        task_id: Task id carrying the bound question (AGT-xxx).
+            Required.
+        question_id: Question id from delimit_agent_poll (Q-xxx).
+            Required.
+        answer: Answer text for the worker. Required.
+        owner_backed: If True, the answer carries a reserved owner
+            decision. Default False (routine lead answer). Recorded
+            as given.
+
+    Returns:
+        Dict with keys: task_id and question_id echoes, status
+        "answered", receipt_id and receipt_ack, resumed (bool),
+        session_id, task (updated record), plus a next_steps field.
+        Returns {"error": "..."} on unknown ids, already-answered
+        questions, or closed tasks.
+    """
+    from ai.agent_dispatch import answer_question
+    return _with_next_steps("agent_answer", _safe_call(
+        answer_question,
+        task_id=task_id,
+        question_id=question_id,
+        answer_text=answer,
+        answered_by="lead",
+        owner_backed=owner_backed,
+    ))
+
+
+@mcp.tool()
+def delimit_agent_cancel(task_id: Annotated[str, Field(description="Task id to cancel (AGT-xxx). Required.")], reason: Annotated[str, Field(description="Why the task is cancelled. Required.")]) -> Dict[str, Any]:
+    """Cancel a task and terminate its worker process if still alive.
+
+    When to use: to withdraw delegated work — a stuck or misguided
+    worker, a duplicate dispatch, or a task the plan no longer
+    needs. Records "cancelled" with the reason and signals the live
+    worker (pid recorded at launch, cmdline-validated against the
+    session id, with a pkill-by-session fallback). Cancellation and
+    "uncertain outcome" stay distinct: cancelled tasks can never be
+    closed via delimit_agent_complete — re-dispatch instead.
+    When NOT to use: to close finished work (use
+    delimit_agent_complete), to read state (use
+    delimit_agent_status), or to transfer ownership (use
+    delimit_agent_handoff).
+
+    Sibling contrast: delimit_agent_complete accepts and closes;
+    this withdraws. delimit_agent_poll observes without changing
+    the worker; this stops it.
+
+    Side effects: writes the cancellation via
+    ai.agent_dispatch.cancel_task (status, reason, timestamp, and
+    whether a live process was signalled) plus an audit entry, and
+    releases any checkout lock the task holds.
+
+    Args:
+        task_id: Task id to cancel (AGT-xxx). Required.
+        reason: Why the task is cancelled. Required and recorded.
+
+    Returns:
+        Dict with keys: task_id echo, status "cancelled", task
+        (updated record), worker_killed (bool), plus a next_steps
+        field. Returns {"error": "..."} on unknown task_id or
+        already-cancelled/done tasks.
+    """
+    from ai.agent_dispatch import cancel_task
+    return _with_next_steps("agent_cancel", _safe_call(
+        cancel_task, task_id=task_id, reason=reason,
+    ))
 
 
 @mcp.tool()
