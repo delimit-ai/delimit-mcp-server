@@ -1,3 +1,19 @@
+## [4.19.1] - 2026-09-13
+
+### Fixed
+- Add explicit `delimit chat --model copilot` and `--model muse` launch paths
+  without health inference or automatic fallback to another provider.
+- Guard Muse Standard-model selection and foreign personal-context exclusions;
+  reject oversized startup guidance instead of silently truncating it.
+- Include both project instruction sources in a size/hash manifest so native
+  precedence does not silently hide the read requirement; never rewrite user rules.
+- Make additional Copilot/Muse command shims opt-in, preserve custom shims, and
+  preflight collisions before replacing any managed shim.
+- Recognize compiled continuity backends and use their installed interpreter.
+  Report precise exit-save failures with private recovery diagnostics, without
+  replacing existing handoffs or claiming unsaved conversation context is saved.
+- Pin validation and publication to one immutable gateway source revision.
+
 ## [Unreleased]
 
 ### Security

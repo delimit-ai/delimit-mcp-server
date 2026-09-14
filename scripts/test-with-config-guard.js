@@ -50,6 +50,9 @@ const TEST_FILES = [
     'tests/cli-deliberate-runs-engine.test.js',
     'tests/funnel-cli-leaks.test.js',
     'tests/check-fail-closed-no-pyyaml.test.js',
+    'tests/harness-launch.test.js',
+    'tests/publish-source-pin.test.js',
+    'tests/chat-repl-explicit-harness.test.js',
 ];
 
 const cfgPath = resolveSharedConfigPath();

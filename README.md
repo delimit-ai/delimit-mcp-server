@@ -164,6 +164,86 @@ delimit_ledger_done       → close with a note (auto-captures a PR URL as ship 
 
 That's the loop: gate the change, sign the proof, keep the context. Run it once on a real spec and you've used the whole merge gate.
 
+### Explicit Copilot CLI and Muse Code sessions
+
+Install and authenticate the official client separately, under the same OS user
+who runs Delimit. Delimit does not install these clients, purchase a plan, log you
+in, or verify your subscription allowance. Then launch from the actual Git
+repository, not your home directory:
+
+```bash
+cd /path/to/repository
+npx delimit-cli chat --model copilot
+npx delimit-cli chat --model muse
+```
+
+These are explicitly selected interactive harnesses, not new model votes or
+automatic build-loop backends. Neither launch probes other models or falls back
+to another provider. Native permission approvals remain active. Copilot launches
+with automatic updates and remote/export features disabled for this session.
+
+**Muse preparation:** first verify that your account permits Standard
+`muse-spark-1.3` on the intended billing route. Back up your native
+`$XDG_CONFIG_HOME/muse/settings.json` (or `~/.config/muse/settings.json` when
+`XDG_CONFIG_HOME` is unset), and merge these fields into its existing JSON object;
+preserve unrelated settings and authentication:
+
+```json
+{
+  "model": "muse-spark-1.3",
+  "context": {
+    "foreign_personal_rules": false,
+    "foreign_personal_skills": false
+  }
+}
+```
+
+The explicit Muse launch requires that selection and exclusion of foreign
+personal rules/skills; it does not change native settings for you. A configured
+provider must be `meta`, and a configured endpoint must be
+`https://api.meta.ai/v1`. `META_API_KEY` or `MODEL_API_KEY` environment overrides
+block this launch until you resolve the intended billing route. Do not switch
+credentials or models merely to bypass that check. Standard selection is not
+proof of zero retention, subscription billing, or private-data clearance.
+
+Current binary discovery supports Copilot in `~/.local/bin`, `/usr/local/bin`,
+or `/usr/bin`, and Muse's versioned `~/.local/bin/muse-bin-<version>-R<revision>`
+distribution. Muse uses that executable directly, not its updater launcher.
+Other installation layouts are not automatically discovered. The native Muse
+context settings were checked with Muse Code 1.2.1; recheck compatibility when
+upgrading the client.
+
+Delimit supplies a compact project-bound startup instruction, not an automatic
+import of your ledger, memory, or complete conversation. Optional local guidance
+can live in `$DELIMIT_HOME/harness-bootstrap.md` (default
+`~/.delimit/harness-bootstrap.md`); the combined startup text must fit within
+16 KiB. Project `AGENTS.md`/`CLAUDE.md` files at or above 64 KiB are rejected
+instead of silently truncated. Recover and save a scoped handoff through your
+available Delimit tools. These launchers do **not** automatically register a
+native MCP connection or prove cross-harness continuity.
+
+When both project instruction files exist, the startup packet lists both files
+with their sizes and hashes and tells the harness to read them completely,
+including guidance hidden by native file precedence. It does not copy their
+contents into the startup packet, silently merge files, or override the existing
+instruction hierarchy. User-global guidance remains opt-in through the local
+bootstrap file; Delimit never copies a different client's private rules by default.
+This manifest is a loading instruction, not proof that the model performed every
+read. If required guidance is inaccessible or conflicts, resolve that gap before
+allowing edits. Oversized native project files still fail closed without rewriting
+the originals.
+
+Optional command shims can be installed with `delimit setup --harness-shims`.
+Ordinary setup only refreshes already-managed Muse/Copilot shims; it does not
+newly shadow your native commands. Custom shims are preserved. With the opt-in,
+a conflicting custom file stops installation of both additional shims.
+
+For existing launcher-managed continuity, clean exit finalizes only a bound
+handoff. If that is unavailable, Delimit reports the specific reason and writes
+a private local diagnostic receipt under its `sessions/` directory. That receipt
+is not a conversation backup. Existing handoffs are not replaced by empty ones;
+resume the exact native session and explicitly save a project-bound handoff.
+
 ---
 
 ## Think and Build
