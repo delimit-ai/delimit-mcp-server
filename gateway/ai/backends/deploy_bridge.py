@@ -16,6 +16,9 @@ logger = logging.getLogger("delimit.ai.deploy_bridge")
 
 DEPLOY_DIR = Path.home() / ".delimit" / "deploys"
 
+# LED-5321 M4: deployment binding defaults (deterministic, no model calls).
+DEPLOY_BINDING_DEFAULT_MAX_AGE_S = 300
+
 
 def _ensure_dir():
     DEPLOY_DIR.mkdir(parents=True, exist_ok=True)
@@ -476,12 +479,354 @@ def _configured_verify_targets(
     return list(DEPLOY_TARGETS)
 
 
+# ── LED-5321 M4: deployment binding ─────────────────────────────────
+# A healthy HTTP 200 (or repo HEAD, or an import in another process) must not
+# pass as proof that the INTENDED service/host/release is live. Binding
+# records and compares: (1) intended release identity, (2) the LIVE loaded
+# executable/config (/proc/<MainPID> cmdline/environ, read-only; systemd
+# ExecStart/Environment are echoed advisory-only, never matched, because a
+# daemon-reload can rewrite unit text while the old process still runs),
+# (3) service/process identity + observation time (unit, MainPID,
+# ActiveEnterTimestamp, observed_at), (4) a startup/semantic health check.
+# Never mutates services. Deterministic, no model calls.
+
+
+def _parse_binding_ts(value: Any) -> Optional[datetime]:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    try:
+        # ISO-8601 (writer format) first.
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except ValueError:
+        pass
+    # systemd ActiveEnterTimestamp: "Mon 2026-09-14 17:00:00 UTC" (or "n/a").
+    for fmt in ("%a %Y-%m-%d %H:%M:%S %Z", "%a %Y-%m-%d %H:%M:%S"):
+        try:
+            dt = datetime.strptime(text, fmt)
+            return dt.replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    return None
+
+
+def _read_proc_cmdline(pid: Any, proc_root: str = "/proc") -> str:
+    """Read /proc/<pid>/cmdline read-only; "" on any failure."""
+    try:
+        pid_int = int(str(pid).strip())
+    except (TypeError, ValueError):
+        return ""
+    try:
+        raw = Path(proc_root) / str(pid_int) / "cmdline"
+        data = raw.read_bytes()
+    except (OSError, ValueError):
+        return ""
+    parts = [p for p in data.decode("utf-8", errors="replace").split("\x00") if p]
+    return " ".join(parts)
+
+
+def _read_proc_environ(pid: Any, proc_root: str = "/proc") -> Dict[str, str]:
+    """Read /proc/<pid>/environ read-only; {} on any failure."""
+    try:
+        pid_int = int(str(pid).strip())
+    except (TypeError, ValueError):
+        return {}
+    try:
+        raw = Path(proc_root) / str(pid_int) / "environ"
+        data = raw.read_bytes()
+    except (OSError, ValueError):
+        return {}
+    out: Dict[str, str] = {}
+    for chunk in data.decode("utf-8", errors="replace").split("\x00"):
+        if "=" in chunk:
+            key, _, val = chunk.partition("=")
+            if key:
+                out[key] = val
+    return out
+
+
+def _read_systemd_show(unit: str, runner: Any = None) -> Dict[str, str]:
+    """Read-only `systemctl show` for one unit; {} on any failure."""
+    if not unit or not str(unit).strip():
+        return {}
+    try:
+        if runner is not None:
+            rc, output = runner(["show", str(unit).strip(),
+                                 "--property=Id,ExecStart,Environment,MainPID,ActiveEnterTimestamp"])
+            if rc != 0:
+                return {}
+            text = output if isinstance(output, str) else bytes(output).decode("utf-8", errors="replace")
+        else:
+            import subprocess
+
+            proc = subprocess.run(
+                ["systemctl", "show", str(unit).strip(),
+                 "--property=Id,ExecStart,Environment,MainPID,ActiveEnterTimestamp"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if proc.returncode != 0:
+                return {}
+            text = proc.stdout or ""
+    except Exception:
+        return {}
+    out: Dict[str, str] = {}
+    for line in text.splitlines():
+        if "=" in line:
+            key, _, val = line.partition("=")
+            out[key.strip()] = val.strip()
+    return out
+
+
+def _collect_live_observation(
+    service_unit: str,
+    proc_root: str = "/proc",
+    systemd_runner: Any = None,
+    host: str = "",
+) -> Dict[str, Any]:
+    """Best-effort read-only live observation (never mutates)."""
+    import socket
+
+    show = _read_systemd_show(service_unit, runner=systemd_runner)
+    pid_raw = (show.get("MainPID") or "").strip()
+    pid = pid_raw if pid_raw and pid_raw != "0" else ""
+    cmdline = _read_proc_cmdline(pid, proc_root) if pid else ""
+    environ = _read_proc_environ(pid, proc_root) if pid else {}
+    try:
+        hostname = host or socket.gethostname()
+    except Exception:
+        hostname = host or ""
+    return {
+        "unit": show.get("Id") or service_unit,
+        "host": hostname,
+        "pid": pid,
+        "cmdline": cmdline,
+        "environ": environ,
+        "exec_start": show.get("ExecStart", ""),
+        "environment": show.get("Environment", ""),
+        "active_enter_timestamp": show.get("ActiveEnterTimestamp", ""),
+        "observed_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _normalize_cmdline(value: Any) -> str:
+    if isinstance(value, (list, tuple)):
+        return " ".join(str(v) for v in value if v)
+    return str(value or "")
+
+
+def _normalize_environ_blob(value: Any) -> str:
+    if isinstance(value, dict):
+        return " ".join(f"{k}={v}" for k, v in value.items())
+    if isinstance(value, (list, tuple)):
+        return " ".join(str(v) for v in value if v)
+    return str(value or "")
+
+
+def _health_verdict(health: Any) -> tuple[Optional[bool], str]:
+    """Return (healthy|None when unavailable, detail)."""
+    if health is None:
+        return None, "no health check recorded"
+    if isinstance(health, bool):
+        return health, f"healthy={health}"
+    if not isinstance(health, dict):
+        return None, f"unparseable health payload: {type(health).__name__}"
+    if "healthy" in health:
+        ok = bool(health.get("healthy"))
+        return ok, str(health.get("detail") or health.get("reason") or f"healthy={ok}")
+    if "ok" in health:
+        ok = bool(health.get("ok"))
+        return ok, str(health.get("detail") or f"ok={ok}")
+    if "semantic_ok" in health:
+        ok = bool(health.get("semantic_ok"))
+        return ok, str(health.get("detail") or f"semantic_ok={ok}")
+    if "status" in health:
+        status = str(health.get("status") or "").strip().lower()
+        if status in ("healthy", "ok", "pass", "passing"):
+            return True, f"status={status}"
+        if status:
+            return False, f"status={status}"
+    return None, "no startup/semantic health signal in payload"
+
+
+def verify_deployment_binding(
+    *,
+    intended_release: str = "",
+    service_unit: str = "",
+    expected_host: Optional[str] = None,
+    observation: Optional[Dict[str, Any]] = None,
+    observation_max_age_s: int = DEPLOY_BINDING_DEFAULT_MAX_AGE_S,
+    health: Optional[Any] = None,
+    proc_root: str = "/proc",
+    systemd_runner: Any = None,
+    now: Any = None,
+) -> Dict[str, Any]:
+    """Verify the intended service/host/release is what is actually live.
+
+    Returns {"verified": bool, "mismatch": str|None, ...identity/observation
+    echoes}. verified=False with the exact mismatch when the running process
+    still loads another release, when the unit/host differs, when observation
+    is stale, when no live PID is observed (release_unobservable), or when
+    no health check is recorded. The release match uses ONLY live process
+    evidence (the observed MainPID's cmdline + environ); systemd
+    ExecStart/Environment are echoed advisory-only, never matched. Never
+    mutates services.
+    """
+    intended = str(intended_release or "").strip()
+    unit = str(service_unit or "").strip()
+    checked_at = datetime.now(timezone.utc).isoformat()
+    base: Dict[str, Any] = {
+        "verified": False,
+        "mismatch": None,
+        "intended_release": intended,
+        "service_unit": unit,
+        "expected_host": expected_host or "",
+        "checked_at": checked_at,
+    }
+    if not intended:
+        base["mismatch"] = "intended_release_required: pass the exact sha/tag under test"
+        return base
+    if not unit:
+        base["mismatch"] = "service_unit_required: pass the intended systemd unit"
+        return base
+
+    if isinstance(now, datetime):
+        now_dt = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
+    elif isinstance(now, str):
+        now_dt = _parse_binding_ts(now) or datetime.now(timezone.utc)
+    else:
+        now_dt = datetime.now(timezone.utc)
+
+    obs: Dict[str, Any] = dict(observation) if isinstance(observation, dict) else {}
+    if not obs:
+        try:
+            obs = _collect_live_observation(unit, proc_root, systemd_runner)
+        except Exception as exc:
+            obs = {"collection_error": f"{type(exc).__name__}: {exc}"}
+
+    obs_unit = str(obs.get("unit") or obs.get("unit_name") or obs.get("Id") or "").strip()
+    obs_host = str(obs.get("host") or obs.get("hostname") or "").strip()
+    obs_pid = str(obs.get("pid") or obs.get("MainPID") or obs.get("main_pid") or "").strip()
+    obs_cmdline = _normalize_cmdline(obs.get("cmdline"))
+    # LIVE process evidence only: /proc/<MainPID>/environ. systemd
+    # Environment/ExecStart are on-disk unit text — advisory echoes only,
+    # never merged into the match (a daemon-reload rewrites unit text while
+    # the old process still runs; MainPID 0 leaves cmdline/environ empty).
+    obs_environ_blob = _normalize_environ_blob(obs.get("environ", {}))
+    obs_exec_start = str(obs.get("exec_start") or obs.get("ExecStart") or "")
+    obs_environment_advisory = _normalize_environ_blob(
+        obs.get("environment") or obs.get("Environment") or "")
+    obs_active = str(obs.get("active_enter_timestamp") or obs.get("ActiveEnterTimestamp") or "")
+    obs_observed_at = str(obs.get("observed_at") or obs.get("observedAt") or "")
+
+    base.update({
+        "observed_unit": obs_unit,
+        "observed_host": obs_host,
+        "observed_pid": obs_pid,
+        "observed_cmdline": obs_cmdline,
+        "observed_exec_start": obs_exec_start,
+        "observed_environment": obs_environment_advisory,
+        "observed_active_enter_timestamp": obs_active,
+        "observed_at": obs_observed_at,
+    })
+
+    # (3) service identity.
+    if not obs_unit:
+        base["mismatch"] = "unit_unavailable: observation carries no unit identity"
+        return base
+    if obs_unit != unit:
+        base["mismatch"] = (
+            f"unit_mismatch: intended unit {unit!r} but observed {obs_unit!r}"
+        )
+        return base
+    if expected_host:
+        want_host = str(expected_host).strip()
+        if want_host and not obs_host:
+            base["mismatch"] = (
+                f"host_unavailable: expected host {want_host!r} but observation has no host"
+            )
+            return base
+        if want_host and obs_host != want_host:
+            base["mismatch"] = (
+                f"host_mismatch: intended host {want_host!r} but observed {obs_host!r}"
+            )
+            return base
+
+    # (3b) observation freshness.
+    obs_dt = _parse_binding_ts(obs_observed_at)
+    if obs_dt is None:
+        base["mismatch"] = "observation_stale: observed_at missing or unparseable"
+        return base
+    try:
+        max_age = int(observation_max_age_s)
+    except (TypeError, ValueError):
+        max_age = DEPLOY_BINDING_DEFAULT_MAX_AGE_S
+    age_s = (now_dt - obs_dt).total_seconds()
+    if age_s < 0:
+        age_s = 0.0
+    base["observation_age_s"] = round(age_s, 1)
+    if age_s > max_age:
+        base["mismatch"] = (
+            f"observation_stale: observed_at {obs_observed_at} is {age_s:.0f}s old "
+            f"(max {max_age}s)"
+        )
+        return base
+
+    # (1)+(2) intended release vs LIVE process evidence only.
+    pid_observed = bool(obs_pid) and obs_pid != "0"
+    if not pid_observed:
+        base["mismatch"] = (
+            f"release_unobservable: no live PID observed (MainPID 0/missing); "
+            f"cannot verify intended release {intended!r} from process evidence"
+        )
+        return base
+    live_haystack = f"{obs_cmdline}\n{obs_environ_blob}"
+    if intended not in live_haystack:
+        loaded = obs_cmdline or obs_environ_blob or "(empty live cmdline/environ)"
+        base["mismatch"] = (
+            f"release_mismatch: intended release {intended!r} not loaded; "
+            f"process loads {loaded!r}"
+        )
+        return base
+
+    # (4) startup/semantic health.
+    effective_health = health if health is not None else obs.get("health", obs.get("healthy", None))
+    # Bare {"healthy": bool} inside observation arrives via obs.get("healthy").
+    if effective_health is None and isinstance(obs.get("health"), dict):
+        effective_health = obs["health"]
+    healthy, detail = _health_verdict(effective_health)
+    base["health"] = effective_health
+    base["health_detail"] = detail
+    if healthy is None:
+        base["mismatch"] = f"health_unavailable: {detail}"
+        return base
+    if not healthy:
+        base["mismatch"] = f"health_unhealthy: {detail}"
+        return base
+
+    base["verified"] = True
+    base["mismatch"] = None
+    return base
+
+
 def verify(
     app: str,
     env: str,
     git_ref: Optional[str] = None,
     repo_path: str = "",
     target_urls: Optional[List[str]] = None,
+    # LED-5321 M4: all optional, backward compatible. When any binding input
+    # is supplied, the result also carries binding + verified (fail-closed).
+    intended_release: Optional[str] = None,
+    service_unit: Optional[str] = None,
+    expected_host: Optional[str] = None,
+    observation: Optional[Dict[str, Any]] = None,
+    observation_max_age_s: int = DEPLOY_BINDING_DEFAULT_MAX_AGE_S,
+    deployment_health: Optional[Any] = None,
+    proc_root: str = "/proc",
+    _systemd_runner: Any = None,
 ) -> Dict[str, Any]:
     """Verify deployment health with real HTTP checks, SSL validation, and npm version.
 
@@ -491,6 +836,14 @@ def verify(
     - npm published version (for npm targets)
 
     Also cross-references local deploy plan status when available.
+
+    LED-5321 M4: when deployment-binding inputs are supplied
+    (intended_release/service_unit/expected_host/observation/
+    deployment_health), the result also carries ``binding`` (the full
+    verify_deployment_binding record) plus top-level ``verified`` (bool)
+    and ``mismatch`` (str|None). A healthy HTTP check on an OLD process no
+    longer passes as proof of the intended release — binding fails closed.
+    Without binding inputs the shape is exactly as before.
     """
     now = datetime.now(timezone.utc).isoformat()
     checks: List[Dict[str, Any]] = []
@@ -586,6 +939,30 @@ def verify(
         result["warnings"] = warnings
     if plan_info:
         result["deploy_plan"] = plan_info
+    # LED-5321 M4: optional deployment binding (no extra probes; binding is
+    # computed from the supplied observation + health only).
+    _binding_requested = any([
+        intended_release, service_unit, expected_host,
+        observation is not None, deployment_health is not None,
+    ])
+    if _binding_requested:
+        try:
+            binding = verify_deployment_binding(
+                intended_release=intended_release or "",
+                service_unit=service_unit or "",
+                expected_host=expected_host,
+                observation=observation,
+                observation_max_age_s=observation_max_age_s,
+                health=deployment_health,
+                proc_root=proc_root or "/proc",
+                systemd_runner=_systemd_runner,
+            )
+        except Exception as exc:
+            binding = {"verified": False,
+                       "mismatch": f"binding_error: {type(exc).__name__}: {exc}"}
+        result["binding"] = binding
+        result["verified"] = bool(binding.get("verified"))
+        result["mismatch"] = binding.get("mismatch")
     return result
 
 

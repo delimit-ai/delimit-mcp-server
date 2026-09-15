@@ -11,10 +11,15 @@ Audit trail: ~/.delimit/agents/audit.jsonl
 
 import json
 import os
+import re
+import shutil
+import signal
+import socket
+import subprocess
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 # LED-3759: reuse the shared ephemeral-path guard (single source; do not fork).
 try:
@@ -58,8 +63,40 @@ def _effective_agents_dir(venture: str = "") -> Path:
     return AGENTS_DIR
 
 VALID_PRIORITIES = {"P0", "P1", "P2"}
-VALID_ASSIGNEES = {"claude", "codex", "gemini", "copilot", "any"}
-VALID_STATUSES = {"dispatched", "in_progress", "done", "handed_off", "failed"}
+VALID_ASSIGNEES = {"claude", "codex", "gemini", "copilot", "muse", "any"}
+VALID_STATUSES = {"dispatched", "in_progress", "done", "handed_off", "failed",
+                  "running", "completed", "cancelled", "uncertain",
+                  "launch_refused", "launch_unsupported"}
+
+# LED-5321 M5: assignee runtimes with a headless launch contract. Only muse
+# ships one (scripts/launch_contained_worker.sh). Every other concrete
+# assignee records launch_unsupported when launch= is requested — no headless
+# contract is invented for them. "any" routing is unchanged (it still resolves
+# to claude/codex/gemini, never to muse/copilot).
+_LAUNCH_RUNTIMES = frozenset({"muse"})
+VALID_LAUNCH_NETWORKS = frozenset({"proxy-only", "restricted", "enabled"})
+_LAUNCH_DEFAULT_MAX_STEPS = 220
+_LAUNCH_DEFAULT_NETWORK = "proxy-only"
+
+# LED-5321 M5: statuses owned by the tracked-launch lifecycle. complete_task
+# gates on this set: launched tasks may only close from completed/uncertain
+# (uncertain needs accept_uncertain=True); legacy statuses (dispatched /
+# in_progress / handed_off / done / failed) close exactly as before.
+_LAUNCHED_LIFECYCLE_STATUSES = frozenset({
+    "running", "completed", "cancelled", "uncertain",
+    "launch_refused", "launch_unsupported",
+})
+
+# LED-5321 M5: tracked-worker lease + run-output layout under the agents dir.
+_WORKER_LEASE_SECONDS = 4 * 3600
+_WORKER_RUNS_SUBDIR = "runs"
+
+# LED-5321 M5: terminal event markers written by `muse exec --json`. poll_worker
+# matches these against the type/event/name/kind field of each JSONL object
+# (structured match only — no inference, no substring scan of prose).
+TERMINAL_COMPLETED_EVENT = "run.terminal.completed"
+TERMINAL_FAILED_EVENT = "run.terminal.failed"
+LIFECYCLE_EVENT = "task.lifecycle"
 
 # LED-876: auto-pause when dead-letter queue depth (stuck 'dispatched' tasks)
 # hits this threshold. Prevents runaway dispatch when no workers are pulling.
@@ -244,6 +281,233 @@ def _release_checkout_claim(task: Dict[str, Any]) -> None:
         pass
 
 
+def _repo_root() -> Path:
+    """Return the delimit-gateway repo root (parent of ai/)."""
+    return Path(__file__).resolve().parent.parent
+
+
+# LED-5321 M5: contained-worker launcher (PR #532). Monkeypatchable in tests;
+# DELIMIT_WORKER_LAUNCHER env also overrides at call time.
+LAUNCHER_SCRIPT = _repo_root() / "scripts" / "launch_contained_worker.sh"
+
+
+def _resolve_launcher() -> Path:
+    """Return the launcher script path, honoring DELIMIT_WORKER_LAUNCHER."""
+    override = os.environ.get("DELIMIT_WORKER_LAUNCHER", "").strip()
+    if override:
+        return Path(override)
+    return LAUNCHER_SCRIPT
+
+
+def _lead_identity() -> str:
+    """Return the dispatching lead's id for the worker lease owner field."""
+    explicit = os.environ.get("DELIMIT_LEAD_ID", "").strip()
+    if explicit:
+        return explicit
+    try:
+        host = socket.gethostname()
+    except Exception:
+        host = "localhost"
+    return f"lead@{host}:{os.getpid()}"
+
+
+def _utcnow() -> str:
+    """Current UTC timestamp in the task-store format."""
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _validate_launch_spec(launch: Any) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Validate a caller-provided launch spec; return (normalized, error).
+
+    Shape errors (wrong type, unknown network, bad max_steps) are caller bugs
+    and return an error BEFORE any task is created. Missing files / tools are
+    environmental and surface later as a recorded launch_refused, not here.
+    """
+    if launch is None:
+        return None, None
+    if not isinstance(launch, dict):
+        return None, "launch must be a dict like {'workspace': ..., 'prompt_file': ...}"
+    if not launch:
+        return None, None  # empty dict == no launch (matches _coerce_dict_arg(""))
+    workspace = launch.get("workspace", "")
+    prompt_file = launch.get("prompt_file", "")
+    if not workspace or not str(workspace).strip():
+        return None, "launch.workspace is required (git worktree path)"
+    if not prompt_file or not str(prompt_file).strip():
+        return None, "launch.prompt_file is required"
+    max_steps = launch.get("max_steps", _LAUNCH_DEFAULT_MAX_STEPS)
+    if isinstance(max_steps, bool) or not isinstance(max_steps, int):
+        try:
+            max_steps = int(str(max_steps).strip())
+        except (ValueError, TypeError):
+            return None, "launch.max_steps must be a positive int"
+    if max_steps <= 0:
+        return None, "launch.max_steps must be a positive int"
+    network = str(launch.get("network", _LAUNCH_DEFAULT_NETWORK)).strip().lower()
+    if network not in VALID_LAUNCH_NETWORKS:
+        return None, (
+            f"launch.network must be one of: {', '.join(sorted(VALID_LAUNCH_NETWORKS))}"
+        )
+    return {
+        "workspace": str(workspace).strip(),
+        "prompt_file": str(prompt_file).strip(),
+        "max_steps": max_steps,
+        "network": network,
+    }, None
+
+
+def _launcher_has_yolo(content: str) -> bool:
+    """True when the launcher would actually pass --yolo to something.
+
+    Token-aware: full-line and trailing `#` comments are ignored (the real
+    script documents the --yolo ban in its own header), while a real flag
+    token anywhere in code trips the guard. Unparseable content fails
+    closed on a raw substring match.
+    """
+    import shlex
+    try:
+        tokens = shlex.split(content, comments=True, posix=True)
+    except ValueError:
+        return "--yolo" in content
+    return any(t == "--yolo" or t.startswith("--yolo=") for t in tokens)
+
+
+def _check_launcher_preconditions(launcher: Path, spec: Dict[str, Any]) -> Optional[str]:
+    """Return a refusal reason, or None if the launcher may run.
+
+    Every failure here is environmental (missing tooling/files, unsafe
+    launcher) and maps to a recorded launch_refused — never a crash.
+    """
+    if not launcher.is_file():
+        return f"launcher script missing: {launcher}"
+    try:
+        content = launcher.read_text()
+    except OSError as e:
+        return f"launcher script unreadable: {e}"
+    if _launcher_has_yolo(content):
+        return "launcher contains forbidden --yolo flag; refusing to launch"
+    if shutil.which("bwrap") is None:
+        return "bubblewrap (bwrap) missing: sandbox cannot start; refusing to launch"
+    ws = spec["workspace"]
+    if not os.path.isdir(ws):
+        return f"workspace is not a directory: {ws}"
+    if not (os.path.isdir(os.path.join(ws, ".git")) or os.path.isfile(os.path.join(ws, ".git"))):
+        return f"workspace is not a git worktree: {ws}"
+    if not os.path.isfile(spec["prompt_file"]):
+        return f"prompt file missing: {spec['prompt_file']}"
+    return None
+
+
+def _worktree_branch(workspace: str) -> str:
+    """Best-effort current branch of a worktree; '' when unknowable."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", workspace, "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if proc.returncode == 0:
+            branch = proc.stdout.strip()
+            return "" if branch == "HEAD" else branch
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return ""
+
+
+def _find_worker_pid(session_id: str) -> Optional[int]:
+    """Best-effort pid of the live worker holding session_id; None if absent."""
+    if not session_id:
+        return None
+    self_pid = os.getpid()
+    try:
+        pids = [p for p in os.listdir("/proc") if p.isdigit()]
+    except OSError:
+        return None
+    for pid in pids:
+        if int(pid) == self_pid:
+            continue
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                cmdline = f.read().decode(errors="replace")
+        except (OSError, ValueError):
+            continue
+        if session_id in cmdline:
+            return int(pid)
+    return None
+
+
+def _read_first_line(path: Path) -> str:
+    """Best-effort first line of a small launcher sidecar file."""
+    try:
+        return path.read_text().splitlines()[0].strip() if path.exists() else ""
+    except (OSError, IndexError):
+        return ""
+
+
+def _launch_muse_worker(
+    *,
+    task_id: str,
+    spec: Dict[str, Any],
+    agents_dir: Path,
+) -> Dict[str, Any]:
+    """Start a muse worker through the contained launcher (no --yolo, ever).
+
+    Returns the binding record (runtime/session_id/workspace/branch/
+    started_at/output_prefix/lease/worker_pid) or {"error": reason} when the
+    launch must be refused. The launcher subprocess is given argv only — never
+    shell=True — and the script itself backgrounds the worker.
+    """
+    launcher = _resolve_launcher()
+    refusal = _check_launcher_preconditions(launcher, spec)
+    if refusal is not None:
+        return {"error": refusal}
+    runs_dir = agents_dir / _WORKER_RUNS_SUBDIR
+    try:
+        runs_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        return {"error": f"cannot create worker runs dir: {e}"}
+    out_prefix = runs_dir / task_id
+    cmd = [
+        str(launcher),
+        spec["workspace"],
+        spec["prompt_file"],
+        str(out_prefix),
+        str(spec["max_steps"]),
+        spec["network"],
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        return {"error": "launcher timed out after 120s"}
+    except OSError as e:
+        return {"error": f"launcher exec failed: {e}"}
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+        tail = detail[-1][:300] if detail else f"exit {proc.returncode}"
+        return {"error": f"launcher refused (exit {proc.returncode}): {tail}"}
+    session_id = _read_first_line(Path(str(out_prefix) + ".session-id"))
+    if not session_id:
+        return {"error": "launcher exited 0 but wrote no session id"}
+    started_at = _read_first_line(Path(str(out_prefix) + ".started")) or _utcnow()
+    now_epoch = time.time()
+    return {
+        "runtime": "muse",
+        "session_id": session_id,
+        "workspace": spec["workspace"],
+        "branch": _worktree_branch(spec["workspace"]),
+        "started_at": started_at,
+        "output_prefix": str(out_prefix),
+        "lease": {
+            "owner": _lead_identity(),
+            "acquired_at": _utcnow(),
+            "expires_at": time.strftime(
+                "%Y-%m-%dT%H:%M:%SZ",
+                time.gmtime(now_epoch + _WORKER_LEASE_SECONDS),
+            ),
+        },
+        "worker_pid": _find_worker_pid(session_id),
+    }
+
+
 def _ensure_dir(base_dir: Optional[Path] = None):
     """Create the agents directory if it doesn't exist."""
     (base_dir or _effective_agents_dir()).mkdir(parents=True, exist_ok=True)
@@ -289,6 +553,7 @@ def dispatch_task(
     variables: Optional[Dict[str, Any]] = None,
     external_key: str = "",
     focus_bypass_reason: str = "",
+    launch: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Create a tracked agent task.
 
@@ -297,6 +562,18 @@ def dispatch_task(
     advanceable Delimit P0/P1 remains open. This is ADVISORY only — it never
     blocks the dispatch; it attaches a ``focus_advisory`` block to the result
     and logs the bypass for the 30-day review. See ai/focus_gate.py.
+
+    LED-5321 M5: ``launch`` is an optional dict
+    ``{"workspace": <git worktree path>, "prompt_file": <path>,
+    "max_steps": int, "network": "proxy-only|restricted|enabled"}``. When
+    given and the assignee runtime is ``muse``, the worker is started through
+    ``scripts/launch_contained_worker.sh`` (subprocess, never --yolo) and the
+    task records runtime/session_id/workspace/branch/started_at/output_prefix/
+    lease with status ``running``. Missing preconditions (no bwrap, bad
+    workspace, unsafe launcher) record ``launch_refused``. Any other assignee
+    records ``launch_unsupported`` — no headless contract is invented. Without
+    ``launch`` the dispatch is audit-only with status ``dispatched``, exactly
+    as before.
 
     Returns:
         Dict with task_id, task details, and a structured prompt for the host AI.
@@ -379,6 +656,12 @@ def dispatch_task(
     priority = priority.upper().strip() if priority else "P1"
     if priority not in VALID_PRIORITIES:
         return {"error": f"priority must be one of: {', '.join(sorted(VALID_PRIORITIES))}"}
+
+    # LED-5321 M5: malformed launch specs are caller bugs — fail fast before
+    # any write, mirroring the invalid-assignee path above.
+    norm_launch, launch_spec_error = _validate_launch_spec(launch)
+    if launch_spec_error is not None:
+        return {"error": launch_spec_error}
 
     # LED-1279: anti-duplicate gate. If the title/description/context tags an
     # LED that's already been shipped (i.e. there's a commit on main mentioning
@@ -528,6 +811,32 @@ def dispatch_task(
         "checkout_lock": checkout_lock_key,
     }
 
+    # LED-5321 M5: tracked launch. The binding (or refusal) is recorded on the
+    # task BEFORE the single save below, so the store never shows a launched
+    # task as audit-only 'dispatched'.
+    if norm_launch is not None:
+        task["launch"] = norm_launch
+        if assignee in _LAUNCH_RUNTIMES:
+            binding = _launch_muse_worker(
+                task_id=task_id, spec=norm_launch, agents_dir=agents_dir,
+            )
+            if "error" in binding:
+                task["status"] = "launch_refused"
+                task["launch_error"] = binding["error"]
+            else:
+                task["status"] = "running"
+                task.update(binding)
+                task["resume_count"] = 0
+                task["output_history"] = []
+        else:
+            task["status"] = "launch_unsupported"
+            task["launch_error"] = (
+                f"runtime '{assignee}' has no headless launch contract; "
+                "only 'muse' can be launched through the contained worker "
+                "launcher"
+            )
+        task["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ")
+
     tasks[task_id] = task
     _save_tasks(tasks, agents_dir)
 
@@ -539,15 +848,44 @@ def dispatch_task(
         "priority": priority,
     }, agents_dir)
 
+    if norm_launch is not None:
+        if task["status"] == "running":
+            _append_audit({
+                "action": "launch",
+                "task_id": task_id,
+                "runtime": task.get("runtime"),
+                "session_id": task.get("session_id"),
+                "workspace": task.get("workspace"),
+                "branch": task.get("branch"),
+                "lease_owner": (task.get("lease") or {}).get("owner"),
+            }, agents_dir)
+        else:
+            _append_audit({
+                "action": task["status"],
+                "task_id": task_id,
+                "runtime": assignee,
+                "reason": task.get("launch_error", "")[:300],
+            }, agents_dir)
+
     # Build a structured prompt that the host AI can pass to a subagent
     prompt = _build_agent_prompt(task)
 
+    if task["status"] == "running":
+        dispatch_message = (
+            f"Task {task_id} running as muse session {task.get('session_id')} "
+            f"({priority})"
+        )
+    elif task["status"] in ("launch_refused", "launch_unsupported"):
+        dispatch_message = f"Task {task_id} {task['status']}: {task.get('launch_error', '')}"
+    else:
+        dispatch_message = f"Task {task_id} dispatched to {assignee} ({priority})"
+
     dispatch_resp = {
-        "status": "dispatched",
+        "status": task["status"],
         "task_id": task_id,
         "task": task,
         "agent_prompt": prompt,
-        "message": f"Task {task_id} dispatched to {assignee} ({priority})",
+        "message": dispatch_message,
     }
     if focus_advisory is not None:
         dispatch_resp["focus_advisory"] = focus_advisory
@@ -614,15 +952,22 @@ def get_agent_status(task_id: str = "") -> Dict[str, Any]:
 
 
 def list_active_agents() -> Dict[str, Any]:
-    """Return all tasks that are not done or failed."""
+    """Return all tasks that are not done or failed.
+
+    LED-5321 M5: running workers and completed/uncertain outputs awaiting
+    lead disposition count as active (someone still has to act);
+    cancelled/refused/unsupported launches count as closed.
+    """
     tasks = _load_tasks()
     active = {
         tid: t for tid, t in tasks.items()
-        if t.get("status") in ("dispatched", "in_progress", "handed_off")
+        if t.get("status") in ("dispatched", "in_progress", "handed_off",
+                               "running", "completed", "uncertain")
     }
     completed = {
         tid: t for tid, t in tasks.items()
-        if t.get("status") in ("done", "failed")
+        if t.get("status") in ("done", "failed", "cancelled",
+                               "launch_refused", "launch_unsupported")
     }
 
     return {
@@ -642,8 +987,26 @@ def complete_task(
     task_id: str,
     result: str = "",
     files_changed: Optional[List[str]] = None,
+    accept_uncertain: bool = False,
+    # LED-5321 M4: all optional, backward compatible. When a review
+    # transcript + diff are supplied, the completion records whether the
+    # transcript binds to the exact diff so a later commit cannot inherit
+    # an earlier review. A worker's "done" is an assertion, never merged/
+    # deployed proof on its own.
+    review_transcript: str = "",
+    review_diff_path: str = "",
+    review_diff_text: str = "",
 ) -> Dict[str, Any]:
-    """Mark a dispatched task as done."""
+    """Mark a dispatched task as done.
+
+    LED-5321 M5: tasks in the tracked-launch lifecycle may only close from
+    ``completed``/``uncertain`` worker states, and ``uncertain`` requires an
+    explicit ``accept_uncertain=True`` (the worker died mid-run, e.g. model
+    stream idle timeout — the outcome is unknown). Closing a ``cancelled``,
+    ``running``, ``launch_refused``, or ``launch_unsupported`` task is an
+    error. Legacy audit-only tasks (dispatched/in_progress/handed_off) close
+    exactly as before.
+    """
     if not task_id or not task_id.strip():
         return {"error": "task_id is required"}
 
@@ -657,11 +1020,49 @@ def complete_task(
     if task["status"] == "done":
         return {"error": f"Task {task_id} is already marked done"}
 
+    if task["status"] in _LAUNCHED_LIFECYCLE_STATUSES:
+        if task["status"] == "uncertain" and not accept_uncertain:
+            return {
+                "error": (
+                    f"Task {task_id} ended uncertain "
+                    f"({task.get('uncertain_reason', 'unknown reason')}); "
+                    "inspect the worker output and pass accept_uncertain=True "
+                    "to close it anyway"
+                )
+            }
+        if task["status"] not in ("completed", "uncertain"):
+            return {
+                "error": (
+                    f"Task {task_id} is {task['status']}; only completed or "
+                    "uncertain (with accept_uncertain=True) worker tasks can "
+                    "be closed"
+                )
+            }
+        if task["status"] == "uncertain":
+            task["accepted_uncertain"] = True
+
     task["status"] = "done"
     task["result"] = result.strip()
     task["files_changed"] = files_changed or []
     task["completed_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ")
     task["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # LED-5321 M4: optional review binding (deterministic, no model calls).
+    # Only computed when the caller supplies review inputs; otherwise the
+    # completion is recorded exactly as before (assertion, not proof).
+    _review_binding: Optional[Dict[str, Any]] = None
+    if review_transcript or review_diff_path or review_diff_text:
+        try:
+            from ai.review_binding import check_review_binding
+
+            _review_binding = check_review_binding(
+                transcript_path=review_transcript or "",
+                diff_path=review_diff_path or "",
+                diff_text=review_diff_text or "",
+            )
+        except Exception as exc:
+            _review_binding = {"bound": False, "reason": f"review_binding_error: {exc}"}
+        task["review_binding"] = _review_binding
 
     tasks[task_id] = task
     _save_tasks(tasks)
@@ -671,6 +1072,7 @@ def complete_task(
         "task_id": task_id,
         "result": result.strip()[:200],
         "files_changed": files_changed or [],
+        **({"review_binding": _review_binding} if _review_binding is not None else {}),
     })
 
     # STR-2202: fold prompt_drift.record + checkout-lock release into the
@@ -684,6 +1086,675 @@ def complete_task(
         "task_id": task_id,
         "task": task,
         "message": f"Task {task_id} marked as done",
+    }
+
+
+# ── LED-5321 M5: tracked worker question/answer + polling + cancel ─────
+
+
+def _worker_identity(task: Dict[str, Any]) -> str:
+    """Return the worker's attribution id (runtime:session) for a task."""
+    return f"{task.get('runtime', task.get('assignee', 'worker'))}:{task.get('session_id', '?')}"
+
+
+def _extract_question_block(text: str) -> str:
+    """Return the first QUESTION: block in worker output, or "".
+
+    The block starts at the first line whose stripped form begins with
+    "QUESTION:" (case-insensitive) and runs to an optional END_QUESTION line
+    or the end of the text. Only the first block is returned: one completion
+    carries at most one bound question.
+    """
+    if not text:
+        return ""
+    lines = text.splitlines()
+    start = None
+    first = ""
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.upper().startswith("QUESTION:"):
+            start = i
+            first = stripped[len("QUESTION:"):].strip()
+            break
+    if start is None:
+        return ""
+    buf = [first] if first else []
+    for line in lines[start + 1:]:
+        if line.strip().upper() == "END_QUESTION":
+            break
+        buf.append(line)
+    return "\n".join(buf).strip()
+
+
+def record_question(
+    task_id: str,
+    question_text: str,
+    *,
+    asked_by: str,
+) -> Dict[str, Any]:
+    """Bind a worker question to its task with a handoff receipt.
+
+    Persists {question_id, text, asked_at, status: waiting} on the task and
+    creates a handoff receipt (next_action = the question) addressed to the
+    lease owner (the lead) or "owner" when no lease exists. All bindings live
+    in the task store, so a fresh lead process sees them via get_agent_status.
+    """
+    if not task_id or not task_id.strip():
+        return {"error": "task_id is required"}
+    if not question_text or not question_text.strip():
+        return {"error": "question_text is required"}
+    if not asked_by or not asked_by.strip():
+        return {"error": "asked_by is required"}
+
+    task_id = task_id.strip().upper()
+    tasks = _load_tasks()
+    if task_id not in tasks:
+        return {"error": f"Task {task_id} not found"}
+
+    try:
+        from ai.handoff_receipts import create_receipt
+    except ImportError:  # pragma: no cover - flat import layout
+        from handoff_receipts import create_receipt
+
+    task = tasks[task_id]
+    text = question_text.strip()
+    asker = asked_by.strip()
+    question_id = f"Q-{uuid.uuid4().hex[:8].upper()}"
+    to_model = (task.get("lease") or {}).get("owner") or "owner"
+    project_path = task.get("workspace") or os.getcwd()
+    receipt = create_receipt(
+        task_description=f"Worker question on {task_id} (asked by {asker}): {text[:120]}",
+        next_action=text,
+        from_model=asker,
+        to_model=to_model,
+        project_path=project_path,
+        files_modified=[],
+    )
+    question = {
+        "question_id": question_id,
+        "text": text,
+        "asked_at": _utcnow(),
+        "asked_by": asker,
+        "status": "waiting",
+        "receipt_id": receipt.receipt_id,
+        "receipt_project_path": project_path,
+        "answer": None,
+    }
+    task.setdefault("questions", []).append(question)
+    task["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ")
+    tasks[task_id] = task
+    _save_tasks(tasks)
+
+    _append_audit({
+        "action": "question_recorded",
+        "task_id": task_id,
+        "question_id": question_id,
+        "receipt_id": receipt.receipt_id,
+        "asked_by": asker,
+    })
+
+    return {
+        "status": "recorded",
+        "task_id": task_id,
+        "question_id": question_id,
+        "receipt_id": receipt.receipt_id,
+        "question": question,
+        "task": task,
+        "message": f"Question {question_id} on {task_id} bound to receipt {receipt.receipt_id}",
+    }
+
+
+def _resume_muse_worker(
+    task: Dict[str, Any],
+    answer_text: str,
+    question_id: str,
+) -> Dict[str, Any]:
+    """Resume the SAME muse session with the answer as its prompt file.
+
+    Returns task-field updates or {"error": reason}. The answer is written to
+    a fresh prompt file and the launcher is invoked with the recorded session
+    id plus a NEW output prefix, so the original transcript is preserved and
+    the old prefix moves to output_history.
+    """
+    session_id = task.get("session_id") or ""
+    workspace = task.get("workspace") or ""
+    old_prefix = task.get("output_prefix") or ""
+    if not session_id or not workspace or not old_prefix:
+        return {"error": "task has no muse session binding to resume"}
+    launcher = _resolve_launcher()
+    launch_spec = task.get("launch") or {}
+    answer_file = Path(old_prefix + f".answer-{question_id}.md")
+    try:
+        answer_file.write_text(answer_text)
+    except OSError as e:
+        return {"error": f"cannot write answer prompt file: {e}"}
+    resume_spec = {
+        "workspace": workspace,
+        "prompt_file": str(answer_file),
+        "max_steps": launch_spec.get("max_steps", _LAUNCH_DEFAULT_MAX_STEPS),
+        "network": launch_spec.get("network", _LAUNCH_DEFAULT_NETWORK),
+    }
+    refusal = _check_launcher_preconditions(launcher, resume_spec)
+    if refusal is not None:
+        return {"error": refusal}
+    resume_count = int(task.get("resume_count", 0) or 0) + 1
+    new_prefix = f"{old_prefix}.r{resume_count}"
+    cmd = [
+        str(launcher),
+        workspace,
+        str(answer_file),
+        new_prefix,
+        str(resume_spec["max_steps"]),
+        resume_spec["network"],
+        session_id,
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        return {"error": "launcher timed out after 120s"}
+    except OSError as e:
+        return {"error": f"launcher exec failed: {e}"}
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+        tail = detail[-1][:300] if detail else f"exit {proc.returncode}"
+        return {"error": f"launcher refused resume (exit {proc.returncode}): {tail}"}
+    resumed_sid = _read_first_line(Path(new_prefix + ".session-id"))
+    if resumed_sid != session_id:
+        return {"error": "launcher did not resume the same session id"}
+    now_epoch = time.time()
+    lease = task.get("lease") or {}
+    return {
+        "output_prefix": new_prefix,
+        "old_prefix": old_prefix,
+        "resume_count": resume_count,
+        "resumed_at": _utcnow(),
+        "answer_file": str(answer_file),
+        "worker_pid": _find_worker_pid(session_id),
+        "lease": {
+            "owner": lease.get("owner") or _lead_identity(),
+            "acquired_at": _utcnow(),
+            "expires_at": time.strftime(
+                "%Y-%m-%dT%H:%M:%SZ",
+                time.gmtime(now_epoch + _WORKER_LEASE_SECONDS),
+            ),
+        },
+    }
+
+
+def answer_question(
+    task_id: str,
+    question_id: str,
+    answer_text: str,
+    *,
+    answered_by: str,
+    owner_backed: bool,
+) -> Dict[str, Any]:
+    """Answer a bound worker question and resume the muse session.
+
+    Persists the answer (recording ``owner_backed`` exactly as given — never
+    inferred; the lead may answer routine technical questions with
+    owner_backed=False), acknowledges the question's handoff receipt with the
+    answer, and — for muse tasks whose worker already reached a terminal
+    output state (completed/uncertain) — resumes the SAME session via the
+    launcher with the answer as the prompt file. No relaunch happens while
+    the worker is still running (that would orphan a duplicate worker) or
+    when no muse binding exists; the answer is still persisted and acked.
+    """
+    if not task_id or not task_id.strip():
+        return {"error": "task_id is required"}
+    if not question_id or not question_id.strip():
+        return {"error": "question_id is required"}
+    if not answer_text or not answer_text.strip():
+        return {"error": "answer_text is required"}
+    if not answered_by or not answered_by.strip():
+        return {"error": "answered_by is required"}
+
+    task_id = task_id.strip().upper()
+    question_id = question_id.strip().upper()
+    tasks = _load_tasks()
+    if task_id not in tasks:
+        return {"error": f"Task {task_id} not found"}
+
+    try:
+        from ai.handoff_receipts import acknowledge_receipt
+    except ImportError:  # pragma: no cover - flat import layout
+        from handoff_receipts import acknowledge_receipt
+
+    task = tasks[task_id]
+    if task["status"] in ("cancelled", "done", "failed",
+                          "launch_refused", "launch_unsupported"):
+        return {"error": f"cannot answer: task {task_id} is {task['status']}"}
+    question = None
+    for q in task.get("questions", []):
+        if q.get("question_id") == question_id:
+            question = q
+            break
+    if question is None:
+        return {"error": f"Question {question_id} not found on {task_id}"}
+    if question.get("status") == "answered":
+        return {"error": f"Question {question_id} is already answered"}
+
+    answer = answer_text.strip()
+    answerer = answered_by.strip()
+    question["answer"] = {
+        "text": answer,
+        "answered_by": answerer,
+        "owner_backed": bool(owner_backed),
+        "answered_at": _utcnow(),
+    }
+    question["status"] = "answered"
+
+    # Acknowledge the receipt best-effort: the task store is the source of
+    # truth, so receipt plumbing never fails the answer itself.
+    ack_status = "skipped"
+    if question.get("receipt_id"):
+        try:
+            ack = acknowledge_receipt(
+                question["receipt_id"],
+                model=answerer,
+                notes=answer,
+                project_path=question.get("receipt_project_path") or "",
+            )
+            ack_status = ack.get("status", "unknown")
+        except Exception as e:  # pragma: no cover — ack must never fail answer
+            ack_status = f"error: {e}"
+
+    launched_muse = bool(
+        task.get("runtime") == "muse"
+        and task.get("session_id")
+        and task.get("output_prefix")
+        and task.get("workspace")
+    )
+    resumed = False
+    resume_error = ""
+    if launched_muse and task["status"] in ("completed", "uncertain"):
+        updates = _resume_muse_worker(task, answer, question_id)
+        if "error" in updates:
+            resume_error = updates["error"]
+        else:
+            resumed = True
+            task.setdefault("run_history", []).append({
+                "output_prefix": updates["old_prefix"],
+                "status": task["status"],
+                "final_text": task.get("final_text", ""),
+                "uncertain_reason": task.get("uncertain_reason", ""),
+                "observed_at": task.get("observed_at", ""),
+            })
+            task.setdefault("output_history", []).append(updates["old_prefix"])
+            task["output_prefix"] = updates["output_prefix"]
+            task["resume_count"] = updates["resume_count"]
+            task["resumed_at"] = updates["resumed_at"]
+            task["answer_file"] = updates["answer_file"]
+            task["worker_pid"] = updates["worker_pid"]
+            task["lease"] = updates["lease"]
+            task["observed_rc"] = None
+            task.pop("uncertain_reason", None)
+            task["status"] = "running"
+    elif task.get("status") == "running":
+        resume_error = "worker still running; answer recorded, no relaunch"
+
+    task["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ")
+    tasks[task_id] = task
+    _save_tasks(tasks)
+
+    _append_audit({
+        "action": "question_answered",
+        "task_id": task_id,
+        "question_id": question_id,
+        "answered_by": answerer,
+        "owner_backed": bool(owner_backed),
+        "receipt_ack": ack_status,
+        "resumed": resumed,
+        "resume_error": resume_error[:200] if resume_error else "",
+    })
+
+    resp: Dict[str, Any] = {
+        "status": "answered",
+        "task_id": task_id,
+        "question_id": question_id,
+        "receipt_id": question.get("receipt_id", ""),
+        "receipt_ack": ack_status,
+        "resumed": resumed,
+        "session_id": task.get("session_id", ""),
+        "task": task,
+    }
+    if resumed:
+        resp["message"] = (
+            f"Question {question_id} answered; muse session "
+            f"{task.get('session_id')} resumed"
+        )
+    elif resume_error:
+        resp["resume_error"] = resume_error
+        resp["message"] = f"Question {question_id} answered ({resume_error})"
+    else:
+        resp["message"] = f"Question {question_id} answered (no worker to resume)"
+    return resp
+
+
+def _read_jsonl_events(jsonl_path: Path) -> List[Dict[str, Any]]:
+    """Best-effort parse of a worker JSONL transcript into event dicts."""
+    try:
+        text = jsonl_path.read_text()
+    except OSError:
+        return []
+    events = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict):
+            events.append(obj)
+    return events
+
+
+def _event_kind(event: Dict[str, Any]) -> str:
+    """Return the terminal/lifecycle marker an event carries, or "".
+
+    Structured match only: the marker must appear in a type/event/name/kind
+    field of the event (or one level down inside data/payload).
+    """
+    candidates = [event]
+    for nest_key in ("data", "payload"):
+        nested = event.get(nest_key)
+        if isinstance(nested, dict):
+            candidates.append(nested)
+    for obj in candidates:
+        # "payload_type" is the marker field of the Muse CLI 1.2.x durable
+        # event stream (top-level: {"payload_type": "run.terminal.completed",
+        # "payload": {"kind": "run_terminal", "terminal": "completed",
+        # "text": ...}}). Observed 2026-09-15 on task AGT-40B623AC: without it
+        # every real worker exit read as "uncertain" although the terminal
+        # event was present; the earlier fixtures used a synthetic "type" key.
+        for key in ("type", "event", "name", "kind", "payload_type"):
+            val = obj.get(key)
+            if not isinstance(val, str):
+                continue
+            for marker in (TERMINAL_COMPLETED_EVENT, TERMINAL_FAILED_EVENT,
+                           LIFECYCLE_EVENT):
+                if marker in val:
+                    return marker
+    return ""
+
+
+def _event_text(event: Dict[str, Any], keys: Tuple[str, ...]) -> str:
+    """First non-empty text among keys (plus one nested data/payload level)."""
+    candidates = [event]
+    for nest_key in ("data", "payload"):
+        nested = event.get(nest_key)
+        if isinstance(nested, dict):
+            candidates.append(nested)
+    for obj in candidates:
+        for key in keys:
+            val = obj.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+            if isinstance(val, (dict, list)) and val:
+                try:
+                    return json.dumps(val)[:4000]
+                except (TypeError, ValueError):
+                    continue
+    return ""
+
+
+def _parse_rc(rc_path: Path) -> Optional[int]:
+    """Parse the launcher's rc sidecar (``rc=N``); None when unparsable."""
+    try:
+        text = rc_path.read_text().strip()
+    except OSError:
+        return None
+    m = re.search(r"rc\s*=\s*(\d+)", text)
+    return int(m.group(1)) if m else None
+
+
+def _stderr_tail(stderr_path: Path, limit: int = 500) -> str:
+    """Best-effort tail of the worker stderr sidecar."""
+    try:
+        text = stderr_path.read_text()
+    except OSError:
+        return ""
+    text = text.strip()
+    return text[-limit:] if len(text) > limit else text
+
+
+def poll_worker(task_id: str) -> Dict[str, Any]:
+    """Read a tracked worker's JSONL output WITHOUT inference.
+
+    Explicit call only (the lead or a caller invokes it — no polling loop
+    lives in the MCP server). Outcomes: rc file absent → ``running``;
+    ``run.terminal.completed`` → ``completed`` (final text extracted, and a
+    QUESTION: block — if present — is bound via record_question);
+    ``run.terminal.failed`` (e.g. model stream idle timeout) → ``uncertain``
+    with a reason (NOT completed, NOT failed-task); rc present but no
+    terminal event → ``uncertain`` (malformed output fails closed).
+    """
+    if not task_id or not task_id.strip():
+        return {"error": "task_id is required"}
+
+    task_id = task_id.strip().upper()
+    tasks = _load_tasks()
+    if task_id not in tasks:
+        return {"error": f"Task {task_id} not found"}
+
+    task = tasks[task_id]
+    prefix = task.get("output_prefix") or ""
+    if not prefix:
+        return {
+            "status": task["status"],
+            "task_id": task_id,
+            "task": task,
+            "message": "no launched worker bound to this task",
+        }
+    if task.get("status") != "running":
+        return {
+            "status": task["status"],
+            "task_id": task_id,
+            "task": task,
+            "message": f"worker is {task.get('status')}; nothing to poll",
+        }
+
+    rc_path = Path(prefix + ".rc")
+    jsonl_path = Path(prefix + ".jsonl")
+    stderr_path = Path(prefix + ".stderr")
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ")
+    task["last_polled_at"] = now
+    task["updated_at"] = now
+
+    if not rc_path.exists():
+        for event in _read_jsonl_events(jsonl_path):
+            if _event_kind(event) == LIFECYCLE_EVENT:
+                task["last_lifecycle"] = event
+        tasks[task_id] = task
+        _save_tasks(tasks)
+        _append_audit({"action": "poll", "task_id": task_id, "outcome": "running"})
+        return {
+            "status": "running",
+            "task_id": task_id,
+            "task": task,
+            "message": "worker still running (no rc file)",
+        }
+
+    rc = _parse_rc(rc_path)
+    task["observed_rc"] = rc
+    task["observed_at"] = now
+    task["worker_stderr_tail"] = _stderr_tail(stderr_path)
+
+    terminal_kind = ""
+    terminal_event: Dict[str, Any] = {}
+    for event in _read_jsonl_events(jsonl_path):
+        kind = _event_kind(event)
+        if kind == LIFECYCLE_EVENT:
+            task["last_lifecycle"] = event
+        elif kind in (TERMINAL_COMPLETED_EVENT, TERMINAL_FAILED_EVENT):
+            terminal_kind = kind  # last terminal event wins
+            terminal_event = event
+
+    if terminal_kind == TERMINAL_COMPLETED_EVENT:
+        final_text = _event_text(
+            terminal_event,
+            ("text", "final_text", "final", "output", "result", "message", "content"),
+        )
+        task["status"] = "completed"
+        task["final_text"] = final_text
+        tasks[task_id] = task
+        _save_tasks(tasks)
+        _append_audit({"action": "poll", "task_id": task_id, "outcome": "completed"})
+        resp: Dict[str, Any] = {
+            "status": "completed",
+            "task_id": task_id,
+            "task": task,
+            "final_text": final_text,
+            "message": f"Worker on {task_id} completed",
+        }
+        question_text = _extract_question_block(final_text)
+        if question_text:
+            qr = record_question(task_id, question_text,
+                                 asked_by=_worker_identity(task))
+            if "error" not in qr:
+                resp["question_id"] = qr["question_id"]
+                resp["receipt_id"] = qr["receipt_id"]
+                resp["task"] = _load_tasks()[task_id]
+                resp["message"] += (
+                    f"; question {qr['question_id']} recorded "
+                    f"(receipt {qr['receipt_id']})"
+                )
+            else:  # pragma: no cover — record path is unit-tested directly
+                resp["question_error"] = qr["error"]
+        return resp
+
+    if terminal_kind == TERMINAL_FAILED_EVENT:
+        reason = _event_text(
+            terminal_event,
+            ("reason", "error", "message", "detail", "details", "text"),
+        ) or f"worker failed (rc={rc})"
+    else:
+        reason = (
+            f"worker exited (rc={rc}) without a {TERMINAL_COMPLETED_EVENT} "
+            f"or {TERMINAL_FAILED_EVENT} event"
+        )
+    task["status"] = "uncertain"
+    task["uncertain_reason"] = reason
+    tasks[task_id] = task
+    _save_tasks(tasks)
+    _append_audit({
+        "action": "poll", "task_id": task_id, "outcome": "uncertain",
+        "reason": reason[:300],
+    })
+    return {
+        "status": "uncertain",
+        "task_id": task_id,
+        "task": task,
+        "reason": reason,
+        "message": f"Worker on {task_id} ended uncertain: {reason}",
+    }
+
+
+def _terminate_worker(task: Dict[str, Any]) -> Tuple[bool, str]:
+    """Terminate the live worker process, if any; never raises.
+
+    Tries the pid recorded at launch (validated: its cmdline must still
+    contain the session id, so a recycled pid is never signalled), then falls
+    back to pkill by session id. Returns (killed, note).
+    """
+    sid = task.get("session_id") or ""
+    pid = task.get("worker_pid")
+    if pid:
+        try:
+            pid_int = int(pid)
+        except (TypeError, ValueError):
+            pid_int = 0
+        if pid_int > 0:
+            try:
+                with open(f"/proc/{pid_int}/cmdline", "rb") as f:
+                    cmdline = f.read().decode(errors="replace")
+            except OSError:
+                cmdline = ""
+            if sid and sid in cmdline:
+                try:
+                    os.kill(pid_int, signal.SIGTERM)
+                except OSError:
+                    pass
+                else:
+                    deadline = time.time() + 2.0
+                    while time.time() < deadline:
+                        if not os.path.exists(f"/proc/{pid_int}"):
+                            break
+                        time.sleep(0.1)
+                    else:
+                        try:
+                            os.kill(pid_int, signal.SIGKILL)
+                        except OSError:
+                            pass
+                    return True, f"signalled pid {pid_int} holding session {sid[:8]}"
+    if sid and shutil.which("pkill") is not None:
+        try:
+            proc = subprocess.run(["pkill", "-f", sid],
+                                  capture_output=True, timeout=10)
+            if proc.returncode == 0:
+                return True, f"pkill matched session {sid[:8]}"
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    return False, "no live worker process found"
+
+
+def cancel_task(task_id: str, *, reason: str) -> Dict[str, Any]:
+    """Cancel a task and terminate its worker process if still alive.
+
+    Records ``cancelled`` with the reason; cancellation and uncertain
+    outcomes stay distinct (cancelled tasks can never be closed via
+    complete_task — re-dispatch instead). The worker is found by the pid
+    recorded at launch (cmdline-validated against the session id) with a
+    pkill-by-session fallback; both are best-effort and never raise.
+    """
+    if not task_id or not task_id.strip():
+        return {"error": "task_id is required"}
+    if not reason or not reason.strip():
+        return {"error": "reason is required"}
+
+    task_id = task_id.strip().upper()
+    tasks = _load_tasks()
+    if task_id not in tasks:
+        return {"error": f"Task {task_id} not found"}
+
+    task = tasks[task_id]
+    if task["status"] == "cancelled":
+        return {"error": f"Task {task_id} is already cancelled"}
+    if task["status"] == "done":
+        return {"error": f"Task {task_id} is already done, cannot cancel"}
+
+    killed = False
+    note = "no worker process bound"
+    if task.get("runtime") == "muse" and task.get("session_id"):
+        killed, note = _terminate_worker(task)
+
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ")
+    task["status"] = "cancelled"
+    task["cancel_reason"] = reason.strip()
+    task["cancelled_at"] = now
+    task["updated_at"] = now
+    task["worker_killed"] = killed
+    task["cancel_note"] = note
+    tasks[task_id] = task
+    _save_tasks(tasks)
+
+    _append_audit({
+        "action": "cancel",
+        "task_id": task_id,
+        "reason": reason.strip()[:300],
+        "worker_killed": killed,
+    })
+
+    _release_checkout_claim(task)
+
+    return {
+        "status": "cancelled",
+        "task_id": task_id,
+        "task": task,
+        "worker_killed": killed,
+        "message": f"Task {task_id} cancelled ({note})",
     }
 
 
@@ -711,6 +1782,11 @@ def handoff_task(
     task = tasks[task_id]
     if task["status"] == "done":
         return {"error": f"Task {task_id} is already done, cannot hand off"}
+
+    # LED-5321 M5: a live worker cannot be handed off by record edit — that
+    # would orphan the running session. Cancel first, then re-dispatch.
+    if task["status"] == "running":
+        return {"error": f"Task {task_id} has a live worker (status running); cancel it before handing off"}
 
     from_model = task["assignee"]
     task["handoffs"].append({
@@ -1026,7 +2102,7 @@ def get_agent_dashboard() -> Dict[str, Any]:
         "by_assignee": {
             model: {
                 "total": len(model_tasks),
-                "active": sum(1 for t in model_tasks if t["status"] in ("dispatched", "in_progress", "handed_off")),
+                "active": sum(1 for t in model_tasks if t["status"] in ("dispatched", "in_progress", "handed_off", "running", "completed", "uncertain")),
                 "done": sum(1 for t in model_tasks if t["status"] == "done"),
                 "tasks": [
                     {"id": t["id"], "title": t["title"], "status": t["status"],

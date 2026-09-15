@@ -94,6 +94,13 @@ echo "  Pruned $PRUNED non-allowlisted file(s)"
 INSTALLED_SERVER="$HOME/.delimit/server"
 if [ "${SKIP_SERVER_SYNC:-}" = "1" ]; then
     echo "  ⏭️  Skipping installed server sync (SKIP_SERVER_SYNC=1)"
+elif [ -L "$INSTALLED_SERVER/ai" ] || [ -L "$INSTALLED_SERVER/core" ]; then
+    # 2026-09-15 incident: ~/.delimit/server/{ai,core} were symlinks into the
+    # live gateway checkout, so this rsync --delete rewrote that checkout's
+    # working tree (33 tracked files + deletions) on every sync. Never write
+    # through a symlink; the dev server must be a real directory.
+    echo "  ⛔ installed dev server ai/ or core/ is a symlink ($INSTALLED_SERVER); refusing to rsync --delete through it. Replace it with a real copy (delimit setup) or set SKIP_SERVER_SYNC=1." >&2
+    exit 1
 elif [ -d "$INSTALLED_SERVER/ai" ]; then
     echo "  Syncing to installed dev server ($INSTALLED_SERVER)..."
     rsync -a --delete --exclude='__pycache__' --exclude='*.pyc' \

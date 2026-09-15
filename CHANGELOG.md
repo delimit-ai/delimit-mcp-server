@@ -1,4 +1,6 @@
-## [4.19.1] - 2026-09-13
+## [Unreleased]
+
+## [4.19.1] - 2026-09-14
 
 ### Fixed
 - Add explicit `delimit chat --model copilot` and `--model muse` launch paths
@@ -13,8 +15,22 @@
   Report precise exit-save failures with private recovery diagnostics, without
   replacing existing handoffs or claiming unsaved conversation context is saved.
 - Pin validation and publication to one immutable gateway source revision.
-
-## [Unreleased]
+- Deployment truth now binds a claimed release to the live service's main
+  process; a release that cannot be observed is reported as unobservable
+  instead of assumed deployed.
+- Handoff receipts carry a content digest, creator, and stale/owner-backed
+  flags so a resumed session can tell a real receipt from a stale one.
+- Agent dispatch gains a contained-launch path with poll/answer/cancel tools
+  (`delimit_agent_poll`, `delimit_agent_answer`, `delimit_agent_cancel`);
+  hosts without the launcher report `launch_unsupported` rather than running
+  an unrestricted worker.
+- `delimit_session_handoff` performs the canonical close (soul, handoff,
+  receipt, readback) idempotently and reports what is missing.
+- Ledger completion accounting fails closed when the audit record cannot be
+  written.
+- `delimit_session_handoff` omits `soul_id` when no soul was captured, so an
+  install without the private continuity module never reports a soul it did
+  not write.
 
 ### Security
 - Install telemetry is now explicit opt-in; the hard-off environment switch

@@ -16,10 +16,17 @@ import logging
 import os
 import re
 import subprocess
+import threading
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
+
+try:
+    import fcntl  # type: ignore[import-not-found]
+except ImportError:  # Windows has no fcntl; the close lock degrades to in-process.
+    fcntl = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -560,6 +567,195 @@ def _check_source_is_ledger_item(
     raise ValueError(msg)
 
 
+# ── LED-5321 M4: evidence-classed truth state ─────────────────────────
+# A ledger note saying "deployed" is an assertion, not a verified fact.
+# Every promotion that claims merged/deployed/published/verified carries an
+# evidence object {class, kind, ref, observed_at, observed_by}. Callers that
+# pass nothing keep working: the record is stored with class="assertion"
+# (never silently "verified"). verified_states only advances on a
+# verified-class evidence object whose ref is present. Deterministic, no
+# model calls, no full audits on ordinary updates.
+
+EVIDENCE_CLASSES = ("assertion", "verified", "stale", "unavailable")
+EVIDENCE_KINDS = (
+    "implemented",
+    "tested",
+    "independently_reviewed",
+    "merged",
+    "published",
+    "deployed",
+    "runtime_verified",
+    "natural_outcome",
+    "natural_outcome_observed",
+)
+VERIFIED_STATES_ORDER = [
+    "implemented",
+    "tested",
+    "independently_reviewed",
+    "merged",
+    "published",
+    "deployed",
+    "runtime_verified",
+    "natural_outcome_observed",
+]
+KIND_TO_VERIFIED_STATE = {
+    "implemented": "implemented",
+    "tested": "tested",
+    "independently_reviewed": "independently_reviewed",
+    "merged": "merged",
+    "published": "published",
+    "deployed": "deployed",
+    "runtime_verified": "runtime_verified",
+    "natural_outcome": "natural_outcome_observed",
+    "natural_outcome_observed": "natural_outcome_observed",
+}
+CLASS_TO_TRUTH_LABEL = {
+    "assertion": "ASSERTED",
+    "verified": "VERIFIED",
+    "stale": "STALE",
+    "unavailable": "UNAVAILABLE",
+}
+LEGACY_TRUTH_LABEL = "legacy/unclassified"
+
+_ASSERTION_RE = re.compile(
+    r"\b(merged|deployed|published|verified|runtime[_\s-]?verified|natural[_\s-]?outcome)\b",
+    re.IGNORECASE,
+)
+
+
+def validate_evidence(evidence: Any) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Validate a caller-supplied evidence object (LED-5321 M4).
+
+    Returns (normalized, None) on success or (None, error_message).
+    Never raises on malformed input; never fabricates verification.
+    """
+    if not isinstance(evidence, dict):
+        return None, "evidence must be an object with {class, kind, ref, observed_at, observed_by}"
+    ev_class = evidence.get("class", "")
+    ev_kind = evidence.get("kind", "")
+    if ev_class not in EVIDENCE_CLASSES:
+        return None, (
+            f"evidence.class must be one of {list(EVIDENCE_CLASSES)} "
+            f"(got {ev_class!r})"
+        )
+    if ev_kind not in EVIDENCE_KINDS:
+        return None, (
+            f"evidence.kind must be one of {list(EVIDENCE_KINDS)} "
+            f"(got {ev_kind!r})"
+        )
+    ref = evidence.get("ref", "")
+    if ev_class == "verified" and not (isinstance(ref, str) and ref.strip()):
+        return None, "verified-class evidence requires a non-empty ref (sha/tag/pr/evidence-bundle id)"
+    if ref is None:
+        ref = ""
+    if not isinstance(ref, str):
+        return None, "evidence.ref must be a string"
+    observed_at = evidence.get("observed_at") or _utc_timestamp()
+    if not isinstance(observed_at, str) or not observed_at.strip():
+        return None, "evidence.observed_at must be a non-empty string"
+    observed_by = evidence.get("observed_by") or _detect_model()
+    if not isinstance(observed_by, str) or not observed_by.strip():
+        return None, "evidence.observed_by must be a non-empty string"
+    return {
+        "class": ev_class,
+        "kind": ev_kind,
+        "ref": ref,
+        "observed_at": observed_at,
+        "observed_by": observed_by,
+    }, None
+
+
+def _infer_kind_from_text(*texts: Optional[str]) -> Optional[str]:
+    blob = " ".join(t for t in texts if t).lower()
+    if not blob:
+        return None
+    if "runtime" in blob and "verif" in blob:
+        return "runtime_verified"
+    if "deployed" in blob:
+        return "deployed"
+    if "published" in blob:
+        return "published"
+    if "merged" in blob:
+        return "merged"
+    if "natural" in blob and "outcome" in blob:
+        return "natural_outcome"
+    return None
+
+
+def _detect_assertion(
+    status: Optional[str],
+    note: Optional[str],
+    title: Optional[str],
+    description: Optional[str],
+) -> tuple[bool, Optional[str]]:
+    """Whether this update asserts a truth-sensitive state (LED-5321 M4)."""
+    inferred = _infer_kind_from_text(note, title, description)
+    if status == "done":
+        return True, inferred or "merged"
+    for text in (note, title, description):
+        if text and _ASSERTION_RE.search(text):
+            return True, inferred or "merged"
+    return False, None
+
+
+def truth_label_for_evidence(evidence: Any) -> str:
+    """Map an evidence object (or class string) to a display label."""
+    if isinstance(evidence, str):
+        return CLASS_TO_TRUTH_LABEL.get(evidence, LEGACY_TRUTH_LABEL)
+    if isinstance(evidence, dict):
+        return CLASS_TO_TRUTH_LABEL.get(str(evidence.get("class", "")), LEGACY_TRUTH_LABEL)
+    return LEGACY_TRUTH_LABEL
+
+
+def truth_label_for_item(item_state: Dict[str, Any]) -> str:
+    """Label a replayed ledger item (LED-5321 M4).
+
+    Never fabricates: items with no evidence object render
+    "legacy/unclassified".
+    """
+    if not isinstance(item_state, dict):
+        return LEGACY_TRUTH_LABEL
+    ev = item_state.get("evidence")
+    if isinstance(ev, dict) and ev.get("class"):
+        return truth_label_for_evidence(ev)
+    ec = item_state.get("evidence_class")
+    if isinstance(ec, str) and ec:
+        return truth_label_for_evidence(ec)
+    return LEGACY_TRUTH_LABEL
+
+
+def _advance_verified_states(
+    existing: Any, evidence: Dict[str, Any]
+) -> List[str]:
+    """Advance verified_states only on verified-class evidence with ref."""
+    base = list(existing) if isinstance(existing, list) else []
+    base = [s for s in base if isinstance(s, str) and s in VERIFIED_STATES_ORDER]
+    if not isinstance(evidence, dict):
+        return base
+    if evidence.get("class") != "verified":
+        return base
+    ref = evidence.get("ref", "")
+    if not (isinstance(ref, str) and ref.strip()):
+        return base
+    mapped = KIND_TO_VERIFIED_STATE.get(str(evidence.get("kind", "")))
+    if not mapped or mapped in base:
+        return base
+    order = {s: i for i, s in enumerate(VERIFIED_STATES_ORDER)}
+    return sorted(base + [mapped], key=lambda s: order.get(s, 999))
+
+
+def _default_assertion_evidence(
+    kind: str, worked_by: str = ""
+) -> Dict[str, Any]:
+    return {
+        "class": "assertion",
+        "kind": kind if kind in EVIDENCE_KINDS else "merged",
+        "ref": "",
+        "observed_at": _utc_timestamp(),
+        "observed_by": worked_by or _detect_model(),
+    }
+
+
 def add_item(
     title: str,
     ledger: str = "ops",
@@ -657,6 +853,9 @@ def add_item(
         "status": "open",
         "tags": tags or [],
         "worked_by": worked_by or _detect_model(),
+        # LED-5321 M4: compatible verified-states list; empty until a
+        # verified-class evidence object with ref advances it.
+        "verified_states": [],
     }
     # LED-189: Optional acceptance criteria
     if acceptance_criteria:
@@ -740,6 +939,11 @@ def update_item(
     worked_by: str = "",
     commit_sha: Optional[str] = None,
     pr_url: Optional[str] = None,
+    # LED-5321 M4: all optional, backward compatible.
+    evidence: Optional[Dict[str, Any]] = None,
+    review_transcript: Optional[str] = None,
+    review_diff_path: Optional[str] = None,
+    review_diff_text: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Update an existing ledger item's fields.
 
@@ -749,7 +953,27 @@ def update_item(
     `verified: bool` flag. Phase 1 does NOT enforce — items still
     transition to `done` even without proof — but the flag lets future
     audits and the Phase 2 reconciler find unverified-done items.
+
+    LED-5321 M4: when `status` moves to `done`, or a note/field asserts
+    merged/deployed/published/verified, an evidence object
+    {class, kind, ref, observed_at, observed_by} is required-or-attached.
+    Callers that pass nothing keep working: the record is stored with
+    evidence.class="assertion" (never silently "verified"). `verified_states`
+    only advances with a verified-class evidence object whose ref is
+    present. Malformed evidence is rejected with a clear error and no write.
     """
+    # LED-5321 M4: validate caller-supplied evidence before any write.
+    _evidence_normalized: Optional[Dict[str, Any]] = None
+    _evidence_error: Optional[str] = None
+    if evidence is not None:
+        _evidence_normalized, _evidence_error = validate_evidence(evidence)
+        if _evidence_error:
+            return {"error": f"invalid evidence: {_evidence_error}"}
+    _triggered, _inferred_kind = _detect_assertion(status, note, title, description)
+    if _triggered and _evidence_normalized is None:
+        _evidence_normalized = _default_assertion_evidence(
+            _inferred_kind or "merged", worked_by
+        )
     _ensure(project_path)
     ledger_dir = _project_ledger_dir(project_path)
 
@@ -859,6 +1083,74 @@ def update_item(
                 # key on the next audit pass.
                 pass
 
+        # LED-5321 M4: evidence-classed promotion. A later commit must not
+        # inherit an earlier review: independently_reviewed only advances
+        # when the transcript binds to the exact diff (review_binding).
+        _review_binding_result: Optional[Dict[str, Any]] = None
+        if _evidence_normalized is not None:
+            _mapped = KIND_TO_VERIFIED_STATE.get(
+                str(_evidence_normalized.get("kind", "")), ""
+            )
+            if (
+                _mapped == "independently_reviewed"
+                and _evidence_normalized.get("class") == "verified"
+            ):
+                try:
+                    from ai.review_binding import check_review_binding
+
+                    _review_binding_result = check_review_binding(
+                        transcript_path=review_transcript or "",
+                        diff_path=review_diff_path or "",
+                        diff_text=review_diff_text or "",
+                    )
+                except Exception as exc:
+                    _review_binding_result = {
+                        "bound": False,
+                        "reason": f"review_binding_error: {exc}",
+                    }
+                if not isinstance(_review_binding_result, dict) or not _review_binding_result.get("bound"):
+                    # Fail closed: keep the record (backward compatible) but
+                    # store it as an assertion so verified_states does NOT
+                    # advance and views render ASSERTED, not VERIFIED.
+                    _reason = ""
+                    if isinstance(_review_binding_result, dict):
+                        _reason = str(_review_binding_result.get("reason", "unbound"))
+                    _evidence_normalized = {
+                        **_evidence_normalized,
+                        "class": "assertion",
+                    }
+                    if isinstance(_review_binding_result, dict):
+                        _review_binding_result.setdefault("downgraded", True)
+                    else:
+                        _review_binding_result = {
+                            "bound": False,
+                            "reason": _reason or "unbound",
+                            "downgraded": True,
+                        }
+            update["evidence"] = _evidence_normalized
+            if _review_binding_result is not None:
+                update["review_binding"] = _review_binding_result
+            # Advance verified_states only on verified-class + ref present.
+            # Replay is scoped to this item's file (no full audit).
+            if _evidence_normalized.get("class") == "verified":
+                try:
+                    _prior = _replay_current_state(item_id, path.parent)
+                    _existing_states: Any = (
+                        _prior.get("verified_states", []) if _prior else []
+                    )
+                except Exception:
+                    _existing_states = []
+                _advanced = _advance_verified_states(
+                    _existing_states, _evidence_normalized
+                )
+                _base = (
+                    list(_existing_states)
+                    if isinstance(_existing_states, list)
+                    else []
+                )
+                if _advanced != _base:
+                    update["verified_states"] = _advanced
+
         _append(path, update)
 
         # Sync to Supabase for dashboard visibility
@@ -883,6 +1175,9 @@ _VALID_FIELDS = SLIM_FIELDS + (
     "description", "acceptance_criteria", "context", "tags", "created_at",
     "worked_by", "last_worked_by", "last_note", "hash", "source", "tools_needed",
     "estimated_complexity", "ledger",
+    # LED-5321 M4: evidence-classed truth fields (all optional, additive).
+    "evidence", "evidence_class", "verified_states", "truth_label",
+    "review_binding", "ship_proof",
 )
 _VALID_SORT = ("updated_at", "created_at", "priority")
 _VALID_ORDER = ("asc", "desc")
@@ -1143,9 +1438,27 @@ def list_items(
                     if "tags" in item and item["tags"] is not None:
                         # Tag updates replace the existing tag set when present
                         state[item_id]["tags"] = item["tags"]
+                    # LED-5321 M4: replay truth fields (latest wins).
+                    if "evidence" in item and isinstance(item["evidence"], dict):
+                        state[item_id]["evidence"] = item["evidence"]
+                        _ec = item["evidence"].get("class", "")
+                        if _ec:
+                            state[item_id]["evidence_class"] = _ec
+                    if "verified_states" in item and isinstance(item["verified_states"], list):
+                        state[item_id]["verified_states"] = list(item["verified_states"])
+                    if "review_binding" in item:
+                        state[item_id]["review_binding"] = item["review_binding"]
+                    if "ship_proof" in item:
+                        state[item_id]["ship_proof"] = item["ship_proof"]
                     state[item_id]["updated_at"] = item.get("updated_at")
             else:
                 state[item_id] = {**item}
+
+        # LED-5321 M4: truth labels (never fabricated; legacy stays unclassified).
+        for _sid, _st in state.items():
+            if "verified_states" not in _st:
+                _st["verified_states"] = []
+            _st["truth_label"] = truth_label_for_item(_st)
 
         filtered = list(state.values())
 
@@ -1297,8 +1610,18 @@ def get_context(project_path: str = ".") -> Dict[str, Any]:
     return {
         "venture": venture["name"],
         "open_items": len(open_items),
-        "next_up": [{"id": i["id"], "title": i["title"], "priority": i["priority"]}
-                     for i in open_items[:5]],
+        # LED-5321 M4: label each item ASSERTED/VERIFIED/STALE/UNAVAILABLE
+        # where evidence exists; legacy records show "legacy/unclassified".
+        "next_up": [
+            {
+                "id": i["id"],
+                "title": i["title"],
+                "priority": i["priority"],
+                "truth_label": i.get("truth_label", LEGACY_TRUTH_LABEL),
+                "verified_states": list(i.get("verified_states", [])),
+            }
+            for i in open_items[:5]
+        ],
         "summary": result["summary"],
     }
 
@@ -1344,7 +1667,7 @@ def query_ledger(query: str, project_path: str = ".") -> Dict[str, Any]:
             cutoff = time.time() - 30 * 86400
             items = [i for i in items if _parse_ts(i.get("updated_at", "")) > cutoff]
 
-        return {"query": query, "intent": "completed", "items": [{"id": i["id"], "title": i["title"]} for i in items], "count": len(items)}
+        return {"query": query, "intent": "completed", "items": [{"id": i["id"], "title": i["title"], "truth_label": i.get("truth_label", LEGACY_TRUTH_LABEL), "verified_states": list(i.get("verified_states", []))} for i in items], "count": len(items)}
 
     elif any(w in q for w in ["blocked", "blocking", "stuck"]):
         result = list_items(status="open", project_path=project_path, limit=50)
@@ -1532,6 +1855,620 @@ def unlink_items(
 
 
 # ═══════════════════════════════════════════════════════════════════════
+#  CANONICAL CLOSE (LED-5321 M3) — helpers
+# ═══════════════════════════════════════════════════════════════════════
+#
+# One supported close operation: capture/refresh the soul, write the session
+# handoff, create the handoff receipt, then READ BACK every written record.
+# Helpers here are shared by session_handoff (canonical path) and the
+# read-side surfacing (session_history / phoenix.revive).
+
+def _close_ts_epoch(value: Any) -> float:
+    """Parse a close timestamp to epoch seconds; -inf when unparseable.
+
+    Accepts ISO-8601 (with or without microseconds/offset) and the ledger
+    ``%Y-%m-%dT%H:%M:%SZ`` form so records written by different writers
+    compare in one domain for the stale-writer guard.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return float("-inf")
+    try:
+        normalized = text.replace("Z", "+00:00") if text.endswith("Z") else text
+        from datetime import datetime as _dt
+
+        parsed = _dt.fromisoformat(normalized)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=_dt.now().astimezone().tzinfo)
+        return parsed.timestamp()
+    except Exception:
+        pass
+    try:
+        return time.mktime(time.strptime(text, "%Y-%m-%dT%H:%M:%SZ"))
+    except Exception:
+        return float("-inf")
+
+
+_CLOSE_THREAD_LOCKS: Dict[str, threading.Lock] = {}
+_CLOSE_THREAD_LOCKS_GUARD = threading.Lock()
+
+# Caps for the resume/history surfacing lists (full counts are reported
+# alongside so callers know when the list was truncated).
+_CLOSE_STATE_LIST_CAP = 25
+# Bound for the latest-handoff scan so a huge sessions dir stays cheap.
+_CLOSE_HANDOFF_SCAN_CAP = 200
+
+
+def _soul_rank_key(data: Dict[str, Any]) -> Tuple[str, str]:
+    """Newest-first rank for a soul record: created_at, then soul_id.
+
+    Same rule as session_continuity._soul_rank_key (duplicated here so the
+    canonical close works in minimal layouts too): discovery orders by
+    ``created_at`` with a deterministic ``soul_id`` tie-break — never by
+    filename/write order — so a late write carrying an older ``created_at``
+    can never become "latest".
+    """
+    return (str(data.get("created_at") or ""), str(data.get("soul_id") or ""))
+
+
+@contextmanager
+def _flock_exclusive(lock_path: Path):
+    """Hold an fcntl exclusive lock on ``lock_path`` (best-effort yield).
+
+    Shared primitive for the close locks below. Degrades to an unguarded
+    yield when flock is unavailable — callers layer in-process thread
+    locks separately where they need them.
+    """
+    if fcntl is None:
+        yield
+        return
+    try:
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    except OSError:
+        yield
+        return
+    try:
+        try:
+            os.fchmod(fd, 0o600)
+        except OSError:
+            pass
+        with os.fdopen(fd, "a+", encoding="utf-8") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise
+
+
+def _continuity_lock_path(project_path: str, prefix: str) -> Optional[Path]:
+    """Return the continuity lock file for a project (creating the dir)."""
+    try:
+        lock_key = hashlib.sha256(
+            os.path.realpath(project_path or ".").encode()
+        ).hexdigest()[:12]
+    except Exception:
+        lock_key = "default"
+    lock_dir = _delimit_home() / "continuity" / "locks"
+    try:
+        lock_dir.mkdir(parents=True, exist_ok=True)
+        if os.name != "nt":
+            os.chmod(lock_dir, 0o700)
+    except OSError:
+        return None
+    return lock_dir / f"{prefix}_{lock_key}.lock"
+
+
+@contextmanager
+def _close_lock(project_path: str):
+    """Serialize canonical closes for one project (whole-close scope).
+
+    Uses its OWN per-project lock file (``close_<hash12>.lock``) plus an
+    in-process thread lock — deliberately NOT the soul-pointer lock file,
+    because a close invokes ``capture_soul``, which takes the soul-pointer
+    lock itself; nesting flock on the same file from one process
+    self-deadlocks. Soul-file/latest.json mutations inside the close take
+    :func:`_soul_mutation_lock` briefly instead (see below), so closes
+    still serialize against concurrent captures where they share state.
+    """
+    try:
+        thread_key = "close:" + hashlib.sha256(
+            os.path.realpath(project_path or ".").encode()
+        ).hexdigest()[:12]
+    except Exception:
+        thread_key = "close:default"
+    with _CLOSE_THREAD_LOCKS_GUARD:
+        thread_lock = _CLOSE_THREAD_LOCKS.setdefault(thread_key, threading.Lock())
+    with thread_lock:
+        lock_path = _continuity_lock_path(project_path, "close")
+        if lock_path is None:
+            yield
+            return
+        with _flock_exclusive(lock_path):
+            yield
+
+
+@contextmanager
+def _soul_mutation_lock(project_path: str):
+    """Briefly serialize soul-file/latest.json mutations with captures.
+
+    Reuses the existing soul-pointer lock mechanism: session_phoenix's
+    per-project lock when importable (the same lock ``capture_soul``
+    takes), else an equivalent local flock on the same shared path
+    (``project_<hash12>.lock``, byte-identical to phoenix's
+    ``_project_hash`` scheme). Held only for single read-modify-write
+    steps — never across ``capture_soul``, which takes this same lock
+    internally (nesting it would self-deadlock).
+    """
+    try:
+        from ai.session_phoenix import _project_latest_lock as _phoenix_lock
+    except ImportError:
+        try:
+            from session_phoenix import _project_latest_lock as _phoenix_lock  # type: ignore
+        except ImportError:
+            _phoenix_lock = None
+    if _phoenix_lock is not None:
+        with _phoenix_lock(project_path):
+            yield
+        return
+    lock_path = _continuity_lock_path(project_path, "project")
+    if lock_path is None:
+        yield
+        return
+    with _flock_exclusive(lock_path):
+        yield
+
+
+def _persist_soul_record(
+    proj_dir: Path,
+    soul_path: Path,
+    soul_record: Dict[str, Any],
+    project_path: str,
+) -> None:
+    """Rewrite one soul file + guarded latest.json advance, atomically
+    with respect to concurrent captures (raises on write failure)."""
+    with _soul_mutation_lock(project_path):
+        _write_soul_file(soul_path, soul_record)
+        _advance_soul_latest_guarded(proj_dir, soul_record)
+
+
+def _resolve_project_best_effort(project_path: str = "") -> str:
+    """Resolve one repo-stable project identity; never raises."""
+    try:
+        try:
+            from ai.session_continuity import resolve_project_path
+        except ImportError:
+            from session_continuity import resolve_project_path  # type: ignore
+        return resolve_project_path(project_path)
+    except Exception:
+        try:
+            raw = (project_path or "").strip() or os.getcwd()
+            return os.path.realpath(raw)
+        except Exception:
+            return project_path or ""
+
+
+def _soul_bucket_for_close(project_path: str) -> Path:
+    """Return the soul storage directory for a close, honoring overrides.
+
+    Prefers session_phoenix's resolver when importable, else the free
+    core's — both share the identical layout/override contract, and the
+    caller always passes an already-resolved path so the two agree.
+    """
+    try:
+        from ai.session_phoenix import _project_dir as _pd
+        return _pd(project_path)
+    except ImportError:
+        pass
+    try:
+        from session_phoenix import _project_dir as _pd  # type: ignore
+        return _pd(project_path)
+    except ImportError:
+        pass
+    try:
+        from ai.session_continuity import _project_dir as _pd_core
+    except ImportError:
+        from session_continuity import _project_dir as _pd_core  # type: ignore
+    return _pd_core(project_path)
+
+
+def _prepare_soul_bucket_for_close(project_path: str) -> Path:
+    """Create the soul bucket with owner-only modes; never surprises."""
+    try:
+        from ai.session_phoenix import _prepare_project_dir as _prep
+        return _prep(project_path)
+    except ImportError:
+        pass
+    try:
+        from session_phoenix import _prepare_project_dir as _prep  # type: ignore
+        return _prep(project_path)
+    except ImportError:
+        pass
+    try:
+        from ai.session_continuity import _prepare_project_dir as _prep_core
+    except ImportError:
+        from session_continuity import _prepare_project_dir as _prep_core  # type: ignore
+    return _prep_core(project_path)
+
+
+def _read_soul_records(proj_dir: Path) -> List[Tuple[Path, Dict[str, Any]]]:
+    """Parse every timestamped soul file in a bucket (tolerant, read-only).
+
+    Skips latest.json (a pointer copy) and floor_*.json files (owned by the
+    deterministic-floor protocol — a canonical close must never rewrite
+    them). Unparseable files are skipped, never fatal.
+    """
+    records: List[Tuple[Path, Dict[str, Any]]] = []
+    try:
+        if not proj_dir.is_dir():
+            return records
+        files = sorted(proj_dir.glob("*.json"), key=lambda p: p.name)
+    except OSError:
+        return records
+    for path in files:
+        try:
+            if path.name == "latest.json" or path.name.startswith("floor_"):
+                continue
+            if path.is_symlink() or not path.is_file():
+                continue
+            data = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict) and data.get("soul_id"):
+            records.append((path, data))
+    return records
+
+
+def _find_close_soul(
+    proj_dir: Path, logical_session_id: str
+) -> Tuple[Optional[Path], Optional[Dict[str, Any]]]:
+    """Return the newest soul stamped with ``logical_session_id`` (or Nones)."""
+    best: Optional[Tuple[Path, Dict[str, Any]]] = None
+    if not logical_session_id:
+        return None, None
+    for path, data in _read_soul_records(proj_dir):
+        if data.get("logical_session_id") != logical_session_id:
+            continue
+        if best is None or _soul_rank_key(data) > _soul_rank_key(best[1]):
+            best = (path, data)
+    return best if best is not None else (None, None)
+
+
+def _find_soul_file_by_id(
+    proj_dir: Path, soul_id: str
+) -> Tuple[Optional[Path], Optional[Dict[str, Any]]]:
+    """Return the newest timestamped file for ``soul_id`` (or Nones)."""
+    best: Optional[Tuple[Path, Dict[str, Any]]] = None
+    if not soul_id:
+        return None, None
+    for path, data in _read_soul_records(proj_dir):
+        if data.get("soul_id") != soul_id:
+            continue
+        if best is None or _soul_rank_key(data) > _soul_rank_key(best[1]):
+            best = (path, data)
+    return best if best is not None else (None, None)
+
+
+def _write_soul_file(path: Path, data: Dict[str, Any]) -> None:
+    """Atomically rewrite one soul file with owner-only modes."""
+    payload = json.dumps(data, indent=2)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        if os.name != "nt":
+            path.chmod(0o600)
+    except Exception:
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def _advance_soul_latest_guarded(proj_dir: Path, candidate: Dict[str, Any]) -> bool:
+    """Advance latest.json only to an equal-or-newer record; never raises.
+
+    Same stale-writer rule as phoenix._advance_project_latest: an
+    older-timestamped writer cannot supersede a newer record. A refresh of
+    the SAME soul (equal rank) always rewrites so latest.json carries the
+    newest content. Returns True when latest.json was (re)written.
+    """
+    latest = proj_dir / "latest.json"
+    try:
+        if latest.is_file() and not latest.is_symlink():
+            try:
+                current = json.loads(latest.read_text())
+            except (OSError, ValueError):
+                current = None
+            if isinstance(current, dict):
+                if _soul_rank_key(current) > _soul_rank_key(candidate):
+                    return False
+        _write_soul_file(latest, candidate)
+        return True
+    except OSError:
+        return False
+
+
+def _write_handoff_file(path: Path, handoff: Dict[str, Any]) -> None:
+    """Atomically write a NEW handoff file (fails if the path exists)."""
+    payload = json.dumps(handoff, indent=2)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    descriptor = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+        0o600,
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        if os.name != "nt":
+            path.chmod(0o600)
+    except Exception:
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def _rewrite_handoff_file(path: Path, handoff: Dict[str, Any]) -> None:
+    """Atomically replace an EXISTING handoff file (idempotent re-close)."""
+    replacement = path.with_name(f".rewrite.{path.name}")
+    try:
+        # A crashed close may have left its intermediate behind; remove it
+        # so the recovery close is not blocked by its own O_EXCL write.
+        replacement.unlink(missing_ok=True)
+    except OSError:
+        pass
+    _write_handoff_file(replacement, handoff)
+    try:
+        os.replace(replacement, path)
+        if os.name != "nt":
+            path.chmod(0o600)
+    except Exception:
+        try:
+            replacement.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def _load_handoff_file(path: Path) -> Optional[Dict[str, Any]]:
+    """Parse one handoff file; None when missing/unparseable (never raises)."""
+    try:
+        if path.is_symlink() or not path.is_file():
+            return None
+        data = json.loads(path.read_text())
+        return data if isinstance(data, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def _find_handoff_by_logical_id(
+    logical_session_id: str,
+) -> Tuple[Optional[Path], Optional[Dict[str, Any]]]:
+    """Return the newest handoff stamped with ``logical_session_id``."""
+    if not logical_session_id or not SESSIONS_DIR.exists():
+        return None, None
+    best: Optional[Tuple[Path, Dict[str, Any]]] = None
+    try:
+        files = sorted(SESSIONS_DIR.glob("session_*.json"), reverse=True)
+    except OSError:
+        return None, None
+    for path in files[:_CLOSE_HANDOFF_SCAN_CAP]:
+        data = _load_handoff_file(path)
+        if not data or data.get("logical_session_id") != logical_session_id:
+            continue
+        if best is None:
+            best = (path, data)
+    return best if best is not None else (None, None)
+
+
+def _latest_handoff_for_project(
+    resolved_project: str = "", venture: str = ""
+) -> str:
+    """Return the latest session handoff id, preferring project, then venture.
+
+    Legacy handoffs carry no project_path, so the preference degrades
+    gracefully: exact project match (canonical compare) wins, else a venture
+    match, else the newest handoff overall. "" when the store is empty.
+    Never raises.
+    """
+    try:
+        if not SESSIONS_DIR.exists():
+            return ""
+        files = sorted(SESSIONS_DIR.glob("session_*.json"), reverse=True)
+    except OSError:
+        return ""
+    overall = ""
+    venture_hit = ""
+    for path in files[:_CLOSE_HANDOFF_SCAN_CAP]:
+        data = _load_handoff_file(path)
+        if not data:
+            continue
+        hid = str(data.get("id") or "")
+        if not hid:
+            continue
+        if not overall:
+            overall = hid
+        if resolved_project and not venture_hit:
+            try:
+                if _resolve_project_best_effort(
+                    str(data.get("project_path") or "")
+                ) == resolved_project and data.get("project_path"):
+                    return hid
+            except Exception:
+                pass
+        if venture and not venture_hit and data.get("venture") == venture:
+            venture_hit = hid
+        if overall and venture_hit and not resolved_project:
+            break
+    return venture_hit or overall
+
+
+def _pending_receipt_summaries(
+    resolved_project: str = "",
+) -> Tuple[List[Dict[str, str]], int]:
+    """Pending handoff receipts for a project, newest first (capped, counted).
+
+    Merges the project's own namespace with any same-project receipts
+    captured from a different cwd (canonical-identity compare), deduped by
+    receipt id. Never raises; [] when the receipts backend is unavailable.
+    """
+    try:
+        try:
+            from ai.handoff_receipts import get_pending_receipts
+        except ImportError:
+            from handoff_receipts import get_pending_receipts  # type: ignore
+        scoped = (
+            get_pending_receipts(project_path=resolved_project)
+            if resolved_project
+            else []
+        )
+        merged = list(scoped)
+        seen = {r.receipt_id for r in merged}
+        if resolved_project:
+            for receipt in get_pending_receipts(project_path=""):
+                if receipt.receipt_id in seen:
+                    continue
+                try:
+                    if (
+                        receipt.project_path
+                        and _resolve_project_best_effort(receipt.project_path)
+                        == resolved_project
+                    ):
+                        merged.append(receipt)
+                        seen.add(receipt.receipt_id)
+                except Exception:
+                    continue
+        else:
+            for receipt in get_pending_receipts(project_path=""):
+                if receipt.receipt_id not in seen:
+                    merged.append(receipt)
+                    seen.add(receipt.receipt_id)
+        merged.sort(
+            key=lambda r: (r.created_at, r.receipt_id), reverse=True
+        )
+        total = len(merged)
+        summaries = [
+            {
+                "id": r.receipt_id,
+                "receipt_id": r.receipt_id,
+                "task": r.task_description,
+                "next_action": r.next_action,
+            }
+            for r in merged[:_CLOSE_STATE_LIST_CAP]
+        ]
+        return summaries, total
+    except Exception:
+        return [], 0
+
+
+def _open_dispatch_summaries(
+    venture: str = "",
+) -> Tuple[List[Dict[str, str]], int]:
+    """Open agent dispatches, newest first (capped, counted).
+
+    When a venture is known, dispatches stamped with that venture are
+    returned along with unscoped (venture-less) ones — a fresh lead must
+    discover unscoped work too. Never raises; [] when dispatch is
+    unavailable.
+    """
+    try:
+        try:
+            from ai.agent_dispatch import list_active_agents
+        except ImportError:
+            from agent_dispatch import list_active_agents  # type: ignore
+        active = list_active_agents().get("active_tasks", []) or []
+        if venture:
+            active = [
+                t
+                for t in active
+                if not str(t.get("venture") or "").strip()
+                or str(t.get("venture") or "").strip() == venture
+            ]
+        active = sorted(
+            active,
+            key=lambda t: (
+                str(t.get("created_at") or ""),
+                str(t.get("id") or ""),
+            ),
+            reverse=True,
+        )
+        total = len(active)
+        summaries = [
+            {
+                "id": str(t.get("id") or ""),
+                "title": str(t.get("title") or ""),
+                "status": str(t.get("status") or ""),
+            }
+            for t in active[:_CLOSE_STATE_LIST_CAP]
+        ]
+        return summaries, total
+    except Exception:
+        return [], 0
+
+
+def _venture_best_effort(resolved_project: str = "") -> str:
+    """Resolve the venture name for a project; "" when unknown (never raises)."""
+    if not resolved_project:
+        return ""
+    try:
+        try:
+            from ai.session_phoenix import _venture_for_project
+        except ImportError:
+            from session_phoenix import _venture_for_project  # type: ignore
+        return str(_venture_for_project(resolved_project) or "")
+    except Exception:
+        return ""
+
+
+def close_state_for_project(
+    project_path: str = "", venture: str = ""
+) -> Dict[str, Any]:
+    """Snapshot of current close/resume state for one project (LED-5321 M3).
+
+    Shared by session_history and phoenix.revive so a fresh lead discovers
+    current state without knowing an artifact path or receipt id. Never
+    raises — every backend failure degrades to an empty section, never a
+    hard error (matching the continuity "never blocks revive" contract).
+    """
+    out: Dict[str, Any] = {
+        "pending_receipts": [],
+        "pending_receipts_count": 0,
+        "open_dispatches": [],
+        "open_dispatches_count": 0,
+        "latest_handoff_id": "",
+    }
+    try:
+        resolved = _resolve_project_best_effort(project_path)
+        vent = (venture or "").strip() or _venture_best_effort(resolved)
+        pending, pending_total = _pending_receipt_summaries(resolved)
+        dispatches, dispatch_total = _open_dispatch_summaries(vent)
+        out["pending_receipts"] = pending
+        out["pending_receipts_count"] = pending_total
+        out["open_dispatches"] = dispatches
+        out["open_dispatches_count"] = dispatch_total
+        out["latest_handoff_id"] = _latest_handoff_for_project(resolved, vent)
+    except Exception:
+        pass
+    return out
+
+
+# ═══════════════════════════════════════════════════════════════════════
 #  SESSION HANDOFF
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -1549,10 +2486,744 @@ def session_handoff(
     project_path: str = "",
     source_model: str = "session_handoff",
     refresh_soul: bool = True,
+    # LED-5321 M3 canonical-close extensions — OPTIONAL ONLY. Every
+    # pre-existing positional/keyword call shape keeps working unchanged.
+    logical_session_id: str = "",
+    task_description: str = "",
+    completed: Optional[List[str]] = None,
+    not_completed: Optional[List[str]] = None,
+    assumptions: Optional[List[str]] = None,
+    next_action: str = "",
+    to_model: str = "any",
+    priority: str = "P1",
+    created_at: str = "",
 ) -> Dict[str, Any]:
     """Store a session summary for cross-session continuity.
 
     Called at end of a productive session so the next session can load context.
+
+    LED-5321 M3 — this is the ONE supported canonical close operation. With
+    the default ``refresh_soul=True`` a single call captures/refreshes the
+    soul, writes the session handoff record, creates the handoff receipt
+    (via ``ai.handoff_receipts.create_receipt``), then READS BACK each
+    written record and reports ``verified`` (never claims closure on a
+    failed readback). ``refresh_soul=False`` preserves the exact legacy
+    handoff-only write for the orphan-salvage path.
+
+    See LED-3731 (below, on _legacy_handoff_write) for the pointer-soul
+    history, and _canonical_close for the idempotency / stale-writer /
+    crash-recovery contract.
+    """
+    SESSIONS_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if os.name != "nt":
+        SESSIONS_DIR.chmod(0o700)
+    if not refresh_soul:
+        return _legacy_handoff_write(
+            summary=summary,
+            items_completed=items_completed,
+            items_added=items_added,
+            key_decisions=key_decisions,
+            blockers=blockers,
+            files_changed=files_changed,
+            venture=venture,
+            project_path=project_path,
+            source_model=source_model,
+            refresh_soul=False,
+        )
+    return _canonical_close(
+        summary=summary,
+        items_completed=items_completed,
+        items_added=items_added,
+        key_decisions=key_decisions,
+        blockers=blockers,
+        files_changed=files_changed,
+        venture=venture,
+        project_path=project_path,
+        source_model=source_model,
+        logical_session_id=logical_session_id,
+        task_description=task_description,
+        completed=completed,
+        not_completed=not_completed,
+        assumptions=assumptions,
+        next_action=next_action,
+        to_model=to_model,
+        priority=priority,
+        created_at=created_at,
+    )
+
+
+def _capture_close_soul(
+    summary: str,
+    key_decisions: Optional[List[str]],
+    items_completed: Optional[List[str]],
+    blockers: Optional[List[str]],
+    items_added: Optional[List[str]],
+    source_model: str,
+    resolved_project_path: str,
+):
+    """Capture a fresh soul via phoenix when present, else the free core.
+
+    Same backend chain (and the same "transitive phoenix failure must NOT
+    silently degrade" guard) as the pre-M3 pointer-soul refresh. Returns the
+    captured soul object; raises on failure.
+    """
+    try:
+        from ai.session_continuity import resolve_project_path, _session_phoenix_is_absent
+    except ModuleNotFoundError as exc:  # pragma: no cover - flat bundle layout
+        if exc.name not in {"ai", "ai.session_continuity"}:
+            raise
+        from session_continuity import resolve_project_path, _session_phoenix_is_absent  # type: ignore
+    _ = resolve_project_path  # resolved by the caller; import kept for parity
+    try:
+        from ai.session_phoenix import capture_soul
+    except ModuleNotFoundError as exc:  # pragma: no cover - flat import layout
+        if not _session_phoenix_is_absent(exc):
+            raise
+        try:
+            from session_phoenix import capture_soul  # type: ignore
+        except ModuleNotFoundError as exc:
+            if not _session_phoenix_is_absent(exc):
+                raise
+            # Public installs intentionally omit session_phoenix; the
+            # shipped free-core contract owns the same schema + layout.
+            try:
+                from ai.session_continuity import capture_soul_core as capture_soul
+            except ImportError:  # pragma: no cover - flat bundle layout
+                from session_continuity import capture_soul_core as capture_soul  # type: ignore
+    return capture_soul(
+        active_task=summary,
+        decisions=list(key_decisions or []),
+        key_context=list(items_completed or []),
+        blockers=list(blockers or []),
+        next_steps=list(items_added or []),
+        source_model=source_model,
+        project_path=resolved_project_path,
+        task_status="in_progress",
+    )
+
+
+def _canonical_close(
+    summary: str,
+    items_completed: Optional[List[str]] = None,
+    items_added: Optional[List[str]] = None,
+    key_decisions: Optional[List[str]] = None,
+    blockers: Optional[List[str]] = None,
+    files_changed: Optional[List[str]] = None,
+    venture: str = "",
+    project_path: str = "",
+    source_model: str = "session_handoff",
+    logical_session_id: str = "",
+    task_description: str = "",
+    completed: Optional[List[str]] = None,
+    not_completed: Optional[List[str]] = None,
+    assumptions: Optional[List[str]] = None,
+    next_action: str = "",
+    to_model: str = "any",
+    priority: str = "P1",
+    created_at: str = "",
+) -> Dict[str, Any]:
+    """One-call canonical session close: soul + handoff + receipt + readback.
+
+    Contract (LED-5321 M3):
+    - Writes (or idempotently refreshes) all three records, then reads each
+      back. ``verified`` is True only when every WRITTEN record reads back;
+      a failed readback returns ``verified=False`` with ``missing`` naming
+      the exact absent record kind(s) and ``status="close_unverified"`` —
+      closure is never claimed on partial writes.
+    - Idempotent: closing twice with the same ``logical_session_id``
+      updates and returns the SAME soul/handoff/receipt (no duplicate
+      receipts). A re-close reports ``idempotent=True``.
+    - Crash-recoverable: when a previous close for the same logical id left
+      only a subset of records, this call completes the set and reports it
+      under ``recovered_partial`` instead of silently accepting the gap.
+    - Concurrency: the whole close runs under the per-project close lock,
+      so two concurrent closes for the same session/project serialize.
+      Stale-writer guard: an incoming write whose timestamp is older than
+      the current newest record for the same logical id does NOT overwrite
+      it (reported under ``stale_suppressed``); latest.json advances only
+      to equal-or-newer records.
+    - Model-agnostic: ``source_model`` is an opaque passthrough (default
+      ``"unknown"`` when empty) — no supervisor/model is hardcoded.
+    - Additive storage: handoff dicts gain only new keys; souls/receipts
+      gain only new dataclass fields. Legacy records without them still
+      load and are treated as unverified assertions, not errors.
+    """
+    from datetime import datetime, timezone as _timezone
+
+    resolved = _resolve_project_best_effort(project_path)
+    logical_id = (logical_session_id or "").strip()
+    if not logical_id:
+        logical_id = (
+            f"close_{_utc_timestamp('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+        )
+    capture_key = (
+        "close-"
+        + hashlib.sha256(f"canonical-close:{logical_id}".encode()).hexdigest()[:18]
+    )
+    incoming_ts = (created_at or "").strip() or datetime.now(_timezone.utc).isoformat()
+    effective_model = (source_model or "").strip() or "unknown"
+
+    with _close_lock(resolved):
+        try:
+            proj_dir = _prepare_soul_bucket_for_close(resolved)
+        except Exception as exc:
+            return {
+                "status": "close_unverified",
+                "verified": False,
+                "soul_id": "",
+                "handoff_id": "",
+                "receipt_id": "",
+                "logical_session_id": logical_id,
+                "project_path": resolved,
+                "soul_refresh_status": "failed",
+                "soul_refresh_error": f"soul bucket unavailable: {exc}"[:500],
+                "receipt_status": "failed",
+                "missing": ["soul", "handoff", "receipt"],
+                "readback": {"soul": None, "handoff": None, "receipt": None},
+            }
+
+        # — discovery of any previous close for this logical id —
+        soul_path, soul_data = _find_close_soul(proj_dir, logical_id)
+        handoff_path, handoff_data = _find_handoff_by_logical_id(logical_id)
+        receipt_obj = None
+        receipts_backend = True
+        try:
+            try:
+                from ai.handoff_receipts import find_receipts_by_logical_id
+            except ImportError:
+                from handoff_receipts import find_receipts_by_logical_id  # type: ignore
+            found = find_receipts_by_logical_id(logical_id, project_path=resolved)
+            if not found:
+                # Same-project receipts captured from a different cwd live
+                # in another namespace; match them by canonical identity.
+                for candidate in find_receipts_by_logical_id(logical_id):
+                    try:
+                        if (
+                            candidate.project_path
+                            and _resolve_project_best_effort(candidate.project_path)
+                            == resolved
+                        ):
+                            found = [candidate]
+                            break
+                    except Exception:
+                        continue
+            receipt_obj = found[0] if found else None
+        except ImportError:
+            receipts_backend = False
+        except Exception:
+            receipt_obj = None
+
+        found_at_entry = [
+            kind
+            for kind, present in (
+                ("soul", soul_data is not None),
+                ("handoff", handoff_data is not None),
+                ("receipt", receipt_obj is not None),
+            )
+            if present
+        ]
+
+        # Stale-writer guard (per record, one time domain): an incoming
+        # write older than a record's current newest timestamp must not
+        # overwrite that record's content.
+        incoming_epoch = _close_ts_epoch(incoming_ts)
+        stale_suppressed: List[str] = []
+        if soul_data is not None and _close_ts_epoch(
+            soul_data.get("created_at")
+        ) > incoming_epoch:
+            stale_suppressed.append("soul")
+        if handoff_data is not None and _close_ts_epoch(
+            handoff_data.get("updated_at") or handoff_data.get("timestamp")
+        ) > incoming_epoch:
+            stale_suppressed.append("handoff")
+        if receipt_obj is not None and _close_ts_epoch(
+            getattr(receipt_obj, "created_at", "")
+        ) > incoming_epoch:
+            stale_suppressed.append("receipt")
+
+        # — predetermined handoff identity (existing or new) —
+        if handoff_data is not None and handoff_path is not None:
+            handoff_id = str(handoff_data.get("id") or handoff_path.stem)
+            handoff_file = handoff_path
+        else:
+            handoff_id = (
+                f"session_{_utc_timestamp('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:12]}"
+            )
+            handoff_file = SESSIONS_DIR / f"{handoff_id}.json"
+
+        # — soul: refresh in place, or capture fresh —
+        soul_id = ""
+        soul_refresh_status = "failed"
+        soul_refresh_error = ""
+        soul_file: Optional[Path] = soul_path
+        soul_record: Optional[Dict[str, Any]] = dict(soul_data) if soul_data else None
+        if soul_record is not None and "soul" in stale_suppressed:
+            soul_id = str(soul_record.get("soul_id") or "")
+            soul_refresh_status = "refreshed"
+        elif soul_record is not None:
+            try:
+                soul_record.update(
+                    {
+                        "active_task": summary,
+                        "decisions": list(key_decisions or []),
+                        "key_context": list(items_completed or []),
+                        "blockers": list(blockers or []),
+                        "next_steps": list(items_added or []),
+                        "source_model": effective_model,
+                        "project_path": resolved,
+                        "task_status": soul_record.get("task_status") or "in_progress",
+                        "updated_at": incoming_ts,
+                        "logical_session_id": logical_id,
+                        "capture_key": capture_key,
+                        "handoff_id": handoff_id,
+                        "close_status": "pending",
+                    }
+                )
+                if files_changed is not None:
+                    soul_record["files_modified"] = list(files_changed)
+                assert soul_file is not None
+                _persist_soul_record(proj_dir, soul_file, soul_record, resolved)
+                soul_id = str(soul_record.get("soul_id") or "")
+                soul_refresh_status = "refreshed" if soul_id else "failed"
+                if not soul_id:
+                    soul_refresh_error = "existing soul record has no soul_id"
+            except Exception as exc:
+                soul_refresh_error = f"{type(exc).__name__}: {exc}"[:500]
+                soul_id = ""
+                soul_record = None
+        else:
+            try:
+                soul = _capture_close_soul(
+                    summary,
+                    key_decisions,
+                    items_completed,
+                    blockers,
+                    items_added,
+                    effective_model,
+                    resolved,
+                )
+                fresh_id = getattr(soul, "soul_id", "") or ""
+                if not fresh_id:
+                    soul_refresh_error = "capture returned no soul_id"
+                else:
+                    located, data = _find_soul_file_by_id(proj_dir, fresh_id)
+                    if located is None or data is None:
+                        soul_refresh_error = (
+                            f"captured soul {fresh_id} not found on disk"
+                        )
+                    else:
+                        data.update(
+                            {
+                                "created_at": incoming_ts,
+                                "source_model": effective_model,
+                                "project_path": resolved,
+                                "updated_at": incoming_ts,
+                                "logical_session_id": logical_id,
+                                "capture_key": capture_key,
+                                "handoff_id": handoff_id,
+                                "close_status": "pending",
+                            }
+                        )
+                        if files_changed is not None:
+                            data["files_modified"] = list(files_changed)
+                        _persist_soul_record(proj_dir, located, data, resolved)
+                        soul_file, soul_record = located, data
+                        soul_id = fresh_id
+                        soul_refresh_status = "refreshed"
+            except Exception as exc:
+                soul_refresh_error = f"{type(exc).__name__}: {exc}"[:500]
+
+        # — receipt: update in place, or create via create_receipt —
+        receipt_id = getattr(receipt_obj, "receipt_id", "") if receipt_obj else ""
+        receipt_status = "failed"
+        receipt_error = ""
+        receipt_record: Optional[Dict[str, Any]] = None
+        receipt_updates = {
+            "task_description": (task_description or "").strip() or summary,
+            "completed": list(completed) if completed is not None else list(items_completed or []),
+            "not_completed": list(not_completed) if not_completed is not None else list(items_added or []),
+            "assumptions": list(assumptions or []),
+            "blockers": list(blockers or []),
+            "next_action": next_action or "",
+            "priority": (priority or "").strip() or "P1",
+            "from_model": effective_model,
+            "to_model": (to_model or "").strip() or "any",
+            "project_path": resolved,
+            "logical_session_id": logical_id,
+            "soul_id": soul_id,
+            "handoff_id": handoff_id,
+        }
+        if files_changed is not None:
+            receipt_updates["files_modified"] = [
+                {"path": p, "change_type": "modified", "summary": ""}
+                for p in files_changed
+            ]
+        if not receipts_backend:
+            receipt_status = "skipped_unavailable"
+        elif receipt_obj is not None and "receipt" in stale_suppressed:
+            # Older-timestamped writer: keep the newer receipt content.
+            receipt_status = "reused"
+            from dataclasses import asdict as _asdict
+
+            receipt_record = _asdict(receipt_obj)
+        elif receipt_obj is not None:
+            try:
+                try:
+                    from ai.handoff_receipts import update_receipt_fields
+                except ImportError:
+                    from handoff_receipts import update_receipt_fields  # type: ignore
+                updated = update_receipt_fields(
+                    receipt_id, dict(receipt_updates), project_path=resolved
+                )
+                if updated is None:
+                    # Namespace drift (receipt found globally but not in the
+                    # resolved namespace): retry without the scope pin.
+                    updated = update_receipt_fields(receipt_id, dict(receipt_updates))
+                if updated is None:
+                    receipt_error = f"receipt {receipt_id} no longer updatable"
+                    receipt_id = ""
+                else:
+                    receipt_status = "reused"
+                    from dataclasses import asdict as _asdict
+
+                    receipt_record = _asdict(updated)
+            except Exception as exc:
+                receipt_error = f"{type(exc).__name__}: {exc}"[:500]
+                receipt_id = ""
+        else:
+            try:
+                try:
+                    from ai.handoff_receipts import create_receipt
+                except ImportError:
+                    from handoff_receipts import create_receipt  # type: ignore
+                new_receipt = create_receipt(
+                    task_description=str(receipt_updates["task_description"]),
+                    completed=list(receipt_updates["completed"]),  # type: ignore[arg-type]
+                    not_completed=list(receipt_updates["not_completed"]),  # type: ignore[arg-type]
+                    assumptions=list(receipt_updates["assumptions"]),  # type: ignore[arg-type]
+                    blockers=list(receipt_updates["blockers"]),  # type: ignore[arg-type]
+                    files_modified=receipt_updates.get("files_modified"),  # type: ignore[arg-type]
+                    next_action=str(receipt_updates["next_action"]),
+                    priority=str(receipt_updates["priority"]),
+                    from_model=str(receipt_updates["from_model"]),
+                    to_model=str(receipt_updates["to_model"]),
+                    project_path=resolved,
+                )
+                receipt_id = new_receipt.receipt_id
+                try:
+                    try:
+                        from ai.handoff_receipts import update_receipt_fields
+                    except ImportError:
+                        from handoff_receipts import update_receipt_fields  # type: ignore
+                    linked = update_receipt_fields(
+                        receipt_id,
+                        {
+                            "logical_session_id": logical_id,
+                            "soul_id": soul_id,
+                            "handoff_id": handoff_id,
+                        },
+                        project_path=resolved,
+                    )
+                    if linked is not None:
+                        from dataclasses import asdict as _asdict
+
+                        receipt_record = _asdict(linked)
+                except Exception:
+                    pass
+                # Stamp the close's logical time on the fresh receipt row
+                # (file + index) so all three close records share one time
+                # domain for newest-first ordering and stale comparison.
+                # (update_receipt_fields protects created_at by design, so
+                # this intentional backdate goes through a direct rewrite.)
+                try:
+                    try:
+                        from ai import handoff_receipts as _hr
+                    except ImportError:
+                        import handoff_receipts as _hr  # type: ignore
+                    _rpath = _hr._project_dir(resolved) / f"{receipt_id}.json"
+                    _rdata = json.loads(_rpath.read_text())
+                    _rdata["created_at"] = incoming_ts
+                    # created_at is digest-covered (M4): re-seal, or every
+                    # canonical-close receipt loads as integrity="mismatch".
+                    if _rdata.get("content_digest"):
+                        _rdata["content_digest"] = _hr._compute_content_digest(
+                            _hr._receipt_body_dict(_rdata)
+                        )
+                    _rpath.write_text(json.dumps(_rdata, indent=2))
+                    _rindex = _hr._load_index(resolved)
+                    for _entry in _rindex.get("receipts", []):
+                        if (
+                            isinstance(_entry, dict)
+                            and _entry.get("receipt_id") == receipt_id
+                        ):
+                            _entry["created_at"] = incoming_ts
+                    _hr._save_index(resolved, _rindex)
+                    if receipt_record is not None:
+                        receipt_record["created_at"] = incoming_ts
+                        if _rdata.get("content_digest"):
+                            receipt_record["content_digest"] = _rdata["content_digest"]
+                except Exception:
+                    pass
+                if receipt_record is None:
+                    from dataclasses import asdict as _asdict
+
+                    receipt_record = _asdict(new_receipt)
+                    receipt_record.update(
+                        {
+                            "logical_session_id": logical_id,
+                            "soul_id": soul_id,
+                            "handoff_id": handoff_id,
+                        }
+                    )
+                receipt_status = "created"
+            except Exception as exc:
+                receipt_error = f"{type(exc).__name__}: {exc}"[:500]
+                receipt_id = ""
+
+        # Link the receipt back onto the soul (best-effort; readback judges).
+        if soul_record is not None and soul_file is not None and receipt_id:
+            try:
+                soul_record["receipt_id"] = receipt_id
+                _persist_soul_record(proj_dir, soul_file, soul_record, resolved)
+            except Exception:
+                pass
+
+        # — handoff: update in place, or write new —
+        handoff_write_error = ""
+        if handoff_data is not None and "handoff" in stale_suppressed:
+            # Older-timestamped writer: keep the newer handoff content.
+            handoff = dict(handoff_data)
+            handoff["id"] = handoff_id
+        elif handoff_data is not None:
+            handoff = dict(handoff_data)
+            handoff.update(
+                {
+                    "venture": venture or handoff.get("venture") or "all",
+                    "summary": summary,
+                    "items_completed": items_completed or [],
+                    "items_added": items_added or [],
+                    "key_decisions": key_decisions or [],
+                    "blockers": blockers or [],
+                    "files_changed": files_changed or [],
+                    "logical_session_id": logical_id,
+                    "capture_key": capture_key,
+                    "soul_id": soul_id,
+                    "receipt_id": receipt_id,
+                    "project_path": resolved,
+                    "source_model": effective_model,
+                    "updated_at": incoming_ts,
+                    "close_verified": False,
+                }
+            )
+            handoff["id"] = handoff_id
+            try:
+                _rewrite_handoff_file(handoff_file, handoff)
+            except Exception as exc:
+                handoff_write_error = f"{type(exc).__name__}: {exc}"[:500]
+        else:
+            handoff = {
+                "id": handoff_id,
+                "timestamp": _utc_timestamp(),
+                "venture": venture or "all",
+                "summary": summary,
+                "items_completed": items_completed or [],
+                "items_added": items_added or [],
+                "key_decisions": key_decisions or [],
+                "blockers": blockers or [],
+                "files_changed": files_changed or [],
+                "logical_session_id": logical_id,
+                "capture_key": capture_key,
+                "soul_id": soul_id,
+                "receipt_id": receipt_id,
+                "project_path": resolved,
+                "source_model": effective_model,
+                # Logical close time (== wall clock unless the caller
+                # overrode created_at): the stale-writer authority for
+                # this record, in the same domain as the soul/receipt.
+                "updated_at": incoming_ts,
+                "close_verified": False,
+            }
+            try:
+                _write_handoff_file(handoff_file, handoff)
+            except Exception as exc:
+                handoff_write_error = f"{type(exc).__name__}: {exc}"[:500]
+
+        # — readback: every written record must load again —
+        readback_soul = None
+        readback_handoff = None
+        readback_receipt = None
+        if soul_id:
+            _, readback_soul = _find_soul_file_by_id(proj_dir, soul_id)
+            if readback_soul is not None and readback_soul.get("soul_id") != soul_id:
+                readback_soul = None
+        readback_handoff = _load_handoff_file(handoff_file)
+        if readback_handoff is not None and readback_handoff.get("id") != handoff_id:
+            readback_handoff = None
+        # The receipt is expected whenever its backend exists: creation
+        # was attempted, so an attempted-but-failed write must fail
+        # verification (never silently verified). Only a wholly absent
+        # backend degrades to soul+handoff verification.
+        receipt_expected = receipts_backend
+        if receipt_expected and receipt_id:
+            try:
+                try:
+                    from ai.handoff_receipts import get_receipt
+                except ImportError:
+                    from handoff_receipts import get_receipt  # type: ignore
+                loaded = get_receipt(receipt_id, project_path=resolved)
+                if loaded is None:
+                    loaded = get_receipt(receipt_id)
+                if loaded is not None:
+                    from dataclasses import asdict as _asdict
+
+                    readback_receipt = _asdict(loaded)
+            except Exception:
+                readback_receipt = None
+
+        missing: List[str] = []
+        if readback_soul is None:
+            missing.append("soul")
+        if readback_handoff is None:
+            missing.append("handoff")
+        if receipt_expected and readback_receipt is None:
+            missing.append("receipt")
+        elif receipt_expected and isinstance(readback_receipt, dict) and (
+            readback_receipt.get("integrity") == "mismatch"
+        ):
+            # M4 truth: a receipt acknowledge_receipt would refuse as
+            # tampered can never back a verified close.
+            missing.append("receipt_integrity")
+
+        if not missing:
+            # Finalize the verified stamp, then confirm the final bytes.
+            try:
+                if soul_record is not None and soul_file is not None:
+                    soul_record["close_status"] = "verified"
+                    if receipt_id:
+                        soul_record["receipt_id"] = receipt_id
+                    _persist_soul_record(proj_dir, soul_file, soul_record, resolved)
+                handoff["close_verified"] = True
+                _rewrite_handoff_file(handoff_file, handoff)
+                _, reread_soul = (
+                    _find_soul_file_by_id(proj_dir, soul_id) if soul_id else (None, None)
+                )
+                reread_handoff = _load_handoff_file(handoff_file)
+                if reread_soul is not None and reread_handoff is not None:
+                    readback_soul, readback_handoff = reread_soul, reread_handoff
+                else:
+                    if reread_soul is None:
+                        missing.append("soul")
+                    if reread_handoff is None:
+                        missing.append("handoff")
+            except Exception as exc:
+                missing.append("finalize")
+                handoff_write_error = handoff_write_error or f"{type(exc).__name__}: {exc}"[:200]
+        else:
+            # Best-effort partial stamp so the NEXT close/revive detects the
+            # gap instead of silently accepting it.
+            try:
+                if soul_record is not None and soul_file is not None:
+                    soul_record["close_status"] = "partial"
+                    _persist_soul_record(proj_dir, soul_file, soul_record, resolved)
+            except Exception:
+                pass
+
+        verified = not missing
+        written_this_call = [
+            kind
+            for kind, ok in (
+                ("soul", readback_soul is not None),
+                ("handoff", readback_handoff is not None),
+                ("receipt", readback_receipt is not None),
+            )
+            if ok and kind not in found_at_entry
+        ]
+        recovered_partial = None
+        if found_at_entry and len(found_at_entry) < 3 and receipt_expected:
+            recovered_partial = {
+                "found": sorted(found_at_entry),
+                "completed": sorted(written_this_call),
+            }
+        elif found_at_entry and len(found_at_entry) < 2 and not receipt_expected:
+            recovered_partial = {
+                "found": sorted(found_at_entry),
+                "completed": sorted(written_this_call),
+            }
+
+        # LED-1705: only a successfully refreshed, revivable soul may
+        # suppress the deterministic Stop-hook floor.
+        if soul_id and readback_soul is not None:
+            try:
+                try:
+                    from ai.last_capture import stamp_capture
+                except ImportError:  # pragma: no cover - flat import layout
+                    from last_capture import stamp_capture
+                stamp_capture(source="model", session_id=handoff_id)
+            except Exception:
+                pass
+
+        result: Dict[str, Any] = {
+            "status": "closed" if verified else "close_unverified",
+            "verified": verified,
+            "soul_id": soul_id,
+            "handoff_id": handoff_id,
+            "receipt_id": receipt_id,
+            "logical_session_id": logical_id,
+            "project_path": resolved,
+            "venture": venture or "all",
+            "source_model": effective_model,
+            "capture_key": capture_key,
+            "idempotent": bool(found_at_entry) and (
+                ("receipt" in found_at_entry) or not receipt_expected
+            ) and "soul" in found_at_entry and "handoff" in found_at_entry,
+            "stale_suppressed": stale_suppressed,
+            "recovered_partial": recovered_partial,
+            "missing": missing,
+            "readback": {
+                "soul": readback_soul,
+                "handoff": readback_handoff,
+                "receipt": readback_receipt,
+            },
+            # Legacy keys (unchanged shape for existing callers).
+            "saved": handoff_id,
+            "path": str(handoff_file),
+            "handoff": handoff,
+            "soul_refresh_status": soul_refresh_status,
+            "receipt_status": receipt_status,
+        }
+        if not soul_id:
+            # No soul was captured or refreshed: omit the key rather than
+            # returning an empty id, so a public bundle without Phoenix (or a
+            # broken Phoenix) is never mistaken for a silently captured soul.
+            result.pop("soul_id", None)
+        if soul_refresh_error:
+            result["soul_refresh_error"] = soul_refresh_error
+        if receipt_error:
+            result["receipt_error"] = receipt_error
+        if handoff_write_error:
+            result["handoff_write_error"] = handoff_write_error
+        return result
+
+
+def _legacy_handoff_write(
+    summary: str,
+    items_completed: Optional[List[str]] = None,
+    items_added: Optional[List[str]] = None,
+    key_decisions: Optional[List[str]] = None,
+    blockers: Optional[List[str]] = None,
+    files_changed: Optional[List[str]] = None,
+    venture: str = "",
+    project_path: str = "",
+    source_model: str = "session_handoff",
+    refresh_soul: bool = True,
+) -> Dict[str, Any]:
+    """Legacy handoff-only write (``refresh_soul=False`` path).
+
+    Preserved byte-for-byte from the pre-M3 session_handoff for the
+    deterministic-floor orphan-salvage path, which manages its own capture
+    stamping and must write NO pointer-soul. Called only by session_handoff
+    with refresh_soul=False; the ``if refresh_soul:`` branch below is kept
+    for structural fidelity but never runs from the dispatcher.
 
     LED-3731: the handoff store (``~/.delimit/sessions/``) and the souls store
     (``~/.delimit/souls/<project-hash>/``, read by ``delimit_revive``) used to
@@ -1706,20 +3377,34 @@ def session_handoff(
     return result
 
 
-def session_history(limit: int = 5) -> Dict[str, Any]:
-    """Load recent session handoffs for context recovery."""
+def session_history(
+    limit: int = 5,
+    project_path: str = "",
+    venture: str = "",
+) -> Dict[str, Any]:
+    """Load recent session handoffs for context recovery.
+
+    LED-5321 M3: besides ``sessions``/``count`` (unchanged), the result now
+    also surfaces the same current-state snapshot a fresh lead needs —
+    ``pending_receipts`` (id/task/next_action), ``open_dispatches``
+    (id/title/status), and ``latest_handoff_id`` — scoped to
+    ``project_path``/``venture`` when given, else aggregated. Additive
+    keys only; existing callers are unaffected.
+    """
     if not SESSIONS_DIR.exists():
-        return {"sessions": [], "count": 0}
+        sessions: List[Dict[str, Any]] = []
+    else:
+        files = sorted(SESSIONS_DIR.glob("session_*.json"), reverse=True)[:limit]
+        sessions = []
+        for f in files:
+            try:
+                sessions.append(json.loads(f.read_text()))
+            except Exception:
+                continue
 
-    files = sorted(SESSIONS_DIR.glob("session_*.json"), reverse=True)[:limit]
-    sessions = []
-    for f in files:
-        try:
-            sessions.append(json.loads(f.read_text()))
-        except Exception:
-            continue
-
-    return {"sessions": sessions, "count": len(sessions)}
+    result: Dict[str, Any] = {"sessions": sessions, "count": len(sessions)}
+    result.update(close_state_for_project(project_path=project_path, venture=venture))
+    return result
 
 
 # ── LED-1145 Phase 1 PR-B: bulk_action ───────────────────────────────────
@@ -1772,11 +3457,26 @@ def _replay_current_state(item_id: str, ledger_dir: Path) -> Optional[Dict[str, 
                         state["last_note"] = item["note"]
                     if "worked_by" in item:
                         state["last_worked_by"] = item["worked_by"]
+                    # LED-5321 M4: replay truth fields (latest wins).
+                    if "evidence" in item and isinstance(item["evidence"], dict):
+                        state["evidence"] = item["evidence"]
+                        _ec = item["evidence"].get("class", "")
+                        if _ec:
+                            state["evidence_class"] = _ec
+                    if "verified_states" in item and isinstance(item["verified_states"], list):
+                        state["verified_states"] = list(item["verified_states"])
+                    if "review_binding" in item:
+                        state["review_binding"] = item["review_binding"]
+                    if "ship_proof" in item:
+                        state["ship_proof"] = item["ship_proof"]
                     if "updated_at" in item:
                         state["updated_at"] = item["updated_at"]
             else:
                 state = {**item}
         if state is not None:
+            if "verified_states" not in state:
+                state["verified_states"] = []
+            state["truth_label"] = truth_label_for_item(state)
             return state
     return None
 
@@ -1807,6 +3507,16 @@ def _apply_field_update(
     }
     if note:
         update_event["note"] = note
+    # LED-5321 M4: bulk direct writes also carry assertion evidence on done.
+    try:
+        _st = new_value if field == "status" else None
+        _trig, _kind = _detect_assertion(_st, note, None, None)
+        if _trig:
+            update_event["evidence"] = _default_assertion_evidence(
+                _kind or "merged", update_event["worked_by"]
+            )
+    except Exception:
+        pass
     _append(found["path"], update_event)
 
 

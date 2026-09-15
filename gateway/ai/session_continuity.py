@@ -113,6 +113,12 @@ class SessionSoul:
     launcher_run_id: str = ""
     lifecycle_status: str = ""
 
+    # Canonical-close linkage (LED-5321 M3). Additive only — legacy soul
+    # files on disk deserialize unchanged, and records without these fields
+    # are treated as unverified assertions, never errors.
+    receipt_id: str = ""
+    close_status: str = ""  # "", "pending", "partial", "verified"
+
 
 # ── standalone store (layout-identical to phoenix; parity-tested) ──────────
 
@@ -235,11 +241,25 @@ def _write_private_json(path: Path, data: Dict[str, Any]) -> None:
         raise
 
 
+def _soul_rank_key(data: Dict[str, Any]) -> tuple:
+    """Newest-first rank for a soul record: created_at, then soul_id.
+
+    LED-5321 M3: discovery orders by ``created_at`` with a deterministic
+    ``soul_id`` tie-break — never by filename/write order — so a late write
+    carrying an older ``created_at`` can never become "latest".
+    """
+    return (str(data.get("created_at") or ""), str(data.get("soul_id") or ""))
+
+
 def _store_soul_basic(soul: SessionSoul) -> Path:
     """Persist a soul + latest.json pointer, prune to MAX_SOULS_PER_PROJECT.
 
     Layout contract shared with phoenix._store_soul (parity-tested):
     <base>/<hash12>/<UTCts>_<counter06>_<soul_id>.json + latest.json copy.
+
+    LED-5321 M3: latest.json advances only to an equal-or-newer record by
+    _soul_rank_key, so a stale/older-timestamped writer cannot supersede a
+    newer record (same rule as phoenix._advance_project_latest).
     """
     global _capture_counter
     proj_dir = _prepare_project_dir(soul.project_path)
@@ -248,11 +268,29 @@ def _store_soul_basic(soul: SessionSoul) -> Path:
     filepath = proj_dir / f"{ts}_{_capture_counter:06d}_{soul.soul_id}.json"
     data = asdict(soul)
     _write_private_json(filepath, data)
-    _write_private_json(proj_dir / "latest.json", data)
+    _advance_latest_guarded(proj_dir, data)
     soul_files = sorted(p for p in proj_dir.glob("*.json") if p.name != "latest.json")
     while len(soul_files) > MAX_SOULS_PER_PROJECT:
         soul_files.pop(0).unlink(missing_ok=True)
     return filepath
+
+
+def _advance_latest_guarded(proj_dir: Path, candidate: Dict[str, Any]) -> bool:
+    """Write latest.json only when ``candidate`` ranks equal-or-newer.
+
+    Returns True when latest.json was (re)written. Best-effort: an
+    unreadable/absent current pointer is always replaced.
+    """
+    latest = proj_dir / "latest.json"
+    try:
+        if latest.is_file() and not latest.is_symlink():
+            current = json.loads(latest.read_text())
+            if isinstance(current, dict) and _soul_rank_key(current) > _soul_rank_key(candidate):
+                return False
+    except (OSError, ValueError):
+        pass
+    _write_private_json(latest, candidate)
+    return True
 
 
 def capture_soul_core(
@@ -354,8 +392,22 @@ def revive_basic(project_path: str = "") -> Dict[str, Any]:
         if vals:
             lines.append(f"{label}:")
             lines.extend(f"  - {v}" for v in vals)
-    return {"status": "revived", "soul": data, "context": "\n".join(lines),
+    out: Dict[str, Any] = {"status": "revived", "soul": data, "context": "\n".join(lines),
             "tier": "core", **({"legacy_path_recovery": True} if legacy_path_recovery else {})}
+    # LED-5321 M3: same current-state snapshot as the full backend —
+    # pending receipts, open dispatches, latest handoff id. Best-effort:
+    # minimal bundles without ledger_manager simply omit it.
+    try:
+        try:
+            from ai.ledger_manager import close_state_for_project
+        except ImportError:
+            from ledger_manager import close_state_for_project  # type: ignore
+        snapshot = close_state_for_project(project_path=project)
+        if isinstance(snapshot, dict):
+            out.update(snapshot)
+    except Exception:
+        pass
+    return out
 
 
 def revive_legacy_neutral_by_id(soul_id: str) -> Dict[str, Any]:

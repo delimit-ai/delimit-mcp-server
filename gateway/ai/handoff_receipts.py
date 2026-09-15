@@ -67,6 +67,242 @@ class HandoffReceipt:
     acknowledged_by: str = ""
     acknowledge_notes: str = ""
 
+    # Canonical-close linkage (LED-5321 M3). Additive only — legacy
+    # receipts on disk deserialize unchanged (unknown keys are already
+    # filtered on load, missing keys fall back to these defaults).
+    logical_session_id: str = ""
+    soul_id: str = ""
+    handoff_id: str = ""
+    # LED-5321 M4: integrity + origin (all optional, backward compatible).
+    # content_digest is sha256 over the canonical JSON of the receipt body
+    # (ack fields excluded); origin records who created it. integrity/stale/
+    # owner_backed are COMPUTED on read, never trusted from storage.
+    content_digest: str = ""
+    created_by_model: str = ""
+    created_by_session: str = ""
+    integrity: str = "legacy"
+    stale: bool = False
+    owner_backed: bool = False
+
+
+# LED-5321 M4: body fields covered by the content digest (ack + computed
+# fields excluded so acknowledge() never invalidates the digest).
+_RECEIPT_BODY_FIELDS = (
+    "receipt_id",
+    "created_at",
+    "from_model",
+    "to_model",
+    "project_path",
+    "task_description",
+    "completed",
+    "not_completed",
+    "assumptions",
+    "blockers",
+    "files_modified",
+    "in_scope",
+    "out_of_scope",
+    "next_action",
+    "priority",
+    "created_by_model",
+    "created_by_session",
+)
+
+
+def _receipt_body_dict(data: Any) -> Dict[str, Any]:
+    if isinstance(data, HandoffReceipt):
+        raw = asdict(data)
+    elif isinstance(data, dict):
+        raw = data
+    else:
+        return {}
+    return {k: raw.get(k) for k in _RECEIPT_BODY_FIELDS}
+
+
+def _compute_content_digest(body: Dict[str, Any]) -> str:
+    canonical = json.dumps(body, sort_keys=True, separators=(",", ":"),
+                           ensure_ascii=False, default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _verify_receipt_integrity(raw: Dict[str, Any]) -> str:
+    """Return ok|mismatch|legacy for a stored receipt dict (LED-5321 M4)."""
+    if not isinstance(raw, dict):
+        return "legacy"
+    stored = raw.get("content_digest", "")
+    if not stored:
+        return "legacy"
+    expected = _compute_content_digest(_receipt_body_dict(raw))
+    return "ok" if stored == expected else "mismatch"
+
+
+def _parse_created_at(value: str) -> str:
+    # Lexical ISO compare is sufficient (all writers use ISO-8601 UTC);
+    # normalize minimally so mixed naive/aware strings still order.
+    return str(value or "")
+
+
+def _is_receipt_stale(project_dir: Path, receipt: HandoffReceipt) -> bool:
+    """True when a newer receipt for the same task exists (LED-5321 M4).
+
+    Same task = identical stripped task_description within the same project
+    namespace. Compares created_at; unreadable stores fail open (not stale)
+    so a corrupt index never blocks an ack — integrity still gates.
+    """
+    try:
+        task = (receipt.task_description or "").strip()
+        if not task:
+            return False
+        newest = _parse_created_at(receipt.created_at)
+        index = _load_index_from_dir(project_dir)
+        entries = index.get("receipts", []) if isinstance(index, dict) else []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            if (entry.get("task_description") or "").strip() != task:
+                continue
+            other_ts = _parse_created_at(str(entry.get("created_at", "")))
+            if other_ts > newest:
+                return True
+        return False
+    except Exception:
+        return False
+
+
+def truth_label_for_receipt(receipt: HandoffReceipt) -> str:
+    """Map a receipt to ASSERTED/VERIFIED/STALE/UNAVAILABLE/legacy (M4)."""
+    try:
+        integrity = getattr(receipt, "integrity", "legacy")
+        if integrity == "mismatch":
+            return "UNAVAILABLE"
+        if integrity == "legacy":
+            return "legacy/unclassified"
+        if bool(getattr(receipt, "stale", False)):
+            return "STALE"
+        if bool(getattr(receipt, "acknowledged", False)):
+            return "VERIFIED"
+        return "ASSERTED"
+    except Exception:
+        return "legacy/unclassified"
+
+
+def _load_owner_action_records(owner_actions_path: Any = None) -> List[Dict[str, Any]]:
+    try:
+        if owner_actions_path is not None:
+            path = Path(str(owner_actions_path))
+        else:
+            from ai import notify as _notify
+
+            path = Path(str(_notify.OWNER_ACTIONS_FILE))
+    except Exception:
+        return []
+    try:
+        if not path.exists():
+            return []
+        records: List[Dict[str, Any]] = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except (ValueError, TypeError):
+                continue
+            if isinstance(row, dict):
+                records.append(row)
+        return records
+    except (OSError, ValueError):
+        return []
+
+
+def check_owner_backed(
+    note: str = "",
+    text: str = "",
+    decision_ref: str = "",
+    sender: str = "",
+    receipt: Optional[HandoffReceipt] = None,
+    owner_actions_path: Any = None,
+) -> Dict[str, Any]:
+    """Whether an owner decision is backed by an owner_action record (M4).
+
+    Owner identity/grants come ONLY from authenticated mechanisms
+    (ai.notify.is_founder_sender + owner_action records), never from a
+    free-text actor string. A decision is backed when its text (or an
+    explicit decision_ref) references an interaction_id present in the
+    owner-actions store. Free-text "owner approved" with no record link
+    returns owner_backed=False. Deterministic, no model calls.
+    """
+    parts: List[str] = []
+    if note:
+        parts.append(str(note))
+    if text:
+        parts.append(str(text))
+    if decision_ref:
+        parts.append(str(decision_ref))
+    if receipt is not None:
+        try:
+            for key in ("task_description", "next_action"):
+                val = getattr(receipt, key, "")
+                if val:
+                    parts.append(str(val))
+            for key in ("completed", "not_completed", "assumptions", "blockers"):
+                vals = getattr(receipt, key, []) or []
+                for v in vals:
+                    if v:
+                        parts.append(str(v))
+        except Exception:
+            pass
+    blob = "\n".join(parts)
+    records = _load_owner_action_records(owner_actions_path)
+    if decision_ref:
+        ref = str(decision_ref).strip()
+        for rec in records:
+            try:
+                if str(rec.get("interaction_id") or "").strip() == ref and ref:
+                    return {"owner_backed": True, "reason": "interaction_id_match",
+                            "interaction_id": ref}
+            except Exception:
+                continue
+        return {"owner_backed": False, "reason": "no_matching_owner_action_record"}
+    if blob:
+        for rec in records:
+            try:
+                iid = str(rec.get("interaction_id") or "").strip()
+            except Exception:
+                continue
+            if iid and iid in blob:
+                return {"owner_backed": True, "reason": "interaction_id_match",
+                        "interaction_id": iid}
+    # A founder sender string alone never grants backing — it must link to
+    # a durable owner_action record (checked above).
+    if sender:
+        try:
+            from ai.notify import is_founder_sender as _is_founder
+
+            if not _is_founder(sender):
+                return {"owner_backed": False, "reason": "sender_not_founder_no_record"}
+        except Exception:
+            pass
+    return {"owner_backed": False, "reason": "no_matching_owner_action_record"}
+
+
+def is_owner_backed(
+    note: str = "",
+    text: str = "",
+    decision_ref: str = "",
+    sender: str = "",
+    receipt: Optional[HandoffReceipt] = None,
+    owner_actions_path: Any = None,
+) -> bool:
+    """Boolean convenience wrapper for check_owner_backed (LED-5321 M4)."""
+    try:
+        return bool(check_owner_backed(
+            note=note, text=text, decision_ref=decision_ref,
+            sender=sender, receipt=receipt,
+            owner_actions_path=owner_actions_path,
+        ).get("owner_backed"))
+    except Exception:
+        return False
+
 
 def _project_hash(project_path: str) -> str:
     """Stable hash for a project path, used as directory name."""
@@ -176,10 +412,16 @@ def create_receipt(
     from_model: str = "unknown",
     to_model: str = "any",
     project_path: str = "",
+    # LED-5321 M4: all optional, backward compatible.
+    created_by_model: str = "",
+    created_by_session: str = "",
 ) -> HandoffReceipt:
     """Create a handoff receipt and persist it to disk.
 
     Auto-detects project_path from cwd and files_modified from git if not provided.
+
+    LED-5321 M4: stores a content digest (sha256 over the canonical JSON of
+    the receipt body) and the origin (created_by_model/session/created_at).
     """
     project_path = project_path or os.getcwd()
 
@@ -202,7 +444,14 @@ def create_receipt(
         out_of_scope=out_of_scope or [],
         next_action=next_action,
         priority=priority,
+        created_by_model=created_by_model or from_model,
+        created_by_session=created_by_session
+        or os.environ.get("DELIMIT_SESSION_ID", "")
+        or os.environ.get("DELIMIT_SESSION", ""),
     )
+    receipt.content_digest = _compute_content_digest(_receipt_body_dict(receipt))
+    receipt.integrity = "ok"
+    receipt.stale = False
 
     _store_receipt(receipt)
     return receipt
@@ -242,17 +491,30 @@ def _store_receipt(receipt: HandoffReceipt) -> Path:
 
 
 def _load_receipt_file(filepath: Path) -> Optional[HandoffReceipt]:
-    """Load a receipt from an already-resolved file path."""
+    """Load a receipt from an already-resolved file path.
+
+    LED-5321 M4: recomputes integrity from the stored body (never trusts a
+    stored integrity value). Legacy receipts without a digest load with
+    integrity="legacy".
+    """
     if not filepath.exists():
         return None
     try:
         data = json.loads(filepath.read_text())
-        return HandoffReceipt(**{
+        receipt = HandoffReceipt(**{
             k: v for k, v in data.items()
             if k in HandoffReceipt.__dataclass_fields__
+            and k not in ("integrity", "stale", "owner_backed")
         })
     except (json.JSONDecodeError, TypeError, KeyError, OSError):
         return None
+    try:
+        receipt.integrity = _verify_receipt_integrity(data if isinstance(data, dict) else {})
+    except Exception:
+        receipt.integrity = "legacy"
+    receipt.stale = False
+    receipt.owner_backed = False
+    return receipt
 
 
 def _load_receipt(project_path: str, receipt_id: str) -> Optional[HandoffReceipt]:
@@ -321,9 +583,24 @@ def get_receipt(receipt_id: str, project_path: str = "") -> Optional[HandoffRece
     we scan every project-hash directory under ``RECEIPTS_BASE_DIR`` for a
     matching ``{receipt_id}.json``. Read-only; returns None when no receipt
     exists or a bare id is ambiguous across namespaces.
+
+    LED-5321 M4: verifies the content digest and flags
+    integrity ok|mismatch|legacy plus staleness (older than the newest
+    receipt for the same task). Never mutates storage.
     """
     matches = _find_receipts(receipt_id, project_path=project_path)
-    return matches[0][1] if len(matches) == 1 else None
+    if len(matches) != 1:
+        return None
+    project_dir, receipt = matches[0]
+    try:
+        receipt.stale = _is_receipt_stale(project_dir, receipt)
+    except Exception:
+        receipt.stale = False
+    try:
+        receipt.owner_backed = is_owner_backed(receipt=receipt)
+    except Exception:
+        receipt.owner_backed = False
+    return receipt
 
 
 def acknowledge_receipt(
@@ -331,10 +608,17 @@ def acknowledge_receipt(
     model: str = "unknown",
     notes: str = "",
     project_path: str = "",
+    # LED-5321 M4: optional, backward compatible.
+    allow_stale: bool = False,
 ) -> Dict[str, Any]:
     """Mark a handoff receipt as acknowledged by the receiving agent.
 
     Returns the updated receipt data or an error if not found.
+
+    LED-5321 M4: refuses a receipt whose stored digest mismatches (forged
+    or tampered body) and a stale receipt (older than the newest receipt
+    for the same task) unless allow_stale=True is passed explicitly.
+    Never rewrites the stored receipt body — only ack fields change.
     """
     matches = _find_receipts(
         receipt_id,
@@ -356,22 +640,64 @@ def acknowledge_receipt(
         }
     project_dir, receipt = matches[0]
 
+    integrity = getattr(receipt, "integrity", "legacy")
+    if integrity == "mismatch":
+        return {
+            "status": "integrity_mismatch",
+            "message": (
+                f"Receipt {receipt_id} failed integrity verification "
+                "(stored digest mismatch — body may be forged or tampered); "
+                "acknowledgment refused."
+            ),
+            "receipt_id": receipt_id,
+            "integrity": "mismatch",
+        }
+
+    try:
+        receipt.stale = _is_receipt_stale(project_dir, receipt)
+    except Exception:
+        receipt.stale = False
+    if receipt.stale and not allow_stale:
+        return {
+            "status": "stale",
+            "message": (
+                f"Receipt {receipt_id} is stale (a newer receipt exists for "
+                "the same task); pass allow_stale=True to acknowledge anyway."
+            ),
+            "receipt_id": receipt_id,
+            "integrity": integrity,
+            "stale": True,
+        }
+
     if receipt.acknowledged:
         return {
             "status": "already_acknowledged",
             "message": f"Receipt {receipt_id} was already acknowledged by {receipt.acknowledged_by} at {receipt.acknowledged_at}.",
             "receipt_id": receipt_id,
+            "integrity": integrity,
+            "stale": bool(receipt.stale),
         }
 
     now = datetime.now(timezone.utc).isoformat()
+
+    # Update the receipt file — ack fields ONLY; the stored body
+    # (including content_digest and origin) is preserved byte-for-byte.
+    filepath = project_dir / f"{receipt_id}.json"
+    try:
+        raw = json.loads(filepath.read_text())
+        if not isinstance(raw, dict):
+            raw = asdict(receipt)
+    except (OSError, ValueError):
+        raw = asdict(receipt)
+    raw["acknowledged"] = True
+    raw["acknowledged_at"] = now
+    raw["acknowledged_by"] = model
+    raw["acknowledge_notes"] = notes
+    filepath.write_text(json.dumps(raw, indent=2))
     receipt.acknowledged = True
     receipt.acknowledged_at = now
     receipt.acknowledged_by = model
     receipt.acknowledge_notes = notes
-
-    # Update the receipt file
-    filepath = project_dir / f"{receipt_id}.json"
-    filepath.write_text(json.dumps(asdict(receipt), indent=2))
 
     # Update the index
     index = _load_index_from_dir(project_dir)
@@ -394,6 +720,11 @@ def acknowledge_receipt(
         )
     _save_index_to_dir(project_dir, index)
 
+    _ack_owner = False
+    try:
+        _ack_owner = is_owner_backed(receipt=receipt)
+    except Exception:
+        _ack_owner = False
     return {
         "status": "acknowledged",
         "receipt_id": receipt_id,
@@ -402,6 +733,9 @@ def acknowledge_receipt(
         "task_description": receipt.task_description,
         "next_action": receipt.next_action,
         "message": f"Receipt {receipt_id} acknowledged. Next action: {receipt.next_action or '(none specified)'}",
+        "integrity": integrity,
+        "stale": bool(receipt.stale),
+        "owner_backed": bool(_ack_owner),
     }
 
 
@@ -430,6 +764,11 @@ def get_receipts(project_path: str = "", status: str = "pending") -> List[Handof
             receipt = _load_receipt_file(project_dir / f"{entry['receipt_id']}.json")
             if receipt is None:
                 continue
+            # LED-5321 M4: flag staleness per receipt (index scan, no body reads).
+            try:
+                receipt.stale = _is_receipt_stale(project_dir, receipt)
+            except Exception:
+                receipt.stale = False
             if (
                 status == "all"
                 or (status == "pending" and not receipt.acknowledged)
@@ -441,7 +780,12 @@ def get_receipts(project_path: str = "", status: str = "pending") -> List[Handof
 
 
 def format_receipt(receipt: HandoffReceipt) -> str:
-    """Format a receipt into a clean, readable text block."""
+    """Format a receipt into a clean, readable text block.
+
+    LED-5321 M4: labels the receipt ASSERTED/VERIFIED/STALE/UNAVAILABLE
+    where integrity data exists; legacy receipts without a digest show
+    "legacy/unclassified" (never fabricated).
+    """
     lines = []
     lines.append("=== HANDOFF RECEIPT ===")
     lines.append(f"ID: {receipt.receipt_id}")
@@ -449,6 +793,32 @@ def format_receipt(receipt: HandoffReceipt) -> str:
     lines.append(f"Task: {receipt.task_description}")
     lines.append(f"Priority: {receipt.priority}")
     lines.append(f"Created: {receipt.created_at}")
+    try:
+        _integrity = getattr(receipt, "integrity", "legacy") or "legacy"
+    except Exception:
+        _integrity = "legacy"
+    try:
+        _truth = truth_label_for_receipt(receipt)
+    except Exception:
+        _truth = "legacy/unclassified"
+    try:
+        _stale = bool(getattr(receipt, "stale", False))
+    except Exception:
+        _stale = False
+    try:
+        _backed = bool(getattr(receipt, "owner_backed", False))
+        if not _backed:
+            _backed = is_owner_backed(receipt=receipt)
+    except Exception:
+        _backed = False
+    lines.append(f"Integrity: {_integrity} | Truth: {_truth} | Stale: {'yes' if _stale else 'no'} | Owner-backed: {'true' if _backed else 'false'}")
+    try:
+        _cbm = getattr(receipt, "created_by_model", "") or ""
+        _cbs = getattr(receipt, "created_by_session", "") or ""
+        if _cbm or _cbs:
+            lines.append(f"Origin: model={_cbm or '?'} session={_cbs or '?'}")
+    except Exception:
+        pass
     lines.append("")
 
     if receipt.completed:
@@ -512,3 +882,82 @@ def format_receipt(receipt: HandoffReceipt) -> str:
 
     lines.append("=" * 24)
     return "\n".join(lines)
+
+
+# ── LED-5321 M3: canonical-close idempotent receipt upkeep ────────────────
+
+
+def find_receipts_by_logical_id(
+    logical_session_id: str,
+    project_path: str = "",
+) -> List[HandoffReceipt]:
+    """Return receipts stamped with ``logical_session_id``, newest first.
+
+    Scoped to ``project_path``'s namespace when given, else aggregated
+    across namespaces (mirrors :func:`get_receipts`). Read-only; legacy
+    receipts without the linkage field never match.
+    """
+    if not logical_session_id:
+        return []
+    matches = [
+        receipt
+        for receipt in get_receipts(project_path=project_path, status="all")
+        if getattr(receipt, "logical_session_id", "") == logical_session_id
+    ]
+    matches.sort(
+        key=lambda receipt: (receipt.created_at, receipt.receipt_id),
+        reverse=True,
+    )
+    return matches
+
+
+def update_receipt_fields(
+    receipt_id: str,
+    updates: Dict[str, Any],
+    project_path: str = "",
+) -> Optional[HandoffReceipt]:
+    """Update one receipt's mutable fields in place (same receipt_id).
+
+    Used by the canonical close for idempotent re-close: the receipt keeps
+    its identity while its content is refreshed. ``receipt_id``,
+    ``created_at``, and acknowledgment state are never overwritten here.
+    The namespace index entry is refreshed to match. Returns the updated
+    receipt, or None when the id is missing or ambiguous.
+    """
+    if not receipt_id:
+        return None
+    matches = _find_receipts(
+        receipt_id,
+        project_path=project_path,
+        fallback_global=not bool(project_path),
+    )
+    if len(matches) != 1:
+        return None
+    project_dir, receipt = matches[0]
+    protected = {
+        "receipt_id",
+        "created_at",
+        "acknowledged",
+        "acknowledged_at",
+        "acknowledged_by",
+        "acknowledge_notes",
+    }
+    for key, value in (updates or {}).items():
+        if key in protected or key not in HandoffReceipt.__dataclass_fields__:
+            continue
+        setattr(receipt, key, value)
+    # LED-5321 M4: the body changed, so the digest must be re-sealed here;
+    # otherwise every idempotent re-close produced a receipt that loaded as
+    # integrity="mismatch" and acknowledge_receipt refused it as tampered.
+    receipt.content_digest = _compute_content_digest(_receipt_body_dict(receipt))
+    filepath = project_dir / f"{receipt_id}.json"
+    filepath.write_text(json.dumps(asdict(receipt), indent=2))
+    index = _load_index_from_dir(project_dir)
+    for entry in index.get("receipts", []):
+        if isinstance(entry, dict) and entry.get("receipt_id") == receipt_id:
+            entry["task_description"] = receipt.task_description
+            entry["from_model"] = receipt.from_model
+            entry["to_model"] = receipt.to_model
+            entry["priority"] = receipt.priority
+    _save_index_to_dir(project_dir, index)
+    return receipt
