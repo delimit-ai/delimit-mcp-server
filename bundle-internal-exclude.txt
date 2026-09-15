@@ -213,3 +213,4 @@ gateway/ai/outreach_comment_submit.py
 gateway/ai/outreach_funnel.py
 gateway/ai/reply_approval.py
 gateway/ai/reply_watch.py
+gateway/ai/review_binding.py
