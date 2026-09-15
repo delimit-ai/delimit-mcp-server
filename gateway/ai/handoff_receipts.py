@@ -946,6 +946,10 @@ def update_receipt_fields(
         if key in protected or key not in HandoffReceipt.__dataclass_fields__:
             continue
         setattr(receipt, key, value)
+    # LED-5321 M4: the body changed, so the digest must be re-sealed here;
+    # otherwise every idempotent re-close produced a receipt that loaded as
+    # integrity="mismatch" and acknowledge_receipt refused it as tampered.
+    receipt.content_digest = _compute_content_digest(_receipt_body_dict(receipt))
     filepath = project_dir / f"{receipt_id}.json"
     filepath.write_text(json.dumps(asdict(receipt), indent=2))
     index = _load_index_from_dir(project_dir)

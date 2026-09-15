@@ -2943,6 +2943,12 @@ def _canonical_close(
                     _rpath = _hr._project_dir(resolved) / f"{receipt_id}.json"
                     _rdata = json.loads(_rpath.read_text())
                     _rdata["created_at"] = incoming_ts
+                    # created_at is digest-covered (M4): re-seal, or every
+                    # canonical-close receipt loads as integrity="mismatch".
+                    if _rdata.get("content_digest"):
+                        _rdata["content_digest"] = _hr._compute_content_digest(
+                            _hr._receipt_body_dict(_rdata)
+                        )
                     _rpath.write_text(json.dumps(_rdata, indent=2))
                     _rindex = _hr._load_index(resolved)
                     for _entry in _rindex.get("receipts", []):
@@ -2954,6 +2960,8 @@ def _canonical_close(
                     _hr._save_index(resolved, _rindex)
                     if receipt_record is not None:
                         receipt_record["created_at"] = incoming_ts
+                        if _rdata.get("content_digest"):
+                            receipt_record["content_digest"] = _rdata["content_digest"]
                 except Exception:
                     pass
                 if receipt_record is None:
@@ -3079,6 +3087,12 @@ def _canonical_close(
             missing.append("handoff")
         if receipt_expected and readback_receipt is None:
             missing.append("receipt")
+        elif receipt_expected and isinstance(readback_receipt, dict) and (
+            readback_receipt.get("integrity") == "mismatch"
+        ):
+            # M4 truth: a receipt acknowledge_receipt would refuse as
+            # tampered can never back a verified close.
+            missing.append("receipt_integrity")
 
         if not missing:
             # Finalize the verified stamp, then confirm the final bytes.

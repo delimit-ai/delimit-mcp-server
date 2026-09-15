@@ -1463,7 +1463,13 @@ def _event_kind(event: Dict[str, Any]) -> str:
         if isinstance(nested, dict):
             candidates.append(nested)
     for obj in candidates:
-        for key in ("type", "event", "name", "kind"):
+        # "payload_type" is the marker field of the Muse CLI 1.2.x durable
+        # event stream (top-level: {"payload_type": "run.terminal.completed",
+        # "payload": {"kind": "run_terminal", "terminal": "completed",
+        # "text": ...}}). Observed 2026-09-15 on task AGT-40B623AC: without it
+        # every real worker exit read as "uncertain" although the terminal
+        # event was present; the earlier fixtures used a synthetic "type" key.
+        for key in ("type", "event", "name", "kind", "payload_type"):
             val = obj.get(key)
             if not isinstance(val, str):
                 continue
