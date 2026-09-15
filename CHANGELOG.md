@@ -28,6 +28,9 @@
   receipt, readback) idempotently and reports what is missing.
 - Ledger completion accounting fails closed when the audit record cannot be
   written.
+- `delimit_session_handoff` omits `soul_id` when no soul was captured, so an
+  install without the private continuity module never reports a soul it did
+  not write.
 
 ### Security
 - Install telemetry is now explicit opt-in; the hard-off environment switch

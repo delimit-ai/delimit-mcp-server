@@ -3177,6 +3177,11 @@ def _canonical_close(
             "soul_refresh_status": soul_refresh_status,
             "receipt_status": receipt_status,
         }
+        if not soul_id:
+            # No soul was captured or refreshed: omit the key rather than
+            # returning an empty id, so a public bundle without Phoenix (or a
+            # broken Phoenix) is never mistaken for a silently captured soul.
+            result.pop("soul_id", None)
         if soul_refresh_error:
             result["soul_refresh_error"] = soul_refresh_error
         if receipt_error:
