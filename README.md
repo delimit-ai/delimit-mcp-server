@@ -10,6 +10,8 @@ Wrap any AI coding assistant (Claude Code, Codex, Cursor, Gemini CLI) with a gov
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Glama Score](https://glama.ai/mcp/servers/delimit-ai/delimit-mcp-server/badges/score.svg)](https://glama.ai/mcp/servers/delimit-ai/delimit-mcp-server/score)
 
+Glama directory grades: License A · Quality A · Maintenance A. Observed September 15, 2026, for this public repository. [View the listing](https://glama.ai/mcp/servers/delimit-ai/delimit-mcp-server).
+
 ```console
 $ delimit wrap -- claude "fix the flaky test in tests/api.spec.ts"
 
