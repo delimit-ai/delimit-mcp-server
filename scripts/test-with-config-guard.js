@@ -53,6 +53,7 @@ const TEST_FILES = [
     'tests/harness-launch.test.js',
     'tests/publish-source-pin.test.js',
     'tests/chat-repl-explicit-harness.test.js',
+    'tests/led-5369-shim-fail-closed.test.js',
 ];
 
 const cfgPath = resolveSharedConfigPath();

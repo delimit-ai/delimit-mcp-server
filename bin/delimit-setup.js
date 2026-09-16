@@ -858,6 +858,22 @@ if [ "$DELIMIT_WRAPPED" = "true" ] || [ ! -t 1 ]; then
             done
         done
     fi
+    # LED-5366 FAIL CLOSED. Reaching here means stdout is NOT a terminal (or we
+    # were explicitly wrapped) and NO real binary was found. Before this guard
+    # the block simply ended, and execution fell through into the interactive
+    # banner below -- printing ASCII art and "[Delimit]" status lines onto a
+    # PIPE that a caller was parsing as the tool's response, then exiting 127.
+    #
+    # Observed 2026-09-16: an npm reinstall briefly removed /usr/bin/claude; the
+    # deliberation panel received 13 banner lines instead of a model answer,
+    # scrubbed to zero length, and the Anthropic seat silently dropped out of
+    # quorum. 927 of 3,861 recorded scrub events were this shape.
+    #
+    # Machine-consumed stdout carries the tool's protocol or nothing at all.
+    # The diagnostic goes to STDERR so "binary missing" stays distinguishable
+    # from "model returned nothing".
+    echo "delimit-shim: no ${toolName} binary found on PATH candidates; refusing to emit banner on non-tty stdout" >&2
+    exit 127
 fi
 # Record session start for exit screen
 SESSION_START=\$(date +%s)
