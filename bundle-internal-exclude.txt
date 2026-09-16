@@ -125,6 +125,7 @@ gateway/ai/social_capability/__init__.py
 gateway/ai/social_capability/capability_validator.py
 gateway/ai/social_capability/current_capabilities.yaml
 gateway/ai/social_capability/fit_floor.py
+gateway/ai/social_capability/github_fit.py
 gateway/ai/social_daemon.py
 gateway/ai/social_queue.py
 gateway/ai/social_target.py
@@ -218,3 +219,4 @@ gateway/ai/github_qualification.py
 gateway/ai/outreach_engaged_reply.py
 gateway/ai/outreach_holds.py
 gateway/ai/send_decision.py
+gateway/ai/build_campaign.py
