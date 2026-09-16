@@ -1084,7 +1084,7 @@ def _check_pro(tool_name: str) -> Optional[Dict]:
 
     Routes through _pro_gate_graced (NOT bare require_premium) so the central
     gate in _with_next_steps is GRACE-AWARE: tools in _NEWLY_ENFORCED_PRO
-    (LED-1741 G2, LED-1740 staged-12) honor the grace + grandfather
+    (LED-1741 G2, LED-1740 staged-12) honor the 90-day grace + grandfather
     instead of hard-blocking a free user during the migration window. Without
     this, _with_next_steps would re-gate (grace-unaware) every PRO_TOOLS member
     it wraps, silently defeating the grace for newly-enforced tools."""
@@ -1113,13 +1113,7 @@ def _check_pro(tool_name: str) -> Optional[Dict]:
 # grandfathers any current caller; only AFTER the window is a new, non-licensed,
 # non-grandfathered caller gated. Reversible (delete the grandfather file or move
 # the date). Nothing charges a customer until npm publish (founder gate).
-_SOCIAL_PRO_ENFORCE_AFTER = "2026-09-16T00:00:00+00:00"
-# AUTHORITATIVE. Recorded in the ratified LED-1741 decision (2026-06-16):
-# "ENFORCED with customer-safe 90-day grace + grandfather gate ... ENFORCE_AFTER
-# 2026-09-16". LED-5365: the previous inline comment read "90 days from
-# 2026-06-16", which is 2026-09-14 -- the span is 92 days. The DATE is the
-# ratified commercial decision and is unchanged; only the inaccurate comment
-# was corrected. "90-day grace" remains the customer-facing description.
+_SOCIAL_PRO_ENFORCE_AFTER = "2026-09-16T00:00:00+00:00"  # 90 days from 2026-06-16
 _NEWLY_ENFORCED_PRO = frozenset({
     "delimit_social_post", "delimit_social_generate",
     "delimit_social_approve", "delimit_social_history",
@@ -1168,25 +1162,9 @@ def _mark_grandfathered(full_name: str) -> None:
 
 
 def _pro_gate_graced(tool_name: str, *, now=None) -> Optional[Dict]:
-    """``require_premium`` for a tool, with a grace + grandfather for tools NEWLY
-    moved into Pro (LED-1741). Returns premium_required (BLOCK) or None (ALLOW).
-
-    EXACT POLICY (LED-5365 precision pass): grace runs through 15 September
-    2026; Pro enforcement begins 16 September 2026 (``_SOCIAL_PRO_ENFORCE_AFTER``
-    = 2026-09-16T00:00:00Z, the ratified LED-1741 date). The historical
-    "90-day grace" wording is preserved as evidence in LED-1741 but is
-    mathematically loose -- 16 Jun to 16 Sep is 92 days -- so it must not be
-    used to DERIVE the enforcement date.
-
-    GRANDFATHERING IS PER-TOOL AND USE-BASED, not per-install. Any use of a
-    newly-enforced tool by a free user during grace persists THAT TOOL to
-    ``grandfathered_tools.json``, and only that tool survives the deadline. A
-    pre-cutoff free install therefore retains exactly the newly-enforced tools
-    it actually used -- NOT all of ``_NEWLY_ENFORCED_PRO``. This is the ratified
-    intent: LED-1740 promises no existing free user is hard-cut "mid-workflow",
-    and LED-1741's own acceptance criteria state post-grace "blocks fresh free
-    only". A tool never used is not a workflow in progress.
-    """
+    """``require_premium`` for a tool, with a 90-day grace + grandfather for tools
+    NEWLY moved into Pro (LED-1741), so no existing free user is hard-cut.
+    Returns a premium_required dict (BLOCK) or None (ALLOW)."""
     from ai.license import require_premium
     full = tool_name if tool_name.startswith("delimit_") else f"delimit_{tool_name}"
     gate = require_premium(tool_name)
