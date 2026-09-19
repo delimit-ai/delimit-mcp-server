@@ -31,6 +31,20 @@
  *
  * Idempotent, and safe to run by hand (`node scripts/sync-version-sources.js`)
  * to repair a tree that drifted before this existed.
+ *
+ * HAZARD when running this OUTSIDE a real `npm version` commit — read before
+ * you test it by hand, because it already bit once. The `git add` below leaves
+ * these paths STAGED. If you then restore the working tree some other way (a
+ * `cp` from a backup, a checkout of one file), the INDEX still holds the value
+ * this script wrote while the worktree holds the restored one. A later
+ * `git commit` of unrelated paths will sweep the stale STAGED blobs in, and
+ * `npm test` will NOT notice: the tests read the working tree, not the index.
+ * That is exactly how one commit went out carrying 4.19.7 while the worktree
+ * (and the local suite) read a perfectly consistent 4.19.6 — CI, which checks
+ * out the commit, was the first thing to see it.
+ *
+ * So: after running this by hand, always `git status` and re-stage or restore
+ * BOTH the worktree and the index together.
  */
 
 'use strict';
@@ -106,14 +120,39 @@ if (changed.length === 0) {
 // only commits what is staged — an unstaged gateway/VERSION is exactly how
 // v4.19.4 shipped a bump without its marker.
 //
-// Best-effort: `npm version --no-git-tag-version` makes no commit at all, and
-// the files may be untracked in an odd checkout. A staging failure must not
-// fail the bump, since the files themselves are already correct on disk.
+// FAIL CLOSED when a git repo is present. An earlier cut swallowed the staging
+// failure on the reasoning that "the files are already correct on disk" — but
+// that is precisely the v4.19.4 condition: files correct in the worktree,
+// absent from the commit, bump ships without them. Blocked in review of PR #230
+// for exactly that. If we are in a repo and cannot stage, the bump must abort
+// loudly rather than proceed toward a partial commit.
+//
+// The no-git case IS legitimate (an exported tarball, a vendored copy), and is
+// the only case tolerated. `npm version --no-git-tag-version` still runs inside
+// a repo and still stages fine — it simply makes no commit — so it is NOT an
+// exemption here.
+let inGitRepo = true;
 try {
-  execFileSync('git', ['add', '--', 'gateway/VERSION', 'server.json'], {
-    cwd: ROOT,
-    stdio: 'ignore',
-  });
+  execFileSync('git', ['rev-parse', '--git-dir'], { cwd: ROOT, stdio: 'ignore' });
 } catch {
-  console.log('sync-version-sources: could not stage (no git, or nothing to stage) — files are written');
+  inGitRepo = false;
+}
+
+if (!inGitRepo) {
+  console.log('sync-version-sources: not a git checkout — files written, nothing to stage');
+} else {
+  try {
+    execFileSync('git', ['add', '--', 'gateway/VERSION', 'server.json'], {
+      cwd: ROOT,
+      stdio: 'ignore',
+    });
+  } catch (err) {
+    console.error(
+      'sync-version-sources: FAILED to stage gateway/VERSION and server.json in a git ' +
+        'checkout. Aborting rather than letting the bump commit without them — that is ' +
+        'the exact failure that burned v4.19.4.\n' +
+        `  ${err && err.message ? err.message : err}`,
+    );
+    process.exit(1);
+  }
 }
