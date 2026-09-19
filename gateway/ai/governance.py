@@ -975,6 +975,11 @@ def govern(tool_name: str, result: Dict[str, Any], project_path: str = ".") -> D
 
 
 # ─────────────────────────────────────────────────────────────────────
+# LED-5445: GitHub's maximum single-page size for issue comments. The sensor
+# deliberately reads ONE page of this size rather than paginating; see the
+# call site for why. Coverage beyond it is reported, never assumed.
+_COMMENT_PAGE_SIZE = 100
+
 # LED-2214b-followup — sensor_github_issue sync impl
 # ─────────────────────────────────────────────────────────────────────
 #
@@ -1076,27 +1081,18 @@ def _sensor_github_issue_impl(
         return refusal
 
     try:
-        # Fetch comments
-        comments_jq = (
-            "[.[] | {id: .id, author: .user.login, "
-            "created_at: .created_at, body: (.body | .[0:500])}]"
+        # LED-5445: the ISSUE is read FIRST because its `comments` field is the
+        # only cheap way to learn how many comments exist BEFORE choosing which
+        # page to retrieve. Previously the comment read ran first, retrieved
+        # GitHub's default FIRST 30, and the since_comment_id filter ran only
+        # over those — so on a longer thread a genuine later reply was never
+        # retrieved and therefore never seen, while has_new_activity still went
+        # True from older comments. That reads as a successful check of a
+        # thread nobody actually looked at.
+        issue_jq = (
+            "{state: .state, title: .title, labels: [.labels[].name], "
+            "reactions: .reactions.total_count, comments: .comments}"
         )
-        comments_proc = subprocess.run(
-            ["gh", "api",
-             f"repos/{repo}/issues/{issue_number}/comments",
-             "--jq", comments_jq],
-            capture_output=True, text=True, timeout=30,
-        )
-        if comments_proc.returncode != 0:
-            return {
-                "error": f"gh api comments failed: {(comments_proc.stderr or '').strip()[:200]}",
-                "has_new_activity": False,
-            }
-        all_comments = json.loads(comments_proc.stdout) if comments_proc.stdout.strip() else []
-        new_comments = [c for c in all_comments if c.get("id", 0) > since_comment_id]
-
-        # Fetch issue state
-        issue_jq = "{state: .state, labels: [.labels[].name], reactions: .reactions.total_count}"
         issue_proc = subprocess.run(
             ["gh", "api",
              f"repos/{repo}/issues/{issue_number}",
@@ -1107,9 +1103,51 @@ def _sensor_github_issue_impl(
             return {
                 "error": f"gh api issue failed: {(issue_proc.stderr or '').strip()[:200]}",
                 "has_new_activity": False,
+                "comment_coverage": "failed",
+                "coverage_complete": False,
             }
         issue_info = json.loads(issue_proc.stdout) if issue_proc.stdout.strip() else {}
         issue_state = issue_info.get("state", "unknown")
+
+        # Fetch comments — ONE bounded page, deliberately the LAST one.
+        #
+        # per_page=100 is GitHub's maximum for a single page. Comments come
+        # back oldest-first, so when a thread is longer than one page the
+        # comments that matter for reply-watching (the NEWEST ones — the only
+        # place a reply after our cursor can be) live on the LAST page. We ask
+        # for that page directly instead of walking the thread.
+        #
+        # --paginate is deliberately NOT used: combined with --jq it emits one
+        # JSON document PER PAGE, which json.loads cannot parse, and it would
+        # issue unbounded requests against the same rate limit that finding M1
+        # was about. This costs the same 2 requests per thread as before.
+        #
+        # Anything still NOT retrieved (the middle of a >100-comment thread) is
+        # REPRESENTED EXPLICITLY below, never silently treated as complete.
+        total_comments = int(issue_info.get("comments") or 0)
+        comments_truncated = total_comments > _COMMENT_PAGE_SIZE
+        last_page = max(1, (total_comments + _COMMENT_PAGE_SIZE - 1) // _COMMENT_PAGE_SIZE)
+        comments_jq = (
+            "[.[] | {id: .id, author: .user.login, "
+            "created_at: .created_at, body: (.body | .[0:500])}]"
+        )
+        comments_proc = subprocess.run(
+            ["gh", "api",
+             f"repos/{repo}/issues/{issue_number}/comments"
+             f"?per_page={_COMMENT_PAGE_SIZE}&page={last_page}",
+             "--jq", comments_jq],
+            capture_output=True, text=True, timeout=30,
+        )
+        if comments_proc.returncode != 0:
+            return {
+                "error": f"gh api comments failed: {(comments_proc.stderr or '').strip()[:200]}",
+                "has_new_activity": False,
+                # LED-5445: a failed read is NOT "nothing to attend to".
+                "comment_coverage": "failed",
+                "coverage_complete": False,
+            }
+        all_comments = json.loads(comments_proc.stdout) if comments_proc.stdout.strip() else []
+        new_comments = [c for c in all_comments if c.get("id", 0) > since_comment_id]
 
         # Severity classification — green default; amber on closed; red on
         # negative keyword in any new comment body.
@@ -1136,20 +1174,34 @@ def _sensor_github_issue_impl(
                 "severity": severity,
             },
             "issue_state": issue_state,
+            # Additive: lets reply surfaces name the thread without a second read.
+            "issue_title": str(issue_info.get("title") or "")[:300],
             "new_comments": new_comments,
             "latest_comment_id": latest_comment_id,
-            "total_comments": len(all_comments),
+            "total_comments": total_comments,
+            "retrieved_comments": len(all_comments),
             "has_new_activity": len(new_comments) > 0,
+            # LED-5445 coverage representation. "complete" means every comment
+            # on the thread was retrieved and the verdict is over all of them.
+            # "truncated" means the thread is longer than one page: the
+            # NEWEST comments were retrieved, but older ones in the middle were
+            # not, so has_new_activity is a statement about what we saw rather
+            # than about the whole thread.
+            "comment_coverage": "truncated" if comments_truncated else "complete",
+            "coverage_complete": not comments_truncated,
         }
     except subprocess.TimeoutExpired:
         return {"error": "gh command timed out after 30s",
-                "has_new_activity": False}
+                "has_new_activity": False,
+                "comment_coverage": "failed", "coverage_complete": False}
     except json.JSONDecodeError as exc:
         return {"error": f"Failed to parse gh output: {exc}",
-                "has_new_activity": False}
+                "has_new_activity": False,
+                "comment_coverage": "failed", "coverage_complete": False}
     except Exception as exc:  # noqa: BLE001 — sensor must fail soft
         logger.error("sensor_github_issue impl error: %s", exc)
-        return {"error": str(exc), "has_new_activity": False}
+        return {"error": str(exc), "has_new_activity": False,
+                "comment_coverage": "failed", "coverage_complete": False}
 
 
 def _deep_get(d: Dict, key: str) -> Any:

@@ -131,7 +131,9 @@ echo "  ✅ ai/: $AI_COUNT .py   core/: $CORE_COUNT .py   tasks/: $TASKS_COUNT .
 LEAKED=0
 while IFS= read -r abs; do
     rel="gateway/${abs#"$NPM_ROOT/gateway/"}"
-    [ "$rel" = "$LICENSE_CORE_SRC" ] && continue
+    # Same transient exemption as the prune above: proprietary sources are kept
+    # only long enough for the .so build step, which strips them immediately.
+    case " $PROPRIETARY_SRCS " in *" $rel "*) continue ;; esac
     if ! grep -qxF "$rel" <<< "$ALLOW_PATHS"; then
         echo "  ❌ NON-ALLOWLISTED FILE SURVIVED SYNC: $rel"
         LEAKED=1
