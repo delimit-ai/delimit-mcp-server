@@ -118,6 +118,32 @@ jobs:
         working-directory: npm-delimit
         run: bash scripts/build-license-core.sh
 
+      # LED-5462: deliberation is classified PROPRIETARY ("ships as compiled
+      # .so, not source") in bundle-classification.md, but nothing ever built
+      # it — only the non-executable .pyi stub shipped, so delimit_scan,
+      # delimit_quickstart and delimit_deliberation_status raised
+      # ModuleNotFoundError on every clean install. Without THIS step the
+      # published artifact still would not contain the engine, no matter what
+      # a local `npm pack` produced.
+      - name: Compile deliberation to native .so (LED-5462)
+        working-directory: npm-delimit
+        run: bash scripts/build-proprietary-core.sh deliberation
+        env:
+          GATEWAY_OVERRIDE: ${{ github.workspace }}/delimit-gateway
+
+      - name: Assert both proprietary engines are present and source-free
+        working-directory: npm-delimit
+        run: |
+          set -euo pipefail
+          for m in license_core deliberation; do
+            ls gateway/ai/$m.cpython-*-*.so >/dev/null 2>&1 \
+              || { echo "::error::$m .so missing from the bundle"; exit 1; }
+            if [ -f "gateway/ai/$m.py" ]; then
+              echo "::error::$m.py plaintext survived into the bundle"; exit 1
+            fi
+          done
+          echo "both proprietary engines compiled; no plaintext source"
+
       # Guard B (fail-closed): npm pack must ship EXACTLY bundle-allowlist.txt.
       # Runs after the .so is built so the tarball reflects the final state.
       - name: Tarball parity guard (fail-closed)
