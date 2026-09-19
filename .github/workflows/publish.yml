@@ -90,6 +90,8 @@ jobs:
           DIRTY="$(git status --porcelain -- gateway/ \
             | grep -v 'gateway/ai/license_core.py' \
             | grep -v 'gateway/ai/license_core.cpython' \
+            | grep -v 'gateway/ai/deliberation.py' \
+            | grep -v 'gateway/ai/deliberation.cpython' \
             | grep -v 'gateway/ai/checksums.sha256' || true)"
           if [ -n "$DIRTY" ]; then
             echo "::error::Committed bundle is STALE vs delimit-gateway. Run 'npm run sync-gateway', review, and COMMIT the bundle before tagging a release."
