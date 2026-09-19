@@ -102,7 +102,16 @@ jobs:
           # what made delimit_scan and delimit_quickstart crash on every clean
           # install). Adding `deliberation.py` the same way would have extended
           # that blind spot to the second stub. Caught in review, not in prod.
-          DIRTY="$(git status --porcelain -- gateway/ | awk '
+          # --no-renames is load-bearing, not cosmetic. With rename detection
+          # ON, porcelain emits "R  <orig> -> <dest>" as ONE record and awk's
+          # $2 lands on the ORIG path — so a rename whose ORIGIN is an exempt
+          # transient (e.g. "R gateway/ai/license_core.py -> anything") would
+          # match the exemption and be silently dropped. That is a fail-OPEN in
+          # the gate this filter exists to harden: exactly the "stale file
+          # slips through silently" class the .pyi substring bug belonged to.
+          # Disabling rename detection makes each path its own record, judged
+          # on its own name. It changes nothing for ordinary in-place modifies.
+          DIRTY="$(git status --porcelain --no-renames -- gateway/ | awk '
             { path = $2 }
             path == "gateway/ai/license_core.py"    { next }
             path == "gateway/ai/deliberation.py"    { next }
