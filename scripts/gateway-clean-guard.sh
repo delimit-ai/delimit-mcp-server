@@ -22,7 +22,10 @@ set -uo pipefail
 
 GATEWAY_SRC="${GATEWAY_OVERRIDE:-/home/delimit/delimit-gateway}"
 
-if [ ! -d "$GATEWAY_SRC/.git" ]; then
+# NOTE: in a git WORKTREE, .git is a FILE containing "gitdir: ...", not a
+# directory — so test for either. (Caught in first use: the guard refused a
+# perfectly valid clean worktree.)
+if [ ! -e "$GATEWAY_SRC/.git" ] || ! git -C "$GATEWAY_SRC" rev-parse --git-dir >/dev/null 2>&1; then
     echo "⚠️  gateway-clean-guard: $GATEWAY_SRC is not a git checkout — cannot bind the artifact."
     echo "    Refusing: a release must be reproducible from committed source."
     exit 1
