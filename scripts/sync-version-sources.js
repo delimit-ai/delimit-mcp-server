@@ -5,8 +5,9 @@
  * WHY
  * ---
  * `npm version` moves package.json and package-lock.json and nothing else.
- * Three other fields carry the package version and it moved none of them:
+ * Four other fields carry the package version and it moved none of them:
  *
+ *   gateway/ai/server.py _VERSION_FALLBACK (used when version discovery fails)
  *   gateway/VERSION              (the bundled MCP server's self-reported version)
  *   server.json .version         (the MCP Registry record)
  *   server.json .packages[0].version
@@ -72,6 +73,27 @@ if (!/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(version)) {
 }
 
 const changed = [];
+// Bundle synchronization runs after rsync and must not stage release files.
+const bundleOnly = process.argv.includes('--bundle-only');
+if (bundleOnly && process.env.npm_lifecycle_event === 'version') {
+  throw new Error('sync-version-sources: version lifecycle cannot skip staging');
+}
+
+// rsync may restore the gateway source's development fallback. Derive the
+// customer fallback from the same canonical package version as its marker.
+{
+  const rel = 'gateway/ai/server.py';
+  const source = fs.readFileSync(p(rel), 'utf8');
+  const pattern = /^_VERSION_FALLBACK = ["'][^"']*["']$/gm;
+  if ([...source.matchAll(pattern)].length !== 1) {
+    throw new Error('sync-version-sources: expected exactly one _VERSION_FALLBACK assignment');
+  }
+  const aligned = source.replace(pattern, `_VERSION_FALLBACK = "${version}"`);
+  if (aligned !== source) {
+    fs.writeFileSync(p(rel), aligned);
+    changed.push(`${rel}: fallback -> ${version}`);
+  }
+}
 
 // gateway/VERSION — plain text marker.
 {
@@ -85,7 +107,7 @@ const changed = [];
 
 // server.json — carries the version TWICE. Missing either one fails the
 // publish gate, so both are written, not just the top-level field.
-{
+if (!bundleOnly) {
   const rel = 'server.json';
   const srv = readJson(rel);
   const before = [srv.version, srv.packages && srv.packages[0] && srv.packages[0].version];
@@ -131,6 +153,8 @@ if (changed.length === 0) {
 // the only case tolerated. `npm version --no-git-tag-version` still runs inside
 // a repo and still stages fine — it simply makes no commit — so it is NOT an
 // exemption here.
+if (bundleOnly) process.exit(0);
+
 let inGitRepo = true;
 try {
   execFileSync('git', ['rev-parse', '--git-dir'], { cwd: ROOT, stdio: 'ignore' });
@@ -142,13 +166,13 @@ if (!inGitRepo) {
   console.log('sync-version-sources: not a git checkout — files written, nothing to stage');
 } else {
   try {
-    execFileSync('git', ['add', '--', 'gateway/VERSION', 'server.json'], {
+    execFileSync('git', ['add', '--', 'gateway/VERSION', 'gateway/ai/server.py', 'server.json'], {
       cwd: ROOT,
       stdio: 'ignore',
     });
   } catch (err) {
     console.error(
-      'sync-version-sources: FAILED to stage gateway/VERSION and server.json in a git ' +
+      'sync-version-sources: FAILED to stage gateway/VERSION, gateway/ai/server.py and server.json in a git ' +
         'checkout. Aborting rather than letting the bump commit without them — that is ' +
         'the exact failure that burned v4.19.4.\n' +
         `  ${err && err.message ? err.message : err}`,

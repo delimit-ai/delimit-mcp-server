@@ -18,7 +18,7 @@
 # This is a HOLD, not a nag: a release must be reproducible from committed
 # state. Set GATEWAY_CLEAN_GUARD_ACK=1 only for a deliberate, recorded
 # exception — it prints loudly and still names every dirty path.
-set -uo pipefail
+set -euo pipefail
 
 GATEWAY_SRC="${GATEWAY_OVERRIDE:-/home/delimit/delimit-gateway}"
 
@@ -32,7 +32,29 @@ if [ ! -e "$GATEWAY_SRC/.git" ] || ! git -C "$GATEWAY_SRC" rev-parse --git-dir >
 fi
 
 DIRTY="$(git -C "$GATEWAY_SRC" status --porcelain 2>/dev/null | grep -vE '^\?\? ' || true)"
-HEAD_SHA="$(git -C "$GATEWAY_SRC" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+HEAD_SHA="$(git -C "$GATEWAY_SRC" rev-parse HEAD)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# The workflow is the existing source of truth; an environment override cannot
+# silently select a different clean checkout from the reviewed CI source.
+EXPECTED_SHA="$(node -e '
+  const fs = require("fs"), path = require("path");
+  const root = path.resolve(process.argv[1], "..");
+  const yaml = require(require.resolve("js-yaml", { paths: [root] }));
+  const pin = yaml.load(fs.readFileSync(path.join(root, ".github/workflows/publish.yml"), "utf8"))?.env?.GATEWAY_SOURCE_SHA;
+  if (typeof pin !== "string" || !/^[0-9a-f]{40}$/.test(pin)) {
+    console.error("gateway-clean-guard: missing or invalid full workflow GATEWAY_SOURCE_SHA");
+    process.exit(1);
+  }
+  if (process.env.GATEWAY_SOURCE_SHA !== undefined && process.env.GATEWAY_SOURCE_SHA !== pin) {
+    console.error("gateway-clean-guard: environment pin differs from workflow GATEWAY_SOURCE_SHA");
+    process.exit(1);
+  }
+  process.stdout.write(pin);
+' "$SCRIPT_DIR")"
+if [ "$HEAD_SHA" != "$EXPECTED_SHA" ]; then
+    echo "❌ gateway-clean-guard: source HEAD $HEAD_SHA differs from required $EXPECTED_SHA"
+    exit 1
+fi
 BRANCH="$(git -C "$GATEWAY_SRC" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
 
 echo "🔗 gateway-clean-guard: $GATEWAY_SRC @ $BRANCH ($HEAD_SHA)"

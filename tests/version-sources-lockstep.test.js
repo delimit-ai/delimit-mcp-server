@@ -57,6 +57,7 @@ function collectSources() {
     { label: 'package-lock.json .version', value: lock.version },
     { label: 'package-lock.json .packages[""].version', value: lock.packages[''].version },
     { label: 'gateway/VERSION', value: gatewayVersion },
+    { label: 'gateway/ai/server.py _VERSION_FALLBACK', value: fs.readFileSync(path.join(ROOT, 'gateway/ai/server.py'), 'utf8').match(/^_VERSION_FALLBACK = ["']([^"']+)["']$/m)?.[1] },
     { label: 'server.json .version', value: srv.version },
     { label: 'server.json .packages[0].version', value: srv.packages[0].version },
   ];
