@@ -68,11 +68,8 @@ cp "$GATEWAY_SRC/requirements.txt" "$NPM_ROOT/gateway/requirements.txt" 2>/dev/n
 # Written from package.json (single canonical version source) so the bundled
 # MCP server — and the ~/.delimit/server copy that `delimit setup` installs —
 # self-reports the true shipped version instead of a hardcoded constant.
-PKG_VERSION="$(node -p "require('$NPM_ROOT/package.json').version" 2>/dev/null || true)"
-if [ -n "$PKG_VERSION" ]; then
-    printf '%s\n' "$PKG_VERSION" > "$NPM_ROOT/gateway/VERSION"
-    echo "  VERSION marker: $PKG_VERSION"
-fi
+node "$SCRIPT_DIR/sync-version-sources.js" --bundle-only
+PKG_VERSION="$(cat "$NPM_ROOT/gateway/VERSION")"
 
 # ── PRUNE: delete every synced gateway file NOT on the allowlist ─────
 # (Exempt: license_core.py, kept transiently for the .so compile step.)

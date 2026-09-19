@@ -74,6 +74,7 @@ fi
 
 # ── Step 1: Sync gateway ─────────────────────────────────────────────
 echo "[1/5] Syncing gateway..."
+bash scripts/gateway-clean-guard.sh
 npm run sync-gateway
 
 # ── Step 2: Run tests ────────────────────────────────────────────────
@@ -91,36 +92,7 @@ echo ""
 echo "[4/5] Bumping version to $VERSION..."
 npm version "$VERSION" --no-git-tag-version
 
-# Keep server.json (MCP registry manifest) in lockstep with package.json.
-# Without this, server.json.version drifts behind the published npm version
-# (it lagged at 4.7.3 while package.json was 4.15.0 — LED-3717), which hurts
-# MCP-directory freshness/completeness scoring. Updates both the top-level
-# version and the npm package entry.
-if [ -f server.json ]; then
-    echo "  Syncing server.json version -> $VERSION"
-    node -e '
-        const fs = require("fs");
-        const v = require("./package.json").version;
-        const p = "server.json";
-        const s = JSON.parse(fs.readFileSync(p, "utf8"));
-        s.version = v;
-        if (Array.isArray(s.packages)) {
-            for (const pkg of s.packages) {
-                if (pkg && typeof pkg === "object") pkg.version = v;
-            }
-        }
-        fs.writeFileSync(p, JSON.stringify(s, null, 2) + "\n");
-    '
-fi
-
-# LED-1900 follow-up: sync-gateway (step 1) ran BEFORE the version bump, so
-# the gateway/VERSION marker it wrote carries the OLD version and trips the
-# publish workflow's anti-drift assert. Rewrite the marker from the bumped
-# package.json so the committed bundle matches what a fresh sync produces.
-if [ -f gateway/VERSION ]; then
-    node -p "require('./package.json').version" > gateway/VERSION
-    echo "  gateway/VERSION -> $(cat gateway/VERSION)"
-fi
+# The npm version lifecycle synchronizes and stages every derived version.
 
 # ── Step 5: Commit, tag, and push ────────────────────────────────────
 echo ""
@@ -153,7 +125,7 @@ fi
 RELEASE_BRANCH="release/v$VERSION"
 git checkout -b "$RELEASE_BRANCH"
 git commit -m "release: v$VERSION"
-git push -u origin "$RELEASE_BRANCH" --no-verify
+git push -u origin "$RELEASE_BRANCH"
 
 # Create PR and merge
 echo "Creating release PR..."

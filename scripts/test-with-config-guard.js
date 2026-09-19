@@ -56,6 +56,7 @@ const TEST_FILES = [
     'tests/led-5369-shim-fail-closed.test.js',
     'tests/version-sources-lockstep.test.js',
     'tests/package-scripts-allowlist.test.js',
+    'tests/release-tooling-hardening.test.js',
 ];
 
 const cfgPath = resolveSharedConfigPath();
