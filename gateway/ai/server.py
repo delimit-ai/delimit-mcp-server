@@ -975,6 +975,56 @@ if ACTIVE_TOOLSET != "full":
 
 
 # ─────────────────────────────────────────────────────────────────────
+#  CAPABILITY CONTAINMENT for INTERNAL-excluded backends.
+#  bundle-classification.md claimed lazy in-body imports of INTERNAL modules
+#  "simply no-op on a public install". They did not: on a clean install of
+#  4.19.2, 15 tools raised an unhandled ModuleNotFoundError and the customer
+#  saw a raw traceback. This wrapper makes that claim true. Applied
+#  UNCONDITIONALLY (the toolset gate above only engages for reduced profiles)
+#  and deliberately NARROW: only modules in capability_guard.INTERNAL_BACKENDS
+#  are absorbed, so an unlisted missing module still raises and the next
+#  regression of this class stays loud.
+# ─────────────────────────────────────────────────────────────────────
+import functools as _functools
+
+from ai.capability_guard import (  # noqa: E402
+    guard_internal as _guard_internal,
+    missing_module_name as _missing_module_name,
+)
+
+_pre_capability_mcp_tool = mcp.tool
+
+
+def _capability_guarded_tool(*args, **kwargs):
+    def _wrap(fn):
+        @_functools.wraps(fn)
+        def _guarded(*a, **kw):
+            try:
+                return fn(*a, **kw)
+            except ModuleNotFoundError as exc:
+                handled = _guard_internal(
+                    getattr(fn, "__name__", ""), _missing_module_name(exc), exc
+                )
+                if handled is not None:
+                    return handled
+                raise
+        return _guarded
+
+    if args and callable(args[0]) and not isinstance(args[0], str):
+        return _pre_capability_mcp_tool(_wrap(args[0]), *args[1:], **kwargs)
+
+    decorator = _pre_capability_mcp_tool(*args, **kwargs)
+
+    def _apply(fn):
+        return decorator(_wrap(fn))
+
+    return _apply
+
+
+mcp.tool = _capability_guarded_tool
+
+
+# ─────────────────────────────────────────────────────────────────────
 #  MCP tool annotations — mechanical, docstring-derived (LED-3709)
 #
 #  Additive metadata only. Stamps readOnlyHint / destructiveHint /
@@ -1084,7 +1134,7 @@ def _check_pro(tool_name: str) -> Optional[Dict]:
 
     Routes through _pro_gate_graced (NOT bare require_premium) so the central
     gate in _with_next_steps is GRACE-AWARE: tools in _NEWLY_ENFORCED_PRO
-    (LED-1741 G2, LED-1740 staged-12) honor the 90-day grace + grandfather
+    (LED-1741 G2, LED-1740 staged-12) honor the grace + grandfather
     instead of hard-blocking a free user during the migration window. Without
     this, _with_next_steps would re-gate (grace-unaware) every PRO_TOOLS member
     it wraps, silently defeating the grace for newly-enforced tools."""
@@ -1113,7 +1163,13 @@ def _check_pro(tool_name: str) -> Optional[Dict]:
 # grandfathers any current caller; only AFTER the window is a new, non-licensed,
 # non-grandfathered caller gated. Reversible (delete the grandfather file or move
 # the date). Nothing charges a customer until npm publish (founder gate).
-_SOCIAL_PRO_ENFORCE_AFTER = "2026-09-16T00:00:00+00:00"  # 90 days from 2026-06-16
+_SOCIAL_PRO_ENFORCE_AFTER = "2026-09-16T00:00:00+00:00"
+# AUTHORITATIVE. Recorded in the ratified LED-1741 decision (2026-06-16):
+# "ENFORCED with customer-safe 90-day grace + grandfather gate ... ENFORCE_AFTER
+# 2026-09-16". LED-5365: the previous inline comment read "90 days from
+# 2026-06-16", which is 2026-09-14 -- the span is 92 days. The DATE is the
+# ratified commercial decision and is unchanged; only the inaccurate comment
+# was corrected. "90-day grace" remains the customer-facing description.
 _NEWLY_ENFORCED_PRO = frozenset({
     "delimit_social_post", "delimit_social_generate",
     "delimit_social_approve", "delimit_social_history",
@@ -1162,9 +1218,25 @@ def _mark_grandfathered(full_name: str) -> None:
 
 
 def _pro_gate_graced(tool_name: str, *, now=None) -> Optional[Dict]:
-    """``require_premium`` for a tool, with a 90-day grace + grandfather for tools
-    NEWLY moved into Pro (LED-1741), so no existing free user is hard-cut.
-    Returns a premium_required dict (BLOCK) or None (ALLOW)."""
+    """``require_premium`` for a tool, with a grace + grandfather for tools NEWLY
+    moved into Pro (LED-1741). Returns premium_required (BLOCK) or None (ALLOW).
+
+    EXACT POLICY (LED-5365 precision pass): grace runs through 15 September
+    2026; Pro enforcement begins 16 September 2026 (``_SOCIAL_PRO_ENFORCE_AFTER``
+    = 2026-09-16T00:00:00Z, the ratified LED-1741 date). The historical
+    "90-day grace" wording is preserved as evidence in LED-1741 but is
+    mathematically loose -- 16 Jun to 16 Sep is 92 days -- so it must not be
+    used to DERIVE the enforcement date.
+
+    GRANDFATHERING IS PER-TOOL AND USE-BASED, not per-install. Any use of a
+    newly-enforced tool by a free user during grace persists THAT TOOL to
+    ``grandfathered_tools.json``, and only that tool survives the deadline. A
+    pre-cutoff free install therefore retains exactly the newly-enforced tools
+    it actually used -- NOT all of ``_NEWLY_ENFORCED_PRO``. This is the ratified
+    intent: LED-1740 promises no existing free user is hard-cut "mid-workflow",
+    and LED-1741's own acceptance criteria state post-grace "blocks fresh free
+    only". A tool never used is not a workflow in progress.
+    """
     from ai.license import require_premium
     full = tool_name if tool_name.startswith("delimit_") else f"delimit_{tool_name}"
     gate = require_premium(tool_name)
@@ -9140,7 +9212,11 @@ def delimit_deploy_npm(
     — every successful publish reaches real users, so it must be
     preceded by the deploy gate chain (delimit_security_audit ->
     delimit_test_smoke -> delimit_changelog -> delimit_deploy_plan)
-    and explicit founder approval per the customer-protection rule.
+    and by package acceptance against the PACKED candidate in a
+    clean room. Publication itself is DELEGATED under the owner
+    amendment of 2026-09-19 ("Delegated Merges and Batched npm
+    Releases") — it no longer waits on a founder click — but the
+    gate chain is fully binding and a failed gate is a HOLD.
     When NOT to use: to deploy a site (use delimit_deploy_site), to
     push container images (delimit_deploy_publish), to dry-run
     locally (`npm pack --dry-run` is faster), or to test the chain

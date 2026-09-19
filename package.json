@@ -1,7 +1,7 @@
 {
   "name": "delimit-cli",
   "mcpName": "io.github.delimit-ai/delimit-mcp-server",
-  "version": "4.19.2",
+  "version": "4.19.3",
   "description": "The merge gate for AI-written code, with signed, replayable attestation. Works with Claude Code, Codex, Cursor, and Gemini CLI.",
   "main": "index.js",
   "files": [
@@ -10,6 +10,7 @@
     "adapters/",
     "gateway/VERSION",
     "gateway/ai/license_core.cpython-*-*.so",
+    "gateway/ai/deliberation.cpython-*-*.so",
     "gateway/ai/__init__.py",
     "gateway/ai/_compile_status.py",
     "gateway/ai/_paths.py",
@@ -34,6 +35,7 @@
     "gateway/ai/backends/tools_real.py",
     "gateway/ai/backends/ui_bridge.py",
     "gateway/ai/backends/vault_bridge.py",
+    "gateway/ai/capability_guard.py",
     "gateway/ai/cli_contract.py",
     "gateway/ai/collision_detect.py",
     "gateway/ai/context_fs.py",
@@ -154,7 +156,9 @@
     "!scripts/demo-v420-clean.sh",
     "!scripts/demo-v420-deliberation.sh",
     "!scripts/sync-gateway.sh",
+    "!scripts/gateway-clean-guard.sh",
     "!scripts/build-license-core.sh",
+    "!scripts/build-proprietary-core.sh",
     "!scripts/security-check.sh",
     "!scripts/check-bundle-parity.sh",
     "!scripts/check-bundle-classification.sh",
@@ -175,7 +179,7 @@
   "scripts": {
     "postinstall": "node scripts/postinstall.js",
     "sync-gateway": "bash scripts/sync-gateway.sh",
-    "prepublishOnly": "node scripts/clean-tree-guard.js && bash scripts/publish-ci-guard.sh && bash scripts/check-bundle-classification.sh && npm run sync-gateway && bash scripts/build-license-core.sh && bash scripts/security-check.sh && bash scripts/check-bundle-parity.sh",
+    "prepublishOnly": "node scripts/clean-tree-guard.js && bash scripts/publish-ci-guard.sh && bash scripts/check-bundle-classification.sh && bash scripts/gateway-clean-guard.sh && npm run sync-gateway && bash scripts/build-proprietary-core.sh license_core && bash scripts/build-proprietary-core.sh deliberation && bash scripts/security-check.sh && bash scripts/check-bundle-parity.sh",
     "test": "node scripts/test-with-config-guard.js",
     "test:raw": "node --test tests/clean-tree-guard.test.js tests/_config-sentinel.test.js tests/setup-onboarding.test.js tests/setup-matrix.test.js tests/setup-no-clobber.test.js tests/config-export-import.test.js tests/cross-model-hooks.test.js tests/golden-path.test.js tests/v420-features.test.js tests/v43-wrap-engine.test.js tests/v43-trust-page-engine.test.js tests/v43-ai-sbom-engine.test.js tests/attest-mcp.test.js tests/delimit-home.test.js tests/postinstall-hardening.test.js tests/auth-signin.test.js tests/auth-signout.test.js tests/migration-2092-banner.test.js tests/control-browser.test.js tests/bundle-parity-guard.test.js tests/security-scans-binary-text.test.js tests/chat-repl-prebrief.test.js tests/chat-repl-continuity.test.js tests/cli-deliberate-runs-engine.test.js tests/funnel-cli-leaks.test.js tests/check-fail-closed-no-pyyaml.test.js tests/harness-launch.test.js tests/publish-source-pin.test.js tests/chat-repl-explicit-harness.test.js tests/led-5369-shim-fail-closed.test.js"
   },

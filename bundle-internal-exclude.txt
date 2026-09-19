@@ -220,3 +220,7 @@ gateway/ai/outreach_engaged_reply.py
 gateway/ai/outreach_holds.py
 gateway/ai/send_decision.py
 gateway/ai/build_campaign.py
+gateway/ai/build_admission.py
+gateway/ai/build_evaluator.py
+gateway/ai/build_selector.py
+gateway/ai/outreach_untrusted_text.py

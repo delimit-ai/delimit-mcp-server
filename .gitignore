@@ -5,3 +5,4 @@ adapters/
 .DS_Store
 .mcpregistry_*
 adapters/
+gateway/ai/*.cpython-*.so

@@ -223,6 +223,29 @@ OWNER_ACTION_SUBJECT_PATTERNS = [
     _re.compile(r"subscription", _re.IGNORECASE),
 ]
 
+# LED-5385: GitHub commit-push notifications for repositories the owner OWNS.
+# The owner already knows about their own pushes and merges; forwarding each
+# one created an owner-review interruption (26 in 72h on 2026-09-16). Only this
+# exact shape is exempt. GitHub security/Dependabot/account mail, human
+# notifications (notifications@github.com) and other owners' repositories are
+# unaffected and still classify through the rules below.
+OWNED_GITHUB_OWNERS = frozenset({"delimit-ai", "wirereport"})
+_GITHUB_COMMIT_NOTIFICATION_SENDER = "noreply@github.com"
+_GITHUB_COMMIT_NOTIFICATION_SUBJECT = _re.compile(
+    r"\A\[(?P<owner>[A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))/[A-Za-z0-9._-]{1,100}\]"
+    r"(?:\s+[0-9a-f]{6,40}:\s.*)?\s*\Z",
+    _re.DOTALL,
+)
+
+
+def is_owned_repo_commit_notification(sender: str, subject: str) -> bool:
+    """True only for a noreply@github.com commit-push notification of an owned repo."""
+    if (sender or "").strip().lower() != _GITHUB_COMMIT_NOTIFICATION_SENDER:
+        return False
+    match = _GITHUB_COMMIT_NOTIFICATION_SUBJECT.match(subject or "")
+    return bool(match) and match.group("owner").lower() in OWNED_GITHUB_OWNERS
+
+
 # Sender patterns that are definitely non-owner (automated/bot)
 NON_OWNER_SENDERS = {
     "noreply@",
@@ -1901,6 +1924,12 @@ def classify_email(sender: str, subject: str, from_header: str = "") -> str:
     # Rule 1: from the owner directly
     if sender_lower in OWNER_ACTION_SENDERS:
         return "owner-action"
+
+    # Rule 1b (LED-5385): own-repo commit-push notifications are not owner
+    # actions. Evaluated before the domain rule (github.com) and the subject
+    # rule (commit messages routinely contain "reply", "payment", ...).
+    if is_owned_repo_commit_notification(sender_lower, subject):
+        return "non-owner"
 
     # Rule 2: from a known vendor/partner domain
     if sender_domain in OWNER_ACTION_DOMAINS:
