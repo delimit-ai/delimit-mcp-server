@@ -164,6 +164,7 @@
     "!scripts/check-bundle-classification.sh",
     "!scripts/list-blocked-gateway-paths.js",
     "!scripts/test-license-core-so.sh",
+    "!scripts/sync-version-sources.js",
     "!scripts/test-with-config-guard.js",
     "!scripts/verify-config-sentinel.js",
     "server.json",
