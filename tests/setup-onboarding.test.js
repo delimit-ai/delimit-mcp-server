@@ -497,9 +497,9 @@ describe('postinstall telemetry', () => {
         assert.ok(pkg.scripts.postinstall.includes('postinstall.js'), 'Should run postinstall.js');
     });
 
-    it('package.json files includes scripts/', () => {
+    it('package.json files explicitly includes the install lifecycle script', () => {
         const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf-8'));
-        assert.ok(pkg.files.includes('scripts/'), 'Should include scripts/ in published files');
+        assert.ok(pkg.files.includes('scripts/postinstall.js'), 'Should include the postinstall script in published files');
     });
 });
 
