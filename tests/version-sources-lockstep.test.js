@@ -21,11 +21,18 @@
  * the drift surfaces locally — on `npm test`, before a tag exists — instead of
  * in the publish job.
  *
- * Deliberately a TEST, not a version lifecycle hook: it ships nothing, changes
- * no release mechanism, and cannot itself write a wrong version. The lifecycle
- * hook that would keep them in sync automatically remains LED-5478.
+ * These tests DETECT drift. They do not prevent it — prevention is
+ * scripts/sync-version-sources.js, wired to the npm `version` lifecycle, which
+ * writes every source from package.json and stages them into the same commit
+ * as the bump. Review of PR #230 twice made the same point: detection that
+ * enumerates sources cannot cover one it does not know about, so the
+ * enumeration is a backstop and the hook is the fix.
  *
- * If you add a new file carrying the package version, add it here too.
+ * These remain useful for a tree that drifted some other way — a hand-edited
+ * version, a bad merge, a cherry-pick — where no `npm version` ever ran.
+ *
+ * If you add a new file carrying the package version, add it to BOTH
+ * collectSources() here and scripts/sync-version-sources.js.
  */
 
 const test = require('node:test');
@@ -76,22 +83,30 @@ test('every version source agrees with package.json', () => {
 });
 
 /**
- * The completeness problem, and why the list above is not enough on its own.
+ * A PARTIAL cross-check against publish.yml. Read the scope limit before
+ * trusting it — an earlier version of this comment overclaimed and was
+ * blocked in review of PR #230 for exactly that.
  *
- * Blocked in review of PR #230: a hardcoded enumeration cannot detect a source
- * it does not enumerate, and "I found them all" is exactly the belief that was
- * already wrong twice. Reproducing the two KNOWN failures demonstrates nothing
- * about unknown ones.
+ * WHAT IT COVERS: version gates written in publish.yml as inline
+ * `require('./x.json')...version` expressions. If someone adds another one,
+ * this fails locally and names it, instead of the drift surfacing after a tag
+ * is pushed and spent.
  *
- * So this test does not trust the list. It reads the publish workflow — the
- * thing that actually burns a tag when it disagrees — extracts every version
- * expression that its gate evaluates, and asserts each one is covered above.
- * If someone adds a new version check to publish.yml, this fails and names it,
- * instead of the drift being discovered after a tag is pushed and spent.
+ * WHAT IT DOES NOT COVER, stated plainly because the gap is the whole point:
+ *   - gateway/VERSION. Its gate is the "Assert committed bundle is in sync
+ *     with gateway" step, a bundle-sync assertion, NOT a require() expression.
+ *     This check is BLIND to it — so it would NOT have caught the v4.19.4
+ *     failure. That one is covered by the hardcoded list above, and prevented
+ *     by scripts/sync-version-sources.js.
+ *   - any gate that moves into a called script, uses different quoting, reads
+ *     via a variable, or lives in another job.
  *
- * The authority is the pipeline, not the author's memory of it.
+ * So this is a supplement, not proof of completeness. Completeness is not
+ * claimed anywhere in this file. Drift is PREVENTED on the bump path by
+ * scripts/sync-version-sources.js (the npm `version` lifecycle hook); the
+ * tests here are the backstop for a tree that drifted some other way.
  */
-test('every version source the publish workflow gates on is covered here', () => {
+test('require()-style version gates in publish.yml are covered here (partial check)', () => {
   const wf = fs.readFileSync(
     path.join(ROOT, '.github', 'workflows', 'publish.yml'),
     'utf8',
@@ -120,6 +135,25 @@ test('every version source the publish workflow gates on is covered here', () =>
       `  gated by publish.yml : ${JSON.stringify(found)}\n` +
       `  covered here         : ${JSON.stringify([...covered])}\n` +
       'Add the missing source to collectSources().',
+  );
+});
+
+test('the version lifecycle hook stays wired', () => {
+  // Prevention only works if npm actually runs it. Silently dropping
+  // scripts.version would restore the exact conditions that burned three tags,
+  // while every other test in this file still passed on an already-aligned
+  // tree. Pin the wiring, and pin that the script it names exists.
+  const pkg = readJson('package.json');
+  const hook = pkg.scripts && pkg.scripts.version;
+  assert.ok(
+    typeof hook === 'string' && hook.includes('sync-version-sources'),
+    'package.json scripts.version must run scripts/sync-version-sources.js so ' +
+      '`npm version` cannot leave gateway/VERSION or server.json behind ' +
+      `(got ${JSON.stringify(hook)})`,
+  );
+  assert.ok(
+    fs.existsSync(path.join(ROOT, 'scripts', 'sync-version-sources.js')),
+    'scripts/sync-version-sources.js is referenced by the version lifecycle but missing',
   );
 });
 
