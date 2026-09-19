@@ -54,6 +54,7 @@ const TEST_FILES = [
     'tests/publish-source-pin.test.js',
     'tests/chat-repl-explicit-harness.test.js',
     'tests/led-5369-shim-fail-closed.test.js',
+    'tests/version-sources-lockstep.test.js',
 ];
 
 const cfgPath = resolveSharedConfigPath();
