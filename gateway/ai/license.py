@@ -12,7 +12,7 @@ try:
     from ai.license_core import (
         load_license as get_license,
         check_premium as is_premium,
-        gate_tool as require_premium,
+        gate_tool as _core_require_premium,
         activate as activate_license,
         needs_revalidation,
         revalidate_license,
@@ -20,18 +20,11 @@ try:
         PRO_TOOLS as _CORE_PRO_TOOLS,
         FREE_TRIAL_LIMITS,
     )
-    # Extend compiled PRO_TOOLS with tools added after last binary build.
-    # LED-1260: keep this in lockstep with the fallback set below — any tool
-    # in the fallback PRO_TOOLS that's NOT in the compiled set must be added
-    # here, otherwise customers with the binary get those tools FREE while
-    # customers without the binary pay for them (regression-on-success).
-    # The runtime test in tests/test_license.py asserts both sets are
-    # equal. LED-1410 makes this stronger: the extension set below is
-    # CODEGEN from ai/pro_tools.yaml (same SSoT as the compiled
-    # set), so the two are equal by construction. The | union with
-    # _CORE_PRO_TOOLS is preserved so OLDER compiled .so files that
-    # were built before a YAML addition still pick up the new tool
-    # at runtime.
+    # LED-1410: use the generated full manifest for the shim, including tools
+    # intentionally absent from older compiled cores. Merely unioning these
+    # names does not change gate_tool's baked-in membership (LED-5459).
+    # LED-1740 ratified the staged-12 Pro gates with grace/grandfather in
+    # server._pro_gate_graced; the adapter below enforces that existing policy.
     PRO_TOOLS = _CORE_PRO_TOOLS | frozenset({
         # CODEGEN-START: EXTENSION_PRO_TOOLS
     "delimit_audit",
@@ -90,6 +83,22 @@ try:
     "delimit_vendor_news_scan",
         # CODEGEN-END: EXTENSION_PRO_TOOLS
     })
+
+    def require_premium(tool_name: str) -> dict | None:
+        full_name = tool_name if tool_name.startswith("delimit_") else f"delimit_{tool_name}"
+        if full_name in PRO_TOOLS and full_name not in _CORE_PRO_TOOLS:
+            # The native gate cannot enforce a name missing from its compiled
+            # set. Use its license validation, while leaving the server's
+            # grace/grandfather handling and native trial accounting intact.
+            if is_premium():
+                return None
+            return {
+                "error": f"'{tool_name}' requires Delimit Pro ($10/mo). Upgrade at https://delimit.ai/pricing",
+                "status": "premium_required",
+                "tool": tool_name,
+                "current_tier": get_license().get("tier", "free"),
+            }
+        return _core_require_premium(tool_name)
 except ImportError:
     # license_core not available — three known cases:
     #   1. Development mode (running from gateway source, no compiled .so)

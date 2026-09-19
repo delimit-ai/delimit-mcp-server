@@ -22,7 +22,7 @@ permissions:
 env:
   # Reviewed source for this package release. Never resolve a moving branch
   # independently in validation and publication; update with the reviewed bundle.
-  GATEWAY_SOURCE_SHA: '375ceb6fe7ee70178fa28effbebf0c4a5673d374'
+  GATEWAY_SOURCE_SHA: '6cb2269e8da7ea27e874fad3fbd3bc91a9c53dfe'
 
 jobs:
   validate:
