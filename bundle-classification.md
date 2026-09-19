@@ -389,3 +389,15 @@ cross-venture or proprietary, so they ship — but confirm they should be public
 - `gateway/ai/outreach_engaged_reply.py` -> INTERNAL — outreach engaged-reply lane state (outreach tooling)
 - `gateway/ai/outreach_holds.py` -> INTERNAL — founder outreach hold loader (outreach tooling)
 - `gateway/ai/send_decision.py` -> INTERNAL — outreach final send-decision boundary (outreach tooling)
+
+## Classified 2026-09-19 (release 4.19.3)
+
+Surfaced by the classification gate when it ran against a clean gateway
+worktree — these four were in neither list on main. Applied the standing rule
+**when uncertain, INTERNAL-EXCLUDE**; all four are autonomous-build / outreach
+operations machinery, not customer product surface.
+
+- `gateway/ai/build_admission.py` -> INTERNAL — autonomous build-loop admission control
+- `gateway/ai/build_evaluator.py` -> INTERNAL — autonomous build-loop evaluation
+- `gateway/ai/build_selector.py` -> INTERNAL — autonomous build-loop work selection
+- `gateway/ai/outreach_untrusted_text.py` -> INTERNAL — outreach untrusted-text handling
