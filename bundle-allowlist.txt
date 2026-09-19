@@ -53,6 +53,7 @@ gateway/ai/backends/tools_infra.py
 gateway/ai/backends/tools_real.py
 gateway/ai/backends/ui_bridge.py
 gateway/ai/backends/vault_bridge.py
+gateway/ai/capability_guard.py
 gateway/ai/cli_contract.py
 gateway/ai/collision_detect.py
 gateway/ai/context_fs.py
@@ -81,6 +82,7 @@ gateway/ai/ledger_propose.py
 gateway/ai/license.py
 gateway/ai/license_consistency.py
 gateway/ai/license_core.cpython-*-*.so
+gateway/ai/deliberation.cpython-*-*.so
 gateway/ai/license_core.pyi
 gateway/ai/local_server.py
 gateway/ai/mcp_bridge.py

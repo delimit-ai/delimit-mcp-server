@@ -3,8 +3,28 @@
 Derived from `gateway/ai/server.py` (the public MCP entrypoint) import analysis +
 per-file nature review. PUBLIC = shipped to npm/public repo; INTERNAL = excluded.
 Rule applied: **when uncertain, INTERNAL-EXCLUDE.** Import-safety verified: no PUBLIC
-`.py` has a top-level import of an INTERNAL `.py` (lazy imports inside tool bodies are
-fine — those internal tools simply no-op on a public install).
+`.py` has a top-level import of an INTERNAL `.py`.
+
+> **CORRECTED 2026-09-19.** This paragraph previously continued: *"(lazy imports
+> inside tool bodies are fine — those internal tools simply no-op on a public
+> install)."* **That was false and it was the root cause of a customer-facing
+> defect.** A lazy `from ai.<internal> import …` inside a tool body does not
+> no-op; it raises an unhandled `ModuleNotFoundError` and the caller sees a raw
+> Python traceback. Measured on a clean install of 4.19.2: **15 registered tools
+> crashed**, among them `delimit_scan` and `delimit_quickstart` — the two the
+> README points a new user at, and the two named in the `free_alternatives` list
+> that `premium_required` returns to a blocked free user.
+>
+> Lazy in-body imports of INTERNAL modules are now genuinely contained by
+> `gateway/ai/capability_guard.py`, which returns a structured
+> `capability_unavailable` result. The containment is narrow on purpose: only
+> modules listed in `INTERNAL_BACKENDS` are absorbed, so an unlisted missing
+> module still raises and the next regression of this class stays loud.
+>
+> Containment is NOT restoration. A capability we advertise must be shipped
+> through its classified implementation path, not downgraded to "unavailable" —
+> which is why `deliberation` is now built and shipped as the compiled `.so`
+> its PROPRIETARY classification always specified.
 
 The canonical path sets live in `bundle-allowlist.txt` and
 `bundle-internal-exclude.txt`; the release guards derive their current counts
@@ -91,6 +111,7 @@ cross-venture or proprietary, so they ship — but confirm they should be public
 - `gateway/ai/backends/ui_bridge.py`
 - `gateway/ai/backends/vault_bridge.py`
 ### MCP server + public support modules
+- `gateway/ai/capability_guard.py` -> PUBLIC — structured containment for INTERNAL-excluded backends (no secrets, no venture identity)
 - `gateway/ai/cli_contract.py`
 - `gateway/ai/collision_detect.py`
 - `gateway/ai/context_fs.py`

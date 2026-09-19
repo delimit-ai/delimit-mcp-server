@@ -39,7 +39,15 @@ echo "🔄 Syncing gateway → npm bundle (allowlist-driven, fail-closed)..."
 # file to copy). license_core.py is NOT in the allowlist (it is proprietary and
 # ships as a .so); we keep it transiently below only so build-license-core.sh
 # can compile + strip it.
+# Sources kept TRANSIENTLY after the prune so the proprietary build step can
+# compile them to .so and strip the plaintext. They are never shipped as .py.
+# deliberation joined this set on 2026-09-19: bundle-classification.md always
+# classified it "PROPRIETARY — ships as compiled .so, not source", but nothing
+# built it, so only the .pyi stub shipped and every tool that imported it
+# (delimit_scan, delimit_quickstart, delimit_deliberation_status) crashed on a
+# clean install.
 LICENSE_CORE_SRC="gateway/ai/license_core.py"
+PROPRIETARY_SRCS="gateway/ai/license_core.py gateway/ai/deliberation.py"
 ALLOW_PATHS="$(grep -vE '^\s*(#|$)' "$ALLOWLIST" | grep '^gateway/' | grep -v '\*' | sort -u)"
 ALLOW_COUNT="$(printf '%s\n' "$ALLOW_PATHS" | grep -c '^gateway/' || true)"
 echo "  Allowlist: $ALLOW_COUNT gateway path(s)"
@@ -74,7 +82,7 @@ while IFS= read -r abs; do
     case "$rel" in
         *__pycache__*|*.pyc) continue ;;
     esac
-    [ "$rel" = "$LICENSE_CORE_SRC" ] && continue
+    case " $PROPRIETARY_SRCS " in *" $rel "*) continue ;; esac
     if ! grep -qxF "$rel" <<< "$ALLOW_PATHS"; then
         rm -f "$abs"
         PRUNED=$((PRUNED+1))

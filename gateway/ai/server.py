@@ -975,6 +975,62 @@ if ACTIVE_TOOLSET != "full":
 
 
 # ─────────────────────────────────────────────────────────────────────
+#  CAPABILITY CONTAINMENT for INTERNAL-excluded backends.
+#
+#  bundle-classification.md claimed "lazy imports inside tool bodies are fine
+#  — those internal tools simply no-op on a public install." They did not:
+#  measured on a clean install of 4.19.2, 15 tools raised an unhandled
+#  ModuleNotFoundError and the customer saw a raw traceback.
+#
+#  This wrapper makes that claim true. It is applied UNCONDITIONALLY (the
+#  toolset gate above only engages for reduced profiles) and it translates a
+#  missing INTERNAL backend into a structured capability_unavailable result.
+#
+#  It is deliberately NARROW: only modules listed in
+#  capability_guard.INTERNAL_BACKENDS are absorbed. Any other missing module
+#  is a genuine packaging defect and still raises, so the next regression of
+#  this class stays loud instead of being silently swallowed.
+# ─────────────────────────────────────────────────────────────────────
+import functools as _functools
+
+from ai.capability_guard import (  # noqa: E402
+    guard_internal as _guard_internal,
+    missing_module_name as _missing_module_name,
+)
+
+_pre_capability_mcp_tool = mcp.tool
+
+
+def _capability_guarded_tool(*args, **kwargs):
+    def _wrap(fn):
+        @_functools.wraps(fn)
+        def _guarded(*a, **kw):
+            try:
+                return fn(*a, **kw)
+            except ModuleNotFoundError as exc:
+                handled = _guard_internal(
+                    getattr(fn, "__name__", ""), _missing_module_name(exc), exc
+                )
+                if handled is not None:
+                    return handled
+                raise
+        return _guarded
+
+    if args and callable(args[0]) and not isinstance(args[0], str):
+        return _pre_capability_mcp_tool(_wrap(args[0]), *args[1:], **kwargs)
+
+    decorator = _pre_capability_mcp_tool(*args, **kwargs)
+
+    def _apply(fn):
+        return decorator(_wrap(fn))
+
+    return _apply
+
+
+mcp.tool = _capability_guarded_tool
+
+
+# ─────────────────────────────────────────────────────────────────────
 #  MCP tool annotations — mechanical, docstring-derived (LED-3709)
 #
 #  Additive metadata only. Stamps readOnlyHint / destructiveHint /

@@ -1,0 +1,234 @@
+#!/bin/bash
+# Compile a PROPRIETARY gateway module to a native .so via Nuitka.
+#
+#   usage: scripts/build-proprietary-core.sh [module]   (default: license_core)
+#
+# Generalised from the LED-1259 license_core builder so `deliberation` — which
+# bundle-classification.md marks "PROPRIETARY — ships as compiled .so, not
+# source" — is built by the SAME verified path (GLIBC ceiling, stub handling,
+# plaintext strip) instead of a second ad-hoc script.
+#
+# Original header follows.
+# LED-1259: Compile gateway/ai/<module>.py to a native .so via Nuitka,
+# then strip the plaintext .py from the bundle so customers cannot grep
+# the validation logic for bypass identifiers.
+#
+# Linux-only first ship. Mac/Windows expansion is filed as a follow-up
+# ledger item — non-linux customers will hit the Python fallback in
+# license.py (degraded Pro features) until we ship per-platform binaries.
+#
+# Idempotent: safe to re-run; will rebuild on every invocation.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+NPM_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+AI_DIR="$NPM_ROOT/gateway/ai"
+MODULE="${1:-license_core}"
+SRC="$AI_DIR/${MODULE}.py"
+STUB="$AI_DIR/${MODULE}.pyi"
+STUB_BACKUP=""
+BUILD_STARTED=0
+BUILD_SUCCEEDED=0
+
+cleanup_generated_intermediates() {
+    rm -rf -- \
+        "$AI_DIR/${MODULE}.build" \
+        "$AI_DIR/${MODULE}.dist" \
+        "$AI_DIR/${MODULE}.onefile-build"
+    rm -f -- \
+        "$AI_DIR/${MODULE}.c" \
+        "$AI_DIR/${MODULE}.const" \
+        "$AI_DIR/license_core.o"
+}
+
+restore_reviewed_stub() {
+    if [ -n "$STUB_BACKUP" ] && [ -f "$STUB_BACKUP" ]; then
+        cp -p -- "$STUB_BACKUP" "$STUB"
+    fi
+}
+
+cleanup() {
+    local status=$?
+
+    if [ "$BUILD_STARTED" -eq 1 ]; then
+        cleanup_generated_intermediates || status=1
+    fi
+    restore_reviewed_stub || status=1
+
+    # A failed compile must not leave a stale or partially generated binary
+    # that a later pack could mistake for reviewed output.
+    if [ "$BUILD_STARTED" -eq 1 ] && [ "$BUILD_SUCCEEDED" -ne 1 ]; then
+        find "$AI_DIR" -maxdepth 1 -type f \
+            -name '${MODULE}.cpython-*-*.so' -delete
+    fi
+
+    if [ -n "$STUB_BACKUP" ]; then
+        rm -f -- "$STUB_BACKUP"
+    fi
+
+    trap - EXIT
+    exit "$status"
+}
+
+# ── Platform gate ────────────────────────────────────────────────────
+UNAME_S="$(uname -s)"
+UNAME_M="$(uname -m)"
+if [ "$UNAME_S" != "Linux" ]; then
+    echo "⚠️  build-license-core: non-Linux host ($UNAME_S) — skipping compile."
+    echo "   First ship is linux-only. The bundle will fall back to .py."
+    exit 0
+fi
+
+if [ ! -f "$SRC" ]; then
+    echo "❌ Source not found: $SRC"
+    exit 1
+fi
+
+if [ ! -f "$STUB" ]; then
+    echo "❌ Reviewed type stub not found: $STUB"
+    exit 1
+fi
+
+# Nuitka rewrites ${MODULE}.pyi in place. Preserve the reviewed bundle
+# artifact before invoking the compiler and restore it on every exit path.
+STUB_BACKUP="$(mktemp "${TMPDIR:-/tmp}/delimit-license-core-pyi.XXXXXX")"
+cp -p -- "$STUB" "$STUB_BACKUP"
+trap cleanup EXIT
+
+# ── Toolchain check ──────────────────────────────────────────────────
+PY="${PYTHON:-python3}"
+if ! command -v "$PY" >/dev/null 2>&1; then
+    echo "❌ python3 not found"
+    exit 1
+fi
+
+PY_VER="$($PY -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+echo "🔧 build-license-core: python=$PY ($PY_VER), arch=$UNAME_M"
+
+if ! "$PY" -m nuitka --version >/dev/null 2>&1; then
+    echo "📦 nuitka not installed — installing via pip..."
+    "$PY" -m pip install --quiet --user nuitka
+fi
+
+NUITKA_VER="$($PY -m nuitka --version 2>&1 | head -1)"
+echo "   nuitka=$NUITKA_VER"
+
+# ── Compile ──────────────────────────────────────────────────────────
+echo "🔨 Compiling ${MODULE}.py → .so (this takes ~30s)..."
+BUILD_STARTED=1
+find "$AI_DIR" -maxdepth 1 -type f \
+    -name '${MODULE}.cpython-*-*.so' -delete
+cleanup_generated_intermediates
+cd "$AI_DIR"
+"$PY" -m nuitka --module --quiet --remove-output --output-dir=. "${MODULE}.py"
+
+# The generated stub is not authoritative. Restore the committed/reviewed
+# bytes before any later packaging guard can inspect or ship the tree.
+restore_reviewed_stub
+if ! cmp -s -- "$STUB_BACKUP" "$STUB"; then
+    echo "❌ Failed to restore reviewed ${MODULE}.pyi byte-for-byte"
+    exit 1
+fi
+echo "   ✅ restored reviewed ${MODULE}.pyi byte-for-byte"
+
+# ── Verify output ────────────────────────────────────────────────────
+SO_FILE="$(ls -1 "${MODULE}".cpython-*-*.so 2>/dev/null | head -1 || true)"
+if [ -z "$SO_FILE" ] || [ ! -f "$SO_FILE" ]; then
+    echo "❌ Compile failed — no .so produced in $AI_DIR"
+    ls -la "$AI_DIR"/license_core* 2>&1 || true
+    exit 1
+fi
+
+SO_SIZE="$(stat -c%s "$SO_FILE")"
+echo "   ✅ produced: $SO_FILE ($SO_SIZE bytes)"
+
+# ── Linux ABI compatibility guard ───────────────────────────────────
+# The public Linux artifact supports Ubuntu 22.04 (glibc 2.35). Building on
+# a floating runner can silently add newer symbol requirements even when the
+# extension imports on the build host. Inspect the artifact itself and fail
+# closed before npm can pack an incompatible binary.
+GLIBC_CEILING="2.35"
+if ! command -v readelf >/dev/null 2>&1; then
+    echo "❌ readelf not found; cannot verify Linux ABI compatibility"
+    exit 1
+fi
+
+if ! READELF_OUTPUT="$(readelf --version-info "$SO_FILE" 2>/dev/null)"; then
+    echo "❌ readelf could not inspect $SO_FILE"
+    exit 1
+fi
+
+# Reject every non-numeric GLIBC requirement. Tags such as
+# GLIBC_ABI_DT_RELR can accompany otherwise-old numeric symbols, while
+# GLIBC_PRIVATE is intentionally not a portable ABI. A numeric-only ceiling
+# check would incorrectly accept either artifact.
+if ! GLIBC_TAGS="$(
+    printf '%s\n' "$READELF_OUTPUT" \
+        | grep -oE 'Name:[[:space:]]+GLIBC_[^[:space:]]+' \
+        | sed -E 's/^Name:[[:space:]]+//'
+)"; then
+    echo "❌ Could not parse GLIBC requirements for $SO_FILE"
+    exit 1
+fi
+
+GLIBC_NUMERIC_REQUIREMENTS=()
+UNSUPPORTED_GLIBC_REQUIREMENTS=()
+while IFS= read -r GLIBC_TAG; do
+    [ -n "$GLIBC_TAG" ] || continue
+    if [[ "$GLIBC_TAG" =~ ^GLIBC_([0-9]+(\.[0-9]+)+)$ ]]; then
+        GLIBC_NUMERIC_REQUIREMENTS+=("${BASH_REMATCH[1]}")
+    else
+        UNSUPPORTED_GLIBC_REQUIREMENTS+=("$GLIBC_TAG")
+    fi
+done <<< "$GLIBC_TAGS"
+
+if [ "${#UNSUPPORTED_GLIBC_REQUIREMENTS[@]}" -gt 0 ]; then
+    echo "❌ $SO_FILE requires unsupported GLIBC version tag(s):"
+    printf '%s\n' "${UNSUPPORTED_GLIBC_REQUIREMENTS[@]}"
+    exit 1
+fi
+
+if [ "${#GLIBC_NUMERIC_REQUIREMENTS[@]}" -eq 0 ]; then
+    echo "❌ Could not determine GLIBC requirements for $SO_FILE"
+    exit 1
+fi
+
+if ! GLIBC_REQUIREMENTS="$(printf '%s\n' "${GLIBC_NUMERIC_REQUIREMENTS[@]}" | sort -Vu)"; then
+    echo "❌ Could not sort GLIBC requirements for $SO_FILE"
+    exit 1
+fi
+
+MAX_GLIBC="$(printf '%s\n' "$GLIBC_REQUIREMENTS" | tail -n 1)"
+if ! GLIBC_CEILING_COMPARISON="$(
+    printf '%s\n%s\n' "$GLIBC_CEILING" "$MAX_GLIBC" | sort -V | tail -n 1
+)"; then
+    echo "❌ Could not compare GLIBC requirements for $SO_FILE"
+    exit 1
+fi
+if [ "$GLIBC_CEILING_COMPARISON" != "$GLIBC_CEILING" ]; then
+    echo "❌ $SO_FILE requires GLIBC_$MAX_GLIBC; maximum supported is GLIBC_$GLIBC_CEILING (Ubuntu 22.04)"
+    exit 1
+fi
+echo "   ✅ GLIBC requirement $MAX_GLIBC <= $GLIBC_CEILING (Ubuntu 22.04 compatible)"
+
+# ── Bypass-identifier scan ───────────────────────────────────────────
+# Customers must not be able to `strings | grep` the .so for known
+# bypass class names. Fail the build if any leak through.
+BYPASS_HITS="$(strings "$SO_FILE" | grep -iE 'DELIMIT_TEST_MODE|DELIMIT_INTERNAL_LICENSE_KEY|JAMSONS' || true)"
+if [ -n "$BYPASS_HITS" ]; then
+    echo "❌ Bypass identifiers found in compiled .so:"
+    echo "$BYPASS_HITS"
+    exit 1
+fi
+echo "   ✅ strings-grep clean (no bypass identifiers)"
+
+# ── Drop the plaintext source from the bundle ────────────────────────
+# .npmignore + package.json will also exclude it, but removing here is
+# belt-and-suspenders so dev/test inspection of the bundle dir matches
+# what gets packed.
+rm -f "$AI_DIR/${MODULE}.py"
+echo "   ✅ removed plaintext ${MODULE}.py from bundle"
+
+BUILD_SUCCEEDED=1
+echo "✅ build-license-core complete: $SO_FILE"
