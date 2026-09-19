@@ -75,6 +75,54 @@ test('every version source agrees with package.json', () => {
   );
 });
 
+/**
+ * The completeness problem, and why the list above is not enough on its own.
+ *
+ * Blocked in review of PR #230: a hardcoded enumeration cannot detect a source
+ * it does not enumerate, and "I found them all" is exactly the belief that was
+ * already wrong twice. Reproducing the two KNOWN failures demonstrates nothing
+ * about unknown ones.
+ *
+ * So this test does not trust the list. It reads the publish workflow — the
+ * thing that actually burns a tag when it disagrees — extracts every version
+ * expression that its gate evaluates, and asserts each one is covered above.
+ * If someone adds a new version check to publish.yml, this fails and names it,
+ * instead of the drift being discovered after a tag is pushed and spent.
+ *
+ * The authority is the pipeline, not the author's memory of it.
+ */
+test('every version source the publish workflow gates on is covered here', () => {
+  const wf = fs.readFileSync(
+    path.join(ROOT, '.github', 'workflows', 'publish.yml'),
+    'utf8',
+  );
+
+  // Every `require('./<file>')<path>.version` the workflow evaluates.
+  const found = [...wf.matchAll(/require\(\s*'\.\/([^']+)'\s*\)((?:\.[A-Za-z_$][\w$]*|\[\s*\d+\s*\])*)/g)]
+    .map(([, file, accessor]) => `${file} ${accessor || '(root)'}`)
+    .filter((expr) => expr.includes('version'));
+
+  assert.ok(
+    found.length > 0,
+    'extracted no version expressions from publish.yml — the regex has drifted ' +
+      'from the workflow and this check is now vacuous, which is worse than absent',
+  );
+
+  const covered = new Set(collectSources().map((s) => s.label));
+  const uncovered = found.filter((expr) => !covered.has(expr));
+
+  assert.deepStrictEqual(
+    uncovered,
+    [],
+    'publish.yml gates on a version source this test does not check.\n' +
+      'That is the exact gap that burned v4.19.5: the workflow knew about\n' +
+      'server.json and the local checks did not.\n' +
+      `  gated by publish.yml : ${JSON.stringify(found)}\n` +
+      `  covered here         : ${JSON.stringify([...covered])}\n` +
+      'Add the missing source to collectSources().',
+  );
+});
+
 test('no version source is empty or undefined', () => {
   // A missing field reads as undefined and would make every comparison above
   // pass vacuously if the expected value were also undefined. Pin presence
