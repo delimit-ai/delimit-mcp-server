@@ -235,3 +235,68 @@ test('malformed native settings and raw runtime errors never disclose content', 
     assert.equal(h.launchHarnessShim('copilot',{...f.opts,args:['-p','synthetic'],spawnSync:()=>{throw new Error(secret);}}),1);
     assert(!f.errors.join(' ').includes(secret));
 });
+
+
+for (const id of ['muse', 'copilot']) {
+    test('chat '+id+' supports neutral owner home without stale venture inference', t => {
+        const f = fixture(t);
+        fs.mkdirSync(path.join(f.home,'.delimit'));
+        fs.writeFileSync(path.join(f.home,'.delimit/active_venture.json'), JSON.stringify({
+            repoRoot:f.repo,venture:'UNRELATED_OLD_VENTURE',updatedAt:'2026-04-02T00:00:00Z'}));
+        fs.writeFileSync(path.join(f.home,'AGENTS.md'),'Owner workspace instructions');
+        assert.equal(h.launchExplicitHarness(id,{...f.opts,cwd:f.home,allowOwnerWorkspace:true}),0);
+        const call=f.calls.at(-1);
+        assert.equal(call.opts.cwd,f.home);
+        const packet=call.args.at(-1);
+        assert.match(packet,/unscoped portfolio lead/);
+        assert.match(packet,/No venture or project handoff has been selected/);
+        assert(packet.includes(path.join(f.home,'AGENTS.md')));
+        assert(!packet.includes('UNRELATED_OLD_VENTURE'));
+        assert(!packet.includes(f.repo));
+        assert(!call.args.includes('--no-session-log'));
+        assert(!call.args.some(a=>/--(yolo|disable-approval|disable-sandbox)/.test(a)));
+    });
+}
+
+test('explicit chat project validates real Git root and ignores redirected Git environment', t => {
+    const f=fixture(t), cp=require('child_process');
+    cp.execFileSync('git',['init','-q',f.repo]);
+    const {resolveChatProject}=require('../lib/continuity-resolver');
+    assert.equal(resolveChatProject(null,{cwd:f.home,home:f.home}),null);
+    const selected=resolveChatProject(f.repo,{cwd:f.home,home:f.home,
+        env:{...process.env,GIT_DIR:'/nonexistent/redirected.git',GIT_WORK_TREE:f.home}});
+    assert.equal(selected.cwd,f.repo); assert.equal(selected.repoRoot,f.repo);
+    assert.throws(()=>resolveChatProject(f.home,{home:f.home}),/existing Git project/);
+    assert.throws(()=>resolveChatProject(path.join(f.root,'missing'),{home:f.home}),/existing Git project/);
+    const nested=path.join(f.repo,'src');fs.mkdirSync(nested);
+    assert.equal(resolveChatProject(nested,{home:f.home}).repoRoot,f.repo);
+});
+
+
+test('actual chat CLI launches both native stubs from home and honors explicit project', t => {
+    const f=fixture(t), cp=require('child_process');
+    cp.execFileSync('git',['init','-q',f.repo]);
+    fs.mkdirSync(path.join(f.home,'.delimit'));
+    fs.writeFileSync(path.join(f.home,'.delimit/active_venture.json'), JSON.stringify({
+        repoRoot:f.repo,venture:'UNRELATED_STALE_VENTURE',updatedAt:'2026-04-02T00:00:00Z'}));
+    for (const bin of ['muse-bin-1.2.1-R2847.1','copilot']) {
+        fs.writeFileSync(path.join(f.home,'.local/bin',bin), `#!${process.execPath}\nrequire('fs').writeFileSync(process.env.CHAT_STUB_RECEIPT, JSON.stringify({cwd:process.cwd(),args:process.argv.slice(2),venture:process.env.DELIMIT_RESOLVED_VENTURE}));\n`, {mode:0o755});
+    }
+    for (const id of ['muse','copilot']) {
+        for (const project of [null,f.repo]) {
+            const receipt=path.join(f.root,'native-receipt.json');
+            const result=cp.spawnSync(process.execPath,[path.join(__dirname,'../bin/delimit-cli.js'),
+                'chat','--model',id,...(project?['--project',project]:[])],{
+                cwd:f.home,encoding:'utf8',env:{HOME:f.home,DELIMIT_HOME:path.join(f.home,'.delimit'),
+                    PATH:process.env.PATH,CHAT_STUB_RECEIPT:receipt,DELIMIT_NO_TELEMETRY:'1',
+                    ...(project?{DELIMIT_SCOPE:'all',DELIMIT_VENTURE:'old-venture'}:{})}});
+            assert.equal(result.status,0,result.stderr);
+            const native=JSON.parse(fs.readFileSync(receipt));
+            assert.equal(native.cwd,project||f.home);
+            assert(!JSON.stringify(native).includes('UNRELATED_STALE_VENTURE'));
+            assert.equal(native.args.includes('--no-session-log'),false);
+            assert.equal(native.args.at(-1).includes('unscoped portfolio lead'),!project);
+            if(project)assert.equal(native.venture,path.basename(f.repo));
+        }
+    }
+});

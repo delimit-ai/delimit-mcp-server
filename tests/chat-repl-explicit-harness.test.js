@@ -92,14 +92,62 @@ describe('explicit Copilot/Muse chat harnesses', () => {
         }
     });
 
-    it('the existing default and explicit Codex chain remain unchanged', () => {
-        assert.deepEqual(makeRepl({}).getActiveChain().map(row => row.id), ['claude', 'codex']);
-        assert.deepEqual(makeRepl({ model: 'codex' }).getActiveChain().map(row => row.id), ['codex', 'claude']);
+    it('lead order adds native harnesses while explicit Codex remains first', () => {
+        assert.deepEqual(makeRepl({}).getActiveChain().map(row => row.id), ['claude', 'codex', 'muse', 'copilot']);
+        assert.deepEqual(makeRepl({ model: 'codex' }).getActiveChain().map(row => row.id), ['codex', 'claude', 'muse', 'copilot']);
     });
 
     it('setup uses the dedicated shim writer, not the legacy tool template', () => {
         const source = fs.readFileSync(path.join(__dirname, '..', 'bin', 'delimit-setup.js'), 'utf8');
         assert.match(source, /require\('\.\.\/lib\/harness-launch'\)\.installHarnessShims\(/);
         assert.doesNotMatch(source, /\['(?:muse|copilot)',/);
+    });
+});
+
+
+describe('owner lead lineup', () => {
+    it('orders all five leads without changing shared registry/fallbacks', () => {
+        const repl = makeRepl({});
+        repl.modelsConfig.antigravity = { auth_mode: 'chat_login' };
+        repl.modelsConfig.fallbacks.default = ['grok', 'codex', 'claude'];
+        const before = JSON.stringify(repl.modelsConfig);
+        assert.deepEqual(repl.getActiveChain().map(r => r.id), ['claude', 'codex', 'antigravity', 'muse', 'copilot']);
+        assert.equal(JSON.stringify(repl.modelsConfig), before);
+        repl.modelsConfig.muse = {enabled: false};
+        repl.failedModels.add('codex');
+        assert.deepEqual(repl.getActiveChain().map(r => r.id), ['claude', 'antigravity', 'copilot']);
+        repl.apiFallbackEnabled = true;
+        assert.equal(repl.getActiveChain().at(-1).id, 'grok');
+    });
+
+    it('failed Muse advances to Copilot without probes or invented home capture', () => {
+        const repl = makeRepl({launchExplicitHarness: () => 1});
+        for (const id of ['claude', 'codex', 'antigravity']) repl.failedModels.add(id);
+        const originalCwd = process.cwd();
+        process.chdir(require('os').homedir());
+        try {
+            repl.captureSoulForMigration = () => {throw Error('must not infer project from home');};
+            const chain = repl.getActiveChain();
+            assert.deepEqual(chain.map(r => r.id), ['muse', 'copilot']);
+            assert.deepEqual(repl.launchLeadHarness(chain[0], chain[1]), {continue:true, status:1});
+            assert.equal(repl.getActiveChain()[0].id, 'copilot');
+        } finally { process.chdir(originalCwd); }
+    });
+
+    it('project fallback preserves existing capture and honest unavailable result', () => {
+        const repl = makeRepl({launchExplicitHarness: () => 1});
+        const calls = [];
+        repl.captureSoulForMigration = (...args) => { calls.push(args); return {status:'unavailable'}; };
+        assert.equal(repl.launchLeadHarness({id:'muse'}, {id:'copilot'}).continue, true);
+        assert.equal(calls.length, 1);
+        assert.deepEqual(calls[0].slice(0,2), ['muse','copilot']);
+        assert.equal(calls[0][2].trigger, 'launcher-crash');
+    });
+
+    it('native interrupt does not silently move to another provider', () => {
+        const repl = makeRepl({launchExplicitHarness: () => 130});
+        repl.captureSoulForMigration = () => {throw Error('unexpected capture');};
+        assert.deepEqual(repl.launchLeadHarness({id:'muse'}, {id:'copilot'}), {continue:false,status:130});
+        assert.equal(repl.failedModels.has('muse'), false);
     });
 });
