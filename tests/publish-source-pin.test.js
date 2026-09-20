@@ -100,3 +100,21 @@ test('file publish dry-run preserves bytes and cannot rerun the directory build 
         assert.equal(directory.status,93,directory.stderr);
     } finally { fs.rmSync(dir,{recursive:true,force:true}); }
 });
+
+test('credential-free no-provider deliberation status is useful, with strict quota and OAuth types',()=>pythonCheck(`
+os.environ.clear()
+# Actual fresh CI runtime shape: no API keys, CLIs, hosted keys or OAuth login.
+status={'mode':'none','install_id':'fresh-ci-install','hosted_used':0,'hosted_remaining':3,'hosted_limit':3,'oauth_required':True,'oauth_signed_in':False}
+m.validate_deliberation_status(status)
+for mode in ('byok','hosted'):
+ m.validate_deliberation_status(dict(status,mode=mode))
+for field,value in [('mode','unknown'),('hosted_used',True),('hosted_remaining','3'),('hosted_limit',-1),('hosted_remaining',4),('oauth_required','true'),('oauth_signed_in',0),('install_id','')]:
+ try: m.validate_deliberation_status(dict(status,**{field:value}))
+ except RuntimeError: pass
+ else: raise AssertionError('invalid status accepted: '+field)
+for field in ('mode','hosted_used','hosted_remaining','hosted_limit','oauth_required','oauth_signed_in','install_id'):
+ bad=dict(status);del bad[field]
+ try: m.validate_deliberation_status(bad)
+ except RuntimeError: pass
+ else: raise AssertionError('missing field accepted: '+field)
+`));

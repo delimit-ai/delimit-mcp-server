@@ -76,6 +76,18 @@ def payload(result):
     return value
 
 
+def validate_deliberation_status(value):
+    # No provider keys/CLI configuration is a valid fresh installation. The
+    # installed engine explicitly reports "none" rather than an error then.
+    require(value.get('mode') in ('none', 'byok', 'hosted'), 'invalid deliberation mode')
+    for name in ('hosted_used', 'hosted_remaining', 'hosted_limit'):
+        require(type(value.get(name)) is int and value[name] >= 0, 'invalid deliberation quota: ' + name)
+    require(value['hosted_remaining'] <= value['hosted_limit'], 'remaining quota exceeds limit')
+    for name in ('oauth_required', 'oauth_signed_in'):
+        require(type(value.get(name)) is bool, 'invalid deliberation OAuth field: ' + name)
+    require(isinstance(value.get('install_id'), str) and bool(value['install_id']), 'missing installation id')
+
+
 def installed_fixtures(root):
     from datetime import datetime, timedelta
     from importlib.machinery import ExtensionFileLoader
@@ -202,8 +214,7 @@ async def mcp_checks(root, project, version):
                     require(isinstance(value.get('steps'), list) and len(value['steps']) == 7,
                             'quickstart did not complete seven steps')
                 elif name == 'delimit_deliberation_status':
-                    require(value.get('mode') in ('byok', 'hosted') and isinstance(value.get('hosted_remaining'), int),
-                            'deliberation status missing mode/quota')
+                    validate_deliberation_status(value)
                 else:
                     require(not value.get('error') and value.get('status') not in ('error', 'capability_unavailable', 'premium_required'), name + ' unavailable')
                 results[name] = value
