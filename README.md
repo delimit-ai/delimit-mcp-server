@@ -166,22 +166,36 @@ delimit_ledger_done       → close with a note (auto-captures a PR URL as ship 
 
 That's the loop: gate the change, sign the proof, keep the context. Run it once on a real spec and you've used the whole merge gate.
 
-### Explicit Copilot CLI and Muse Code sessions
+### Lead chat, Copilot CLI and Muse Code sessions
 
 Install and authenticate the official client separately, under the same OS user
 who runs Delimit. Delimit does not install these clients, purchase a plan, log you
-in, or verify your subscription allowance. Then launch from the actual Git
-repository, not your home directory:
+in, or verify your subscription allowance. The interactive lead order is
+Claude → Codex → Antigravity → Muse → Copilot, subject to existing configuration,
+availability and native-client checks. This changes only lead chat, not review
+panels or background routing. Existing paid API fallback remains opt-in.
 
 ```bash
-cd /path/to/repository
-npx delimit-cli chat --model copilot
+npx delimit-cli chat
 npx delimit-cli chat --model muse
+npx delimit-cli chat --model copilot
+npx delimit-cli chat --project /path/to/repository --model muse
 ```
 
-These are explicitly selected interactive harnesses, not new model votes or
-automatic build-loop backends. Neither launch probes other models or falls back
-to another provider. Native permission approvals remain active. Copilot launches
+You can launch from your home directory without changing directories. That is
+an unscoped owner workspace: Delimit loads workspace instructions but does not
+infer a venture or restore the newest unrelated handoff. A stale active-venture
+pointer is not selected. Use `--project` to bind an existing Git repository;
+missing or invalid project paths fail before launching a model. Root/workspace
+exit does not claim a project-bound capture. Recover or save continuity against
+the actual task scope through existing Delimit tools.
+
+Muse and Copilot are native interactive harnesses, not new model votes or
+automatic build-loop backends. An explicit `--model muse` or `--model copilot`
+stays on that selection without probing or silently switching providers.
+In the default lead chain a failed native launch can advance to the next lead;
+an intentional interrupt exits. No successful handoff is inferred from a failed
+or unavailable capture. Native permission approvals remain active. Copilot launches
 with automatic updates and remote/export features disabled for this session.
 
 **Muse preparation:** first verify that your account permits Standard

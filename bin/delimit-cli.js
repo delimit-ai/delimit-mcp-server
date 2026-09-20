@@ -14,6 +14,7 @@ const crossModelHooks = require('../lib/cross-model-hooks');
 const { delimitHome, homeSubpath } = require('../lib/delimit-home');
 const {
     resolveContinuityContext,
+    resolveChatProject,
     formatContinuityReport,
     resolveRepoRoot,
     loadActiveVenture,
@@ -7515,11 +7516,32 @@ program
     .alias('phoenix')
     .description('Governed session launcher: quota fallback + soul revive across models (Auto-Phoenix). Alias: phoenix')
     .option('--api-fallback', 'Enable API fallback to continue using paid tokens')
-    .option('--model <id>', 'Launch claude/codex/antigravity with the default fallback chain, or copilot/muse as an explicit-only harness with no automatic fallback')
+    .option('--model <id>', 'Start with a selected lead; explicit muse/copilot stays on that native harness without fallback')
+    .option('--project <path>', 'Use an existing Git project without changing your shell directory; home launches remain an unscoped owner workspace')
     .action((options) => {
-        const { DelimitChatREPL } = require('../lib/chat-repl');
-        const repl = new DelimitChatREPL(options);
-        repl.start();
+        try {
+            const selected = resolveChatProject(options.project);
+            if (selected) {
+                // --project binds validation AND every downstream child to the
+                // selected repository, even before the native launcher runs.
+                for (const key of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE',
+                    'GIT_OBJECT_DIRECTORY', 'GIT_COMMON_DIR', 'GIT_QUARANTINE_PATH']) delete process.env[key];
+                process.chdir(selected.cwd);
+                const context = resolveContinuityContext({ cwd: selected.cwd, venture: selected.venture, scope: 'repo' });
+                process.env.DELIMIT_CONTINUITY_ROOT = context.continuityRoot;
+                process.env.DELIMIT_REPO_GOVERNANCE_ROOT = context.repoGovernanceRoot || '';
+                process.env.DELIMIT_RESOLVED_VENTURE = context.venture;
+                process.env.DELIMIT_RESOLVED_ACTOR = context.actor;
+                process.env.DELIMIT_VENTURE = context.venture;
+                process.env.DELIMIT_SCOPE = 'repo';
+            }
+            const { DelimitChatREPL } = require('../lib/chat-repl');
+            const repl = new DelimitChatREPL(options);
+            repl.start();
+        } catch (error) {
+            console.error(chalk.red(error.message));
+            process.exitCode = 1;
+        }
     });
 
 program
