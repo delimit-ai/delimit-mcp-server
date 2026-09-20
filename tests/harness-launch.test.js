@@ -280,7 +280,7 @@ test('actual chat CLI launches both native stubs from home and honors explicit p
     fs.writeFileSync(path.join(f.home,'.delimit/active_venture.json'), JSON.stringify({
         repoRoot:f.repo,venture:'UNRELATED_STALE_VENTURE',updatedAt:'2026-04-02T00:00:00Z'}));
     for (const bin of ['muse-bin-1.2.1-R2847.1','copilot']) {
-        fs.writeFileSync(path.join(f.home,'.local/bin',bin), `#!${process.execPath}\nrequire('fs').writeFileSync(process.env.CHAT_STUB_RECEIPT, JSON.stringify({cwd:process.cwd(),args:process.argv.slice(2),venture:process.env.DELIMIT_RESOLVED_VENTURE}));\n`, {mode:0o755});
+        fs.writeFileSync(path.join(f.home,'.local/bin',bin), `#!${process.execPath}\nrequire('fs').writeFileSync(process.env.CHAT_STUB_RECEIPT, JSON.stringify({cwd:process.cwd(),args:process.argv.slice(2),venture:process.env.DELIMIT_RESOLVED_VENTURE,gitRouting:Object.fromEntries(Object.entries(process.env).filter(([k])=>['GIT_DIR','GIT_WORK_TREE','GIT_INDEX_FILE','GIT_OBJECT_DIRECTORY','GIT_COMMON_DIR','GIT_QUARANTINE_PATH'].includes(k)))}));\n`, {mode:0o755});
     }
     for (const id of ['muse','copilot']) {
         for (const project of [null,f.repo]) {
@@ -289,10 +289,13 @@ test('actual chat CLI launches both native stubs from home and honors explicit p
                 'chat','--model',id,...(project?['--project',project]:[])],{
                 cwd:f.home,encoding:'utf8',env:{HOME:f.home,DELIMIT_HOME:path.join(f.home,'.delimit'),
                     PATH:process.env.PATH,CHAT_STUB_RECEIPT:receipt,DELIMIT_NO_TELEMETRY:'1',
-                    ...(project?{DELIMIT_SCOPE:'all',DELIMIT_VENTURE:'old-venture'}:{})}});
+                    ...(project?{DELIMIT_SCOPE:'all',DELIMIT_VENTURE:'old-venture',
+                        GIT_DIR:'/nonexistent/hostile.git',GIT_WORK_TREE:f.home,GIT_INDEX_FILE:'/nonexistent/hostile-index',
+                        GIT_OBJECT_DIRECTORY:'/nonexistent/objects',GIT_COMMON_DIR:'/nonexistent/common',GIT_QUARANTINE_PATH:'/nonexistent/quarantine'}:{})}});
             assert.equal(result.status,0,result.stderr);
             const native=JSON.parse(fs.readFileSync(receipt));
             assert.equal(native.cwd,project||f.home);
+            assert.deepEqual(native.gitRouting,{});
             assert(!JSON.stringify(native).includes('UNRELATED_STALE_VENTURE'));
             assert.equal(native.args.includes('--no-session-log'),false);
             assert.equal(native.args.at(-1).includes('unscoped portfolio lead'),!project);

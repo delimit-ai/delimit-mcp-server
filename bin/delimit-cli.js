@@ -7522,6 +7522,10 @@ program
         try {
             const selected = resolveChatProject(options.project);
             if (selected) {
+                // --project binds validation AND every downstream child to the
+                // selected repository, even before the native launcher runs.
+                for (const key of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE',
+                    'GIT_OBJECT_DIRECTORY', 'GIT_COMMON_DIR', 'GIT_QUARANTINE_PATH']) delete process.env[key];
                 process.chdir(selected.cwd);
                 const context = resolveContinuityContext({ cwd: selected.cwd, venture: selected.venture, scope: 'repo' });
                 process.env.DELIMIT_CONTINUITY_ROOT = context.continuityRoot;
