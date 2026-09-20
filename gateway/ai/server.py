@@ -638,7 +638,7 @@ def _emit_policy_event(tool_name: str, status: str, reason: str) -> None:
 #      gateway/ai/server.py ← ../../package.json)
 #   3. the pinned fallback below (last resort so the delimit_version return
 #      schema never changes shape — never-break-installs).
-_VERSION_FALLBACK = "4.19.6"
+_VERSION_FALLBACK = "4.19.7"
 
 
 def _resolve_version(start_path: Optional[str] = None) -> str:
@@ -1162,7 +1162,8 @@ def _check_pro(tool_name: str) -> Optional[Dict]:
 # migration, existing users are NOT hard-cut: a 90-day grace window allows AND
 # grandfathers any current caller; only AFTER the window is a new, non-licensed,
 # non-grandfathered caller gated. Reversible (delete the grandfather file or move
-# the date). Nothing charges a customer until npm publish (founder gate).
+# the date). LED-5459 now ends that grandfather exemption for the staged
+# twelve only; the other tools retain their original migration protection.
 _SOCIAL_PRO_ENFORCE_AFTER = "2026-09-16T00:00:00+00:00"
 # AUTHORITATIVE. Recorded in the ratified LED-1741 decision (2026-06-16):
 # "ENFORCED with customer-safe 90-day grace + grandfather gate ... ENFORCE_AFTER
@@ -1176,7 +1177,7 @@ _NEWLY_ENFORCED_PRO = frozenset({
     # LED-1740 staged-12 gating (founder-ratified 2026-06-16): tools with real
     # marginal cost (3-model LLM audit, paid-API + LLM vendor news, outbound
     # X/YouTube posting, scrapers, background daemon threads) moved into Pro.
-    # Same 90-day grace + grandfather — no existing free user is hard-cut.
+    # Historical grace; LED-5459 ends grandfathering for these twelve below.
     "delimit_audit",
     "delimit_build_loop_daemon",
     "delimit_vendor_news_scan", "delimit_vendor_news_draft",
@@ -1191,6 +1192,17 @@ _NEWLY_ENFORCED_PRO = frozenset({
     # listed above.)
     "delimit_security_deliberate", "delimit_security_ingest",
     "delimit_gov_new_task",
+})
+# LED-5459 owner decision (2026-09-19): enforce these twelve for old and
+# new Free installations after grace, including previously recorded users.
+# Other newly-enforced tools retain their existing grandfather protection.
+_STAGED_PRO_NO_GRANDFATHER = frozenset({
+    "delimit_audit", "delimit_build_loop_daemon",
+    "delimit_vendor_news_scan", "delimit_vendor_news_draft",
+    "delimit_content_publish", "delimit_social_target",
+    "delimit_github_scan", "delimit_reddit_scan",
+    "delimit_inbox_daemon", "delimit_social_daemon",
+    "delimit_daemon_run", "delimit_notify_inbox",
 })
 _GRANDFATHER_FILE = os.path.expanduser("~/.delimit/grandfathered_tools.json")
 
@@ -1236,6 +1248,9 @@ def _pro_gate_graced(tool_name: str, *, now=None) -> Optional[Dict]:
     intent: LED-1740 promises no existing free user is hard-cut "mid-workflow",
     and LED-1741's own acceptance criteria state post-grace "blocks fresh free
     only". A tool never used is not a workflow in progress.
+
+    LED-5459 owner decision (2026-09-19) supersedes grandfathering for only
+    _STAGED_PRO_NO_GRANDFATHER: after grace, old and new Free users require Pro.
     """
     from ai.license import require_premium
     full = tool_name if tool_name.startswith("delimit_") else f"delimit_{tool_name}"
@@ -1246,6 +1261,8 @@ def _pro_gate_graced(tool_name: str, *, now=None) -> Optional[Dict]:
         return gate  # already-Pro tool → enforce as before (no grace)
     now = now or datetime.now(timezone.utc)
     deadline = datetime.fromisoformat(_SOCIAL_PRO_ENFORCE_AFTER)
+    if now >= deadline and full in _STAGED_PRO_NO_GRANDFATHER:
+        return gate  # owner-directed cutoff includes recorded legacy users
     if now < deadline or full in _load_grandfathered():
         _mark_grandfathered(full)  # grace-period users keep access after the window
         return None

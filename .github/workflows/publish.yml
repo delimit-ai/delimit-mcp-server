@@ -22,7 +22,7 @@ permissions:
 env:
   # Reviewed source for this package release. Never resolve a moving branch
   # independently in validation and publication; update with the reviewed bundle.
-  GATEWAY_SOURCE_SHA: '375ceb6fe7ee70178fa28effbebf0c4a5673d374'
+  GATEWAY_SOURCE_SHA: 'b255a7aa6f0ead16908cae1c7d3ef0b40e5338eb'
 
 jobs:
   validate:
@@ -279,14 +279,9 @@ jobs:
         working-directory: npm-delimit
         run: npm ci
 
-      # NOTE: no standalone "Sync gateway" step here. `npm publish` fires
-      # prepublishOnly, whose FIRST step (clean-tree-guard) requires a CLEAN
-      # working tree. A pre-publish sync step dirties the tree and made
-      # clean-tree-guard block the publish (root cause of the v4.14.2 / v4.15.0
-      # failures). prepublishOnly runs sync-gateway ITSELF, AFTER clean-tree-
-      # guard, so the gateway is synced at pack time from a clean baseline.
-      # GATEWAY_OVERRIDE (set on the publish steps below) lets that internal
-      # sync resolve the checked-out gateway in CI.
+      # Build once, accept the packed customer artifact, then publish that file.
+      # Explicit prepublishOnly below retains all lifecycle gates on a clean
+      # checkout. File publication cannot trigger a second native rebuild.
 
       - name: Set up Python (LED-1259 compile)
         uses: actions/setup-python@v5
@@ -309,12 +304,48 @@ jobs:
           echo "node: $(node --version)"
           echo "npm:  $(npm --version)"
 
+      - name: Build and pack exact release artifact
+        working-directory: npm-delimit
+        env:
+          GATEWAY_OVERRIDE: ${{ github.workspace }}/delimit-gateway
+        run: |
+          set -euo pipefail
+          npm run prepublishOnly
+          RELEASE_DIR="$RUNNER_TEMP/delimit-release-artifact"
+          mkdir -p "$RELEASE_DIR"
+          npm pack --json --pack-destination "$RELEASE_DIR" > "$RELEASE_DIR/pack.json"
+          PACK_FILE=$(node -e 'const p=require(process.argv[1]); if(p.length!==1 || p[0].filename!==require("path").basename(p[0].filename)) process.exit(1); process.stdout.write(p[0].filename)' "$RELEASE_DIR/pack.json")
+          echo "RELEASE_TARBALL=$RELEASE_DIR/$PACK_FILE" >> "$GITHUB_ENV"
+          echo "RELEASE_EVIDENCE=$RELEASE_DIR/acceptance" >> "$GITHUB_ENV"
+          git rev-parse HEAD > "$RELEASE_DIR/npm-source-sha.txt"
+          echo "$GATEWAY_SOURCE_SHA" > "$RELEASE_DIR/gateway-source-sha.txt"
+          node --version > "$RELEASE_DIR/node-version.txt"
+          npm --version > "$RELEASE_DIR/npm-version.txt"
+          python3 --version > "$RELEASE_DIR/python-version.txt"
+
+      - name: Accept exact packed artifact
+        working-directory: npm-delimit
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p "require('./package.json').version")
+          python3 scripts/accept-packed-artifact.py "$RELEASE_TARBALL" "$VERSION" "$RELEASE_EVIDENCE"
+
+      - name: Retain exact artifact and acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-release-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/delimit-release-artifact/
+          if-no-files-found: error
+
       - name: Publish (dry run)
         if: github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run == 'true'
         working-directory: npm-delimit
         env:
           GATEWAY_OVERRIDE: ${{ github.workspace }}/delimit-gateway
-        run: npm publish --dry-run
+        run: |
+          python3 scripts/accept-packed-artifact.py --verify "$RELEASE_TARBALL" "$RELEASE_EVIDENCE/PASS.json"
+          npm publish "$RELEASE_TARBALL" --dry-run
 
       - name: Publish to npm
         if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run == 'false')
@@ -322,10 +353,12 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           GATEWAY_OVERRIDE: ${{ github.workspace }}/delimit-gateway
-        run: npm publish --access public
+        run: |
+          python3 scripts/accept-packed-artifact.py --verify "$RELEASE_TARBALL" "$RELEASE_EVIDENCE/PASS.json"
+          npm publish "$RELEASE_TARBALL" --access public
 
       - name: Verify published version
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run == 'false')
         working-directory: npm-delimit
         run: |
           PKG_VERSION=$(node -p "require('./package.json').version")
@@ -333,8 +366,9 @@ jobs:
           # bounded backoff instead of racing a fixed 10s sleep (v4.3.4 hit
           # E404 on the 10s path even though the publish had succeeded).
           for attempt in 1 2 3 4 5 6; do
-            if npm view "delimit-cli@$PKG_VERSION" version; then
-              echo "verified on attempt $attempt"
+            if npm view "delimit-cli@$PKG_VERSION" dist --json > "$RUNNER_TEMP/published-dist.json"; then
+              node -e 'const fs=require("fs"); const d=JSON.parse(fs.readFileSync(process.argv[1])); const a=JSON.parse(fs.readFileSync(process.argv[2])); if(d.shasum!==a.sha1 || d.integrity!==a.integrity) throw Error("Published artifact differs from accepted tarball")' "$RUNNER_TEMP/published-dist.json" "$RELEASE_EVIDENCE/PASS.json"
+              echo "accepted bytes verified on attempt $attempt"
               exit 0
             fi
             echo "attempt $attempt: not visible yet, sleeping $((attempt * 15))s"
