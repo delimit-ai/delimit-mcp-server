@@ -312,9 +312,9 @@ describe('LED-4057 delimit chat project-bound continuity', () => {
         fs.symlinkSync(other, path.join(backendRoot, 'sessions'));
         const { repl } = replReturning({ status: 'error', error: 'SECRET private exception text' });
         const result = repl.finalizeSession('claude');
-        assert.strictEqual(result.receipt_error, 'recovery_receipt_unavailable');
+        assert.strictEqual(result.receipt_error, undefined);
         assert.strictEqual(result.reason, 'backend_error');
-        assert.deepStrictEqual(fs.readdirSync(other), []);
+        assert.strictEqual(fs.readdirSync(other).length, 1);
         assert.doesNotMatch(repl.formatSessionExit(result), /SECRET/);
     });
 

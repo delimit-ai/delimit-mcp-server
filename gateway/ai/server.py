@@ -638,7 +638,7 @@ def _emit_policy_event(tool_name: str, status: str, reason: str) -> None:
 #      gateway/ai/server.py ← ../../package.json)
 #   3. the pinned fallback below (last resort so the delimit_version return
 #      schema never changes shape — never-break-installs).
-_VERSION_FALLBACK = "4.19.7"
+_VERSION_FALLBACK = "4.19.9"
 
 
 def _resolve_version(start_path: Optional[str] = None) -> str:
