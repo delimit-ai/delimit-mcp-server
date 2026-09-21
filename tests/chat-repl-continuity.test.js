@@ -308,13 +308,27 @@ describe('LED-4057 delimit chat project-bound continuity', () => {
 
     test('backend errors and unsafe receipt paths remain honest, without leaking raw errors', () => {
         const other = path.join(backendRoot, 'other');
-        fs.mkdirSync(other);
+        fs.mkdirSync(other, { mode: 0o700 });
+        fs.chmodSync(other, 0o700);
         fs.symlinkSync(other, path.join(backendRoot, 'sessions'));
         const { repl } = replReturning({ status: 'error', error: 'SECRET private exception text' });
         const result = repl.finalizeSession('claude');
-        assert.strictEqual(result.receipt_error, 'recovery_receipt_unavailable');
+        assert.strictEqual(result.receipt_error, undefined);
         assert.strictEqual(result.reason, 'backend_error');
-        assert.deepStrictEqual(fs.readdirSync(other), []);
+        assert.strictEqual(fs.readdirSync(other).length, 1);
+        assert.doesNotMatch(repl.formatSessionExit(result), /SECRET/);
+    });
+
+    test('a symlinked sessions directory whose target is group/world-writable is refused', () => {
+        const shared = path.join(backendRoot, 'shared');
+        fs.mkdirSync(shared);
+        fs.chmodSync(shared, 0o777);
+        fs.symlinkSync(shared, path.join(backendRoot, 'sessions'));
+        const { repl } = replReturning({ status: 'error', error: 'SECRET private exception text' });
+        const result = repl.finalizeSession('claude');
+        assert.strictEqual(result.receipt_error, 'recovery_receipt_unavailable');
+        assert.strictEqual(result.receipt, undefined);
+        assert.deepStrictEqual(fs.readdirSync(shared), []);
         assert.doesNotMatch(repl.formatSessionExit(result), /SECRET/);
     });
 
