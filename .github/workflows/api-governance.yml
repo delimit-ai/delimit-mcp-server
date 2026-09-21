@@ -2,16 +2,36 @@ name: API Governance
 
 on:
   pull_request:
+    # ready_for_review: drafts skip the job (below); marking ready runs it.
+    types: [opened, synchronize, reopened, ready_for_review]
+    # Cost control (2026-09-21): narrowed from every *.yaml/*.yml/*.json and
+    # lib/** to the inputs this job actually reads: the OpenAPI/Swagger specs
+    # the spec-check step discovers, the policy files the engine auto-discovers
+    # (.delimit/policies.yml, .delimit/policy.yaml, delimit.yml), and this
+    # workflow. Not a required status check (no required-checks rule on main),
+    # so an `on.paths` skip cannot leave a merge blocked.
     paths:
-      - '**/*.yaml'
-      - '**/*.yml'
-      - '**/*.json'
-      - 'lib/**'
+      - '**/openapi*.yaml'
+      - '**/openapi*.yml'
+      - '**/openapi*.json'
+      - '**/swagger*.yaml'
+      - '**/swagger*.yml'
+      - '**/swagger*.json'
+      - '.delimit/**'
+      - 'delimit.yml'
+      - '.github/workflows/api-governance.yml'
+
+# Cost control: a new push to the same PR cancels the superseded run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   api-check:
     name: Delimit API Check
+    if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       pull-requests: write
     steps:
@@ -41,3 +61,9 @@ jobs:
           old_spec: base/${{ steps.spec-check.outputs.spec_path }}
           new_spec: ${{ steps.spec-check.outputs.spec_path }}
           mode: advisory
+          # Keyless signing needs `id-token: write`, which this workflow does
+          # not grant; without it cosign fell back to an interactive
+          # device-code prompt and idled 300 s before failing (every run
+          # ~5 min, zero signed attestations produced). Disabled explicitly
+          # until the workflow is deliberately granted id-token: write.
+          attestation: 'false'

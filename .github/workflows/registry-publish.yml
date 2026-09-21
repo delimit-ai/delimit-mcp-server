@@ -26,6 +26,7 @@ jobs:
   registry:
     runs-on: ubuntu-latest
     name: Publish server.json
+    timeout-minutes: 15
     env:
       # Bump BOTH values together, and the same pair in publish.yml.
       MCP_PUBLISHER_VERSION: "1.8.1"

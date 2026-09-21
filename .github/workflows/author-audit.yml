@@ -47,6 +47,7 @@ permissions:
 jobs:
   author-audit:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     env:
       GH_TOKEN: ${{ secrets.AUTHOR_AUDIT_TOKEN || secrets.GITHUB_TOKEN }}
       ORG: delimit-ai
