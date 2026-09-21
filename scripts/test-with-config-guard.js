@@ -57,6 +57,7 @@ const TEST_FILES = [
     'tests/version-sources-lockstep.test.js',
     'tests/package-scripts-allowlist.test.js',
     'tests/release-tooling-hardening.test.js',
+    'tests/quickstart-cli.test.js',
 ];
 
 const cfgPath = resolveSharedConfigPath();

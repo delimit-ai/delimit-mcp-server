@@ -38,6 +38,14 @@ const program = new Command();
 const yaml = require('js-yaml');
 const { isInteractive } = require('../lib/interactive');
 
+// Paced progress line used by `quickstart`. It was referenced there since
+// PR #95 but only ever defined in bin/delimit-setup.js, so `delimit quickstart`
+// threw "ReferenceError: logp is not defined" on its first step (LED-5629).
+async function logp(msg, ms = 0) {
+    console.log(msg);
+    if (ms > 0) await new Promise(resolve => setTimeout(resolve, ms));
+}
+
 // Single source of truth for the CLI's own version (package.json). Hardcoded
 // version strings in banners drift (doctor printed "v4.20" on a 4.18.1 install).
 const CLI_VERSION = (() => {
