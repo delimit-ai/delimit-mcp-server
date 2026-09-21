@@ -1,10 +1,28 @@
 name: Tests
 
-on: [push, pull_request]
+# Cost control (2026-09-21): push runs are limited to main (and v* tags are
+# already validated by publish.yml); feature branches are tested through their
+# pull_request run, so a branch push no longer runs the suite twice. Drafts
+# skip; ready_for_review runs the full suite on the final head.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+# Superseded PR runs are cancelled; pushes to main are never cancelled.
+concurrency:
+  # PR runs group per PR number and cancel superseded runs. Push/dispatch runs
+  # get a unique group (run_id), so a main push is never cancelled or
+  # displaced while queued, exactly as before.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   scoped-mcp:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     name: Scoped MCP synthetic protocol tests
     steps:
       - uses: actions/checkout@v4
@@ -21,7 +39,9 @@ jobs:
           PYTHONPATH: gateway
 
   test:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     strategy:
       matrix:
         node-version: ['18', '20', '22']
@@ -39,7 +59,9 @@ jobs:
       - run: npm test
 
   bundle-guards:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     name: Bundle fail-closed guards
     steps:
       - uses: actions/checkout@v4

@@ -28,6 +28,15 @@ on:
 permissions:
   contents: read
 
+# Cost control (2026-09-21): superseded PR runs are cancelled; pushes to main
+# are never cancelled.
+concurrency:
+  # PR runs group per PR number and cancel superseded runs. Push/dispatch runs
+  # get a unique group (run_id), so a main push is never cancelled or
+  # displaced while queued, exactly as before.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   identity-strings:
     name: Identity-strings gate
