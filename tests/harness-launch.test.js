@@ -4,6 +4,10 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const h = require('../lib/harness-launch');
+// git subprocesses must never inherit GIT_DIR (e.g. from a pre-push hook in a
+// worktree): an inherited GIT_DIR made `git init` set core.bare=true on the
+// shared checkout's config (LED-5629; see tests/_git-hermetic.js).
+const { gitEnv } = require('./_git-hermetic');
 
 test('actual setup block propagates explicit shim failures to its CLI error handler', () => {
     const vm = require('vm');
@@ -260,7 +264,7 @@ for (const id of ['muse', 'copilot']) {
 
 test('explicit chat project validates real Git root and ignores redirected Git environment', t => {
     const f=fixture(t), cp=require('child_process');
-    cp.execFileSync('git',['init','-q',f.repo]);
+    cp.execFileSync('git',['init','-q',f.repo],{cwd:f.root,env:gitEnv(f.root),stdio:'ignore'});
     const {resolveChatProject}=require('../lib/continuity-resolver');
     assert.equal(resolveChatProject(null,{cwd:f.home,home:f.home}),null);
     const selected=resolveChatProject(f.repo,{cwd:f.home,home:f.home,
@@ -275,7 +279,7 @@ test('explicit chat project validates real Git root and ignores redirected Git e
 
 test('actual chat CLI launches both native stubs from home and honors explicit project', t => {
     const f=fixture(t), cp=require('child_process');
-    cp.execFileSync('git',['init','-q',f.repo]);
+    cp.execFileSync('git',['init','-q',f.repo],{cwd:f.root,env:gitEnv(f.root),stdio:'ignore'});
     fs.mkdirSync(path.join(f.home,'.delimit'));
     fs.writeFileSync(path.join(f.home,'.delimit/active_venture.json'), JSON.stringify({
         repoRoot:f.repo,venture:'UNRELATED_STALE_VENTURE',updatedAt:'2026-04-02T00:00:00Z'}));
