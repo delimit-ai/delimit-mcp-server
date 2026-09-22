@@ -1,8 +1,8 @@
 # `</>` Delimit
 
-**The merge gate for AI-written code, with signed, replayable attestation.**
+**Building your AI organization.**
 
-Wrap any AI coding assistant (Claude Code, Codex, Cursor, Gemini CLI) with a governance chain that runs your gates, records what changed, and signs a replayable receipt for every merge.
+Persistent memory, shared records and handoffs, and a merge gate for AI-written code with signed, replayable attestation — for Claude Code, Codex, Cursor, and Gemini CLI. Local-first, open source (MIT).
 
 [![npm](https://img.shields.io/npm/v/delimit-cli)](https://www.npmjs.com/package/delimit-cli)
 [![Tests](https://img.shields.io/badge/tests-4800%2B%20passing-brightgreen)](https://github.com/delimit-ai/delimit-mcp-server)
