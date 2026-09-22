@@ -7029,8 +7029,15 @@ program
 // Memory commands: remember, recall, forget
 // ---------------------------------------------------------------------------
 
-const MEMORY_DIR = homeSubpath('memory');
-const MEMORY_FILE = path.join(MEMORY_DIR, 'memories.jsonl');
+// LED-5658: was a module-level const frozen at process start. bin/delimit-
+// cli.js is normally a fresh process per invocation so this rarely bit real
+// usage, but it's the same anti-pattern flagged elsewhere in this repo
+// (lib/continuity-resolver.js's old KNOWN_WORKSPACES_FILE/ACTIVE_VENTURE_FILE)
+// and defeats in-process isolation (e.g. a test harness that requires this
+// file once and then varies DELIMIT_HOME per test). Functions re-resolve via
+// homeSubpath() -> delimitHome() on every call instead.
+function memoryDir() { return homeSubpath('memory'); }
+function memoryFile() { return path.join(memoryDir(), 'memories.jsonl'); }
 
 const KNOWN_TECH_TERMS = new Set([
     'redis', 'jwt', 'docker', 'k8s', 'kubernetes', 'aws', 'gcp', 'azure', 'api',
@@ -7079,15 +7086,15 @@ function extractTags(text) {
 }
 
 function readMemories() {
-    if (!fs.existsSync(MEMORY_DIR)) return [];
+    if (!fs.existsSync(memoryDir())) return [];
     const memories = [];
 
     // Read individual .json files (MCP format — primary)
     try {
-        const files = fs.readdirSync(MEMORY_DIR).filter(f => f.endsWith('.json') && f.startsWith('mem-'));
+        const files = fs.readdirSync(memoryDir()).filter(f => f.endsWith('.json') && f.startsWith('mem-'));
         for (const f of files) {
             try {
-                const entry = JSON.parse(fs.readFileSync(path.join(MEMORY_DIR, f), 'utf-8'));
+                const entry = JSON.parse(fs.readFileSync(path.join(memoryDir(), f), 'utf-8'));
                 // Normalize: MCP uses "content", CLI used "text"
                 if (entry.content && !entry.text) entry.text = entry.content;
                 if (entry.text && !entry.content) entry.content = entry.text;
@@ -7099,8 +7106,8 @@ function readMemories() {
     } catch {}
 
     // Also read legacy .jsonl file (CLI format — backwards compat)
-    if (fs.existsSync(MEMORY_FILE)) {
-        const lines = fs.readFileSync(MEMORY_FILE, 'utf-8').split('\n').filter(l => l.trim());
+    if (fs.existsSync(memoryFile())) {
+        const lines = fs.readFileSync(memoryFile(), 'utf-8').split('\n').filter(l => l.trim());
         for (const line of lines) {
             try {
                 const entry = JSON.parse(line);
@@ -7121,7 +7128,7 @@ function readMemories() {
 
 function writeMemory(entry) {
     // Write in MCP-compatible format (individual .json files)
-    fs.mkdirSync(MEMORY_DIR, { recursive: true });
+    fs.mkdirSync(memoryDir(), { recursive: true });
     const crypto = require('crypto');
     const content = entry.text;
     const memId = 'mem-' + crypto.createHash('sha256').update(content.slice(0, 100)).digest('hex').slice(0, 12);
@@ -7135,25 +7142,25 @@ function writeMemory(entry) {
         hash,
         source_model: process.env.DELIMIT_MODEL || 'cli',
     };
-    fs.writeFileSync(path.join(MEMORY_DIR, `${memId}.json`), JSON.stringify(mcpEntry, null, 2));
+    fs.writeFileSync(path.join(memoryDir(), `${memId}.json`), JSON.stringify(mcpEntry, null, 2));
     return memId;
 }
 
 function deleteMemory(id) {
     // Delete from .json files
-    const jsonFile = path.join(MEMORY_DIR, `${id}.json`);
+    const jsonFile = path.join(memoryDir(), `${id}.json`);
     if (fs.existsSync(jsonFile)) {
         fs.unlinkSync(jsonFile);
         return true;
     }
     // Also check legacy .jsonl
-    if (fs.existsSync(MEMORY_FILE)) {
-        const lines = fs.readFileSync(MEMORY_FILE, 'utf-8').split('\n').filter(l => l.trim());
+    if (fs.existsSync(memoryFile())) {
+        const lines = fs.readFileSync(memoryFile(), 'utf-8').split('\n').filter(l => l.trim());
         const filtered = lines.filter(l => {
             try { return JSON.parse(l).id !== id; } catch { return true; }
         });
         if (filtered.length < lines.length) {
-            fs.writeFileSync(MEMORY_FILE, filtered.join('\n') + (filtered.length ? '\n' : ''));
+            fs.writeFileSync(memoryFile(), filtered.join('\n') + (filtered.length ? '\n' : ''));
             return true;
         }
     }

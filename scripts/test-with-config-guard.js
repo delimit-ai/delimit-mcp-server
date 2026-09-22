@@ -38,6 +38,8 @@ const TEST_FILES = [
     'tests/v43-ai-sbom-engine.test.js',
     'tests/attest-mcp.test.js',
     'tests/delimit-home.test.js',
+    'tests/led5658-cli-remember-isolation.test.js',
+    'tests/led5658-python-js-home-parity.test.js',
     'tests/postinstall-hardening.test.js',
     'tests/auth-signin.test.js',
     'tests/auth-signout.test.js',

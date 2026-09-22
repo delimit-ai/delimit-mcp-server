@@ -27,7 +27,42 @@ from typing import Any, Dict, Optional
 
 from ai._paths import GATEWAY_REPO
 
+try:
+    import pwd  # POSIX only — mirrors os.userInfo() on the JS side.
+except ImportError:  # Windows has no pwd module.
+    pwd = None  # type: ignore[assignment]
+
 logger = logging.getLogger("delimit.continuity")
+
+
+def _real_home() -> Path:
+    """The OS user database's home directory (getpwuid on POSIX) — ignores
+    $HOME entirely. Mirrors lib/delimit-home.js's ``_realHome()`` (LED-5658).
+    Used only to detect whether the caller has overridden $HOME away from
+    the actual system home (an isolation signal), never as the resolved
+    store location itself.
+
+    TEST-ONLY escape hatch: ``_DELIMIT_TEST_ONLY_REAL_HOME`` lets a test
+    substitute a disposable directory for "the real home" so a test that
+    deliberately reproduces the ambient-DELIMIT_HOME conflict never risks
+    writing into this machine's actual real home if the guard regresses.
+    Mirrors the identical hook in lib/delimit-home.js. Never read outside
+    tests in practice — a stray production export only affects the
+    mismatch heuristic, never the write path directly.
+    """
+    test_override = os.environ.get("_DELIMIT_TEST_ONLY_REAL_HOME", "").strip()
+    if test_override:
+        return Path(test_override)
+    if pwd is not None:
+        try:
+            return Path(pwd.getpwuid(os.getuid()).pw_dir)
+        except (KeyError, OSError):
+            pass
+    # No pwd module, or lookup failed (e.g. no matching passwd entry in a
+    # sandboxed/containerized setup) — fall back to treating $HOME as
+    # authoritative, i.e. skip the mismatch check rather than guess.
+    return Path.home()
+
 
 def _resolve_delimit_home() -> Path:
     """LED-1188: env-var-aware resolver for the private-state directory.
@@ -39,12 +74,43 @@ def _resolve_delimit_home() -> Path:
 
     Mirrors lib/delimit-home.js on the npm side so install-time relocation
     works identically across the JS CLI and the Python gateway.
+
+    LED-5658 — the ambient-DELIMIT_HOME trap: this machine's own shell
+    profile exports a concrete DELIMIT_HOME into every new shell. Since
+    DELIMIT_HOME is (correctly) preferred over $HOME above, a caller that
+    overrides only $HOME for isolation (tests, previews, sandboxes) was
+    silently ignored — DELIMIT_HOME stayed pointed at the real store. This
+    applies the SAME narrowly-scoped rule as lib/delimit-home.js's
+    delimitHome(): when $HOME has been overridden away from the real
+    passwd-database home AND the current DELIMIT_HOME/DELIMIT_NAMESPACE_ROOT
+    is EXACTLY the default a normal (non-overridden) shell would compute
+    (``<passwd-home>/.delimit``), that value is untrusted ambient leftover
+    and DELIMIT_HOME is re-derived from the overridden $HOME instead. A
+    DELIMIT_HOME that is genuinely different from that default — including
+    a legitimate `su`/`sudo -u` context where the passwd home actually DOES
+    track $HOME — is still honored as explicit/authentic.
     """
-    for env_key in ("DELIMIT_HOME", "DELIMIT_NAMESPACE_ROOT"):
-        val = os.environ.get(env_key, "").strip()
-        if val:
-            return Path(val)
-    return Path.home() / ".delimit"
+    env_home = Path.home()  # honors $HOME, re-read fresh every call
+    from_env = (
+        os.environ.get("DELIMIT_HOME", "").strip()
+        or os.environ.get("DELIMIT_NAMESPACE_ROOT", "").strip()
+    )
+    if from_env:
+        trimmed = Path(from_env)
+        real_home = _real_home()
+        home_overridden = env_home != real_home
+        if home_overridden:
+            ambient_default = real_home / ".delimit"
+            if trimmed != ambient_default:
+                # A genuinely distinct DELIMIT_HOME — honor it as explicit
+                # intent even while HOME is overridden.
+                return trimmed
+            # trimmed == ambient_default: indistinguishable from "the
+            # profile set it, nobody touched it for this invocation".
+            # $HOME was overridden — trust that signal instead.
+        else:
+            return trimmed
+    return env_home / ".delimit"
 
 
 DELIMIT_HOME = _resolve_delimit_home()
