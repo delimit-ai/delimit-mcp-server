@@ -1,5 +1,18 @@
 ## [Unreleased]
 
+## [4.19.10] - 2026-09-22
+
+### Fixed
+- `delimit quickstart` no longer crashes with `ReferenceError: logp is not defined`
+  on first run (LED-5462 / LED-5629). This was the onboarding command the paywall's
+  free alternatives pointed new users to.
+- `delimit chat` lineup now includes Copilot and Muse alongside Claude, Codex and
+  Gemini (LED-5606), and binds the explicit chat project environment before native launch.
+
+### Changed
+- README hero aligned with delimit.ai ("Building your AI organization"). The merge gate
+  is unchanged.
+
 ## [4.19.1] - 2026-09-14
 
 ### Fixed
