@@ -1,18 +1,105 @@
 """
 Memory bridge — file-based semantic memory store.
-Stores memories as JSON files in ~/.delimit/memory/.
+Stores memories as JSON files in ~/.delimit/memory/ (or $DELIMIT_HOME/memory
+when set — see _memory_dir() / LED-5658).
 """
 
 import json
 import hashlib
 import logging
+import os
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+try:
+    import pwd  # type: ignore[import-not-found]  # POSIX only.
+except ImportError:  # Windows has no pwd module.
+    pwd = None  # type: ignore[assignment]
+
 logger = logging.getLogger("delimit.ai.memory_bridge")
 
-MEMORY_DIR = Path.home() / ".delimit" / "memory"
+
+def _real_home() -> Path:
+    """The OS user database's home directory (getpwuid on POSIX) — ignores
+    $HOME entirely. Mirrors lib/delimit-home.js's ``_realHome()`` and the
+    identical helper in ai.continuity / ai.ledger_manager (LED-5658). Used
+    only to detect whether the caller has overridden $HOME away from the
+    actual system home (an isolation signal), never as the resolved store
+    location itself.
+
+    TEST-ONLY escape hatch: ``_DELIMIT_TEST_ONLY_REAL_HOME`` lets a test
+    substitute a disposable directory for "the real home" so a test that
+    deliberately reproduces the ambient-DELIMIT_HOME conflict never risks
+    writing into this machine's actual real home.
+
+    Deliberately duplicated rather than imported from ai.continuity: this
+    backend module should stay import-self-contained (matches every
+    sibling DELIMIT_HOME resolver in this codebase, which duplicates its
+    own short env lookup rather than sharing one — see
+    ai.ledger_manager._real_home()'s docstring for why a cross-module
+    import here is avoided).
+    """
+    test_override = os.environ.get("_DELIMIT_TEST_ONLY_REAL_HOME", "").strip()
+    if test_override:
+        return Path(test_override)
+    if pwd is not None:
+        try:
+            return Path(pwd.getpwuid(os.getuid()).pw_dir)
+        except (KeyError, OSError):
+            pass
+    return Path.home()
+
+
+def _memory_dir() -> Path:
+    """Resolve the memory store directory.
+
+    LED-5658: this used to be a MODULE-LEVEL constant computed once at
+    import time from bare ``Path.home()`` — the only backend in this
+    package that neither (a) honored ``$DELIMIT_HOME`` / a test-supplied
+    override, matching every sibling backend (tenant_paths.py,
+    control_plane.py, continuity.py, ops_bridge.py, repo_bridge.py, ...),
+    nor (b) re-resolved per call. Frozen at import time it also could never
+    be isolated by a test/sandbox that starts the gateway process once and
+    then changes its environment (e.g. an MCP server that stays resident
+    across many tool calls in one session) — the constant would keep
+    pointing at whatever store was live at import, silently ignoring any
+    later override and risking a write into the owner's real store.
+
+    LED-5658 review follow-up: also applies the SAME narrowly-scoped
+    ambient-DELIMIT_HOME mismatch guard as lib/delimit-home.js's
+    delimitHome() (see ai.continuity._resolve_delimit_home()'s docstring
+    for the full rationale): when $HOME has been overridden away from the
+    real passwd-database home AND the current DELIMIT_HOME/
+    DELIMIT_NAMESPACE_ROOT is EXACTLY the default a normal shell would
+    compute, that value is untrusted ambient leftover and DELIMIT_HOME is
+    re-derived from the overridden $HOME instead.
+    """
+    env_home = Path.home()  # honors $HOME, re-read fresh every call
+    from_env = (
+        os.environ.get("DELIMIT_HOME", "").strip()
+        or os.environ.get("DELIMIT_NAMESPACE_ROOT", "").strip()
+    )
+    if from_env:
+        trimmed = Path(from_env)
+        real_home = _real_home()
+        home_overridden = env_home != real_home
+        if home_overridden:
+            ambient_default = real_home / ".delimit"
+            if trimmed != ambient_default:
+                return trimmed.expanduser() / "memory"
+            # trimmed == ambient_default: untrusted ambient leftover —
+            # $HOME was overridden, trust that signal instead.
+        else:
+            return trimmed.expanduser() / "memory"
+    return env_home / ".delimit" / "memory"
+
+
+# Backward-compat: a small number of call sites (and possibly external
+# scripts) may still read the module-level ``MEMORY_DIR`` name directly.
+# Keep it defined for import compatibility, but nothing in this module
+# reads it anymore — every function below calls _memory_dir() fresh.
+MEMORY_DIR = _memory_dir()
 
 # Legacy CLI store filename. The npm CLI historically wrote memories as
 # newline-delimited JSON (`memories.jsonl`) using a `text`/`created`/`source`
@@ -24,7 +111,7 @@ LEGACY_JSONL_NAME = "memories.jsonl"
 
 
 def _ensure_dir():
-    MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+    _memory_dir().mkdir(parents=True, exist_ok=True)
 
 
 def _tokenize(query: str) -> List[str]:
@@ -69,7 +156,7 @@ def _read_legacy_jsonl() -> List[Dict[str, Any]]:
     list and never raises. Malformed individual lines are skipped so one
     bad line does not lose the rest of the file.
     """
-    path = MEMORY_DIR / LEGACY_JSONL_NAME
+    path = _memory_dir() / LEGACY_JSONL_NAME
     entries: List[Dict[str, Any]] = []
     try:
         if not path.exists():
@@ -114,7 +201,7 @@ def _load_all_entries() -> List[Dict[str, Any]]:
             by_id[key] = entry
 
     # Primary store: mem-*.json (authoritative, wins on conflict).
-    for f in MEMORY_DIR.glob("*.json"):
+    for f in _memory_dir().glob("*.json"):
         try:
             entry = json.loads(f.read_text())
         except (OSError, json.JSONDecodeError, ValueError):
@@ -176,7 +263,7 @@ def store(
         "hot_load": bool(hot_load),
     }
 
-    path = MEMORY_DIR / f"{mem_id}.json"
+    path = _memory_dir() / f"{mem_id}.json"
     path.write_text(json.dumps(entry, indent=2))
 
     return {
