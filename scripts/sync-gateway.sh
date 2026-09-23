@@ -92,13 +92,19 @@ find "$NPM_ROOT/gateway/ai" "$NPM_ROOT/gateway/core" "$NPM_ROOT/gateway/tasks" \
 
 echo "  Pruned $PRUNED non-allowlisted file(s)"
 
-# ── Also sync to installed dev server (if present) ───────────────────
+# ── Optionally sync to installed dev server (if present) ─────────────
 # This is the LOCAL developer MCP server (~/.delimit/server) on our own machine
 # and intentionally receives the FULL gateway (it is not the shipped bundle).
+# Release builds must opt in explicitly before writing to this live installation.
 # Customer installs receive the allowlisted bundle via npm postinstall instead.
 INSTALLED_SERVER="$HOME/.delimit/server"
 if [ "${SKIP_SERVER_SYNC:-}" = "1" ]; then
     echo "  ⏭️  Skipping installed server sync (SKIP_SERVER_SYNC=1)"
+elif [ "${SYNC_INSTALLED_SERVER:-}" != "1" ]; then
+    echo "  ⏭️  Skipping installed server sync (default); set SYNC_INSTALLED_SERVER=1 to opt in."
+elif [ -n "${GATEWAY_OVERRIDE:-}" ] && [ "${FORCE_INSTALLED_SERVER_SYNC:-}" != "1" ]; then
+    echo "  ⛔ GATEWAY_OVERRIDE selects a pinned export, not the live gateway; refusing installed server rsync --delete. Set FORCE_INSTALLED_SERVER_SYNC=1 as well to override." >&2
+    exit 1
 elif [ -L "$INSTALLED_SERVER/ai" ] || [ -L "$INSTALLED_SERVER/core" ]; then
     # 2026-09-15 incident: ~/.delimit/server/{ai,core} were symlinks into the
     # live gateway checkout, so this rsync --delete rewrote that checkout's

@@ -55,6 +55,7 @@ const TEST_FILES = [
     'tests/harness-launch.test.js',
     'tests/publish-source-pin.test.js',
     'tests/chat-repl-explicit-harness.test.js',
+    'tests/chat-repl-model-flag.test.js',
     'tests/led-5369-shim-fail-closed.test.js',
     'tests/version-sources-lockstep.test.js',
     'tests/package-scripts-allowlist.test.js',
