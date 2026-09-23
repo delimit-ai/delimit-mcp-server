@@ -10,6 +10,14 @@ Audit trail: ~/.delimit/agents/audit.jsonl
 """
 
 import json
+try:
+    import fcntl  # type: ignore[import-not-found]
+except ImportError:  # Windows has no fcntl; store locking degrades to in-process.
+    fcntl = None  # type: ignore[assignment]
+import functools
+import inspect
+import tempfile
+import threading
 import os
 import re
 import shutil
@@ -63,28 +71,44 @@ def _effective_agents_dir(venture: str = "") -> Path:
     return AGENTS_DIR
 
 VALID_PRIORITIES = {"P0", "P1", "P2"}
-VALID_ASSIGNEES = {"claude", "codex", "gemini", "copilot", "muse", "any"}
+VALID_ASSIGNEES = {"claude", "codex", "gemini", "copilot", "muse", "any", "auto"}
 VALID_STATUSES = {"dispatched", "in_progress", "done", "handed_off", "failed",
                   "running", "completed", "cancelled", "uncertain",
-                  "launch_refused", "launch_unsupported"}
+                  "launch_refused", "launch_unsupported", "exhausted"}
 
-# LED-5321 M5: assignee runtimes with a headless launch contract. Only muse
-# ships one (scripts/launch_contained_worker.sh). Every other concrete
-# assignee records launch_unsupported when launch= is requested — no headless
-# contract is invented for them. "any" routing is unchanged (it still resolves
-# to claude/codex/gemini, never to muse/copilot).
-_LAUNCH_RUNTIMES = frozenset({"muse"})
+# LED-5321 M5: assignee runtimes with a headless launch contract. LED-5314:
+# codex/copilot/antigravity gain contracts
+# (scripts/launch_contained_worker_{codex,copilot,antigravity}.sh) alongside
+# muse (scripts/launch_contained_worker.sh). Runtimes without a contract
+# record launch_unsupported when launch= is requested — no headless contract
+# is invented for them. "any" routing is unchanged (it still resolves to
+# claude/codex/gemini and records launch_unsupported when launch= is given,
+# even for codex — backward compatibility for a customer-facing parameter);
+# "auto" is the NEW policy-order rotating value.
+_LAUNCH_RUNTIMES = frozenset({"muse", "copilot", "codex", "antigravity"})
 VALID_LAUNCH_NETWORKS = frozenset({"proxy-only", "restricted", "enabled"})
 _LAUNCH_DEFAULT_MAX_STEPS = 220
 _LAUNCH_DEFAULT_NETWORK = "proxy-only"
+
+# LED-5314: owner routing policy (2026-09-14, reaffirmed 2026-09-20) for
+# assignee="auto": muse → copilot → antigravity → codex → claude. Claude has
+# no headless launch contract, so rotation stops before it ("exhausted") and
+# the lead decides. Metered API routes are never used by "auto".
+_AUTO_POLICY_ORDER = ("muse", "copilot", "antigravity", "codex")
+
+# LED-5314: CLI binary a runtime needs on PATH to be attempted.
+_RUNTIME_CLI = {"muse": "muse", "copilot": "copilot",
+                "antigravity": "agy", "codex": "codex"}
 
 # LED-5321 M5: statuses owned by the tracked-launch lifecycle. complete_task
 # gates on this set: launched tasks may only close from completed/uncertain
 # (uncertain needs accept_uncertain=True); legacy statuses (dispatched /
 # in_progress / handed_off / done / failed) close exactly as before.
+# LED-5314: "exhausted" (auto rotation ran out of runtimes) is terminal like
+# launch_refused — the lead re-dispatches instead of closing it.
 _LAUNCHED_LIFECYCLE_STATUSES = frozenset({
     "running", "completed", "cancelled", "uncertain",
-    "launch_refused", "launch_unsupported",
+    "launch_refused", "launch_unsupported", "exhausted",
 })
 
 # LED-5321 M5: tracked-worker lease + run-output layout under the agents dir.
@@ -97,6 +121,29 @@ _WORKER_RUNS_SUBDIR = "runs"
 TERMINAL_COMPLETED_EVENT = "run.terminal.completed"
 TERMINAL_FAILED_EVENT = "run.terminal.failed"
 LIFECYCLE_EVENT = "task.lifecycle"
+
+# LED-5314: terminal markers for the newer runtimes (structured match only).
+# codex exec --json streams {"type": ...} events (turn.completed carries
+# usage, turn.failed carries error); agy --output-format stream-json streams
+# {"event": ...} events with one terminal {"event": "result"} verdict;
+# copilot --output-format json streams {"type": ...} events ending in a
+# {"type": "result"} event (a {"type": "error"} or {"type":
+# "session.error"} event means failure).
+CODEX_TURN_COMPLETED = "turn.completed"
+CODEX_TURN_FAILED = "turn.failed"
+CODEX_ERROR = "error"
+AGY_RESULT_EVENT = "result"
+COPILOT_RESULT_EVENT = "result"
+COPILOT_ERROR_EVENT = "error"
+COPILOT_SESSION_ERROR_EVENT = "session.error"
+_RUNTIME_TERMINAL_HINT = {
+    "codex": "turn.completed/turn.failed",
+    "antigravity": "result",
+    "copilot": "result/session.error",
+}
+_AGY_SUCCESS_STATUSES = frozenset({
+    "success", "successful", "succeeded", "ok", "completed", "complete", "done",
+})
 
 # LED-876: auto-pause when dead-letter queue depth (stuck 'dispatched' tasks)
 # hits this threshold. Prevents runaway dispatch when no workers are pulling.
@@ -239,6 +286,8 @@ def _record_completion_drift(task: Dict[str, Any]) -> None:
         from ai.prompt_drift import record_result
 
         model = (task.get("assignee") or "").strip()
+        if model == "auto":
+            model = (task.get("runtime") or "").strip()
         if not model or model == "any":
             return
         result = (task.get("result") or "").strip()
@@ -288,14 +337,34 @@ def _repo_root() -> Path:
 
 # LED-5321 M5: contained-worker launcher (PR #532). Monkeypatchable in tests;
 # DELIMIT_WORKER_LAUNCHER env also overrides at call time.
+# LED-5314: one launcher script per runtime; each is monkeypatchable and has
+# its own DELIMIT_WORKER_LAUNCHER_<RUNTIME> override (resolved dynamically so
+# test monkeypatching keeps working).
 LAUNCHER_SCRIPT = _repo_root() / "scripts" / "launch_contained_worker.sh"
+LAUNCHER_SCRIPT_CODEX = _repo_root() / "scripts" / "launch_contained_worker_codex.sh"
+LAUNCHER_SCRIPT_COPILOT = _repo_root() / "scripts" / "launch_contained_worker_copilot.sh"
+LAUNCHER_SCRIPT_ANTIGRAVITY = _repo_root() / "scripts" / "launch_contained_worker_antigravity.sh"
+
+_LAUNCHER_ENV_BY_RUNTIME = {
+    "muse": "DELIMIT_WORKER_LAUNCHER",
+    "codex": "DELIMIT_WORKER_LAUNCHER_CODEX",
+    "copilot": "DELIMIT_WORKER_LAUNCHER_COPILOT",
+    "antigravity": "DELIMIT_WORKER_LAUNCHER_ANTIGRAVITY",
+}
 
 
-def _resolve_launcher() -> Path:
-    """Return the launcher script path, honoring DELIMIT_WORKER_LAUNCHER."""
-    override = os.environ.get("DELIMIT_WORKER_LAUNCHER", "").strip()
+def _resolve_launcher(runtime: str = "muse") -> Path:
+    """Return the launcher script path for a runtime, honoring its env override."""
+    env_key = _LAUNCHER_ENV_BY_RUNTIME.get(runtime or "muse", "DELIMIT_WORKER_LAUNCHER")
+    override = os.environ.get(env_key, "").strip()
     if override:
         return Path(override)
+    if runtime == "codex":
+        return LAUNCHER_SCRIPT_CODEX
+    if runtime == "copilot":
+        return LAUNCHER_SCRIPT_COPILOT
+    if runtime == "antigravity":
+        return LAUNCHER_SCRIPT_ANTIGRAVITY
     return LAUNCHER_SCRIPT
 
 
@@ -372,11 +441,53 @@ def _launcher_has_yolo(content: str) -> bool:
     return any(t == "--yolo" or t.startswith("--yolo=") for t in tokens)
 
 
-def _check_launcher_preconditions(launcher: Path, spec: Dict[str, Any]) -> Optional[str]:
+# LED-5314: per-runtime flags that must never appear as real tokens in a
+# launcher script (a flag that disables a sandbox or path verification).
+# The guard is token-aware like _launcher_has_yolo, so each script may still
+# document its own ban in comments — and, e.g., copilot's REQUIRED
+# --allow-all-tools never trips the --allow-all ban (exact-token match, not
+# a prefix match).
+_LAUNCHER_FORBIDDEN_FLAGS = {
+    "muse": frozenset({"--yolo"}),
+    "codex": frozenset({"--yolo", "--dangerously-bypass-approvals-and-sandbox"}),
+    "antigravity": frozenset({"--yolo", "--dangerously-skip-permissions"}),
+    "copilot": frozenset({"--yolo", "--allow-all", "--allow-all-paths"}),
+}
+
+
+def _launcher_forbidden_flag(content: str, runtime: str) -> Optional[str]:
+    """First forbidden flag token the launcher would actually pass, or None.
+
+    Token-aware: full-line and trailing `#` comments are ignored, while a
+    real flag token anywhere in code trips the guard. Unparseable content
+    fails closed on a raw substring match.
+    """
+    import shlex
+    forbidden = _LAUNCHER_FORBIDDEN_FLAGS.get(runtime or "muse", frozenset({"--yolo"}))
+    try:
+        tokens = shlex.split(content, comments=True, posix=True)
+    except ValueError:
+        for flag in sorted(forbidden):
+            if flag in content:
+                return flag
+        return None
+    for tok in tokens:
+        for flag in sorted(forbidden):
+            if tok == flag or tok.startswith(flag + "="):
+                return flag
+    return None
+
+
+def _check_launcher_preconditions(
+    launcher: Path, spec: Dict[str, Any], runtime: str = "muse",
+) -> Optional[str]:
     """Return a refusal reason, or None if the launcher may run.
 
     Every failure here is environmental (missing tooling/files, unsafe
-    launcher) and maps to a recorded launch_refused — never a crash.
+    launcher) and maps to a recorded launch_refused — never a crash. Muse
+    keeps its bubblewrap gate; the newer runtimes rely on CLI-native
+    containment (codex --sandbox, agy --sandbox, copilot path verification)
+    and gate on their CLI being installed instead.
     """
     if not launcher.is_file():
         return f"launcher script missing: {launcher}"
@@ -384,10 +495,18 @@ def _check_launcher_preconditions(launcher: Path, spec: Dict[str, Any]) -> Optio
         content = launcher.read_text()
     except OSError as e:
         return f"launcher script unreadable: {e}"
-    if _launcher_has_yolo(content):
-        return "launcher contains forbidden --yolo flag; refusing to launch"
-    if shutil.which("bwrap") is None:
-        return "bubblewrap (bwrap) missing: sandbox cannot start; refusing to launch"
+    if (runtime or "muse") == "muse":
+        if _launcher_has_yolo(content):
+            return "launcher contains forbidden --yolo flag; refusing to launch"
+        if shutil.which("bwrap") is None:
+            return "bubblewrap (bwrap) missing: sandbox cannot start; refusing to launch"
+    else:
+        bad = _launcher_forbidden_flag(content, runtime)
+        if bad is not None:
+            return f"launcher contains forbidden {bad} flag; refusing to launch"
+        cli = _RUNTIME_CLI.get(runtime, "")
+        if cli and shutil.which(cli) is None:
+            return f"{cli} not installed; refusing to launch"
     ws = spec["workspace"]
     if not os.path.isdir(ws):
         return f"workspace is not a directory: {ws}"
@@ -443,21 +562,25 @@ def _read_first_line(path: Path) -> str:
         return ""
 
 
-def _launch_muse_worker(
+def _launch_runtime_worker(
     *,
+    runtime: str,
     task_id: str,
     spec: Dict[str, Any],
     agents_dir: Path,
+    output_prefix: Optional[Path] = None,
 ) -> Dict[str, Any]:
-    """Start a muse worker through the contained launcher (no --yolo, ever).
+    """Start a worker through its runtime's contained launcher.
 
+    Same lifecycle for every runtime (task record, lease, output prefix, rc
+    sidecar, poll, cancel, uncertain): no sandbox-disabling flag, ever.
     Returns the binding record (runtime/session_id/workspace/branch/
     started_at/output_prefix/lease/worker_pid) or {"error": reason} when the
     launch must be refused. The launcher subprocess is given argv only — never
     shell=True — and the script itself backgrounds the worker.
     """
-    launcher = _resolve_launcher()
-    refusal = _check_launcher_preconditions(launcher, spec)
+    launcher = _resolve_launcher(runtime)
+    refusal = _check_launcher_preconditions(launcher, spec, runtime)
     if refusal is not None:
         return {"error": refusal}
     runs_dir = agents_dir / _WORKER_RUNS_SUBDIR
@@ -465,7 +588,7 @@ def _launch_muse_worker(
         runs_dir.mkdir(parents=True, exist_ok=True)
     except OSError as e:
         return {"error": f"cannot create worker runs dir: {e}"}
-    out_prefix = runs_dir / task_id
+    out_prefix = output_prefix if output_prefix is not None else runs_dir / task_id
     cmd = [
         str(launcher),
         spec["workspace"],
@@ -473,24 +596,28 @@ def _launch_muse_worker(
         str(out_prefix),
         str(spec["max_steps"]),
         spec["network"],
+        spec.get("session_id", ""),
     ]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
     except subprocess.TimeoutExpired:
-        return {"error": "launcher timed out after 120s"}
+        return {"error": "launcher timed out after 120s", "execution_uncertain": True}
     except OSError as e:
         return {"error": f"launcher exec failed: {e}"}
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or "").strip().splitlines()
         tail = detail[-1][:300] if detail else f"exit {proc.returncode}"
-        return {"error": f"launcher refused (exit {proc.returncode}): {tail}"}
+        pre_spawn = (_read_first_line(Path(str(out_prefix) + ".launch-protocol")) == "1"
+                     and not Path(str(out_prefix) + ".spawn-attempted").exists())
+        return {"error": f"launcher refused (exit {proc.returncode}): {tail}",
+                "execution_uncertain": not pre_spawn}
     session_id = _read_first_line(Path(str(out_prefix) + ".session-id"))
-    if not session_id:
-        return {"error": "launcher exited 0 but wrote no session id"}
+    if not session_id or (spec.get("session_id") and session_id != spec["session_id"]):
+        return {"error": "launcher session binding missing or mismatched", "execution_uncertain": True}
     started_at = _read_first_line(Path(str(out_prefix) + ".started")) or _utcnow()
     now_epoch = time.time()
     return {
-        "runtime": "muse",
+        "runtime": runtime,
         "session_id": session_id,
         "workspace": spec["workspace"],
         "branch": _worktree_branch(spec["workspace"]),
@@ -508,27 +635,417 @@ def _launch_muse_worker(
     }
 
 
+def _launch_muse_worker(
+    *,
+    task_id: str,
+    spec: Dict[str, Any],
+    agents_dir: Path,
+    output_prefix: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Start a muse worker through the contained launcher (no --yolo, ever).
+
+    Thin wrapper over _launch_runtime_worker; same behavior as before.
+    """
+    return _launch_runtime_worker(
+        runtime="muse", task_id=task_id, spec=spec,
+        agents_dir=agents_dir, output_prefix=output_prefix,
+    )
+
+
+# ── LED-5314: auto rotation state (reused, never a new store) ──────────
+
+# Rotation reuses the EXISTING subscription-CLI quota-hold store from
+# ai/social.py (LED-4912: ~/.delimit/state/social_cli_quota_holds.json —
+# {mid: {reason, until, monthly, set_at}}) with the same TTL semantics, so a
+# quota-exhausted provider is skipped by worker dispatch and social drafting
+# alike. Quota/auth failures go through social's monthly-reset-aware setter;
+# launch refusals share the file/schema/bounded window with their own reason.
+# Only when ai.social is unimportable does dispatch fall back to one small
+# JSON file under the agents dir (same schema).
+_DISPATCH_HOLD_REASON_REFUSED = "launch_refused"
+_DISPATCH_HOLDS_FALLBACK_FILE = "runtime_holds.json"
+
+# A poll-caught terminal failure rotates to the next runtime only when it
+# lands within this window after the worker started (a quota wall kills the
+# run fast; a late failure is real work the lead should inspect) AND the
+# output carries a quota/rate-limit signal.
+_AUTO_QUICK_FAIL_SECONDS = 600
+_AUTO_QUOTA_SIGNAL_RE = re.compile(
+    r"429|402|quota|rate[\s_-]?limit|resource[\s_-]?exhausted|"
+    r"usage[\s_-]?limit|limit[\s_-]?reached|out of credits?|"
+    r"insufficient[\s_-](credit|quota|balance)",
+    re.IGNORECASE,
+)
+
+
+def _dispatch_hold_path(agents_dir: Optional[Path] = None) -> Path:
+    """Path of the shared quota-hold file (or the agents-dir fallback)."""
+    try:
+        from ai.social import _social_cli_hold_path
+    except Exception:
+        try:
+            from social import _social_cli_hold_path
+        except Exception:
+            base = agents_dir or _effective_agents_dir()
+            return base / _DISPATCH_HOLDS_FALLBACK_FILE
+    try:
+        return _social_cli_hold_path()
+    except Exception:
+        base = agents_dir or _effective_agents_dir()
+        return base / _DISPATCH_HOLDS_FALLBACK_FILE
+
+
+def _dispatch_holds_active() -> bool:
+    """Mirror social's holds gate (inactive under tests without an override)."""
+    try:
+        from ai.social import _social_cli_holds_active
+    except Exception:
+        try:
+            from social import _social_cli_holds_active
+        except Exception:
+            return True  # fallback file is already test-isolated (AGENTS_DIR)
+    try:
+        return bool(_social_cli_holds_active())
+    except Exception:
+        return False
+
+
+def _dispatch_read_holds(agents_dir: Optional[Path] = None) -> Dict[str, Any]:
+    """Best-effort read of the shared holds file (same schema as social)."""
+    try:
+        state = json.loads(_dispatch_hold_path(agents_dir).read_text())
+    except (OSError, ValueError):
+        return {}
+    return dict(state) if isinstance(state, dict) else {}
+
+
+def _dispatch_runtime_hold(runtime: str) -> Optional[Dict[str, Any]]:
+    """Active unavailability hold for a dispatch runtime, or None.
+
+    Best-effort and fail-safe: any error (or an inactive gate) means "no
+    hold" so dispatch is never blocked by bookkeeping.
+    """
+    if not _dispatch_holds_active():
+        return None
+    try:
+        entry = _dispatch_read_holds().get(runtime)
+        now = time.time()
+        if (isinstance(entry, dict)
+                and isinstance(entry.get("until"), (int, float))
+                and entry["until"] > now):
+            return entry
+    except Exception:
+        pass
+    return None
+
+
+def _dispatch_hold_window_seconds() -> int:
+    """Bounded hold window — same knob and clamp as social's setter."""
+    try:
+        return max(60, min(6 * 3600, int(os.environ.get(
+            "DELIMIT_SOCIAL_CLI_QUOTA_HOLD_SEC", "1800"))))
+    except ValueError:
+        return 1800
+
+
+def _dispatch_write_hold(mid: str, reason: str, until: float,
+                         *, monthly: bool = False,
+                         agents_dir: Optional[Path] = None) -> float:
+    """Write a hold entry to the shared file (best-effort, same schema).
+
+    Returns the hold-until epoch, or 0.0 when the gate is inactive or the
+    write failed. Never raises into dispatch.
+    """
+    if not _dispatch_holds_active():
+        return 0.0
+    now = time.time()
+    try:
+        from datetime import datetime, timezone
+        set_at = datetime.fromtimestamp(now, timezone.utc).isoformat(timespec="seconds")
+    except Exception:
+        set_at = _utcnow()
+    try:
+        path = _dispatch_hold_path(agents_dir)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        holds = _dispatch_read_holds(agents_dir)
+        holds[mid] = {"reason": reason, "until": until,
+                      "monthly": bool(monthly), "set_at": set_at}
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(holds))
+        os.replace(tmp, path)
+        return until
+    except OSError:
+        return 0.0
+
+
+def _dispatch_mark_quota(runtime: str, evidence: str = "") -> float:
+    """Hold a quota-failed runtime via social's setter (monthly-aware).
+
+    Falls back to a local bounded-window write when ai.social is
+    unimportable. Returns the hold-until epoch, or 0.0 when no hold applies.
+    """
+    try:
+        from ai.social import _social_cli_set_hold
+    except Exception:
+        try:
+            from social import _social_cli_set_hold
+        except Exception:
+            monthly = "monthly" in (evidence or "").lower() and "quota" in (evidence or "").lower()
+            if monthly:
+                import calendar
+                t = time.gmtime()
+                y, m = (t.tm_year + 1, 1) if t.tm_mon == 12 else (t.tm_year, t.tm_mon + 1)
+                until = float(calendar.timegm((y, m, 1, 0, 0, 0)))
+            else:
+                until = time.time() + _dispatch_hold_window_seconds()
+            return _dispatch_write_hold(runtime, "quota", until, monthly=monthly)
+    try:
+        return _social_cli_set_hold(runtime, "quota", evidence or "")
+    except Exception:
+        return 0.0
+
+
+def _dispatch_mark_refused(runtime: str) -> float:
+    """Record nothing shared for a refused launch; return 0.0.
+
+    A refusal is usually local (missing worktree/prompt/CLI/sandbox), not a
+    provider capacity signal. Writing it to the shared LED-4912 holds file
+    would pause live social drafting on that provider, so refusals stay
+    task-local: the task's ``attempts`` history already records them and
+    rotation never retries a runtime within one task. Only quota/rate-limit
+    evidence (``_dispatch_mark_quota``) writes the shared hold.
+    """
+    return 0.0
+
+
+def _auto_skip_reason(runtime: str) -> Optional[str]:
+    """None if the runtime is eligible now, else a skip reason (no side effects)."""
+    cli = _RUNTIME_CLI.get(runtime, "")
+    if cli and shutil.which(cli) is None:
+        return f"{cli} not installed"
+    hold = _dispatch_runtime_hold(runtime)
+    if hold:
+        try:
+            when = time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                 time.gmtime(float(hold.get("until", 0))))
+        except (TypeError, ValueError, OverflowError):
+            when = "unknown time"
+        return f"on {hold.get('reason', 'quota')} hold until {when}"
+    return None
+
+
+def _auto_attempt_entry(runtime: str, outcome: str, reason: str) -> Dict[str, Any]:
+    """One attempt-history row: runtime, outcome, reason, timestamps."""
+    return {"runtime": runtime, "outcome": outcome, "reason": (reason or "")[:300],
+            "attempted_at": _utcnow()}
+
+
+def _auto_exhausted_error(attempts: List[Dict[str, Any]]) -> str:
+    """One-line rotation summary for the exhausted task record."""
+    parts = [f"{a.get('runtime')}: {a.get('reason')}" for a in attempts
+             if a.get("runtime") != "claude"]
+    return "rotation exhausted: " + ("; ".join(parts) if parts else "no runtime attempted")
+
+
+def _check_auto_spec_once(spec: Dict[str, Any]) -> Optional[str]:
+    """Caller-bug precheck for auto: fail fast, don't burn one hold per runtime."""
+    ws = spec["workspace"]
+    if not os.path.isdir(ws):
+        return f"workspace is not a directory: {ws}"
+    if not (os.path.isdir(os.path.join(ws, ".git")) or os.path.isfile(os.path.join(ws, ".git"))):
+        return f"workspace is not a git worktree: {ws}"
+    if not os.path.isfile(spec["prompt_file"]):
+        return f"prompt file missing: {spec['prompt_file']}"
+    return None
+
+
+def _dispatch_auto_launch(
+    task: Dict[str, Any],
+    tasks: Dict[str, Any],
+    norm_launch: Dict[str, Any],
+    agents_dir: Path,
+) -> None:
+    """Policy-order rotation for assignee="auto". Mutates task/tasks in place.
+
+    Tries muse → copilot → antigravity → codex, skipping CLIs that are
+    missing or on quota hold; a clean launch refusal holds the runtime and
+    falls through to the next. At most one attempt per runtime. Success binds
+    the worker (status running); total failure records "exhausted" (stopping
+    before claude — no headless contract — so the lead can decide). An
+    uncertain launch (a worker may have started) stops rotation as
+    launch_refused instead of risking a duplicate worker. Persists before
+    every spawn, mirroring the explicit-launch path.
+    """
+    from ai.agent_session_slots import reserve
+    task_id = task["id"]
+    attempts: List[Dict[str, Any]] = []
+    base_prefix = agents_dir / _WORKER_RUNS_SUBDIR / task_id
+    task["run_base_prefix"] = str(base_prefix)
+    task["launch_seq"] = 0
+    spec_error = _check_auto_spec_once(norm_launch)
+    if spec_error is not None:
+        task["status"] = "launch_refused"
+        task["launch_error"] = spec_error
+        task["attempts"] = attempts
+        return
+    from ai.provider_usage import choose_runtime
+    selection = choose_runtime(task["priority"], task.get("task_type", ""))
+    recorded_skips = set()
+    def record_skips_through(runtime: str) -> bool:
+        if runtime not in _AUTO_POLICY_ORDER:
+            attempts.append(_auto_attempt_entry(runtime, "skipped", "runtime absent from auto policy order"))
+            return False
+        for candidate in _AUTO_POLICY_ORDER[:_AUTO_POLICY_ORDER.index(runtime) + 1]:
+            if candidate in selection["skipped"] and candidate not in recorded_skips:
+                attempts.append(_auto_attempt_entry(candidate, "skipped", selection["skipped"][candidate]))
+                recorded_skips.add(candidate)
+        return True
+    for runtime in selection["ranked"]:
+        if not record_skips_through(runtime):
+            continue
+        skip = _auto_skip_reason(runtime)
+        if skip is not None:
+            attempts.append(_auto_attempt_entry(runtime, "skipped", skip))
+            continue
+        seq = int(task.get("launch_seq", 0) or 0)
+        prefix = base_prefix if seq == 0 else Path(str(base_prefix) + f".auto{seq}")
+        task["execution_slot"] = reserve(prefix, str(uuid.uuid4()))
+        tasks[task_id] = task
+        _save_tasks(tasks, agents_dir)
+        launch_spec = dict(norm_launch, session_id=task["execution_slot"]["session_id"])
+        if runtime == "muse":
+            binding = _launch_muse_worker(
+                task_id=task_id, spec=launch_spec, agents_dir=agents_dir,
+                output_prefix=prefix,
+            )
+        else:
+            binding = _launch_runtime_worker(
+                runtime=runtime, task_id=task_id, spec=launch_spec,
+                agents_dir=agents_dir, output_prefix=prefix,
+            )
+        task["execution_slot"]["launch_returned"] = True
+        task["launch_seq"] = seq + 1
+        if "error" in binding:
+            if binding.get("execution_uncertain"):
+                attempts.append(_auto_attempt_entry(
+                    runtime, "refused",
+                    binding["error"] + " (execution uncertain; rotation stopped)"))
+                task["attempts"] = attempts
+                task["status"] = "launch_refused"
+                task["launch_error"] = binding["error"]
+                return
+            _dispatch_mark_refused(runtime)
+            task["execution_slot"]["state"] = "released"
+            attempts.append(_auto_attempt_entry(runtime, "refused", binding["error"]))
+            continue
+        attempts.append(_auto_attempt_entry(
+            runtime, "launched",
+            f"worker started (session {binding['session_id']})"))
+        task["status"] = "running"
+        task.update(binding)
+        task["resume_count"] = 0
+        task["output_history"] = []
+        task["attempts"] = attempts
+        return
+    record_skips_through(_AUTO_POLICY_ORDER[-1])
+    attempts.append(_auto_attempt_entry(
+        "claude", "skipped", "no headless launch contract; lead decides"))
+    task["attempts"] = attempts
+    task["status"] = "exhausted"
+    task["launch_error"] = _auto_exhausted_error(attempts)
+
+
 def _ensure_dir(base_dir: Optional[Path] = None):
     """Create the agents directory if it doesn't exist."""
     (base_dir or _effective_agents_dir()).mkdir(parents=True, exist_ok=True)
 
 
+_store_thread_lock = threading.RLock()
+_store_lock_local = threading.local()
+
+
+class TaskStoreUnavailable(RuntimeError):
+    pass
+
+
+def _serialized_store(func):
+    """Serialize full lifecycle transactions across MCP processes and threads."""
+    signature = inspect.signature(func)
+
+    @functools.wraps(func)
+    def wrapped(*args, **kwargs):
+        bound = signature.bind(*args, **kwargs)
+        base = _effective_agents_dir(bound.arguments.get("venture", ""))
+        with _store_thread_lock:
+            held = getattr(_store_lock_local, "held", set())
+            if base in held:
+                return func(*args, **kwargs)
+            _ensure_dir(base)
+            with (base / "tasks.lock").open("a+") as lock:
+                if fcntl is not None:
+                    fcntl.flock(lock, fcntl.LOCK_EX)
+                _store_lock_local.held = held | {base}
+                try:
+                    return func(*args, **kwargs)
+                except TaskStoreUnavailable as exc:
+                    return {"status": "store_unavailable", "error": str(exc)}
+                finally:
+                    _store_lock_local.held = held
+                    if fcntl is not None:
+                        fcntl.flock(lock, fcntl.LOCK_UN)
+    return wrapped
+
+
+def _store_read_safe(**on_unavailable):
+    """Read-only store paths return the structured store_unavailable result
+    (plus any caller-specific fields) instead of raising to the MCP client."""
+    def deco(func):
+        @functools.wraps(func)
+        def wrapped(*args, **kwargs):
+            try:
+                return func(*args, **kwargs)
+            except TaskStoreUnavailable as exc:
+                return {"status": "store_unavailable", "error": str(exc), **on_unavailable}
+        return wrapped
+    return deco
+
+
 def _load_tasks(base_dir: Optional[Path] = None) -> Dict[str, Any]:
-    """Load all tasks from the tasks file."""
+    """Load the store; corruption must not turn into an empty worker pool."""
     tasks_file = (base_dir or _effective_agents_dir()) / "tasks.json"
-    if not tasks_file.exists():
-        return {}
     try:
-        return json.loads(tasks_file.read_text())
-    except (json.JSONDecodeError, OSError):
+        tasks = json.loads(tasks_file.read_text())
+    except FileNotFoundError:
+        runs = tasks_file.parent / _WORKER_RUNS_SUBDIR
+        if runs.exists() and any(runs.iterdir()):
+            raise TaskStoreUnavailable("Task store missing with worker artifacts; admission held")
         return {}
+    except (json.JSONDecodeError, OSError) as exc:
+        raise TaskStoreUnavailable("Task store unreadable; admission held") from exc
+    if not isinstance(tasks, dict) or any(not isinstance(t, dict) for t in tasks.values()):
+        raise TaskStoreUnavailable("Task store malformed; admission held")
+    return tasks
 
 
 def _save_tasks(tasks: Dict[str, Any], base_dir: Optional[Path] = None):
-    """Write all tasks back to the tasks file."""
+    """Atomically persist a transaction before launching any worker."""
     base = base_dir or _effective_agents_dir()
     _ensure_dir(base)
-    (base / "tasks.json").write_text(json.dumps(tasks, indent=2))
+    fd, name = tempfile.mkstemp(prefix=".tasks-", dir=base)
+    try:
+        with os.fdopen(fd, "w") as stream:
+            json.dump(tasks, stream, indent=2)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(name, base / "tasks.json")
+        directory_fd = os.open(base, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
 
 
 def _append_audit(entry: Dict[str, Any], base_dir: Optional[Path] = None):
@@ -540,6 +1057,7 @@ def _append_audit(entry: Dict[str, Any], base_dir: Optional[Path] = None):
         f.write(json.dumps(entry) + "\n")
 
 
+@_serialized_store
 def dispatch_task(
     title: str,
     description: str = "",
@@ -565,15 +1083,25 @@ def dispatch_task(
 
     LED-5321 M5: ``launch`` is an optional dict
     ``{"workspace": <git worktree path>, "prompt_file": <path>,
-    "max_steps": int, "network": "proxy-only|restricted|enabled"}``. When
-    given and the assignee runtime is ``muse``, the worker is started through
-    ``scripts/launch_contained_worker.sh`` (subprocess, never --yolo) and the
-    task records runtime/session_id/workspace/branch/started_at/output_prefix/
-    lease with status ``running``. Missing preconditions (no bwrap, bad
+    "max_steps": int, "network": "proxy-only|restricted|enabled"}``.
+    ``launch.network`` is validated for every runtime but only ENFORCED
+    by the muse launcher (``--sandbox-network``); codex/antigravity/
+    copilot use their CLI's own sandbox network defaults. When
+    given and the assignee runtime has a headless contract (``muse``,
+    ``codex``, ``copilot``), the worker is started through its
+    ``scripts/launch_contained_worker*.sh`` script (subprocess, never a
+    sandbox-disabling flag) and the task records
+    runtime/session_id/workspace/branch/started_at/output_prefix/lease with
+    status ``running``. Missing preconditions (no sandbox tooling, bad
     workspace, unsafe launcher) record ``launch_refused``. Any other assignee
-    records ``launch_unsupported`` — no headless contract is invented. Without
-    ``launch`` the dispatch is audit-only with status ``dispatched``, exactly
-    as before.
+    records ``launch_unsupported`` — no headless contract is invented.
+    LED-5314: assignee ``auto`` (requires ``launch``) rotates through
+    muse → copilot → antigravity → codex in policy order, skipping runtimes
+    whose CLI is missing or on quota hold; a refused or quick quota-failed
+    runtime is held and the SAME task is re-launched on the next runtime
+    (attempt history on the task record). Total failure records
+    ``exhausted``. Without ``launch`` the dispatch is audit-only with status
+    ``dispatched``, exactly as before.
 
     Returns:
         Dict with task_id, task details, and a structured prompt for the host AI.
@@ -643,6 +1171,11 @@ def dispatch_task(
     # tasks never land in a bucket no worker pulls from. The mapping uses
     # task_type as the primary key; if unknown, falls through to the
     # default (gemini — cheapest + highest throughput).
+    # LED-5314: routed_from_any is sticky — an "any"-routed task keeps the
+    # exact pre-rotation launch behavior (launch_unsupported) even when it
+    # routes to a runtime that gained a headless contract, so customer
+    # calls never newly spawn workers (backward compatibility).
+    routed_from_any = (assignee == "any")
     if assignee == "any":
         # STR-2202: prompt_drift.rank is the primary resolver behind "any";
         # it falls back to the static TASK_TYPE_ROUTER when data is thin or on
@@ -652,6 +1185,8 @@ def dispatch_task(
             assignee = routed
         else:
             assignee = ROUTER_DEFAULT_ASSIGNEE
+
+    is_auto = (assignee == "auto")
 
     priority = priority.upper().strip() if priority else "P1"
     if priority not in VALID_PRIORITIES:
@@ -663,33 +1198,34 @@ def dispatch_task(
     if launch_spec_error is not None:
         return {"error": launch_spec_error}
 
-    # LED-1279: anti-duplicate gate. If the title/description/context tags an
-    # LED that's already been shipped (i.e. there's a commit on main mentioning
-    # the LED with date >= LED.created_at), refuse the dispatch and auto-close
-    # the LED. Yesterday's AGT-65A61AD5 wasted three subagent cycles on
-    # LED-1208/9/10, all of which had been shipped in commit 014fb5c on
-    # 2026-05-03. This gate prevents that class of duplicate.
+    # LED-5314: "auto" is a launch mode, not a worker bucket — without a
+    # launch spec there is nothing to rotate, so fail fast (no compat
+    # constraint: "auto" is new).
+    if is_auto and norm_launch is None:
+        return {"error": "assignee 'auto' requires a launch spec (policy-order contained launch)"}
+
+    # LED-1279: commit mentions may indicate duplicate work, but cannot prove
+    # an LED is complete. Report matches without blocking or closing the LED.
+    possible_duplicate: Optional[Dict[str, Any]] = None
     try:
         from ai.dispatch_gate import evaluate_dispatch, extract_led_id, lookup_led_created_at
 
         led_id_for_gate = extract_led_id(title, description, context)
         if led_id_for_gate:
             led_created_at = lookup_led_created_at(led_id_for_gate)
-            refusal = evaluate_dispatch(
+            possible_duplicate = evaluate_dispatch(
                 title=title,
                 description=description,
                 context=context,
                 led_created_at=led_created_at,
             )
-            if refusal is not None:
+            if possible_duplicate is not None:
                 _append_audit({
-                    "action": "dispatch_refused_shipped",
+                    "action": "dispatch_possible_duplicate",
                     "title": stripped,
-                    "led_id": refusal.get("led_id"),
-                    "shipped_in": refusal.get("shipped_in", {}).get("short_sha"),
-                    "shipped_repo": refusal.get("shipped_in", {}).get("repo"),
+                    "led_id": possible_duplicate.get("led_id"),
+                    "matching_commits": [c.get("short_sha") for c in possible_duplicate.get("commits", [])],
                 }, agents_dir)
-                return refusal
     except Exception as e:  # pragma: no cover — gate must never crash dispatch
         # If the gate itself blows up, log it and proceed — losing a dispatch
         # to a gate bug is a worse failure mode than the duplicate it would
@@ -747,7 +1283,16 @@ def dispatch_task(
                 }
                 if focus_advisory is not None:
                     deduped_resp["focus_advisory"] = focus_advisory
+                if possible_duplicate is not None:
+                    deduped_resp["possible_duplicate"] = possible_duplicate
                 return deduped_resp
+
+    if norm_launch is not None and (
+            is_auto or (assignee in _LAUNCH_RUNTIMES and not routed_from_any)):
+        from ai.agent_session_slots import admission
+        held = admission(tasks)
+        if held:
+            return held
 
     task_id = f"AGT-{uuid.uuid4().hex[:8].upper()}"
 
@@ -816,13 +1361,30 @@ def dispatch_task(
     # task as audit-only 'dispatched'.
     if norm_launch is not None:
         task["launch"] = norm_launch
-        if assignee in _LAUNCH_RUNTIMES:
-            binding = _launch_muse_worker(
-                task_id=task_id, spec=norm_launch, agents_dir=agents_dir,
-            )
+        if is_auto:
+            _dispatch_auto_launch(task, tasks, norm_launch, agents_dir)
+        elif assignee in _LAUNCH_RUNTIMES and not routed_from_any:
+            from ai.agent_session_slots import reserve
+            prefix = agents_dir / _WORKER_RUNS_SUBDIR / task_id
+            task["execution_slot"] = reserve(prefix, str(uuid.uuid4()))
+            tasks[task_id] = task
+            _save_tasks(tasks, agents_dir)
+            launch_spec = dict(norm_launch, session_id=task["execution_slot"]["session_id"])
+            if assignee == "muse":
+                binding = _launch_muse_worker(
+                    task_id=task_id, spec=launch_spec, agents_dir=agents_dir,
+                )
+            else:
+                binding = _launch_runtime_worker(
+                    runtime=assignee, task_id=task_id, spec=launch_spec,
+                    agents_dir=agents_dir,
+                )
+            task["execution_slot"]["launch_returned"] = True
             if "error" in binding:
                 task["status"] = "launch_refused"
                 task["launch_error"] = binding["error"]
+                if not binding.get("execution_uncertain"):
+                    task["execution_slot"]["state"] = "released"
             else:
                 task["status"] = "running"
                 task.update(binding)
@@ -830,11 +1392,19 @@ def dispatch_task(
                 task["output_history"] = []
         else:
             task["status"] = "launch_unsupported"
-            task["launch_error"] = (
-                f"runtime '{assignee}' has no headless launch contract; "
-                "only 'muse' can be launched through the contained worker "
-                "launcher"
-            )
+            if routed_from_any:
+                # Byte-for-byte "any" compatibility: the pre-rotation message.
+                task["launch_error"] = (
+                    f"runtime '{assignee}' has no headless launch contract; "
+                    "only 'muse' can be launched through the contained worker "
+                    "launcher"
+                )
+            else:
+                task["launch_error"] = (
+                    f"runtime '{assignee}' has no headless launch contract; "
+                    "launchable runtimes are 'muse', 'codex' and 'copilot' "
+                    "(or assignee 'auto' for policy-order rotation)"
+                )
         task["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ")
 
     tasks[task_id] = task
@@ -872,10 +1442,10 @@ def dispatch_task(
 
     if task["status"] == "running":
         dispatch_message = (
-            f"Task {task_id} running as muse session {task.get('session_id')} "
-            f"({priority})"
+            f"Task {task_id} running as {task.get('runtime', assignee)} session "
+            f"{task.get('session_id')} ({priority})"
         )
-    elif task["status"] in ("launch_refused", "launch_unsupported"):
+    elif task["status"] in ("launch_refused", "launch_unsupported", "exhausted"):
         dispatch_message = f"Task {task_id} {task['status']}: {task.get('launch_error', '')}"
     else:
         dispatch_message = f"Task {task_id} dispatched to {assignee} ({priority})"
@@ -889,6 +1459,8 @@ def dispatch_task(
     }
     if focus_advisory is not None:
         dispatch_resp["focus_advisory"] = focus_advisory
+    if possible_duplicate is not None:
+        dispatch_resp["possible_duplicate"] = possible_duplicate
     return dispatch_resp
 
 
@@ -919,7 +1491,7 @@ def _build_agent_prompt(task: Dict[str, Any]) -> str:
         for c in task["constraints"]:
             lines.append(f"- {c}")
 
-    if task.get("assignee") == "copilot":
+    if task.get("assignee") == "copilot" or task.get("runtime") == "copilot":
         lines.append(
             "\n**When done:** Return to the Delimit coordinator with a completion packet "
             f"for task_id='{task['id']}'. Include the actual inspected evidence, changed "
@@ -934,6 +1506,7 @@ def _build_agent_prompt(task: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+@_store_read_safe()
 def get_agent_status(task_id: str = "") -> Dict[str, Any]:
     """Get the status of a specific task, or list all active tasks."""
     tasks = _load_tasks()
@@ -951,12 +1524,13 @@ def get_agent_status(task_id: str = "") -> Dict[str, Any]:
     }
 
 
+@_store_read_safe()
 def list_active_agents() -> Dict[str, Any]:
     """Return all tasks that are not done or failed.
 
     LED-5321 M5: running workers and completed/uncertain outputs awaiting
     lead disposition count as active (someone still has to act);
-    cancelled/refused/unsupported launches count as closed.
+    cancelled/refused/unsupported/exhausted launches count as closed.
     """
     tasks = _load_tasks()
     active = {
@@ -967,7 +1541,8 @@ def list_active_agents() -> Dict[str, Any]:
     completed = {
         tid: t for tid, t in tasks.items()
         if t.get("status") in ("done", "failed", "cancelled",
-                               "launch_refused", "launch_unsupported")
+                               "launch_refused", "launch_unsupported",
+                               "exhausted")
     }
 
     return {
@@ -983,6 +1558,7 @@ def list_active_agents() -> Dict[str, Any]:
     }
 
 
+@_serialized_store
 def complete_task(
     task_id: str,
     result: str = "",
@@ -1003,9 +1579,9 @@ def complete_task(
     ``completed``/``uncertain`` worker states, and ``uncertain`` requires an
     explicit ``accept_uncertain=True`` (the worker died mid-run, e.g. model
     stream idle timeout — the outcome is unknown). Closing a ``cancelled``,
-    ``running``, ``launch_refused``, or ``launch_unsupported`` task is an
-    error. Legacy audit-only tasks (dispatched/in_progress/handed_off) close
-    exactly as before.
+    ``running``, ``launch_refused``, ``launch_unsupported``, or ``exhausted``
+    task is an error. Legacy audit-only tasks (dispatched/in_progress/
+    handed_off) close exactly as before.
     """
     if not task_id or not task_id.strip():
         return {"error": "task_id is required"}
@@ -1017,6 +1593,11 @@ def complete_task(
         return {"error": f"Task {task_id} not found"}
 
     task = tasks[task_id]
+    if task.get("execution_slot"):
+        from ai.agent_session_slots import occupies_slot
+        if occupies_slot(task):
+            return {"error": "live worker may still be running; termination not confirmed; poll or cancel before closing/transferring"}
+
     if task["status"] == "done":
         return {"error": f"Task {task_id} is already marked done"}
 
@@ -1126,6 +1707,7 @@ def _extract_question_block(text: str) -> str:
     return "\n".join(buf).strip()
 
 
+@_serialized_store
 def record_question(
     task_id: str,
     question_text: str,
@@ -1251,16 +1833,19 @@ def _resume_muse_worker(
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
     except subprocess.TimeoutExpired:
-        return {"error": "launcher timed out after 120s"}
+        return {"error": "launcher timed out after 120s", "execution_uncertain": True}
     except OSError as e:
         return {"error": f"launcher exec failed: {e}"}
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or "").strip().splitlines()
         tail = detail[-1][:300] if detail else f"exit {proc.returncode}"
-        return {"error": f"launcher refused resume (exit {proc.returncode}): {tail}"}
+        pre_spawn = (_read_first_line(Path(new_prefix + ".launch-protocol")) == "1"
+                     and not Path(new_prefix + ".spawn-attempted").exists())
+        return {"error": f"launcher refused resume (exit {proc.returncode}): {tail}",
+                "execution_uncertain": not pre_spawn}
     resumed_sid = _read_first_line(Path(new_prefix + ".session-id"))
     if resumed_sid != session_id:
-        return {"error": "launcher did not resume the same session id"}
+        return {"error": "launcher did not resume the same session id", "execution_uncertain": True}
     now_epoch = time.time()
     lease = task.get("lease") or {}
     return {
@@ -1281,6 +1866,7 @@ def _resume_muse_worker(
     }
 
 
+@_serialized_store
 def answer_question(
     task_id: str,
     question_id: str,
@@ -1322,7 +1908,7 @@ def answer_question(
 
     task = tasks[task_id]
     if task["status"] in ("cancelled", "done", "failed",
-                          "launch_refused", "launch_unsupported"):
+                          "launch_refused", "launch_unsupported", "exhausted"):
         return {"error": f"cannot answer: task {task_id} is {task['status']}"}
     question = None
     for q in task.get("questions", []):
@@ -1333,6 +1919,21 @@ def answer_question(
         return {"error": f"Question {question_id} not found on {task_id}"}
     if question.get("status") == "answered":
         return {"error": f"Question {question_id} is already answered"}
+
+    from ai.agent_session_slots import admission, reserve, occupies_slot
+    will_resume = bool(task.get("runtime") == "muse" and task.get("session_id")
+                       and task.get("output_prefix") and task.get("workspace")
+                       and task["status"] in ("completed", "uncertain"))
+    if will_resume:
+        if occupies_slot(task):
+            return {"status": "concurrency_limited", "error": "Previous run termination not confirmed"}
+        held = admission(tasks)
+        if held:
+            return held
+        count = int(task.get("resume_count", 0) or 0) + 1
+        task["execution_slot"] = reserve(f"{task['output_prefix']}.r{count}", task['session_id'])
+        tasks[task_id] = task
+        _save_tasks(tasks)
 
     answer = answer_text.strip()
     answerer = answered_by.strip()
@@ -1369,8 +1970,11 @@ def answer_question(
     resume_error = ""
     if launched_muse and task["status"] in ("completed", "uncertain"):
         updates = _resume_muse_worker(task, answer, question_id)
+        task["execution_slot"]["launch_returned"] = True
         if "error" in updates:
             resume_error = updates["error"]
+            if not updates.get("execution_uncertain"):
+                task["execution_slot"]["state"] = "released"
         else:
             resumed = True
             task.setdefault("run_history", []).append({
@@ -1520,16 +2124,428 @@ def _stderr_tail(stderr_path: Path, limit: int = 500) -> str:
     return text[-limit:] if len(text) > limit else text
 
 
+def _agy_result_ok(event: Dict[str, Any]) -> bool:
+    """True when an agy stream-json result event reports success.
+
+    Structured only: any non-empty error field fails; otherwise an explicit
+    success status word is required (a result without a verdict fails
+    closed — the outcome is unknown, never assumed complete).
+    """
+    candidates = [event]
+    result = event.get("result")
+    if isinstance(result, dict):
+        candidates.append(result)
+    for obj in candidates:
+        for key in ("error", "error_message", "failure"):
+            val = obj.get(key)
+            if isinstance(val, str) and val.strip():
+                return False
+            if isinstance(val, dict) and val:
+                return False
+    for obj in candidates:
+        for key in ("status", "state", "verdict", "outcome"):
+            val = obj.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip().lower() in _AGY_SUCCESS_STATUSES
+    return False
+
+
+def _runtime_terminal_kind(event: Dict[str, Any], runtime: str) -> str:
+    """Terminal marker an event carries for a runtime: completed/failed/"".
+
+    Structured match only (exact match on a type/event/name/kind field —
+    never a prose scan). Muse keeps the existing payload_type/type match;
+    codex matches its exec --json stream, agy its stream-json result event,
+    copilot its json stream.
+    """
+    if runtime == "codex":
+        for key in ("type", "event", "name", "kind"):
+            val = event.get(key)
+            if not isinstance(val, str):
+                continue
+            if val == CODEX_TURN_COMPLETED:
+                return "completed"
+            if val in (CODEX_TURN_FAILED, CODEX_ERROR):
+                return "failed"
+        return ""
+    if runtime == "antigravity":
+        for key in ("event", "type", "name", "kind"):
+            if event.get(key) == AGY_RESULT_EVENT:
+                return "completed" if _agy_result_ok(event) else "failed"
+        return ""
+    if runtime == "copilot":
+        for key in ("type", "event", "name", "kind"):
+            val = event.get(key)
+            if val == COPILOT_RESULT_EVENT:
+                return "completed"
+            # Live-verified 2026-09-22: a quota wall (HTTP 402) emits no
+            # result event at all — the verdict is a session.error event
+            # carrying errorType/message/statusCode/errorCode.
+            if val in (COPILOT_ERROR_EVENT, COPILOT_SESSION_ERROR_EVENT):
+                return "failed"
+        return ""
+    kind = _event_kind(event)  # muse, unchanged
+    if kind == TERMINAL_COMPLETED_EVENT:
+        return "completed"
+    if kind == TERMINAL_FAILED_EVENT:
+        return "failed"
+    return ""
+
+
+def _agy_final_text(event: Dict[str, Any]) -> str:
+    """Structured final text from an agy result event (top level + result/)."""
+    candidates = [event]
+    result = event.get("result")
+    if isinstance(result, dict):
+        candidates.append(result)
+    for obj in candidates:
+        for key in ("text", "answer", "response", "output", "message", "content"):
+            val = obj.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+    return ""
+
+
+def _copilot_final_text(jsonl_path: Path, terminal_event: Dict[str, Any]) -> str:
+    """Structured final text: last assistant.message content, else result text."""
+    last = ""
+    for event in _read_jsonl_events(jsonl_path):
+        if event.get("type") != "assistant.message":
+            continue
+        data = event.get("data")
+        if isinstance(data, dict):
+            content = data.get("content")
+        elif isinstance(data, str):
+            content = data
+        else:
+            content = event.get("content")
+        if isinstance(content, str) and content.strip():
+            last = content.strip()
+    if last:
+        return last
+    return _event_text(terminal_event, ("text", "message", "content", "output"))
+
+
+def _codex_final_text(prefix: str, jsonl_path: Path) -> str:
+    """Structured final text: the -o last-message file, else last agent text."""
+    try:
+        text = Path(prefix + ".last-message").read_text().strip()
+        if text:
+            return text
+    except OSError:
+        pass
+    last = ""
+    for event in _read_jsonl_events(jsonl_path):
+        if event.get("type") != "item.completed":
+            continue
+        item = event.get("item")
+        if not isinstance(item, dict) or item.get("type") != "agent_message":
+            continue
+        text = item.get("text")
+        if isinstance(text, str) and text.strip():
+            last = text.strip()
+    return last
+
+
+def _runtime_final_text(runtime: str, terminal_event: Dict[str, Any],
+                        prefix: str, jsonl_path: Path) -> str:
+    """Structured final text for a completed non-muse worker."""
+    if runtime == "codex":
+        return _codex_final_text(prefix, jsonl_path)
+    if runtime == "antigravity":
+        return _agy_final_text(terminal_event)
+    if runtime == "copilot":
+        return _copilot_final_text(jsonl_path, terminal_event)
+    return ""
+
+
+def _runtime_failure_reason(runtime: str, terminal_event: Dict[str, Any],
+                            rc: Optional[int]) -> str:
+    """Structured failure reason for a failed non-muse worker."""
+    if runtime == "codex":
+        err = terminal_event.get("error")
+        if isinstance(err, dict):
+            for key in ("message", "text", "detail", "details"):
+                val = err.get(key)
+                if isinstance(val, str) and val.strip():
+                    return val.strip()
+            try:
+                return json.dumps(err)[:500]
+            except (TypeError, ValueError):
+                pass
+        elif isinstance(err, str) and err.strip():
+            return err.strip()
+        message = terminal_event.get("message")
+        if isinstance(message, str) and message.strip():
+            return message.strip()
+        return f"codex {terminal_event.get('type', 'terminal')} event (rc={rc})"
+    if runtime == "antigravity":
+        candidates = [terminal_event]
+        result = terminal_event.get("result")
+        if isinstance(result, dict):
+            candidates.append(result)
+        for obj in candidates:
+            for key in ("error", "error_message", "failure", "message", "reason"):
+                val = obj.get(key)
+                if isinstance(val, str) and val.strip():
+                    return val.strip()
+                if isinstance(val, dict) and val:
+                    try:
+                        return json.dumps(val)[:500]
+                    except (TypeError, ValueError):
+                        continue
+        for obj in candidates:
+            status = obj.get("status")
+            if isinstance(status, str) and status.strip():
+                return f"agy result status {status.strip()} (rc={rc})"
+        return f"agy result without a success verdict (rc={rc})"
+    if runtime == "copilot":
+        candidates = [terminal_event]
+        data = terminal_event.get("data")
+        if isinstance(data, dict):
+            candidates.append(data)
+        for obj in candidates:
+            for key in ("message", "error", "reason", "text"):
+                val = obj.get(key)
+                if isinstance(val, str) and val.strip():
+                    return val.strip()
+                if isinstance(val, dict) and val:
+                    try:
+                        return json.dumps(val)[:500]
+                    except (TypeError, ValueError):
+                        continue
+        if isinstance(data, dict):
+            bits = [f"{key}={data[key]}" for key in
+                    ("errorType", "errorCode", "statusCode")
+                    if data.get(key) is not None]
+            if bits:
+                return f"copilot {' '.join(bits)} (rc={rc})"
+        return f"copilot worker failed (rc={rc})"
+    return f"worker failed (rc={rc})"
+
+
+def _auto_failure_evidence(task: Dict[str, Any], reason: str) -> str:
+    """Bounded failure evidence: reason + stderr tail + last-message sidecar."""
+    evidence = f"{reason or ''}\n{task.get('worker_stderr_tail', '')}"
+    prefix = task.get("output_prefix") or ""
+    if prefix:
+        try:
+            evidence += "\n" + Path(str(prefix) + ".last-message").read_text()[:2000]
+        except OSError:
+            pass
+    return evidence
+
+
+def _auto_quick_quota_failure(task: Dict[str, Any], reason: str) -> bool:
+    """True when a terminal failure is quick AND quota-signalled.
+
+    The window runs from the worker's started_at to its observed_at; the
+    signal is matched against the bounded failure evidence (never a full
+    transcript scan).
+    """
+    start = _iso_epoch(task.get("started_at", ""))
+    end = _iso_epoch(task.get("observed_at", "")) or time.time()
+    elapsed = None if start is None else end - start
+    # A skewed/future start (negative elapsed) is clock skew, not a quick
+    # failure — it must never rotate.
+    if elapsed is None or elapsed < 0 or elapsed > _AUTO_QUICK_FAIL_SECONDS:
+        return False
+    return bool(_AUTO_QUOTA_SIGNAL_RE.search(_auto_failure_evidence(task, reason)))
+
+
+def _poll_rotate_next(task: Dict[str, Any], tasks: Dict[str, Any],
+                      from_runtime: str, reason: str,
+                      *, record_failure: bool = True) -> Dict[str, Any]:
+    """Re-launch an auto task on the next untried runtime (LED-5314).
+
+    Records the failed runtime's quota hold and flips its attempt row to
+    quota_failed (skipped when re-trying a deferred rotation —
+    record_failure=False — so the hold and history are written exactly once),
+    then walks forward. At most one attempt per runtime. Returns a poll-style
+    response: running (rotated), exhausted (no runtime left — last worker
+    evidence preserved for the lead), or uncertain with a rotation/deferred
+    marker when capacity is held (re-poll to retry).
+    """
+    from ai.agent_session_slots import admission, reserve
+    task_id = task["id"]
+    attempts = task.get("attempts", [])
+    if record_failure:
+        _dispatch_mark_quota(from_runtime, _auto_failure_evidence(task, reason))
+        for entry in attempts:
+            if entry.get("runtime") == from_runtime and entry.get("outcome") == "launched":
+                entry["outcome"] = "quota_failed"
+                entry["reason"] = (reason or "")[:300]
+                entry["observed_at"] = _utcnow()
+                break
+        else:
+            entry = _auto_attempt_entry(from_runtime, "quota_failed", reason or "")
+            entry["observed_at"] = _utcnow()
+            attempts.append(entry)
+        task["attempts"] = attempts
+    tried = {a.get("runtime") for a in attempts}
+    tried.add(task.get("runtime"))
+    base_prefix = task.get("run_base_prefix") or task.get("output_prefix") or ""
+    from ai.provider_usage import choose_runtime
+    selection = choose_runtime(task.get("priority", "P1"), task.get("task_type", ""), exclude=tried)
+    recorded_skips = set()
+    def record_skips_through(runtime: str) -> bool:
+        if runtime not in _AUTO_POLICY_ORDER:
+            attempts.append(_auto_attempt_entry(runtime, "skipped", "runtime absent from auto policy order"))
+            return False
+        for candidate in _AUTO_POLICY_ORDER[:_AUTO_POLICY_ORDER.index(runtime) + 1]:
+            if candidate in selection["skipped"] and candidate not in recorded_skips:
+                attempts.append(_auto_attempt_entry(candidate, "skipped", selection["skipped"][candidate]))
+                recorded_skips.add(candidate)
+        return True
+    for cand in selection["ranked"]:
+        if not record_skips_through(cand):
+            continue
+        if cand in tried:
+            continue
+        skip = _auto_skip_reason(cand)
+        if skip is not None:
+            attempts.append(_auto_attempt_entry(cand, "skipped", skip))
+            tried.add(cand)
+            continue
+        held = admission(tasks)
+        if held:
+            task["attempts"] = attempts
+            task["rotation"] = {
+                "status": "deferred",
+                "reason": "concurrency_limited; re-poll to rotate",
+                "observed_at": _utcnow(),
+            }
+            tasks[task_id] = task
+            _save_tasks(tasks)
+            _append_audit({"action": "poll", "task_id": task_id,
+                           "outcome": "uncertain", "rotation": "deferred",
+                           "reason": (task.get("uncertain_reason") or "")[:300]})
+            return {
+                "status": "uncertain",
+                "task_id": task_id,
+                "task": task,
+                "rotation": "deferred",
+                "reason": task.get("uncertain_reason", ""),
+                "message": (f"Worker on {task_id} ended uncertain; rotation "
+                            f"deferred (concurrency limited) — re-poll to retry"),
+            }
+        seq = int(task.get("launch_seq", 0) or 0)
+        new_prefix = str(base_prefix) + f".auto{seq}" if seq else str(base_prefix)
+        task["execution_slot"] = reserve(new_prefix, str(uuid.uuid4()))
+        tasks[task_id] = task
+        _save_tasks(tasks)
+        launch_spec = dict(task.get("launch") or {},
+                           session_id=task["execution_slot"]["session_id"])
+        agents_dir = _effective_agents_dir()
+        if cand == "muse":
+            binding = _launch_muse_worker(
+                task_id=task_id, spec=launch_spec, agents_dir=agents_dir,
+                output_prefix=Path(new_prefix),
+            )
+        else:
+            binding = _launch_runtime_worker(
+                runtime=cand, task_id=task_id, spec=launch_spec,
+                agents_dir=agents_dir, output_prefix=Path(new_prefix),
+            )
+        task["execution_slot"]["launch_returned"] = True
+        task["launch_seq"] = seq + 1
+        if "error" in binding:
+            if binding.get("execution_uncertain"):
+                attempts.append(_auto_attempt_entry(
+                    cand, "refused",
+                    binding["error"] + " (execution uncertain; rotation stopped)"))
+                task["attempts"] = attempts
+                task["rotation"] = {
+                    "status": "stopped",
+                    "reason": f"{cand} launch uncertain; not rotating further",
+                    "observed_at": _utcnow(),
+                }
+                tasks[task_id] = task
+                _save_tasks(tasks)
+                _append_audit({"action": "poll", "task_id": task_id,
+                               "outcome": "uncertain", "rotation": "stopped",
+                               "reason": binding["error"][:300]})
+                return {
+                    "status": "uncertain",
+                    "task_id": task_id,
+                    "task": task,
+                    "rotation": "stopped",
+                    "reason": task.get("uncertain_reason", ""),
+                    "message": (f"Worker on {task_id} ended uncertain; rotation "
+                                f"stopped ({cand} launch uncertain)"),
+                }
+            _dispatch_mark_refused(cand)
+            task["execution_slot"]["state"] = "released"
+            attempts.append(_auto_attempt_entry(cand, "refused", binding["error"]))
+            tried.add(cand)
+            continue
+        task.setdefault("output_history", []).append(task.get("output_prefix"))
+        task["output_prefix"] = binding["output_prefix"]
+        task["runtime"] = binding["runtime"]
+        task["session_id"] = binding["session_id"]
+        task["workspace"] = binding["workspace"]
+        task["branch"] = binding["branch"]
+        task["started_at"] = binding["started_at"]
+        task["lease"] = binding["lease"]
+        task["worker_pid"] = binding.get("worker_pid")
+        task["status"] = "running"
+        task["resume_count"] = 0
+        task["observed_rc"] = None
+        task.pop("uncertain_reason", None)
+        task.pop("rotation", None)
+        attempts.append(_auto_attempt_entry(
+            cand, "launched",
+            f"worker started (session {binding['session_id']})"))
+        task["attempts"] = attempts
+        task["updated_at"] = _utcnow()
+        tasks[task_id] = task
+        _save_tasks(tasks)
+        _append_audit({"action": "rotate", "task_id": task_id,
+                       "from_runtime": from_runtime, "to_runtime": cand,
+                       "reason": (reason or "")[:300]})
+        return {
+            "status": "running",
+            "task_id": task_id,
+            "task": task,
+            "rotated_to": cand,
+            "message": (f"Worker on {task_id} hit quota on {from_runtime}; "
+                        f"rotated to {cand} (session {binding['session_id']})"),
+        }
+    record_skips_through(_AUTO_POLICY_ORDER[-1])
+    attempts.append(_auto_attempt_entry(
+        "claude", "skipped", "no headless launch contract; lead decides"))
+    task["attempts"] = attempts
+    task["status"] = "exhausted"
+    task["launch_error"] = _auto_exhausted_error(attempts)
+    task.pop("rotation", None)
+    tasks[task_id] = task
+    _save_tasks(tasks)
+    _append_audit({"action": "exhausted", "task_id": task_id,
+                   "reason": task["launch_error"][:300]})
+    return {
+        "status": "exhausted",
+        "task_id": task_id,
+        "task": task,
+        "reason": task["launch_error"],
+        "message": f"Worker on {task_id} exhausted rotation: {task['launch_error']}",
+    }
+
+
+@_serialized_store
 def poll_worker(task_id: str) -> Dict[str, Any]:
     """Read a tracked worker's JSONL output WITHOUT inference.
 
     Explicit call only (the lead or a caller invokes it — no polling loop
     lives in the MCP server). Outcomes: rc file absent → ``running``;
-    ``run.terminal.completed`` → ``completed`` (final text extracted, and a
-    QUESTION: block — if present — is bound via record_question);
-    ``run.terminal.failed`` (e.g. model stream idle timeout) → ``uncertain``
-    with a reason (NOT completed, NOT failed-task); rc present but no
-    terminal event → ``uncertain`` (malformed output fails closed).
+    a terminal completed marker → ``completed`` (final text extracted, and a
+    QUESTION: block — if present — is bound via record_question); a terminal
+    failed marker (e.g. model stream idle timeout) → ``uncertain`` with a
+    reason (NOT completed, NOT failed-task); rc present but no terminal
+    event → ``uncertain`` (malformed output fails closed). LED-5314: the
+    completed/failed markers are runtime-specific (muse run.terminal.*,
+    codex turn.* + rc, agy stream-json result, copilot result/error), and an
+    ``auto`` task whose worker fails fast with a quota signal is re-launched
+    on the next runtime instead of parking uncertain.
     """
     if not task_id or not task_id.strip():
         return {"error": "task_id is required"}
@@ -1549,6 +2565,15 @@ def poll_worker(task_id: str) -> Dict[str, Any]:
             "message": "no launched worker bound to this task",
         }
     if task.get("status") != "running":
+        if (task.get("status") == "uncertain"
+                and task.get("assignee") == "auto"
+                and (task.get("rotation") or {}).get("status") == "deferred"):
+            # A rotation deferred for capacity: re-poll retries it (the
+            # failure and its hold were recorded on the first poll).
+            return _poll_rotate_next(
+                task, tasks, task.get("runtime") or "",
+                task.get("uncertain_reason", ""), record_failure=False,
+            )
         return {
             "status": task["status"],
             "task_id": task_id,
@@ -1559,7 +2584,9 @@ def poll_worker(task_id: str) -> Dict[str, Any]:
     rc_path = Path(prefix + ".rc")
     jsonl_path = Path(prefix + ".jsonl")
     stderr_path = Path(prefix + ".stderr")
-    now = time.strftime("%Y-%m-%dT%H:%M:%SZ")
+    # True UTC: started_at comes from the launcher's `date -u` sidecar, so
+    # observed_at must share the convention or the quick-fail elapsed skews.
+    now = _utcnow()
     task["last_polled_at"] = now
     task["updated_at"] = now
 
@@ -1582,21 +2609,52 @@ def poll_worker(task_id: str) -> Dict[str, Any]:
     task["observed_at"] = now
     task["worker_stderr_tail"] = _stderr_tail(stderr_path)
 
-    terminal_kind = ""
+    runtime = task.get("runtime") or task.get("assignee") or "muse"
+    terminal_kind = ""  # "completed" | "failed"
     terminal_event: Dict[str, Any] = {}
     for event in _read_jsonl_events(jsonl_path):
-        kind = _event_kind(event)
-        if kind == LIFECYCLE_EVENT:
+        if runtime == "muse" and _event_kind(event) == LIFECYCLE_EVENT:
             task["last_lifecycle"] = event
-        elif kind in (TERMINAL_COMPLETED_EVENT, TERMINAL_FAILED_EVENT):
+        kind = _runtime_terminal_kind(event, runtime)
+        if kind:
             terminal_kind = kind  # last terminal event wins
             terminal_event = event
+    if terminal_kind == "completed" and runtime != "muse" and rc != 0:
+        # A non-muse success marker with a nonzero exit disagrees with the
+        # rc file — fail closed as a failure, never as completed.
+        terminal_kind = "failed"
+    if terminal_kind == "completed" and runtime == "codex":
+        # codex exits 0 and emits turn.completed even when every file write was
+        # refused by its sandbox (structured: item.completed/file_change with
+        # status "failed"). A run whose writes failed is not a completed task.
+        # Resolve by path and event order: a path whose LATEST file_change
+        # completed without failure (a successful retry) does not count.
+        latest_status: Dict[str, str] = {}
+        for e in _read_jsonl_events(jsonl_path):
+            item = e.get("item") if e.get("type") == "item.completed" else None
+            if not isinstance(item, dict) or item.get("type") != "file_change":
+                continue
+            status = str(item.get("status") or "")
+            for ch in (item.get("changes") or [{}]):
+                path = str((ch or {}).get("path") or "")
+                latest_status[path] = status
+        failed_writes = [p for p, st in latest_status.items() if st == "failed"]
+        if failed_writes:
+            terminal_kind = "failed"
+            terminal_event = {
+                "type": "file_change.failed",
+                "message": f"codex reported {len(failed_writes)} failed file write(s) "
+                           "(sandbox refused workspace writes)",
+            }
 
-    if terminal_kind == TERMINAL_COMPLETED_EVENT:
-        final_text = _event_text(
-            terminal_event,
-            ("text", "final_text", "final", "output", "result", "message", "content"),
-        )
+    if terminal_kind == "completed":
+        if runtime == "muse":
+            final_text = _event_text(
+                terminal_event,
+                ("text", "final_text", "final", "output", "result", "message", "content"),
+            )
+        else:
+            final_text = _runtime_final_text(runtime, terminal_event, prefix, jsonl_path)
         task["status"] = "completed"
         task["final_text"] = final_text
         tasks[task_id] = task
@@ -1625,18 +2683,30 @@ def poll_worker(task_id: str) -> Dict[str, Any]:
                 resp["question_error"] = qr["error"]
         return resp
 
-    if terminal_kind == TERMINAL_FAILED_EVENT:
-        reason = _event_text(
-            terminal_event,
-            ("reason", "error", "message", "detail", "details", "text"),
-        ) or f"worker failed (rc={rc})"
+    if terminal_kind == "failed":
+        if runtime == "muse":
+            reason = _event_text(
+                terminal_event,
+                ("reason", "error", "message", "detail", "details", "text"),
+            ) or f"worker failed (rc={rc})"
+        else:
+            reason = _runtime_failure_reason(runtime, terminal_event, rc)
     else:
-        reason = (
-            f"worker exited (rc={rc}) without a {TERMINAL_COMPLETED_EVENT} "
-            f"or {TERMINAL_FAILED_EVENT} event"
-        )
+        if runtime == "muse":
+            reason = (
+                f"worker exited (rc={rc}) without a {TERMINAL_COMPLETED_EVENT} "
+                f"or {TERMINAL_FAILED_EVENT} event"
+            )
+        else:
+            hint = _RUNTIME_TERMINAL_HINT.get(runtime, "terminal")
+            reason = (f"{runtime} worker exited (rc={rc}) without a terminal "
+                      f"event ({hint})")
     task["status"] = "uncertain"
     task["uncertain_reason"] = reason
+    if task.get("assignee") == "auto" and _auto_quick_quota_failure(task, reason):
+        # Rotation, not parking: hold the quota-dead runtime and re-launch
+        # the SAME task on the next runtime (or record exhausted).
+        return _poll_rotate_next(task, tasks, runtime, reason)
     tasks[task_id] = task
     _save_tasks(tasks)
     _append_audit({
@@ -1700,6 +2770,7 @@ def _terminate_worker(task: Dict[str, Any]) -> Tuple[bool, str]:
     return False, "no live worker process found"
 
 
+@_serialized_store
 def cancel_task(task_id: str, *, reason: str) -> Dict[str, Any]:
     """Cancel a task and terminate its worker process if still alive.
 
@@ -1727,7 +2798,18 @@ def cancel_task(task_id: str, *, reason: str) -> Dict[str, Any]:
 
     killed = False
     note = "no worker process bound"
-    if task.get("runtime") == "muse" and task.get("session_id"):
+    if task.get("execution_slot"):
+        from ai.agent_session_slots import reclaim
+        try:
+            proof = reclaim(task["execution_slot"])
+        except (OSError, ValueError, KeyError) as exc:
+            proof = {"released": False, "reason": f"termination evidence unavailable: {type(exc).__name__}"}
+        if not proof["released"]:
+            return {"status": "cancellation_held", "task_id": task_id, "reason": proof["reason"]}
+        task["execution_slot"]["state"] = "released"
+        task["execution_slot"]["release_evidence"] = dict(proof, operator=_lead_identity(), reason=reason.strip(), recorded_at=_utcnow())
+        killed, note = proof["proof"] in ("group_terminated", "group_killed"), proof["proof"]
+    elif task.get("runtime") == "muse" and task.get("session_id"):
         killed, note = _terminate_worker(task)
 
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -1745,6 +2827,7 @@ def cancel_task(task_id: str, *, reason: str) -> Dict[str, Any]:
         "task_id": task_id,
         "reason": reason.strip()[:300],
         "worker_killed": killed,
+        "execution_release": (task.get("execution_slot") or {}).get("release_evidence"),
     })
 
     _release_checkout_claim(task)
@@ -1758,6 +2841,7 @@ def cancel_task(task_id: str, *, reason: str) -> Dict[str, Any]:
     }
 
 
+@_serialized_store
 def handoff_task(
     task_id: str,
     to_model: str,
@@ -1772,14 +2856,19 @@ def handoff_task(
     task_id = task_id.strip().upper()
     to_model = to_model.lower().strip()
 
-    if to_model not in VALID_ASSIGNEES - {"any"}:
-        return {"error": f"to_model must be one of: {', '.join(sorted(VALID_ASSIGNEES - {'any'}))}"}
+    if to_model not in VALID_ASSIGNEES - {"any", "auto"}:
+        return {"error": f"to_model must be one of: {', '.join(sorted(VALID_ASSIGNEES - {'any', 'auto'}))}"}
 
     tasks = _load_tasks()
     if task_id not in tasks:
         return {"error": f"Task {task_id} not found"}
 
     task = tasks[task_id]
+    if task.get("execution_slot"):
+        from ai.agent_session_slots import occupies_slot
+        if occupies_slot(task):
+            return {"error": "live worker may still be running; termination not confirmed; poll or cancel before closing/transferring"}
+
     if task["status"] == "done":
         return {"error": f"Task {task_id} is already done, cannot hand off"}
 
@@ -1836,6 +2925,7 @@ def handoff_task(
     }
 
 
+@_store_read_safe(allowed=False, reason="Task store unavailable; constraints cannot be verified")
 def enforce_constraints(task_id: str, action: str) -> Dict[str, Any]:
     """Check if an action is allowed given the task's constraints.
 
@@ -1898,6 +2988,7 @@ def enforce_constraints(task_id: str, action: str) -> Dict[str, Any]:
     return {"allowed": True, "reason": "All constraints passed"}
 
 
+@_serialized_store
 def link_ledger_item(task_id: str, ledger_item_id: str) -> Dict[str, Any]:
     """Link a dispatched agent task to a ledger item (LED-xxx or STR-xxx).
 
@@ -1963,6 +3054,7 @@ def _dispatch_stale_hours_default() -> int:
         return _DISPATCH_STALE_HOURS_DEFAULT
 
 
+@_serialized_store
 def auto_close_stale_dispatches(
     threshold_hours: Optional[int] = None,
     dry_run: bool = True,
@@ -2009,6 +3101,8 @@ def auto_close_stale_dispatches(
 
     stale: List[Dict[str, Any]] = []
     for tid, t in tasks.items():
+        if t.get("execution_slot"):
+            continue
         if t.get("status") not in statuses:
             continue
         if t.get("task_type") in _DLQ_EXEMPT_TASK_TYPES:
@@ -2063,6 +3157,7 @@ def auto_close_stale_dispatches(
     }
 
 
+@_store_read_safe()
 def get_agent_dashboard() -> Dict[str, Any]:
     """Return a full dashboard view of all agent activity.
 

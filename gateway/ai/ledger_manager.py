@@ -28,20 +28,125 @@ try:
 except ImportError:  # Windows has no fcntl; the close lock degrades to in-process.
     fcntl = None  # type: ignore[assignment]
 
+try:
+    import pwd  # type: ignore[import-not-found]  # POSIX only.
+except ImportError:  # Windows has no pwd module.
+    pwd = None  # type: ignore[assignment]
+
 logger = logging.getLogger(__name__)
 
 
+def _real_home() -> Path:
+    """The OS user database's home directory (getpwuid on POSIX) — ignores
+    $HOME entirely. Mirrors lib/delimit-home.js's ``_realHome()`` and
+    ai.continuity's identical helper (LED-5658). Used only to detect
+    whether the caller has overridden $HOME away from the actual system
+    home (an isolation signal), never as the resolved store location
+    itself.
+
+    TEST-ONLY escape hatch: ``_DELIMIT_TEST_ONLY_REAL_HOME`` lets a test
+    substitute a disposable directory for "the real home" so a test that
+    deliberately reproduces the ambient-DELIMIT_HOME conflict never risks
+    writing into this machine's actual real home. Mirrors the identical
+    hook in lib/delimit-home.js and ai.continuity._real_home().
+
+    Deliberately duplicated rather than imported from ai.continuity: this
+    module ships in minimal/public bundle layouts that don't include
+    continuity.py (see
+    tests/test_handoff_revive_continuity.py::test_tarball_equivalent_public_layout_handoff_revives_without_phoenix,
+    which builds a "public-shipped continuity files" subset explicitly
+    excluding it) — a cross-module import here would have broken that
+    layout. Every DELIMIT_HOME resolver in this codebase already
+    duplicates its ~3-line env lookup rather than sharing one (see
+    control_plane.py, session_continuity.py, last_capture.py, etc.); this
+    follows the same established pattern.
+    """
+    test_override = os.environ.get("_DELIMIT_TEST_ONLY_REAL_HOME", "").strip()
+    if test_override:
+        return Path(test_override)
+    if pwd is not None:
+        try:
+            return Path(pwd.getpwuid(os.getuid()).pw_dir)
+        except (KeyError, OSError):
+            pass
+    return Path.home()
+
+
 def _delimit_home() -> Path:
-    """Resolve the customer-selected Delimit state root."""
-    for env_key in ("DELIMIT_HOME", "DELIMIT_NAMESPACE_ROOT"):
-        val = os.environ.get(env_key, "").strip()
-        if val:
-            return Path(val).expanduser()
-    return Path.home() / ".delimit"
+    """Resolve the customer-selected Delimit state root.
+
+    LED-5658 review follow-up: applies the SAME narrowly-scoped
+    ambient-DELIMIT_HOME mismatch guard as lib/delimit-home.js's
+    delimitHome() and ai.continuity._resolve_delimit_home() (see either
+    docstring for the full rationale): when $HOME has been overridden away
+    from the real passwd-database home AND the current
+    DELIMIT_HOME/DELIMIT_NAMESPACE_ROOT is EXACTLY the default a normal
+    shell would compute, that value is untrusted ambient leftover and
+    DELIMIT_HOME is re-derived from the overridden $HOME instead. A
+    DELIMIT_HOME genuinely different from that default — including a
+    legitimate su/sudo -u context — is still honored as explicit/authentic.
+    """
+    env_home = Path.home()  # honors $HOME, re-read fresh every call
+    from_env = (
+        os.environ.get("DELIMIT_HOME", "").strip()
+        or os.environ.get("DELIMIT_NAMESPACE_ROOT", "").strip()
+    )
+    if from_env:
+        trimmed = Path(from_env)
+        real_home = _real_home()
+        home_overridden = env_home != real_home
+        if home_overridden:
+            ambient_default = real_home / ".delimit"
+            if trimmed != ambient_default:
+                return trimmed.expanduser()
+            # trimmed == ambient_default: untrusted ambient leftover —
+            # $HOME was overridden, trust that signal instead.
+        else:
+            return trimmed.expanduser()
+    return env_home / ".delimit"
 
 
-GLOBAL_DIR = _delimit_home()
-VENTURES_FILE = GLOBAL_DIR / "ventures.json"
+def _global_dir() -> Path:
+    """LED-5658 round 4: per-call re-resolution of the customer-selected
+    state root, mirroring memory_bridge._memory_dir(). Every ledger-root
+    function below (and every internal caller in this module) calls this
+    — or one of _central_ledger_dir()/_ledger_v2_dir()/_ventures_file()/
+    _sandbox_ledger_root(), all derived from it — fresh on each use,
+    instead of reading a value frozen at import time. GLOBAL_DIR and the
+    other bare module constants below remain defined, still computed once
+    at import, ONLY as backward-compatible aliases for any external code
+    that imports the bare name directly; nothing in this module reads
+    them anymore.
+    """
+    return _delimit_home()
+
+
+def _central_ledger_dir() -> Path:
+    return _global_dir() / "ledger"
+
+
+def _ledger_v2_dir() -> Path:
+    return _global_dir() / "ledger-v2"
+
+
+def _ventures_file() -> Path:
+    return _global_dir() / "ventures.json"
+
+
+def _sandbox_ledger_root() -> Path:
+    """LED-5658: isolated home for venture names that resolve to a slug
+    this process doesn't recognize AND have no legitimate project marker
+    behind them. Kept under _ledger_v2_dir() so it is trivially
+    distinguishable from real per-venture sub-ledgers; never read by any
+    canonical-ledger query."""
+    return _ledger_v2_dir() / "_unrecognized"
+
+
+# Backward-compatible aliases only (frozen at import) — see _global_dir()'s
+# docstring. Nothing in this module reads these; every internal use calls
+# the _*_dir()/_ventures_file()/_sandbox_ledger_root() functions above.
+GLOBAL_DIR = _global_dir()
+VENTURES_FILE = _ventures_file()
 
 # LED-1145 Phase 2 #3: P0 quota soft warning. The soft block fires when an
 # add_item call would push the unresolved-P0 count over the quota. Item is
@@ -187,21 +292,24 @@ def _detect_venture(project_path: str = ".") -> Dict[str, str]:
     except Exception:
         pass
 
+    # A dedicated venture namespace (~/.delimit/ventures/<name>) is an
+    # AUTHORITATIVE custom venture — the <name> after ventures/ is never
+    # junk, even though the path contains ".delimit" and may sit under
+    # /tmp during tests (which would otherwise mark it ephemeral and
+    # collapse every custom venture to "delimit"). Computed unconditionally
+    # (not just inside the remap branch below) so a dedicated namespace
+    # retains its venture name even under a temporary root.
+    parent = p.parent
+    is_dedicated_venture = (
+        parent.name == "ventures" and parent.parent.name == ".delimit"
+    )
+
     # LED-3925 write-path resolution: if no authoritative project signal named
     # this path AND the basename is an ephemeral / non-venture junk name
     # (server, .delimit, tmp*), remap it to a real venture slug rather than
     # stamping the junk basename onto every ledger write.
     if not name_from_project_signal:
         basename = p.name
-        # A dedicated venture namespace (~/.delimit/ventures/<name>) is an
-        # AUTHORITATIVE custom venture — the <name> after ventures/ is never
-        # junk, even though the path contains ".delimit" and may sit under
-        # /tmp during tests (which would otherwise mark it ephemeral and
-        # collapse every custom venture to "delimit").
-        parent = p.parent
-        is_dedicated_venture = (
-            parent.name == "ventures" and parent.parent.name == ".delimit"
-        )
         if not is_dedicated_venture and (
             _is_ephemeral_path(str(p))
             or basename in ("server", ".delimit")
@@ -232,11 +340,12 @@ def _register_venture(info: Dict[str, str]):
     The guard fails-silently — tests that pass tmp_path to functions
     which auto-register simply don't pollute the registry going forward.
     """
-    GLOBAL_DIR.mkdir(parents=True, exist_ok=True)
+    _global_dir().mkdir(parents=True, exist_ok=True)
     ventures = {}
-    if VENTURES_FILE.exists():
+    _vfile = _ventures_file()
+    if _vfile.exists():
         try:
-            ventures = json.loads(VENTURES_FILE.read_text())
+            ventures = json.loads(_vfile.read_text())
         except Exception:
             pass
 
@@ -252,11 +361,13 @@ def _register_venture(info: Dict[str, str]):
             "type": info.get("type", ""),
             "registered_at": _utc_timestamp(),
         }
-        VENTURES_FILE.write_text(json.dumps(ventures, indent=2))
+        _vfile.write_text(json.dumps(ventures, indent=2))
 
 
-CENTRAL_LEDGER_DIR = _delimit_home() / "ledger"
-LEDGER_V2_DIR = _delimit_home() / "ledger-v2"
+# Backward-compatible aliases only (frozen at import) — see _global_dir()'s
+# docstring above.
+CENTRAL_LEDGER_DIR = _central_ledger_dir()
+LEDGER_V2_DIR = _ledger_v2_dir()
 
 # LED-1188 D3 (deliberation att_f86e1f51110e8ed6 follow-up, 2026-04-28):
 # Plan-C migration partitions the central ledger into per-venture sub-ledgers
@@ -339,6 +450,156 @@ def _detect_model() -> str:
     return "unknown"
 
 
+# Backward-compatible alias only (frozen at import) — see _global_dir()'s
+# docstring above. _sandbox_ledger_dir() below calls _sandbox_ledger_root()
+# fresh, not this constant.
+_SANDBOX_LEDGER_ROOT = _sandbox_ledger_root()
+
+
+def _sandbox_ledger_dir(name: str) -> Path:
+    """Isolated, disposable ledger dir for an unrecognized venture name
+    (LED-5658). Deterministic per literal name so repeated calls with the
+    same synthetic venture see their own prior writes, but never the
+    canonical central/per-venture ledgers."""
+    safe = re.sub(r"[^a-zA-Z0-9._-]+", "-", name or "unknown").strip("-._") or "unknown"
+    return _sandbox_ledger_root() / safe
+
+
+def _unknown_venture_name(project_path: str = ".") -> Optional[str]:
+    """LED-5658: return the literal venture name when ``project_path``
+    resolves to neither a recognized canonical slug NOR an existing
+    directory on disk — i.e. a synthetic/unknown venture with nothing real
+    behind it (an arbitrary MCP `venture=` string, a typo, a test name).
+    Returns None for every legitimate case: a recognized canonical slug, OR
+    an existing (even if not-yet-partitioned) project directory.
+
+    Shared by _project_ledger_dir (read-path sandboxing) and every write
+    entry point (add_item/update_item/link_items/bulk_action — fail-closed,
+    LED-5658 review follow-up: a write must never silently succeed into an
+    isolated sandbox without saying so).
+    """
+    if not _ledger_v2_dir().exists() and not (_central_ledger_dir() / "delimit").exists():
+        return None  # legacy single-file layout; nothing to gate
+
+    try:
+        resolved = Path(project_path).expanduser().resolve()
+    except (OSError, RuntimeError):
+        resolved = None
+
+    info = _detect_venture(project_path)
+
+    # An ephemeral path needs adoption evidence before canonical slug
+    # recognition. A package/pyproject/git name, or a dedicated-venture
+    # namespace under /tmp, can name a real slug but does not prove this
+    # temporary directory is authorized to write to its ledger.
+    if (
+        resolved is not None
+        and _is_ephemeral_path(str(resolved))
+        and not _has_legitimate_project_marker(resolved)
+    ):
+        return info.get("name") or "unknown"
+
+    slug = _canonical_venture_slug(info.get("name", ""))
+    if slug is not None:
+        return None
+
+    # LED-5658 round 4: an unrecognized name backed by a LEGITIMATE
+    # project keeps the original (pre-fix) behavior — a real, simply
+    # not-yet-partitioned project must not be disrupted. Bare
+    # `resolved.exists()` was too weak a legitimacy signal: ANY directory
+    # that happens to exist (e.g. any pytest tmp_path, or any arbitrary
+    # path an unknown MCP `venture=` argument could name) trivially
+    # satisfies it, which meant add_item/link_items/bulk_action's
+    # write-gate and _project_ledger_dir's read-path sandboxing both
+    # silently no-op'd whenever the caller's venture string happened to
+    # collide with something that exists on disk. Require an actual
+    # legitimacy marker instead (see _has_legitimate_project_marker):
+    # a registered VENTURES_FILE entry, or the .delimit/ directory
+    # `delimit init` creates as the FIRST thing it does (ai.server.
+    # delimit_init: `delimit_dir.mkdir()` before policies.yml or the
+    # ledger files). An existing directory with NEITHER is unknown.
+    # (resolved was already computed above, for the ephemeral check.)
+    if resolved is None or not _has_legitimate_project_marker(resolved):
+        return info.get("name") or "unknown"
+    return None
+
+
+def _has_legitimate_project_marker(resolved: Path) -> bool:
+    """LED-5658 round 4: is `resolved` a real, intentionally-adopted
+    project, not just "some directory that happens to exist"? True when
+    EITHER:
+      - `resolved` is registered in VENTURES_FILE (its recorded path
+        matches, after normalization); or
+      - `resolved / ".delimit"` exists as a directory — the marker
+        `delimit init` creates first, before policies.yml or any ledger
+        file (ai.server.delimit_init), and the same marker
+        lib/continuity-resolver.js's resolveRepoRoot() checks
+        (`.delimit/ledger/operations.jsonl`) on the JS side — a bare
+        `.delimit/` dir is accepted here too since a freshly-init'd
+        project may not have written any ledger item yet.
+    Never raises; a filesystem error is treated as "not legitimate"
+    (fail closed).
+    """
+    try:
+        if (resolved / ".delimit").is_dir():
+            return True
+    except OSError:
+        pass
+    try:
+        vfile = _ventures_file()
+        ventures = json.loads(vfile.read_text()) if vfile.exists() else {}
+    except Exception:
+        ventures = {}
+    resolved_str = str(resolved)
+    for info in ventures.values():
+        vpath = info.get("path", "") if isinstance(info, dict) else ""
+        if not vpath:
+            continue
+        try:
+            if str(Path(vpath).expanduser().resolve()) == resolved_str:
+                return True
+        except (OSError, RuntimeError):
+            continue
+    return False
+
+
+def _unknown_venture_write_error(project_path: str) -> Optional[Dict[str, Any]]:
+    """LED-5658 review follow-up: fail-closed gate for every WRITE entry
+    point (add_item/update_item/link_items/bulk_action). Returns an error
+    dict (never raises) when project_path resolves to an unknown venture,
+    or None when the write may proceed. A write must never report plain
+    success into a silently-sandboxed store — that was indistinguishable
+    from "it worked" and let an unknown/typo'd venture look like a normal
+    one. Reads remain harmless (see _project_ledger_dir): they still
+    resolve to the isolated sandbox and simply return empty results,
+    carrying an additive ``sandboxed``/``warning`` field instead of
+    erroring.
+    """
+    name = _unknown_venture_name(project_path)
+    if name is None:
+        return None
+    return {
+        "error": (
+            f"Unknown venture {name!r}: no ledger store exists for it. "
+            f"This name is not a {_known_venture_hint()}. Refusing to "
+            "write rather than silently landing in an isolated, "
+            "non-canonical store."
+        ),
+        "unknown_venture": name,
+        "known_ventures": sorted(_KNOWN_VENTURE_SLUGS),
+    }
+
+
+def _known_venture_hint() -> str:
+    """Human-readable list of valid ventures/namespaces for a fail-closed
+    error message (LED-5658 review follow-up)."""
+    return (
+        f"recognized venture slugs ({', '.join(sorted(_KNOWN_VENTURE_SLUGS))}), "
+        "an existing project directory (pass its path), or an already-"
+        "initialized dedicated namespace under ~/.delimit/ventures/<name>/"
+    )
+
+
 def _project_ledger_dir(project_path: str = ".") -> Path:
     """Resolve the ledger directory for a project, with Plan-C auto-detect.
 
@@ -349,7 +610,23 @@ def _project_ledger_dir(project_path: str = ".") -> Path:
          per-venture sub-ledger. (Plan-C staged but not yet swapped.)
       3. If CENTRAL_LEDGER_DIR / <slug> / operations.jsonl exists, return
          that per-venture sub-ledger. (Plan-C swapped.)
-      4. Fall back to CENTRAL_LEDGER_DIR (legacy single-file layout).
+      4. Fall back to CENTRAL_LEDGER_DIR (legacy single-file layout) — but
+         ONLY when project_path resolves to a directory that actually
+         exists (a real, if not-yet-partitioned, project). LED-5658: when
+         the resolved path does not exist on disk, the "venture" has no
+         real project behind it at all — it is a synthetic/unknown name
+         (e.g. an arbitrary MCP `venture=` string). Silently falling
+         through to CENTRAL_LEDGER_DIR in that case let any unrecognized
+         name read and write the real shared ledger (found live via
+         delimit_ledger_list(venture="<made-up name>") returning the full
+         1490-item canonical ledger instead of an empty/isolated result).
+         Route those to an isolated per-name sandbox dir instead (5).
+      5. Unrecognized slug + nonexistent project_path -> isolated sandbox
+         dir keyed by the literal venture name (_sandbox_ledger_dir). This
+         path is READ-ONLY safe (an isolated, empty store — see
+         _unknown_venture_name's docstring); every WRITE entry point gates
+         on _unknown_venture_name() first and fails closed instead of
+         reaching this branch (LED-5658 review follow-up).
 
     Cross-model handoff fix (still enforced): Codex and Gemini were writing to
     $PWD/.delimit/ledger/ which caused ledger fragmentation. The central
@@ -357,29 +634,39 @@ def _project_ledger_dir(project_path: str = ".") -> Path:
     single source of truth — per-project .delimit/ dirs are for policies and
     config only.
     """
+    unknown_name = _unknown_venture_name(project_path)
+    if unknown_name is not None:
+        return _sandbox_ledger_dir(unknown_name)
+
+    central = _central_ledger_dir()
+    ledger_v2 = _ledger_v2_dir()
+
     # Quick exit: legacy callers that pass venture="" / project="." and
     # have no Plan-C tree on disk get the original single-file layout.
-    if not LEDGER_V2_DIR.exists() and not (CENTRAL_LEDGER_DIR / "delimit").exists():
-        return CENTRAL_LEDGER_DIR
+    if not ledger_v2.exists() and not (central / "delimit").exists():
+        return central
 
     info = _detect_venture(project_path)
     slug = _canonical_venture_slug(info.get("name", ""))
     if slug is None:
-        return CENTRAL_LEDGER_DIR
+        # _unknown_venture_name returned None above, so this is the
+        # "unrecognized slug but a LEGITIMATE (marker/registered) real
+        # directory" case — unchanged pre-LED-5658 behavior.
+        return central
 
     # Plan-C staged: ledger-v2/<slug>/
-    staged = LEDGER_V2_DIR / slug
+    staged = ledger_v2 / slug
     if (staged / "operations.jsonl").exists():
         return staged
 
     # Plan-C swapped: ledger/<slug>/
-    swapped = CENTRAL_LEDGER_DIR / slug
+    swapped = central / slug
     if (swapped / "operations.jsonl").exists():
         return swapped
 
     # No partitioned tree for this venture — fall back to the central
     # legacy layout (operations.jsonl + strategy.jsonl directly in ledger/).
-    return CENTRAL_LEDGER_DIR
+    return central
 
 
 def _resolve_namespace(project_path: str = ".") -> Dict[str, str]:
@@ -587,6 +874,13 @@ EVIDENCE_KINDS = (
     "runtime_verified",
     "natural_outcome",
     "natural_outcome_observed",
+    # LED-5658: generic, no-lifecycle-claim kind for a status change / note
+    # that doesn't assert a specific verifiable milestone (e.g. a plain
+    # "done", or an assessment/documentation note). Additive — existing
+    # records and the EVIDENCE_KINDS/KIND_TO_VERIFIED_STATE contract for
+    # every prior kind are unchanged; "assessment" intentionally has no
+    # entry in KIND_TO_VERIFIED_STATE, so it never advances verified_states.
+    "assessment",
 )
 VERIFIED_STATES_ORDER = [
     "implemented",
@@ -616,11 +910,6 @@ CLASS_TO_TRUTH_LABEL = {
     "unavailable": "UNAVAILABLE",
 }
 LEGACY_TRUTH_LABEL = "legacy/unclassified"
-
-_ASSERTION_RE = re.compile(
-    r"\b(merged|deployed|published|verified|runtime[_\s-]?verified|natural[_\s-]?outcome)\b",
-    re.IGNORECASE,
-)
 
 
 def validate_evidence(evidence: Any) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
@@ -665,36 +954,33 @@ def validate_evidence(evidence: Any) -> tuple[Optional[Dict[str, Any]], Optional
     }, None
 
 
-def _infer_kind_from_text(*texts: Optional[str]) -> Optional[str]:
-    blob = " ".join(t for t in texts if t).lower()
-    if not blob:
-        return None
-    if "runtime" in blob and "verif" in blob:
-        return "runtime_verified"
-    if "deployed" in blob:
-        return "deployed"
-    if "published" in blob:
-        return "published"
-    if "merged" in blob:
-        return "merged"
-    if "natural" in blob and "outcome" in blob:
-        return "natural_outcome"
-    return None
-
-
 def _detect_assertion(
     status: Optional[str],
     note: Optional[str],
     title: Optional[str],
     description: Optional[str],
 ) -> tuple[bool, Optional[str]]:
-    """Whether this update asserts a truth-sensitive state (LED-5321 M4)."""
-    inferred = _infer_kind_from_text(note, title, description)
+    """Whether this update asserts a truth-sensitive state (LED-5321 M4).
+
+    LED-5658: kind is NEVER inferred from note/title/description prose.
+    The removed `_infer_kind_from_text`/`_ASSERTION_RE` keyword scan stamped
+    a specific lifecycle kind (e.g. "deployed") onto any update whose note
+    merely *mentioned* a lifecycle word — including negated ones. A note
+    reading "nothing implemented or deployed" produced evidence
+    {class: "assertion", kind: "deployed"}; a note with no lifecycle word
+    at all still got kind "merged" purely because `status` moved to "done".
+    Neither is what the note said. Per the governing rule (evidence type
+    comes from the producing operation and the caller-supplied evidence,
+    never from prose): the only non-explicit trigger left is `status`
+    moving to "done", and it gets the generic, no-claim "assessment" kind
+    — never a guessed specific lifecycle kind. A caller that knows it is
+    recording a specific lifecycle fact (merged/deployed/published/...)
+    must say so explicitly via the `evidence=` param; that IS "the
+    producing operation" naming its own evidence, not this generic
+    status-setter guessing at it from text.
+    """
     if status == "done":
-        return True, inferred or "merged"
-    for text in (note, title, description):
-        if text and _ASSERTION_RE.search(text):
-            return True, inferred or "merged"
+        return True, "assessment"
     return False, None
 
 
@@ -794,6 +1080,10 @@ def add_item(
         ledger=ledger,
     )
 
+    _unknown_err = _unknown_venture_write_error(project_path)
+    if _unknown_err is not None:
+        return _unknown_err
+
     _ensure(project_path)
     venture = _detect_venture(project_path)
     ledger_dir = _project_ledger_dir(project_path)
@@ -814,11 +1104,12 @@ def add_item(
     # whether it lives in operations or strategy in any sub-ledger).
     filename = "strategy.jsonl" if ledger == "strategy" else "operations.jsonl"
     candidate_paths: list[Path] = []
-    if LEDGER_V2_DIR.exists():
-        for sub in LEDGER_V2_DIR.iterdir():
+    _ledger_v2 = _ledger_v2_dir()
+    if _ledger_v2.exists():
+        for sub in _ledger_v2.iterdir():
             if sub.is_dir():
                 candidate_paths.append(sub / filename)
-    candidate_paths.append(CENTRAL_LEDGER_DIR / filename)
+    candidate_paths.append(_central_ledger_dir() / filename)
 
     for cand in candidate_paths:
         if cand == path:
@@ -923,6 +1214,42 @@ def _find_item_in_ledger_dir(item_id: str, ledger_dir: Path) -> Optional[Dict[st
     return None
 
 
+def _find_item_across_registered_ventures(
+    item_id: str, exclude_dir: Optional[Path]
+) -> Optional[Dict[str, Any]]:
+    """LED-5658 review v2: READ-ONLY scan of every registered venture's
+    ledger for item_id, skipping exclude_dir. Never writes. Returns the
+    _find_item_in_ledger_dir result plus the venture name, or None.
+
+    Two distinct uses:
+      1. update_item's auto-detect fallback (exclude_dir = the already-
+         searched default dir) — the pre-existing cross-venture search,
+         unchanged in behavior, just extracted so it can also power (2).
+      2. update_item's explicit-unknown-venture REJECT path
+         (exclude_dir=None, nothing searched yet) — read-only diagnostic
+         only, to populate item_found_in in the rejection error. This
+         call NEVER leads to a write; the caller has already been told no.
+    """
+    try:
+        _vfile = _ventures_file()
+        ventures = json.loads(_vfile.read_text()) if _vfile.exists() else {}
+    except Exception:
+        ventures = {}
+    searched = {str(exclude_dir)} if exclude_dir is not None else set()
+    for name, info in ventures.items():
+        vpath = info.get("path", "")
+        if not vpath:
+            continue
+        candidate_dir = Path(vpath) / ".delimit" / "ledger"
+        if str(candidate_dir) in searched:
+            continue
+        searched.add(str(candidate_dir))
+        found = _find_item_in_ledger_dir(item_id, candidate_dir)
+        if found:
+            return {**found, "venture": name}
+    return None
+
+
 def update_item(
     item_id: str,
     status: Optional[str] = None,
@@ -954,13 +1281,39 @@ def update_item(
     transition to `done` even without proof — but the flag lets future
     audits and the Phase 2 reconciler find unverified-done items.
 
-    LED-5321 M4: when `status` moves to `done`, or a note/field asserts
-    merged/deployed/published/verified, an evidence object
-    {class, kind, ref, observed_at, observed_by} is required-or-attached.
-    Callers that pass nothing keep working: the record is stored with
-    evidence.class="assertion" (never silently "verified"). `verified_states`
-    only advances with a verified-class evidence object whose ref is
+    LED-5321 M4: when `status` moves to `done`, an evidence object
+    {class, kind, ref, observed_at, observed_by} is required-or-attached
+    (kind defaults to the generic "assessment" — LED-5658: it is never
+    guessed from note/title/description prose; a caller that wants a
+    specific lifecycle kind, e.g. merged/deployed/published/verified, must
+    pass `evidence=` explicitly). Callers that pass nothing keep working:
+    the record is stored with evidence.class="assertion" (never silently
+    "verified"). `verified_states` only advances with a verified-class
+    evidence object whose ref is
     present. Malformed evidence is rejected with a clear error and no write.
+
+    LED-5658 review v2 (lead decision resolving a Claude/Codex review
+    split): the ONLY special case is a genuinely UNKNOWN venture — no
+    recognized canonical slug, AND no real directory behind it (see
+    _unknown_venture_name; auto-detect, project_path in ("", "."), is
+    NEVER unknown by this definition — "." always resolves to the
+    existing process cwd). When project_path resolves to an unknown
+    venture, the call is rejected BEFORE any lookup or write — no
+    fallback search, no chance of reaching into a different, real,
+    canonical ledger just because item_id happens to collide there. The
+    error carries `unknown_venture`, `known_ventures`, and — when item_id
+    is found to actually exist in some other real, registered venture (a
+    read-only check only, never a write) — `item_found_in: <venture>` so
+    the caller can retry with the correct venture in one step.
+
+    Every OTHER case — auto-detect, a recognized canonical slug, or an
+    explicit path to a real (even if unregistered/not-yet-partitioned)
+    project directory — is UNCHANGED from pre-LED-5658 behavior: if the
+    item isn't in the resolved ledger, every OTHER registered venture is
+    searched and the item is updated wherever it's actually found. When
+    that fallback is what located the item, the success response carries
+    an additive `venture_fallback: true` so a caller can tell its
+    default/explicit venture guess was wrong.
     """
     # LED-5321 M4: validate caller-supplied evidence before any write.
     _evidence_normalized: Optional[Dict[str, Any]] = None
@@ -974,33 +1327,52 @@ def update_item(
         _evidence_normalized = _default_assertion_evidence(
             _inferred_kind or "merged", worked_by
         )
+    # LED-5658 review v2: an EXPLICITLY passed venture that is UNKNOWN (no
+    # recognized slug, no real directory behind it — auto-detect,
+    # project_path in ("", "."), is never "unknown": "." always resolves
+    # to the existing process cwd) must be rejected BEFORE any lookup or
+    # write — reject first, no fallback search, so an explicit typo/
+    # unknown venture can never reach into and mutate a different real,
+    # canonical ledger just because item_id happens to collide there.
+    #
+    # An EXPLICIT but RECOGNIZED venture (a known slug, OR an unrecognized
+    # name backed by a real, existing project directory — e.g. a
+    # not-yet-registered project) is UNCHANGED from pre-LED-5658 behavior:
+    # it still gets the full cross-venture fallback search below, exactly
+    # like auto-detect. Only "unknown" (per _unknown_venture_name) is
+    # special-cased. See update_item's docstring for the full contract.
+    _unknown_name = _unknown_venture_name(project_path)
+    if _unknown_name is not None:
+        _elsewhere = _find_item_across_registered_ventures(item_id, exclude_dir=None)
+        _err: Dict[str, Any] = {
+            "error": (
+                f"Venture {_unknown_name!r} is unknown: no ledger store "
+                f"exists for it. This name is not a {_known_venture_hint()}. "
+                f"Refusing to look up or update {item_id} under it."
+            ),
+            "unknown_venture": _unknown_name,
+            "known_ventures": sorted(_KNOWN_VENTURE_SLUGS),
+        }
+        if _elsewhere is not None:
+            _err["item_found_in"] = _elsewhere["venture"]
+        return _err
+
     _ensure(project_path)
     ledger_dir = _project_ledger_dir(project_path)
 
     # First, search the specified project's ledger
     found = _find_item_in_ledger_dir(item_id, ledger_dir)
 
-    # If not found, search all registered ventures as a fallback
+    # Cross-venture fallback: unchanged from pre-LED-5658 behavior for
+    # both auto-detect AND an explicit-but-recognized venture. Only a
+    # genuinely UNKNOWN venture (rejected above, before reaching here)
+    # loses it.
+    _used_venture_fallback = False
     if not found:
-        try:
-            ventures = {}
-            if VENTURES_FILE.exists():
-                ventures = json.loads(VENTURES_FILE.read_text())
-        except Exception:
-            ventures = {}
-
-        searched = {str(ledger_dir)}
-        for _name, info in ventures.items():
-            vpath = info.get("path", "")
-            if not vpath:
-                continue
-            candidate_dir = Path(vpath) / ".delimit" / "ledger"
-            if str(candidate_dir) in searched:
-                continue
-            searched.add(str(candidate_dir))
-            found = _find_item_in_ledger_dir(item_id, candidate_dir)
-            if found:
-                break
+        _elsewhere = _find_item_across_registered_ventures(item_id, exclude_dir=ledger_dir)
+        if _elsewhere is not None:
+            found = _elsewhere
+            _used_venture_fallback = True
 
     if found:
         ledger_name = found["ledger_name"]
@@ -1160,8 +1532,19 @@ def update_item(
         except Exception:
             pass  # Never let cloud sync break ledger operations
 
-        return {"updated": item_id, "changes": update, "ledger": ledger_name}
+        result = {"updated": item_id, "changes": update, "ledger": ledger_name}
+        if _used_venture_fallback:
+            # LED-5658 review v2: auto-detect only — tells the caller its
+            # default-resolved venture did NOT hold the item; some OTHER
+            # registered venture did.
+            result["venture_fallback"] = True
+        return result
 
+    # Note: an EXPLICIT unknown venture never reaches here — it was
+    # rejected above, before this lookup ran at all. This generic error
+    # covers: explicit + recognized venture where item_id genuinely isn't
+    # there (no fallback attempted, by design), or auto-detect where
+    # item_id isn't in any registered venture.
     return {"error": f"Item {item_id} not found in project ledger"}
 
 
@@ -1591,6 +1974,19 @@ def list_items(
     }
     if cursor_invalidated:
         response["cursor_invalidated"] = True
+    # LED-5658 review follow-up: reads stay harmless (never error) for an
+    # unknown venture, but must say so — additive fields only, no schema
+    # break for existing callers that ignore unknown keys.
+    _unknown_name = _unknown_venture_name(project_path)
+    if _unknown_name is not None:
+        response["sandboxed"] = True
+        response["warning"] = (
+            f"venture {_unknown_name!r} is not a recognized venture or an "
+            "existing project — this response is from an isolated, "
+            "non-canonical, disposable store, not the real ledger. Items "
+            "will always be empty unless something was previously written "
+            "under this exact venture name."
+        )
     return response
 
 
@@ -1607,7 +2003,7 @@ def get_context(project_path: str = ".") -> Dict[str, Any]:
     priority_order = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
     open_items.sort(key=lambda x: priority_order.get(x.get("priority", "P2"), 9))
 
-    return {
+    response = {
         "venture": venture["name"],
         "open_items": len(open_items),
         # LED-5321 M4: label each item ASSERTED/VERIFIED/STALE/UNAVAILABLE
@@ -1624,14 +2020,21 @@ def get_context(project_path: str = ".") -> Dict[str, Any]:
         ],
         "summary": result["summary"],
     }
+    # LED-5658 review follow-up: propagate list_items' additive
+    # sandboxed/warning fields — reads stay harmless, never error.
+    if result.get("sandboxed"):
+        response["sandboxed"] = True
+        response["warning"] = result["warning"]
+    return response
 
 
 def list_ventures() -> Dict[str, Any]:
     """List all registered ventures/projects."""
-    if not VENTURES_FILE.exists():
+    vfile = _ventures_file()
+    if not vfile.exists():
         return {"ventures": {}, "count": 0}
     try:
-        ventures = json.loads(VENTURES_FILE.read_text())
+        ventures = json.loads(vfile.read_text())
         return {"ventures": ventures, "count": len(ventures)}
     except Exception:
         return {"ventures": {}, "count": 0}
@@ -1760,6 +2163,13 @@ def link_items(
     if link_type not in VALID_LINK_TYPES:
         return {"error": f"Invalid link_type '{link_type}'. Use: {', '.join(sorted(VALID_LINK_TYPES))}"}
 
+    # LED-5658 review follow-up: link_items unconditionally appends —
+    # unlike update_item, there is no "item not found" fallback that would
+    # otherwise catch an unknown venture. Fail closed before any write.
+    _unknown_err = _unknown_venture_write_error(project_path)
+    if _unknown_err is not None:
+        return _unknown_err
+
     _ensure(project_path)
     ledger_dir = _project_ledger_dir(project_path)
     links_file = ledger_dir / LINKS_FILE_NAME
@@ -1808,8 +2218,22 @@ def get_links(
     ledger_dir = _project_ledger_dir(project_path)
     links_file = ledger_dir / LINKS_FILE_NAME
 
+    # LED-5658 review follow-up: reads stay harmless for an unknown
+    # venture (never error), but say so via additive fields.
+    _unknown_name = _unknown_venture_name(project_path)
+    _sandbox_extra: Dict[str, Any] = {}
+    if _unknown_name is not None:
+        _sandbox_extra = {
+            "sandboxed": True,
+            "warning": (
+                f"venture {_unknown_name!r} is not a recognized venture or "
+                "an existing project — this response is from an isolated, "
+                "non-canonical, disposable store, not the real ledger."
+            ),
+        }
+
     if not links_file.exists():
-        return {"item_id": item_id, "links": [], "count": 0}
+        return {"item_id": item_id, "links": [], "count": 0, **_sandbox_extra}
 
     links = []
     try:
@@ -1822,7 +2246,7 @@ def get_links(
     except Exception:
         pass
 
-    return {"item_id": item_id, "links": links, "count": len(links)}
+    return {"item_id": item_id, "links": links, "count": len(links), **_sandbox_extra}
 
 
 def unlink_items(
@@ -3586,6 +4010,15 @@ def bulk_action(
     if ledger_dir_override is not None:
         ledger_dir = Path(ledger_dir_override)
     else:
+        # LED-5658 review follow-up: fail closed on an unknown venture for
+        # a real (non-dry-run) write. dry_run stays harmless — every item
+        # naturally reports "not_found" against an empty sandbox rather
+        # than fabricating a change, so a preview is not misleading either
+        # way; only an actual write gets the explicit error.
+        if not dry_run:
+            _unknown_err = _unknown_venture_write_error(project_path)
+            if _unknown_err is not None:
+                return _unknown_err
         _ensure(project_path)
         ledger_dir = _project_ledger_dir(project_path)
 

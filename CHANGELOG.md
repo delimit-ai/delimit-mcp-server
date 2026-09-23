@@ -1,4 +1,4 @@
-## [Unreleased]
+## [4.19.11] - 2026-09-23
 
 ### Added
 - `delimit_agent_dispatch` accepts assignee `"auto"`, which rotates contained
@@ -26,6 +26,11 @@
   To remove a harness from chat routing, set `chat_enabled: false` on it (#243).
 
 ### Fixed
+- `delimit-cli setup` no longer deletes env keys you added to the `delimit`
+  MCP server entry (Claude Code, Cursor, Gemini, Antigravity, Codex). Setup
+  runs after every auto-update, so custom keys such as API keys or rate-limit
+  overrides were being wiped; managed keys (`PYTHONPATH`) still refresh
+  (#245, LED-5685).
 - 11 tools that are intentionally not in the public package
   (`social_post`, `social_generate`, `social_accounts`, `social_history`,
   `social_approve`, `swarm`, `screen_record`, `screenshot`,
@@ -35,6 +40,10 @@
   STR-6400, LED-5460).
 - The Muse usage meter is read-only (no session or turn), bounded to 8 s and
   cached without extending stale readings (gateway #620).
+- Agent status, dashboard and constraint checks return a structured
+  `store_unavailable` result instead of a traceback when the local task store
+  is corrupt (constraint checks fail closed); agent tools load on platforms
+  without `fcntl` (gateway #622).
 - Agent dispatch admission is now governed by concurrent tracked-session slots
   (5) instead of hourly throttling: the 5/hour `agent_dispatch` rate limit is
   removed, and dispatch past the session cap reports `concurrency_limited`

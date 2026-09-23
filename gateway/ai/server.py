@@ -383,7 +383,6 @@ _DEFAULT_TOOL_RATE_LIMITS = {
     'social_approve': 10,
     'notify': 15,
     'deliberate': 5,
-    'agent_dispatch': 5,
     'ledger_add': 30,
 }
 
@@ -399,6 +398,8 @@ def _resolve_rate_limit(clean_tool_name: str) -> Optional[int]:
     call delimit_deliberate freely while autonomous loops keep the 5/hour
     safety cap. Set the env var at MCP-server-process startup time.
     """
+    if clean_tool_name == "agent_dispatch":
+        return None  # Execution concurrency lives in the durable worker lifecycle.
     if os.environ.get("DELIMIT_RATE_LIMITS_DISABLED", "").lower() in ("1", "true", "yes"):
         return None
     env_key = f"DELIMIT_RATE_LIMIT_{clean_tool_name.upper()}"
@@ -638,7 +639,7 @@ def _emit_policy_event(tool_name: str, status: str, reason: str) -> None:
 #      gateway/ai/server.py ← ../../package.json)
 #   3. the pinned fallback below (last resort so the delimit_version return
 #      schema never changes shape — never-break-installs).
-_VERSION_FALLBACK = "4.19.10"
+_VERSION_FALLBACK = "4.19.11"
 
 
 def _resolve_version(start_path: Optional[str] = None) -> str:
@@ -980,10 +981,12 @@ if ACTIVE_TOOLSET != "full":
 #  "simply no-op on a public install". They did not: on a clean install of
 #  4.19.2, 15 tools raised an unhandled ModuleNotFoundError and the customer
 #  saw a raw traceback. This wrapper makes that claim true. Applied
-#  UNCONDITIONALLY (the toolset gate above only engages for reduced profiles)
-#  and deliberately NARROW: only modules in capability_guard.INTERNAL_BACKENDS
-#  are absorbed, so an unlisted missing module still raises and the next
-#  regression of this class stays loud.
+#  UNCONDITIONALLY (the toolset gate above only engages for reduced profiles).
+#  STR-6400: catches ImportError (not just ModuleNotFoundError) because
+#  `from ai import <excluded>` raises plain ImportError, and absorbs ANY
+#  missing ai.* backend via capability_guard (explicit list + generic ai.*
+#  fallback). Only non-ai missing modules still raise, so a third-party
+#  packaging defect stays loud instead of silently absorbed.
 # ─────────────────────────────────────────────────────────────────────
 import functools as _functools
 
@@ -1001,7 +1004,7 @@ def _capability_guarded_tool(*args, **kwargs):
         def _guarded(*a, **kw):
             try:
                 return fn(*a, **kw)
-            except ModuleNotFoundError as exc:
+            except (ImportError, ModuleNotFoundError) as exc:
                 handled = _guard_internal(
                     getattr(fn, "__name__", ""), _missing_module_name(exc), exc
                 )
@@ -2108,8 +2111,8 @@ def _with_next_steps(tool_name: str, result: Dict[str, Any]) -> Dict[str, Any]:
             )
 
     # Rate limit check - prevents runaway loops from any model
-    # Dispatch is admitted before its backend writes a task. Checking again
-    # here would double-charge and can hide a successfully created task ID.
+    # Dispatch has a durable execution concurrency gate, not a call quota.
+    # Never turn a successfully recorded audit task into a post-write refusal.
     rate_gate = (None if tool_name.removeprefix("delimit_") == "agent_dispatch"
                  else _check_rate_limit(tool_name))
     if rate_gate:
@@ -9351,6 +9354,10 @@ def delimit_ledger_add(
     Side effects: writes a new ledger entry via
     ai.ledger_manager.add_item. Coerces tags / acceptance_criteria /
     tools_needed from comma strings to lists via _coerce_list_arg.
+    LED-5658: an unrecognized `venture` with no real project directory
+    behind it fails closed with {"error", "unknown_venture",
+    "known_ventures"} rather than silently succeeding into an isolated,
+    non-canonical store.
 
     Args:
         title: What needs to be done. Required.
@@ -9426,11 +9433,23 @@ def delimit_ledger_update(
     delimit_ledger_done closes; this is the general-purpose updater.
 
     Side effects: writes to the ledger via ai.ledger_manager. Coerces
-    string list inputs (labels) through _coerce_list_arg.
+    string list inputs (labels) through _coerce_list_arg. LED-5658 review
+    v2: a `venture` that resolves to UNKNOWN — no recognized slug AND no
+    real project directory behind it (auto-detect, an empty `venture`,
+    can never be unknown) — is rejected BEFORE any lookup or write, with
+    {"error", "unknown_venture", "known_ventures"} and, when item_id is
+    found to actually exist in some other real registered venture
+    (read-only check, never a write), `item_found_in` naming it. Every
+    other case — auto-detect, a recognized venture, or an explicit path
+    to a real (even if unregistered) project — is unchanged: it keeps the
+    existing cross-venture fallback search, and the response carries
+    `venture_fallback: true` when that fallback is what located the item.
 
     Args:
         item_id: Ledger item id, e.g. "LED-001" or "STR-001". Required.
-        venture: Project name/path. Empty = auto-detect.
+        venture: Project name/path. Empty = auto-detect. An unknown
+            venture fails closed instead of falling through — see
+            "Side effects" above.
         status: New status — "open", "in_progress", "blocked", "done".
         priority: New priority — "P0", "P1", "P2".
         title: New title.
@@ -9443,9 +9462,11 @@ def delimit_ledger_update(
         blocks: Item id that this one blocks (e.g. "STR-005").
         worked_by: AI model working on this. Empty = auto-detect.
         evidence: Optional evidence object (LED-5321 M4). When status moves
-            to done (or a note asserts merged/deployed/published/verified)
-            and no evidence is passed, the record is stored as
-            evidence.class="assertion".
+            to done and no evidence is passed, the record is stored as
+            evidence.class="assertion", evidence.kind="assessment" (LED-5658:
+            kind is never guessed from note/title/description text — pass
+            evidence explicitly for a specific lifecycle kind like merged/
+            deployed/published/verified).
         review_transcript/review_diff_path/review_diff_text: optional
             review-binding inputs for independently_reviewed promotion.
 
@@ -9876,7 +9897,12 @@ def delimit_ledger_list(
     delimit_ledger_query fetches one; this is the powerful list call.
 
     Side effects: read-only. Calls ai.ledger_manager.list_items.
-    Single-value `status` / `priority` are kept for back-compat.
+    Single-value `status` / `priority` are kept for back-compat. LED-5658:
+    an unrecognized `venture` with no real project directory behind it
+    stays harmless — it returns empty items rather than the shared
+    canonical ledger — but the response carries additive
+    `sandboxed: true` + `warning` fields so that isn't mistaken for "no
+    matching items in the real ledger."
 
     Args:
         venture: Project name/path. Empty = auto-detect.
@@ -10015,7 +10041,10 @@ def delimit_ledger_link(
 
     Side effects: writes the link via ai.ledger_manager.link_items.
     "blocks" / "blocked_by" auto-create the reverse direction so
-    both items see the relationship.
+    both items see the relationship. LED-5658: an unrecognized `venture`
+    with no real project directory behind it fails closed with
+    {"error", "unknown_venture", "known_ventures"} rather than silently
+    succeeding into an isolated, non-canonical store.
 
     Args:
         from_id: Source item id (e.g. "LED-025"). Required.
@@ -14633,10 +14662,11 @@ def _delimit_agent_impl(
     task store and append to its audit log. CRITICAL: action="dispatch"
     records intent only — it persists a task plus a formatted agent_prompt
     and does NOT spawn or run a subagent — UNLESS the launch parameter is
-    given with assignee "muse", in which case the worker IS started through
-    the contained launcher (scripts/launch_contained_worker.sh, sandbox on,
-    never --yolo) and the task records the session binding with status
-    "running". Without launch, per the operating model, actual execution is
+    given with a launchable assignee ("muse", "codex", "copilot", "auto"),
+    in which case the worker IS started through the contained launcher
+    (scripts/launch_contained_worker*.sh, sandbox on, never a
+    sandbox-disabling flag) and the task records the session binding with
+    status "running". Without launch, per the operating model, actual execution is
     the caller's responsibility via the Agent tool
     (subagent_type=engineering); this is the planning + audit surface.
     Dispatch additionally enforces deterministic guards before writing: a
@@ -14656,11 +14686,13 @@ def _delimit_agent_impl(
         title: Task title (action="dispatch" only). Required — the backend
             rejects empty titles.
         description: Longer task description (action="dispatch" only).
-        assignee: Target model "claude"/"codex"/"gemini"/"any"
+        assignee: Target model "claude"/"codex"/"gemini"/"any"/"auto"
             (action="dispatch" only). Default "any", resolved to a
             concrete model by the router. Invalid values are rejected.
-            Explicit-only "muse"/"copilot" name harnesses; only "muse"
-            supports the launch parameter.
+            Explicit-only "muse"/"copilot" name harnesses; "muse",
+            "codex" and "copilot" support the launch parameter, and
+            "auto" rotates muse → copilot → antigravity → codex in
+            policy order (requires launch; total failure is "exhausted").
         priority: "P0"/"P1"/"P2" (action="dispatch" only). Default "P1";
             invalid values are rejected.
         tools_needed: Comma-separated MCP tools the work will need
@@ -14685,15 +14717,17 @@ def _delimit_agent_impl(
             as a dict or JSON object string with workspace (git worktree
             path, required), prompt_file (required), max_steps (default
             220), network ("proxy-only"/"restricted"/"enabled", default
-            "proxy-only"). Coerced via _coerce_dict_arg. Only assignee
-            "muse" launches; other runtimes record "launch_unsupported".
+            "proxy-only"). Coerced via _coerce_dict_arg. Assignees "muse",
+            "codex" and "copilot" launch; "auto" rotates in policy order;
+            other runtimes record "launch_unsupported" and total rotation
+            failure records "exhausted".
 
     Returns:
         Dict whose shape depends on action — see the per-action alias
         (delimit_agent_dispatch / _status / _complete / _handoff) for the
         exact keys. All responses carry a next_steps field from
         _with_next_steps. dispatch → {status: "dispatched" | "deduped" |
-        "running" | "launch_refused" | "launch_unsupported",
+        "running" | "launch_refused" | "launch_unsupported" | "exhausted",
         task_id, task, agent_prompt, message}; status → a single task
         {status: "ok", task} for a known id, or an active-task summary
         {status: "ok", active_count, completed_count, active_tasks,
@@ -14709,12 +14743,9 @@ def _delimit_agent_impl(
         return {"error": f"Unknown action '{action}'. Valid: {', '.join(valid_actions)}"}
 
     if action == "dispatch":
-        # Both the unified tool and legacy alias enter here. A refusal must
-        # happen before dispatch_task writes durable intent or audit records.
-        rate_gate = _check_rate_limit("agent_dispatch")
-        if rate_gate:
-            _emit_event("agent_dispatch", rate_gate)
-            return _cap_response(rate_gate)
+        # Both the unified tool and legacy alias use the same lifecycle gate.
+        # Tracked launch/resume admission is atomic in agent_dispatch.
+        # Audit records consume no execution slot or hourly call allowance.
         from ai.agent_dispatch import dispatch_task
         tools_list = _coerce_list_arg(tools_needed, "tools_needed")
         constraints_list = _coerce_list_arg(constraints, "constraints")
@@ -14771,10 +14802,10 @@ delimit_agent = mcp.tool()(_delimit_agent_impl)
 # --- Thin wrappers (aliases) for backward compatibility ---
 
 @mcp.tool()
-def delimit_agent_dispatch(title: Annotated[str, Field(description="Short task title. Required.")], description: Annotated[str, Field(description="Longer task description.")] = "", assignee: Annotated[str, Field(description="Worker — \"claude\", \"codex\", \"gemini\", explicit-only \"copilot\"/\"muse\", or \"any\" (default). Copilot/Muse name harnesses, not model families; any excludes both. Only \"muse\" supports launch.")] = "any",
+def delimit_agent_dispatch(title: Annotated[str, Field(description="Short task title. Required.")], description: Annotated[str, Field(description="Longer task description.")] = "", assignee: Annotated[str, Field(description="Worker — \"claude\", \"codex\", \"gemini\", explicit-only \"copilot\"/\"muse\", \"any\" (default), or \"auto\" (policy-order rotation: muse, copilot, antigravity, codex; requires launch). Copilot/Muse name harnesses, not model families; any excludes both. Launchable: \"muse\", \"codex\", \"copilot\", \"auto\".")] = "any",
                            priority: Annotated[str, Field(description="One of \"P0\" (immediate), \"P1\" (default), \"P2\".")] = "P1", tools_needed: Annotated[str, Field(description="Comma-separated MCP tools the work will need.")] = "",
                            constraints: Annotated[str, Field(description="Comma-separated constraints (e.g. \"no force push\").")] = "", context: Annotated[str, Field(description="Background info to seed the executor.")] = "",
-                           launch: Annotated[Optional[Union[str, Dict[str, Any]]], Field(description="Optional tracked-launch spec: dict or JSON string with workspace, prompt_file, max_steps, network. Only assignee \"muse\" launches.")] = None) -> Dict[str, Any]:
+                           launch: Annotated[Optional[Union[str, Dict[str, Any]]], Field(description="Optional tracked-launch spec: dict or JSON string with workspace, prompt_file, max_steps, network. Assignees \"muse\"/\"codex\"/\"copilot\" launch; \"auto\" rotates in policy order (total failure is \"exhausted\").")] = None) -> Dict[str, Any]:
     """Record an engineering-task dispatch with full audit trail.
 
     When to use: as the PLANNING + AUDIT surface when the
@@ -14783,10 +14814,12 @@ def delimit_agent_dispatch(title: Annotated[str, Field(description="Short task t
     actual execution is performed by the Agent tool with
     subagent_type=engineering; this tool records the intent,
     assignee, constraints, and eventual outcome so the dispatch is
-    replayable from the ledger. With assignee "muse" plus the launch
-    parameter, the worker IS started as a tracked contained process
-    whose session, lease, questions, and terminal state are bound to
-    the task record.
+    replayable from the ledger. With a launchable assignee ("muse",
+    "codex", "copilot", or "auto") plus the launch parameter, the
+    worker IS started as a tracked contained process whose session,
+    lease, questions, and terminal state are bound to the task
+    record; "auto" rotates runtimes in policy order instead of
+    pinning one.
     When NOT to use: as an autonomous queue processor expecting
     auto-execution — without launch this records dispatch but does
     NOT run the work. Real autonomous queue execution is deferred to
@@ -14809,8 +14842,9 @@ def delimit_agent_dispatch(title: Annotated[str, Field(description="Short task t
     to lists; `launch` is coerced from a JSON string or dict via
     _coerce_dict_arg. Without launch, NO subagent is spawned by this
     call — the caller is responsible for invoking the Agent tool
-    separately. With launch + assignee "muse", the contained worker
-    launcher IS invoked (sandbox on, never --yolo) and the task
+    separately. With launch + a launchable assignee ("muse", "codex",
+    "copilot", "auto"), the contained worker launcher IS invoked
+    (sandbox on, never a sandbox-disabling flag) and the task
     records the session binding. This lifecycle surface is not
     license-gated in the current build.
 
@@ -14818,11 +14852,12 @@ def delimit_agent_dispatch(title: Annotated[str, Field(description="Short task t
         title: Short task title. Required.
         description: Longer task description.
         assignee: Worker — "claude", "codex", "gemini", explicit-only
-            "copilot"/"muse", or "any" (default). Copilot/Muse identify
-            CLI harnesses, not distinct underlying model families. "any"
-            retains the existing automatic candidates and never selects
-            Copilot or Muse. Copilot returns evidence to the coordinator
-            for completion.
+            "copilot"/"muse", "any" (default), or "auto" (policy-order
+            rotation: muse → copilot → antigravity → codex; requires
+            launch). Copilot/Muse identify CLI harnesses, not distinct
+            underlying model families. "any" retains the existing
+            automatic candidates and never selects Copilot or Muse.
+            Copilot returns evidence to the coordinator for completion.
         priority: One of "P0" (immediate), "P1" (default), "P2".
         tools_needed: Comma-separated MCP tools the work will need
             (used for sandboxing hints).
@@ -14833,8 +14868,13 @@ def delimit_agent_dispatch(title: Annotated[str, Field(description="Short task t
             object string: workspace (git worktree path, required),
             prompt_file (required), max_steps (default 220), network
             ("proxy-only"/"restricted"/"enabled", default "proxy-only").
-            Only assignee "muse" launches (status "running"); other
-            runtimes record "launch_unsupported", and missing sandbox
+            launch.network is validated for every runtime but only
+            enforced by the muse launcher (--sandbox-network);
+            codex/antigravity/copilot use their CLI's own sandbox
+            network defaults. Assignees "muse"/"codex"/"copilot" launch
+            (status "running"); "auto" launches the first eligible
+            policy-order runtime (total failure is "exhausted"); other
+            runtimes record "launch_unsupported", and missing
             preconditions record "launch_refused".
 
     Returns:
@@ -14843,7 +14883,8 @@ def delimit_agent_dispatch(title: Annotated[str, Field(description="Short task t
         tools_needed, constraints, context, status, created_at),
         agent_prompt (formatted prompt for the executor), plus a
         next_steps field. status is "dispatched" without launch,
-        else "running" / "launch_refused" / "launch_unsupported".
+        else "running" / "launch_refused" / "launch_unsupported" /
+        "exhausted".
     """
     return _delimit_agent_impl(action="dispatch", title=title, description=description,
                          assignee=assignee, priority=priority, tools_needed=tools_needed,
