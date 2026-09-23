@@ -91,6 +91,7 @@ cross-venture or proprietary, so they ship — but confirm they should be public
 - `gateway/ai/activate_helpers.py`
 - `gateway/ai/agent_dispatch.py`
 - `gateway/ai/agent_policy.py`
+- `gateway/ai/agent_session_slots.py` (dispatch concurrency admission evidence; imported by shipped agent_dispatch.py, stdlib-only — see 2026-09-22 note below)
 ### MCP backend bridges (public tool adapters)
 - `gateway/ai/backends/__init__.py`
 - `gateway/ai/backends/async_utils.py`
@@ -401,3 +402,38 @@ operations machinery, not customer product surface.
 - `gateway/ai/build_evaluator.py` -> INTERNAL — autonomous build-loop evaluation
 - `gateway/ai/build_selector.py` -> INTERNAL — autonomous build-loop work selection
 - `gateway/ai/outreach_untrusted_text.py` -> INTERNAL — outreach untrusted-text handling
+
+## Classified 2026-09-22 (release 4.19.11 prep, STR-6400)
+
+Surfaced by the classification gate against gateway candidate `a5f4d15`:
+`ai/agent_session_slots.py` (new in gateway #595) was in neither list.
+
+- `gateway/ai/agent_session_slots.py` -> PUBLIC — dispatch concurrency
+  admission evidence (`admission`/`reserve`/`reclaim`/`occupies_slot`),
+  imported by the PUBLIC `ai/agent_dispatch.py` on dispatch/launch paths and
+  NOT in `capability_guard.INTERNAL_BACKENDS`, so excluding it would raise
+  `ModuleNotFoundError` on customer installs. Stdlib-only (`os`, `signal`,
+  `time`, `pathlib`), /proc evidence only, no secrets or venture identity.
+
+Gateway `scripts/launch_contained_worker_{codex,copilot,antigravity}.sh` (new
+in gateway #612) are intentionally NOT bundled: `scripts/` was never in the
+allowlist (the pre-existing `launch_contained_worker.sh` muse launcher ships
+the same way — absent), and `agent_dispatch.py` resolves launchers under the
+gateway repo root with `DELIMIT_WORKER_LAUNCHER[_<RUNTIME>]` overrides, so
+hosts without them record `launch_unsupported` instead of launching. No
+runtime dependency for customers; no classification entry needed (the guard
+enumerates `ai/` only).
+
+## Classified 2026-09-23 (release 4.19.11 prep, candidate gateway `42b4b6b`)
+
+- `gateway/ai/provider_usage.py` -> PUBLIC — provider quota meters and the
+  pooled `auto` runtime chooser (gateway #617/#620, LED-5672). Lazily imported
+  by the PUBLIC `ai/agent_dispatch.py` on `assignee="auto"` paths, so excluding
+  it would raise on customer installs. Stdlib plus the shipped
+  `ai/tenant_paths.py`; reads only the local user's own provider credentials,
+  never prints them. Owner-specific state (Copilot hold, X secret name) is
+  local policy since gateway #621; no venture identity. The Muse probe is
+  read-only (#620).
+- `gateway/ai/social_capability/explain_delimit_claims.yaml` -> INTERNAL —
+  claim sheet read only by the INTERNAL `ai/social.py` (gateway #610), same
+  classification as the rest of `ai/social_capability/`.

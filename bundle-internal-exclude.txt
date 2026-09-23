@@ -56,6 +56,7 @@ gateway/ai/founder_email_intake.py
 gateway/ai/fresh_x.py
 gateway/ai/github_owner_reply.py
 gateway/ai/selling_workflow_status.py
+gateway/ai/social_capability/explain_delimit_claims.yaml
 gateway/ai/social_capability/historical_grounding.py
 gateway/ai/focus_gate.py
 gateway/ai/founding_users.py
