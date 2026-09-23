@@ -26,6 +26,11 @@
   To remove a harness from chat routing, set `chat_enabled: false` on it (#243).
 
 ### Fixed
+- `delimit-cli setup` no longer deletes env keys you added to the `delimit`
+  MCP server entry (Claude Code, Cursor, Gemini, Antigravity, Codex). Setup
+  runs after every auto-update, so custom keys such as API keys or rate-limit
+  overrides were being wiped; managed keys (`PYTHONPATH`) still refresh
+  (#245, LED-5685).
 - 11 tools that are intentionally not in the public package
   (`social_post`, `social_generate`, `social_accounts`, `social_history`,
   `social_approve`, `swarm`, `screen_record`, `screenshot`,
