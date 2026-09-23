@@ -342,6 +342,7 @@ async function main(options = {}) {
         args: [actualServer],
         cwd: path.join(DELIMIT_HOME, 'server'),
         env: {
+            ...(mcpConfig.mcpServers.delimit?.env || {}),
             PYTHONPATH: path.join(DELIMIT_HOME, 'server')
         },
         description: 'Delimit — AI agent guardrails'
@@ -397,19 +398,25 @@ async function main(options = {}) {
             // approval_policy = "never" means auto-approve all tools from this server (no per-prompt confirmations).
             // Deliberation intentionally runs several independent model calls;
             // give the MCP transport the same 30-minute ceiling as the engine.
-            const correctEntry = `\n[mcp_servers.delimit]\ncommand = "${python}"\nargs = ["${actualServer}"]\ncwd = "${serverDir}"\napproval_policy = "never"\ntool_timeout_sec = 1800\n\n[mcp_servers.delimit.env]\nPYTHONPATH = "${serverDir}:${path.join(serverDir, 'ai')}"\n`;
             // Remove ALL existing delimit MCP entries (prevents duplicates)
             const existed = toml.includes('mcp_servers.delimit');
             const lines = toml.split('\n');
             const cleaned = [];
+            const userEnvLines = new Map();
             let skipBlock = false;
+            let inDelimitEnv = false;
             for (const line of lines) {
-                if (line.match(/^\[mcp_servers\.delimit/)) {
+                if (line.match(/^\s*\[mcp_servers\.delimit(?:\.|\])/)) {
                     skipBlock = true;
+                    inDelimitEnv = /^\s*\[mcp_servers\.delimit\.env\]\s*$/.test(line);
                     continue;
                 }
-                if (skipBlock && (line.startsWith('[') || line.trim() === '')) {
-                    if (line.startsWith('[') && !line.match(/^\[mcp_servers\.delimit/)) {
+                if (skipBlock && inDelimitEnv) {
+                    const envLine = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*"(?:\\.|[^"\\])*"\s*$/);
+                    if (envLine && envLine[1] !== 'PYTHONPATH') userEnvLines.set(envLine[1], line);
+                }
+                if (skipBlock && (/^\s*\[/.test(line) || line.trim() === '')) {
+                    if (/^\s*\[/.test(line) && !/^\s*\[mcp_servers\.delimit(?:\.|\])/.test(line)) {
                         skipBlock = false;
                         cleaned.push(line);
                     }
@@ -420,6 +427,7 @@ async function main(options = {}) {
                 }
             }
             toml = cleaned.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+            const correctEntry = `\n[mcp_servers.delimit]\ncommand = "${python}"\nargs = ["${actualServer}"]\ncwd = "${serverDir}"\napproval_policy = "never"\ntool_timeout_sec = 1800\n\n[mcp_servers.delimit.env]\nPYTHONPATH = "${serverDir}:${path.join(serverDir, 'ai')}"\n${[...userEnvLines.values()].map(line => `${line}\n`).join('')}`;
             toml += correctEntry;
             fs.writeFileSync(CODEX_CONFIG, toml, { mode: 0o644 });
             await logp(`  ${green('✓')} ${existed ? 'Updated' : 'Added'} Delimit in Codex config`);
@@ -442,7 +450,7 @@ async function main(options = {}) {
                 command: python,
                 args: [actualServer],
                 cwd: path.join(DELIMIT_HOME, 'server'),
-                env: { PYTHONPATH: path.join(DELIMIT_HOME, 'server') }
+                env: { ...(cursorConfig.mcpServers.delimit?.env || {}), PYTHONPATH: path.join(DELIMIT_HOME, 'server') }
             };
             fs.writeFileSync(CURSOR_CONFIG, JSON.stringify(cursorConfig, null, 2));
             if (cursorExisted) {
@@ -471,7 +479,7 @@ async function main(options = {}) {
                 command: python,
                 args: [actualServer],
                 cwd: path.join(DELIMIT_HOME, 'server'),
-                env: { PYTHONPATH: path.join(DELIMIT_HOME, 'server') }
+                env: { ...(geminiConfig.mcpServers.delimit?.env || {}), PYTHONPATH: path.join(DELIMIT_HOME, 'server') }
             };
             // Auto-approve all tools — users should not be prompted for every Delimit call.
             // Only set if missing — never clobber the user's chosen approval mode on upgrade.
@@ -512,7 +520,7 @@ async function main(options = {}) {
                 command: python,
                 args: [actualServer],
                 cwd: path.join(DELIMIT_HOME, 'server'),
-                env: { PYTHONPATH: path.join(DELIMIT_HOME, 'server') }
+                env: { ...(antigravityConfig.mcpServers.delimit?.env || {}), PYTHONPATH: path.join(DELIMIT_HOME, 'server') }
             };
             if (!antigravityConfig.general) antigravityConfig.general = {};
             if (!antigravityConfig.general.defaultApprovalMode) {

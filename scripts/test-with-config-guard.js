@@ -29,6 +29,7 @@ const TEST_FILES = [
     'tests/setup-onboarding.test.js',
     'tests/setup-matrix.test.js',
     'tests/setup-no-clobber.test.js',
+    'tests/setup-env-preservation.test.js',
     'tests/config-export-import.test.js',
     'tests/cross-model-hooks.test.js',
     'tests/golden-path.test.js',
