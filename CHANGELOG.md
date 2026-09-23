@@ -1,5 +1,29 @@
 ## [Unreleased]
 
+### Added
+- `delimit_agent_dispatch` accepts assignee `"auto"`, which rotates contained
+  launch across runtimes in policy order (muse → copilot → antigravity →
+  codex); total rotation failure reports a new `"exhausted"` status (gateway
+  #612, LED-5660).
+- Contained worker launch now supports the `codex` and `copilot` runtimes
+  alongside `muse` where their launcher scripts are installed; `launch.network`
+  is validated for every runtime but enforced only by the muse launcher
+  (gateway #612, LED-5660).
+
+### Fixed
+- Agent dispatch admission is now governed by concurrent tracked-session slots
+  (5) instead of hourly throttling: the 5/hour `agent_dispatch` rate limit is
+  removed, and dispatch past the session cap reports `concurrency_limited`
+  while audit-only dispatch stays available (gateway #595, LED-5180; new
+  bundled module `gateway/ai/agent_session_slots.py`).
+- UTC-consistent `auto` quick-fail window in worker polling, with a
+  negative-elapsed guard (gateway #613, LED-5660 follow-up).
+- CLI state isolation (LED-5658, #239): `delimitHome()` honors a `HOME`
+  override when the ambient `DELIMIT_HOME` is the untouched passwd-home
+  default, so sandboxed runs no longer leak the ambient home. The gateway
+  ledger half (gateway #611) is still pending review and is not in this
+  release.
+
 ## [4.19.10] - 2026-09-22
 
 ### Fixed
