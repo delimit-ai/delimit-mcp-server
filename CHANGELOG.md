@@ -35,6 +35,10 @@
   STR-6400, LED-5460).
 - The Muse usage meter is read-only (no session or turn), bounded to 8 s and
   cached without extending stale readings (gateway #620).
+- Agent status, dashboard and constraint checks return a structured
+  `store_unavailable` result instead of a traceback when the local task store
+  is corrupt (constraint checks fail closed); agent tools load on platforms
+  without `fcntl` (gateway #622).
 - Agent dispatch admission is now governed by concurrent tracked-session slots
   (5) instead of hourly throttling: the 5/hour `agent_dispatch` rate limit is
   removed, and dispatch past the session cap reports `concurrency_limited`

@@ -10,7 +10,10 @@ Audit trail: ~/.delimit/agents/audit.jsonl
 """
 
 import json
-import fcntl
+try:
+    import fcntl  # type: ignore[import-not-found]
+except ImportError:  # Windows has no fcntl; store locking degrades to in-process.
+    fcntl = None  # type: ignore[assignment]
 import functools
 import inspect
 import tempfile
@@ -979,7 +982,8 @@ def _serialized_store(func):
                 return func(*args, **kwargs)
             _ensure_dir(base)
             with (base / "tasks.lock").open("a+") as lock:
-                fcntl.flock(lock, fcntl.LOCK_EX)
+                if fcntl is not None:
+                    fcntl.flock(lock, fcntl.LOCK_EX)
                 _store_lock_local.held = held | {base}
                 try:
                     return func(*args, **kwargs)
@@ -987,8 +991,23 @@ def _serialized_store(func):
                     return {"status": "store_unavailable", "error": str(exc)}
                 finally:
                     _store_lock_local.held = held
-                    fcntl.flock(lock, fcntl.LOCK_UN)
+                    if fcntl is not None:
+                        fcntl.flock(lock, fcntl.LOCK_UN)
     return wrapped
+
+
+def _store_read_safe(**on_unavailable):
+    """Read-only store paths return the structured store_unavailable result
+    (plus any caller-specific fields) instead of raising to the MCP client."""
+    def deco(func):
+        @functools.wraps(func)
+        def wrapped(*args, **kwargs):
+            try:
+                return func(*args, **kwargs)
+            except TaskStoreUnavailable as exc:
+                return {"status": "store_unavailable", "error": str(exc), **on_unavailable}
+        return wrapped
+    return deco
 
 
 def _load_tasks(base_dir: Optional[Path] = None) -> Dict[str, Any]:
@@ -1487,6 +1506,7 @@ def _build_agent_prompt(task: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+@_store_read_safe()
 def get_agent_status(task_id: str = "") -> Dict[str, Any]:
     """Get the status of a specific task, or list all active tasks."""
     tasks = _load_tasks()
@@ -1504,6 +1524,7 @@ def get_agent_status(task_id: str = "") -> Dict[str, Any]:
     }
 
 
+@_store_read_safe()
 def list_active_agents() -> Dict[str, Any]:
     """Return all tasks that are not done or failed.
 
@@ -2904,6 +2925,7 @@ def handoff_task(
     }
 
 
+@_store_read_safe(allowed=False, reason="Task store unavailable; constraints cannot be verified")
 def enforce_constraints(task_id: str, action: str) -> Dict[str, Any]:
     """Check if an action is allowed given the task's constraints.
 
@@ -3135,6 +3157,7 @@ def auto_close_stale_dispatches(
     }
 
 
+@_store_read_safe()
 def get_agent_dashboard() -> Dict[str, Any]:
     """Return a full dashboard view of all agent activity.
 
