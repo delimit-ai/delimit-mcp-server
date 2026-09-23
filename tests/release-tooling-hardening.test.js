@@ -71,6 +71,60 @@ test('gateway sync repairs overwritten fallback without staging or changing regi
     } finally { repo.cleanup(); }
 });
 
+test('gateway sync leaves installed server alone unless explicitly opted in and forced for an override', () => {
+    const repo = versionFixture();
+    try {
+        copy(repo, 'scripts/sync-gateway.sh');
+        write(repo, 'bundle-allowlist.txt', 'gateway/ai/server.py\ngateway/core/__init__.py\ngateway/tasks/__init__.py\ngateway/VERSION\n');
+        write(repo, 'source/ai/server.py', '_VERSION_FALLBACK = "4.15.0"\n');
+        write(repo, 'source/core/__init__.py', '# source core\n');
+        write(repo, 'source/tasks/__init__.py', '# source tasks\n');
+        write(repo, 'gateway/core/__init__.py', '# old core\n');
+        write(repo, 'gateway/tasks/__init__.py', '# old tasks\n');
+        const home = path.join(repo.dir, 'fake-home');
+        const installed = path.join(home, '.delimit/server');
+        write(repo, 'fake-home/.delimit/server/ai/sentinel.py', '# preserve me\n');
+        write(repo, 'fake-home/.delimit/server/core/sentinel.py', '# preserve me\n');
+        write(repo, 'fake-home/.delimit/server/VERSION', 'old-version\n');
+        const env = {
+            HOME: home, GATEWAY_OVERRIDE: path.join(repo.dir, 'source'),
+            SKIP_SERVER_SYNC: '', SYNC_INSTALLED_SERVER: '', FORCE_INSTALLED_SERVER_SYNC: '',
+        };
+        const sync = extra => run(repo, 'bash', ['scripts/sync-gateway.sh'], { ...env, ...extra });
+
+        const defaultRun = sync();
+        assert.equal(defaultRun.status, 0, defaultRun.stdout + defaultRun.stderr);
+        assert.match(defaultRun.stdout, /Skipping installed server sync \(default\); set SYNC_INSTALLED_SERVER=1/);
+        assert.ok(fs.existsSync(path.join(installed, 'ai/sentinel.py')));
+        assert.ok(fs.existsSync(path.join(installed, 'core/sentinel.py')));
+        assert.equal(fs.readFileSync(path.join(installed, 'VERSION'), 'utf8'), 'old-version\n');
+
+        const skipped = sync({ SKIP_SERVER_SYNC: '1', SYNC_INSTALLED_SERVER: '1', FORCE_INSTALLED_SERVER_SYNC: '1' });
+        assert.equal(skipped.status, 0, skipped.stdout + skipped.stderr);
+        assert.match(skipped.stdout, /Skipping installed server sync \(SKIP_SERVER_SYNC=1\)/);
+        assert.ok(fs.existsSync(path.join(installed, 'ai/sentinel.py')));
+
+        const refused = sync({ SYNC_INSTALLED_SERVER: '1' });
+        assert.notEqual(refused.status, 0);
+        assert.match(refused.stderr, /GATEWAY_OVERRIDE selects a pinned export.*FORCE_INSTALLED_SERVER_SYNC=1/);
+        assert.ok(fs.existsSync(path.join(installed, 'ai/sentinel.py')));
+        assert.ok(fs.existsSync(path.join(installed, 'core/sentinel.py')));
+
+        const forced = sync({ SYNC_INSTALLED_SERVER: '1', FORCE_INSTALLED_SERVER_SYNC: '1' });
+        assert.equal(forced.status, 0, forced.stdout + forced.stderr);
+        assert.equal(fs.existsSync(path.join(installed, 'ai/sentinel.py')), false);
+        assert.equal(fs.existsSync(path.join(installed, 'core/sentinel.py')), false);
+        assert.match(fs.readFileSync(path.join(installed, 'ai/server.py'), 'utf8'), /4\.15\.0/);
+        assert.equal(fs.readFileSync(path.join(installed, 'VERSION'), 'utf8'), '9.8.7\n');
+
+        fs.rmSync(path.join(installed, 'core'), { recursive: true });
+        fs.symlinkSync(path.join(repo.dir, 'source/core'), path.join(installed, 'core'), 'dir');
+        const symlinkRefused = sync({ SYNC_INSTALLED_SERVER: '1', FORCE_INSTALLED_SERVER_SYNC: '1' });
+        assert.notEqual(symlinkRefused.status, 0);
+        assert.match(symlinkRefused.stderr, /is a symlink.*refusing to rsync --delete/);
+    } finally { repo.cleanup(); }
+});
+
 test('missing fallback and staging failures block version synchronization', () => {
     const repo = versionFixture();
     try {
