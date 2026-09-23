@@ -113,7 +113,7 @@ describe('owner lead lineup', () => {
         const before = JSON.stringify(repl.modelsConfig);
         assert.deepEqual(repl.getActiveChain().map(r => r.id), ['claude', 'codex', 'antigravity', 'muse', 'copilot']);
         assert.equal(JSON.stringify(repl.modelsConfig), before);
-        repl.modelsConfig.muse = {enabled: false};
+        repl.modelsConfig.muse = {chat_enabled: false};
         repl.failedModels.add('codex');
         assert.deepEqual(repl.getActiveChain().map(r => r.id), ['claude', 'antigravity', 'copilot']);
         repl.apiFallbackEnabled = true;
@@ -149,5 +149,32 @@ describe('owner lead lineup', () => {
         repl.captureSoulForMigration = () => {throw Error('unexpected capture');};
         assert.deepEqual(repl.launchLeadHarness({id:'muse'}, {id:'copilot'}), {continue:false,status:130});
         assert.equal(repl.failedModels.has('muse'), false);
+    });
+});
+
+describe('harness chat routing is independent of the drafter enabled flag', () => {
+    function replWith(extra) {
+        const oldModels = DelimitChatREPL.prototype.loadModels;
+        const oldRoutes = DelimitChatREPL.prototype.loadRoutes;
+        DelimitChatREPL.prototype.loadModels = () => ({ ...structuredClone(fixture), ...extra });
+        DelimitChatREPL.prototype.loadRoutes = () => ({});
+        try { return new DelimitChatREPL({}); } finally {
+            DelimitChatREPL.prototype.loadModels = oldModels;
+            DelimitChatREPL.prototype.loadRoutes = oldRoutes;
+        }
+    }
+    it('muse and copilot stay in the chain when models.json marks them enabled:false (drafter role)', () => {
+        const ids = replWith({ muse: { enabled: false, auth_mode: 'chat_login' },
+                               copilot: { enabled: false, auth_mode: 'chat_login' } }).getActiveChain().map(m => m.id);
+        assert.ok(ids.includes('muse') && ids.includes('copilot'), ids.join(','));
+    });
+    it('chat_enabled:false still opts a harness out of the chat chain', () => {
+        const ids = replWith({ muse: { chat_enabled: false } }).getActiveChain().map(m => m.id);
+        assert.ok(!ids.includes('muse'), ids.join(','));
+        assert.ok(ids.includes('copilot'));
+    });
+    it('enabled:false still removes a non-harness model', () => {
+        const ids = replWith({ codex: { auth_mode: 'chat_login', enabled: false } }).getActiveChain().map(m => m.id);
+        assert.ok(!ids.includes('codex'), ids.join(','));
     });
 });

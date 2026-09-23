@@ -32,17 +32,17 @@ function silence(fn) {
 describe('chat --model <id> per-launch override', () => {
     it('uses the default chain unchanged when --model is absent', () => {
         const ids = replWith({}).getActiveChain().map(m => m.id);
-        assert.deepStrictEqual(ids, ['claude', 'codex', 'antigravity']);
+        assert.deepStrictEqual(ids, ['claude', 'codex', 'antigravity', 'muse', 'copilot']);
     });
 
     it('launches the requested model first, keeping the rest as fallback', () => {
         const ids = replWith({ model: 'codex' }).getActiveChain().map(m => m.id);
-        assert.deepStrictEqual(ids, ['codex', 'claude', 'antigravity']);
+        assert.deepStrictEqual(ids, ['codex', 'claude', 'antigravity', 'muse', 'copilot']);
     });
 
     it('does not duplicate the model if it is already in the chain', () => {
         const ids = replWith({ model: 'antigravity' }).getActiveChain().map(m => m.id);
-        assert.deepStrictEqual(ids, ['antigravity', 'claude', 'codex']);
+        assert.deepStrictEqual(ids, ['antigravity', 'claude', 'codex', 'muse', 'copilot']);
     });
 
     it('honors an explicitly-requested api-only model even without --api-fallback', () => {
@@ -54,7 +54,7 @@ describe('chat --model <id> per-launch override', () => {
     it('warns once and falls back to the default chain on an unknown id', () => {
         const r = replWith({ model: 'nope' });
         const ids = silence(() => r.getActiveChain().map(m => m.id));
-        assert.deepStrictEqual(ids, ['claude', 'codex', 'antigravity']);
+        assert.deepStrictEqual(ids, ['claude', 'codex', 'antigravity', 'muse', 'copilot']);
         // launchModel is cleared after the warning so it never repeats.
         assert.strictEqual(r.launchModel, null);
     });
