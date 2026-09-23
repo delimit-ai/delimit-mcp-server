@@ -75,6 +75,7 @@
     "gateway/ai/pro_tools.yaml",
     "gateway/ai/project_config.py",
     "gateway/ai/prompt_drift.py",
+    "gateway/ai/provider_usage.py",
     "gateway/ai/rate_limiter.py",
     "gateway/ai/registry_guards.py",
     "gateway/ai/release_sync.py",

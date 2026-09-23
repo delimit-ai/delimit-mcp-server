@@ -423,3 +423,15 @@ gateway repo root with `DELIMIT_WORKER_LAUNCHER[_<RUNTIME>]` overrides, so
 hosts without them record `launch_unsupported` instead of launching. No
 runtime dependency for customers; no classification entry needed (the guard
 enumerates `ai/` only).
+
+## Classified 2026-09-23 (release 4.19.11 prep, candidate gateway `45afc00`)
+
+- `gateway/ai/provider_usage.py` -> PUBLIC — provider quota meters and the
+  pooled `auto` runtime chooser (gateway #617/#620, LED-5672). Lazily imported
+  by the PUBLIC `ai/agent_dispatch.py` on `assignee="auto"` paths, so excluding
+  it would raise on customer installs. Stdlib plus the shipped
+  `ai/tenant_paths.py`; reads only the local user's own provider credentials,
+  never prints them, no venture identity. The Muse probe is read-only (#620).
+- `gateway/ai/social_capability/explain_delimit_claims.yaml` -> INTERNAL —
+  claim sheet read only by the INTERNAL `ai/social.py` (gateway #610), same
+  classification as the rest of `ai/social_capability/`.

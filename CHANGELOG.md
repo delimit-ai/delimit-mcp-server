@@ -9,8 +9,32 @@
   alongside `muse` where their launcher scripts are installed; `launch.network`
   is validated for every runtime but enforced only by the muse launcher
   (gateway #612, LED-5660).
+- Provider quota meters (codex, claude, muse, deepseek, X API; copilot and
+  antigravity report `unknown` with a reason) and a pooled chooser for
+  `assignee="auto"` that reserves the lead runtime and ranks the others by
+  quota pressure; metered APIs are never picked for coding (gateway #617,
+  LED-5672; new bundled module `gateway/ai/provider_usage.py`).
+- `delimit_agent_dispatch` responses may include `possible_duplicate` when a
+  commit mentions the task's ledger id (gateway #618, LED-5674).
+
+### Changed
+- The LED-1279 dispatch gate no longer refuses a dispatch or auto-closes a
+  ledger item because a commit subject mentions its id; it now warns via
+  `possible_duplicate` (gateway #618, LED-5674).
+- `delimit chat`: Muse and Copilot appear in the interactive routing chain
+  even when `models.json` disables them as social drafters (`enabled: false`).
+  To remove a harness from chat routing, set `chat_enabled: false` on it (#243).
 
 ### Fixed
+- 11 tools that are intentionally not in the public package
+  (`social_post`, `social_generate`, `social_accounts`, `social_history`,
+  `social_approve`, `swarm`, `screen_record`, `screenshot`,
+  `substantive_content_check`, `executor`, `build_loop_daemon`) returned an
+  ImportError traceback; they now return the standard `capability_unavailable`
+  response. A module that is present but broken still raises (gateway #614,
+  STR-6400, LED-5460).
+- The Muse usage meter is read-only (no session or turn), bounded to 8 s and
+  cached without extending stale readings (gateway #620).
 - Agent dispatch admission is now governed by concurrent tracked-session slots
   (5) instead of hourly throttling: the 5/hour `agent_dispatch` rate limit is
   removed, and dispatch past the session cap reports `concurrency_limited`
@@ -20,9 +44,11 @@
   negative-elapsed guard (gateway #613, LED-5660 follow-up).
 - CLI state isolation (LED-5658, #239): `delimitHome()` honors a `HOME`
   override when the ambient `DELIMIT_HOME` is the untouched passwd-home
-  default, so sandboxed runs no longer leak the ambient home. The gateway
-  ledger half (gateway #611) is still pending review and is not in this
-  release.
+  default, so sandboxed runs no longer leak the ambient home; the gateway
+  half fixes the same leak in memory and ledger writes (gateway #611).
+- Release tooling: `scripts/sync-gateway.sh` no longer writes the local
+  developer server (`~/.delimit/server`) unless `SYNC_INSTALLED_SERVER=1`
+  (#242, LED-5661). No effect on installed packages.
 
 ## [4.19.10] - 2026-09-22
 
