@@ -1,10 +1,8 @@
 """LED-1279: dispatcher anti-duplicate gate.
 
 Before creating a new agent task tagged with an LED ID, check whether any
-local repository's git history already contains a commit referencing that
-LED. If it does, refuse the dispatch and auto-close the LED — yesterday's
-AGT-65A61AD5 wasted three subagent cycles on LEDs already shipped in
-commit 014fb5c (PR #106) on 2026-05-03.
+local repository's git history contains a commit referencing that LED.
+Report matches as an advisory: a mention may cover only part of the item.
 
 Cost model: each duplicate dispatch burns 5-30 minutes of subagent + orchestrator
 attention. This gate pays for itself within 1-2 future dispatches.
@@ -21,7 +19,8 @@ Design notes:
     merged doesn't trigger a false positive. PR-merge commits qualify.
   - Time window: only commits with author/commit date >= LED.created_at
     are considered. An LED can't have been "shipped" before it existed.
-  - Multiple matches: the FIRST match (oldest commit since created_at) wins.
+  - Multiple matches: report all matches oldest first. The legacy lookup
+    retains its first-match return shape for existing callers.
 """
 
 from __future__ import annotations
@@ -92,11 +91,12 @@ def discover_repos() -> list[str]:
 
     # 1. Venture registry — ~/.delimit/ventures.json
     try:
-        from ai.ledger_manager import VENTURES_FILE  # late import: tests stub VENTURES_FILE
+        from ai.ledger_manager import _ventures_file  # late import; LED-5658: live per-call resolver
         import json
 
-        if VENTURES_FILE.exists():
-            ventures = json.loads(VENTURES_FILE.read_text())
+        _vfile = _ventures_file()
+        if _vfile.exists():
+            ventures = json.loads(_vfile.read_text())
             for info in ventures.values():
                 _add(info.get("path", ""))
     except Exception as e:  # pragma: no cover — best effort
@@ -229,22 +229,32 @@ def is_led_already_shipped(
                 "subject": "fix(self-repair): ...",
             }
     """
+    matches = find_matching_commits(led_id, created_at=created_at, repos=repos)
+    return (True, matches[0]) if matches else (False, None)
+
+
+def find_matching_commits(
+    led_id: str,
+    created_at: str = "",
+    repos: Optional[Iterable[str]] = None,
+) -> list[dict]:
+    """Return commit-subject mentions of an LED, oldest first, without changing ledger state."""
     if not led_id or not LED_ID_RE.fullmatch(led_id):
-        return False, None
+        return []
 
     # Normalize LED ID to canonical "LED-NNN" so the grep is consistent.
     norm_id = led_id.upper()
 
     repo_list = list(repos) if repos is not None else discover_repos()
     if not repo_list:
-        return False, None
+        return []
 
     since_iso: Optional[str] = None
     since_dt = _parse_iso_z(created_at) if created_at else None
     if since_dt is not None:
         since_iso = since_dt.strftime("%Y-%m-%dT%H:%M:%S%z")
 
-    # Collect first match per repo, then pick the globally-oldest.
+    # Collect all matches; a later commit can cover a different part of the LED.
     candidates: list[tuple[str, str, str, str]] = []
     for repo in repo_list:
         rows = _git_log_first_parent_grep(repo, norm_id, since_iso)
@@ -266,50 +276,14 @@ def is_led_already_shipped(
             if norm_id not in tokens:
                 continue
             candidates.append((repo, sha, date_iso, subject))
-            break  # first match per repo
 
-    if not candidates:
-        return False, None
-
-    # Pick the oldest (smallest commit date) across all repos.
+    # Sort oldest first, preserving the legacy first-match behavior.
     candidates.sort(key=lambda t: t[2])
-    repo, sha, date_iso, subject = candidates[0]
-    return True, {
-        "repo": repo,
-        "sha": sha,
-        "short_sha": sha[:7],
-        "date": date_iso,
-        "subject": subject,
-    }
-
-
-def auto_close_shipped_led(led_id: str, details: dict) -> dict:
-    """Mark an already-shipped LED as done with a note pointing to the commit.
-
-    Wraps ``ai.ledger_manager.update_item`` so the dispatcher's refusal path
-    has a single call site. Errors here MUST NOT propagate — if ledger update
-    fails for whatever reason (stale registry, missing file), we still want
-    to refuse the dispatch.
-    """
-    try:
-        from ai.ledger_manager import update_item
-
-        note = (
-            f"Auto-closed by dispatcher gate (LED-1279): shipped in "
-            f"{details.get('repo','?')}@{details.get('short_sha','?')} on "
-            f"{details.get('date','?')}. "
-            f"Refused duplicate AGT dispatch."
-        )
-        result = update_item(
-            item_id=led_id,
-            status="done",
-            note=note,
-            worked_by="dispatcher-gate",
-        )
-        return {"updated": True, "result": result}
-    except Exception as e:  # pragma: no cover — defensive
-        logger.warning("dispatch_gate: auto-close of %s failed: %s", led_id, e)
-        return {"updated": False, "error": str(e)}
+    return [
+        {"repo": repo, "sha": sha, "short_sha": sha[:7],
+         "date": date_iso, "subject": subject}
+        for repo, sha, date_iso, subject in candidates
+    ]
 
 
 def evaluate_dispatch(
@@ -319,41 +293,28 @@ def evaluate_dispatch(
     led_created_at: str = "",
     repos: Optional[Iterable[str]] = None,
 ) -> Optional[dict]:
-    """Run the gate: extract an LED id, check if shipped, return refusal payload or None.
+    """Return a non-blocking advisory for commit mentions, or None.
 
     Returns:
-        - None when dispatch should proceed (no LED tag, or LED not shipped).
-        - A refusal dict when dispatch should be blocked:
-            {
-                "status": "refused",
-                "reason": "led_already_shipped",
-                "led_id": "LED-1208",
-                "shipped_in": {"repo": ..., "sha": ..., "short_sha": ..., "date": ..., "subject": ...},
-                "auto_close": {...},
-                "message": "...",
-            }
+        - None when there is no matching commit.
+        - An advisory with ``led_id``, ``commits``, and ``message`` otherwise.
     """
     led_id = extract_led_id(title, description, context)
     if not led_id:
         return None  # No LED tag — orchestrator may dispatch generic work.
 
-    shipped, details = is_led_already_shipped(
+    commits = find_matching_commits(
         led_id, created_at=led_created_at, repos=repos
     )
-    if not shipped or not details:
+    if not commits:
         return None
 
-    auto_close = auto_close_shipped_led(led_id, details)
     return {
-        "status": "refused",
-        "reason": "led_already_shipped",
         "led_id": led_id,
-        "shipped_in": details,
-        "auto_close": auto_close,
+        "commits": commits,
         "message": (
-            f"Refused: {led_id} already shipped in "
-            f"{details['repo']}@{details['short_sha']} on {details['date'][:10]} "
-            f"({details['subject'][:80]}). LED auto-closed."
+            f"Possible duplicate: {len(commits)} commit(s) mention {led_id}. "
+            "Review their scope; dispatch remains allowed."
         ),
     }
 
@@ -369,17 +330,18 @@ def lookup_led_created_at(led_id: str) -> str:
         return ""
     norm = led_id.upper()
     try:
-        from ai.ledger_manager import LEDGER_V2_DIR
+        from ai.ledger_manager import _ledger_v2_dir  # LED-5658: live per-call resolver
     except Exception:
         return ""
 
-    if not LEDGER_V2_DIR.exists():
+    ledger_v2_dir = _ledger_v2_dir()
+    if not ledger_v2_dir.exists():
         return ""
 
     import json
 
     # Walk every ledger file under ledger-v2/* looking for the genesis row.
-    for jsonl in LEDGER_V2_DIR.rglob("*.jsonl"):
+    for jsonl in ledger_v2_dir.rglob("*.jsonl"):
         try:
             with open(jsonl, "r") as f:
                 for line in f:

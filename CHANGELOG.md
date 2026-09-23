@@ -1,4 +1,4 @@
-## [Unreleased]
+## [4.19.11] - 2026-09-23
 
 ### Added
 - `delimit_agent_dispatch` accepts assignee `"auto"`, which rotates contained
