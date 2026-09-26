@@ -100,6 +100,8 @@ echo "[5/5] Committing and tagging..."
 
 # Stage synced gateway files too (sync-gateway may have updated them)
 git add package.json package-lock.json server.json gateway/
+# The published lockfile ships from 4.20.1 on; stage it only when present.
+if [ -f npm-shrinkwrap.json ]; then git add npm-shrinkwrap.json; fi
 
 # LED-1900: sync-gateway copies proprietary/internal SOURCE (e.g.
 # license_core.py, which ships only as a compiled .so) into the tree. The

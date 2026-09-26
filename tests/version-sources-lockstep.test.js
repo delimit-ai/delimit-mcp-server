@@ -3,7 +3,7 @@
  *
  * WHY THIS EXISTS
  * ---------------
- * `npm version` moves package.json and package-lock.json. It does NOT move
+ * `npm version` moves package.json, package-lock.json, and npm-shrinkwrap.json. It does NOT move
  * gateway/VERSION (regenerated from package.json by scripts/sync-gateway.sh at
  * pack time) and it does NOT move server.json (the MCP Registry record, which
  * carries the version TWICE). Nothing kept the other two in lockstep, and the
@@ -31,8 +31,8 @@
  * These remain useful for a tree that drifted some other way — a hand-edited
  * version, a bad merge, a cherry-pick — where no `npm version` ever ran.
  *
- * If you add a new file carrying the package version, add it to BOTH
- * collectSources() here and scripts/sync-version-sources.js.
+ * If you add a new file carrying the package version, add it to collectSources()
+ * here and to scripts/sync-version-sources.js unless npm itself updates it.
  */
 
 const test = require('node:test');
@@ -47,6 +47,7 @@ const readJson = (rel) => JSON.parse(fs.readFileSync(path.join(ROOT, rel), 'utf8
 function collectSources() {
   const pkg = readJson('package.json');
   const lock = readJson('package-lock.json');
+  const shrinkwrap = readJson('npm-shrinkwrap.json');
   const srv = readJson('server.json');
   const gatewayVersion = fs
     .readFileSync(path.join(ROOT, 'gateway', 'VERSION'), 'utf8')
@@ -56,6 +57,8 @@ function collectSources() {
     { label: 'package.json .version', value: pkg.version },
     { label: 'package-lock.json .version', value: lock.version },
     { label: 'package-lock.json .packages[""].version', value: lock.packages[''].version },
+    { label: 'npm-shrinkwrap.json .version', value: shrinkwrap.version },
+    { label: 'npm-shrinkwrap.json .packages[""].version', value: shrinkwrap.packages[''].version },
     { label: 'gateway/VERSION', value: gatewayVersion },
     { label: 'gateway/ai/server.py _VERSION_FALLBACK', value: fs.readFileSync(path.join(ROOT, 'gateway/ai/server.py'), 'utf8').match(/^_VERSION_FALLBACK = ["']([^"']+)["']$/m)?.[1] },
     { label: 'server.json .version', value: srv.version },

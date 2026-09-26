@@ -1,3 +1,8 @@
+## [4.20.1] - 2026-09-26
+
+### Changed
+- The npm package now ships npm-shrinkwrap.json with the dependency versions tested for this release.
+
 ## [4.20.0] - 2026-09-26
 
 ### Added

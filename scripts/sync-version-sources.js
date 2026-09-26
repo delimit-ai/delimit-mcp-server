@@ -4,7 +4,8 @@
  *
  * WHY
  * ---
- * `npm version` moves package.json and package-lock.json and nothing else.
+ * `npm version` moves package.json, package-lock.json, and npm-shrinkwrap.json.
+ * It does not move the gateway or registry version sources below.
  * Four other fields carry the package version and it moved none of them:
  *
  *   gateway/ai/server.py _VERSION_FALLBACK (used when version discovery fails)
