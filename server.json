@@ -1,8 +1,8 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.delimit-ai/delimit-mcp-server",
-  "title": "Delimit — The merge gate for AI-written code",
-  "description": "The merge gate for AI-written code, with signed, replayable attestation.",
+  "title": "Delimit — Keep the state. Change the model.",
+  "description": "Shared context across Claude Code, Codex, Cursor, Antigravity, GitHub Copilot, and Muse, with a multi-model panel for hard calls. Includes a merge gate and local signed attestations for code repositories.",
   "repository": {
     "url": "https://github.com/delimit-ai/delimit-mcp-server",
     "source": "github"
