@@ -4,7 +4,7 @@ const { Command } = require('commander');
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
-const { execSync, spawn } = require('child_process');
+const { execSync, spawn, execFileSync } = require('child_process');
 const os = require('os');
 const chalk = require('chalk');
 const inquirer = require('inquirer');
@@ -4031,7 +4031,7 @@ program
         }
         // Claude Code owns ~/.claude.json; setup registers through its CLI.
         try {
-            execSync('claude --version', { stdio: 'pipe', timeout: 30000 });
+            execFileSync('claude', ['--version'], { stdio: 'pipe', timeout: 5000 });
             const claudeConfig = path.join(homeDir, '.claude.json');
             let registered = false;
             try {
