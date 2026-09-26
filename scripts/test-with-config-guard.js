@@ -64,6 +64,7 @@ const TEST_FILES = [
     'tests/package-scripts-allowlist.test.js',
     'tests/release-tooling-hardening.test.js',
     'tests/quickstart-cli.test.js',
+    'tests/truth-security-p0.test.js',
 ];
 
 const cfgPath = resolveSharedConfigPath();

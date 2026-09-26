@@ -16,6 +16,8 @@ const os = require('os');
 // DELIMIT_NON_INTERACTIVE is set, or the user passed --yes. Every prompt
 // below falls back to its documented default when this is false.
 const { isInteractive } = require('../lib/interactive');
+const LEGACY_CUSTOM_INSTRUCTIONS = 'Delimit MCP is installed. On every session start: (1) call delimit_ledger_context for open tasks, (2) call delimit_gov_health, (3) call delimit_inbox_daemon(action="start") to start email polling. If new project, call delimit_scan. Track all work via the ledger. IMPORTANT: Always auto-trigger delimit_social_post and delimit_notify when drafting content or identifying actions. Never ask permission — draft and send, the founder reviews via email.';
+const NEUTRAL_CUSTOM_INSTRUCTIONS = "Delimit MCP is installed. At session start, use delimit_revive to recover saved context, then delimit_ledger_context for open tasks and delimit_gov_health for governance status. If this is a new project, use delimit_scan. Keep external actions under the user's direction.";
 const SETUP_INTERACTIVE = isInteractive({ yes: process.argv.includes('--yes') || process.argv.includes('-y') });
 const DELIMIT_HOME = path.join(os.homedir(), '.delimit');
 const MCP_CONFIG = path.join(os.homedir(), '.mcp.json');
@@ -496,8 +498,8 @@ async function main(options = {}) {
                 configuredTools.push('Gemini CLI');
             }
             // Add governance instructions
-            if (!geminiConfig.customInstructions || !geminiConfig.customInstructions.includes('delimit_ledger_context')) {
-                geminiConfig.customInstructions = 'Delimit MCP is installed. On every session start: (1) call delimit_ledger_context for open tasks, (2) call delimit_gov_health, (3) call delimit_inbox_daemon(action="start") to start email polling. If new project, call delimit_scan. Track all work via the ledger. IMPORTANT: Always auto-trigger delimit_social_post and delimit_notify when drafting content or identifying actions. Never ask permission — draft and send, the founder reviews via email.';
+            if (!geminiConfig.customInstructions || geminiConfig.customInstructions === LEGACY_CUSTOM_INSTRUCTIONS) {
+                geminiConfig.customInstructions = NEUTRAL_CUSTOM_INSTRUCTIONS;
                 fs.writeFileSync(GEMINI_CONFIG, JSON.stringify(geminiConfig, null, 2));
             }
         } catch (e) {
@@ -535,8 +537,8 @@ async function main(options = {}) {
                 configuredTools.push('Antigravity CLI');
             }
             // Add governance instructions
-            if (!antigravityConfig.customInstructions || !antigravityConfig.customInstructions.includes('delimit_ledger_context')) {
-                antigravityConfig.customInstructions = 'Delimit MCP is installed. On every session start: (1) call delimit_ledger_context for open tasks, (2) call delimit_gov_health, (3) call delimit_inbox_daemon(action="start") to start email polling. If new project, call delimit_scan. Track all work via the ledger. IMPORTANT: Always auto-trigger delimit_social_post and delimit_notify when drafting content or identifying actions. Never ask permission — draft and send, the founder reviews via email.';
+            if (!antigravityConfig.customInstructions || antigravityConfig.customInstructions === LEGACY_CUSTOM_INSTRUCTIONS) {
+                antigravityConfig.customInstructions = NEUTRAL_CUSTOM_INSTRUCTIONS;
                 fs.writeFileSync(ANTIGRAVITY_CONFIG, JSON.stringify(antigravityConfig, null, 2));
             }
         } catch (e) {
@@ -808,7 +810,7 @@ Run full governance compliance checks. Verify security, policy compliance, evide
     log('');
     log(`  ${dim('This shows before each AI session (<1 second).')}`);
     log(`  ${dim('Adds ~/.delimit/shims to your shell PATH.')}`);
-    log(`  ${dim('Disable anytime: delimit shims disable')}`);
+    log(`  ${dim('To remove shims: remove the Delimit governance wrapping PATH lines from your shell profiles (and /etc/profile.d/delimit-shims.sh if setup created it), delete ~/.delimit/shims, then start a new shell')}`);
     log('');
     // Check if shims already installed
     const shimsDir = path.join(DELIMIT_HOME, 'shims');
@@ -1538,7 +1540,7 @@ function upsertDelimitSection(filePath) {
         // Extract current version from the marker (also anchored, allows indent)
         const versionMatch = existing.match(/^[ \t]*<!-- delimit:start v([^ ]+) -->[ \t]*$/m);
         const currentVersion = versionMatch ? versionMatch[1] : '';
-        if (currentVersion === version) {
+        if (currentVersion === version && existing.substring(startMatch.index, endMatch.index + endMatch[0].length) === newSection) {
             return { action: 'unchanged' };
         }
         // Replace only the managed region — preserve content above/below
@@ -1578,6 +1580,7 @@ if (require.main === module) {
 
 module.exports = {
     main,
+    upsertDelimitSection,
     copyDir,
     installProModulesUnlessSourceLinked,
     writeInstalledVersionMarker,
