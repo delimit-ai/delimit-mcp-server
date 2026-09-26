@@ -639,7 +639,7 @@ def _emit_policy_event(tool_name: str, status: str, reason: str) -> None:
 #      gateway/ai/server.py ← ../../package.json)
 #   3. the pinned fallback below (last resort so the delimit_version return
 #      schema never changes shape — never-break-installs).
-_VERSION_FALLBACK = "4.19.11"
+_VERSION_FALLBACK = "4.20.0"
 
 
 def _resolve_version(start_path: Optional[str] = None) -> str:
@@ -2029,6 +2029,19 @@ def _cap_response(result: Dict[str, Any]) -> Dict[str, Any]:
     return r
 
 
+def _records_next_steps(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep records-profile hints inside its registered MCP surface."""
+    if ACTIVE_TOOLSET == "records" and isinstance(result, dict):
+        steps = result.get("next_steps")
+        if isinstance(steps, list):
+            result["next_steps"] = [
+                step for step in steps
+                if isinstance(step, dict)
+                and _tool_in_toolset(step.get("tool", ""), "records")
+            ]
+    return result
+
+
 def _with_next_steps(tool_name: str, result: Dict[str, Any]) -> Dict[str, Any]:
     """Route every tool result through governance. This IS the loop.
 
@@ -2044,7 +2057,7 @@ def _with_next_steps(tool_name: str, result: Dict[str, Any]) -> Dict[str, Any]:
     """
     # Auto-start inbox daemon on first tool call - works for ALL models
     global _inbox_daemon_autostarted
-    if not _inbox_daemon_autostarted:
+    if ACTIVE_TOOLSET != "records" and not _inbox_daemon_autostarted:
         _inbox_daemon_autostarted = True
         _autostart_optional_inbox_daemon()
 
@@ -2158,12 +2171,14 @@ def _with_next_steps(tool_name: str, result: Dict[str, Any]) -> Dict[str, Any]:
             if isinstance(result, dict)
             else "."
         )
-        return _cap_response(govern(tool_name, result, project_path=str(governance_project)))
+        return _cap_response(_records_next_steps(
+            govern(tool_name, result, project_path=str(governance_project))
+        ))
     except Exception:
         # Fallback: just add next_steps from registry
         steps = NEXT_STEPS_REGISTRY.get(tool_name, [])
         result["next_steps"] = steps
-        return _cap_response(result)
+        return _cap_response(_records_next_steps(result))
 
 
 

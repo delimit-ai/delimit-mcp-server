@@ -225,3 +225,5 @@ gateway/ai/build_admission.py
 gateway/ai/build_evaluator.py
 gateway/ai/build_selector.py
 gateway/ai/outreach_untrusted_text.py
+gateway/ai/founder_x_compose.py
+gateway/ai/outreach_staged_reply.py
