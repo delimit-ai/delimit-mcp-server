@@ -6,7 +6,7 @@ On first launch, `npx` fetches `delimit-cli` from the npm registry and `pip` may
 
 Uninstalling the plugin leaves `~/.delimit` untouched. Inspect and delete that directory yourself if you want to remove the records.
 
-The session-start hook reads local records only and sends nothing anywhere.
+The session-start hook reads local records under `~/.delimit` and, to name the project, the `package.json` or `pyproject.toml` name and the git remote URL of the current directory; it writes nothing and sends nothing anywhere.
 
 ## Where records live
 
