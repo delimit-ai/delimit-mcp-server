@@ -113,8 +113,7 @@ describe('lib/migration-2092-banner: banner copy', () => {
             'Your existing transcripts under ~/.delimit/memory/deliberations/ are preserved.',
             'New deliberations on Free tier are ephemeral by design.',
             '',
-            'Pro turns every deliberation into a signed, replayable attestation',
-            'with 365-day retention: delimit.ai/pricing',
+            'See current Pro features: delimit.ai/pricing',
             '',
         ].join('\n');
         assert.equal(bannerText(), expected);

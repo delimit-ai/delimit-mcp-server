@@ -6524,7 +6524,8 @@ function printModelStatus(config) {
     console.log(`    ${chalk.gray('o')} ${'Claude'.padEnd(10)} -- ${chalk.gray('not configured (uses your Claude Code subscription)')}`);
 
     console.log('');
-    console.log(`  ${remaining} free deliberation${remaining === 1 ? '' : 's'} remaining (of ${usage.limit || 3}).`);
+    // A local counter does not imply that this install has hosted model access.
+    console.log("  Deliberations use your configured model CLIs or API keys.");
     if (configuredCount > 0) {
         console.log(`  Mode: ${chalk.green('BYOK')} (${configuredCount} model${configuredCount === 1 ? '' : 's'})`);
     } else {
@@ -6905,19 +6906,19 @@ program
     .command("vault")
     .description("Manage local secrets and API keys")
     .argument("[action]", "Action: status | set | list | reveal", "status")
-    .option("--verbose", "Show encryption details and backend status")
+    .option("--verbose", "Show storage details and backend status")
     .action(async (action, options) => {
         console.log(chalk.magenta.bold("\n  Delimit Vault\n"));
         
         if (action === "status") {
             console.log(chalk.bold("Backend Status:"));
-            console.log(`  Local Storage:  ${chalk.green("✓ Active")} (~/.delimit/secrets/)`);
-            console.log(`  Encryption:     ${chalk.green("✓ AES-256-GCM Enabled")}`);
+            console.log(`  Storage:        plaintext JSON at ${homeSubpath('secrets')}/<NAME>.json`);
+            console.log("  Permissions:    owner-only (0600) on files written by vault set");
+            console.log("  Encryption:     none");
             
             if (options.verbose) {
                 console.log(chalk.dim("\n[Verbose Mode]"));
-                console.log(chalk.dim("  - Key Derivation: PBKDF2"));
-                console.log(chalk.dim("  - Local Only:     TRUE (secrets never leave your CPU)"));
+                console.log(chalk.dim("  - Values are readable by anyone who can read the secret files."));
             }
             console.log("\nUse " + chalk.cyan("delimit vault list") + " to see configured secrets.");
         } else if (action === "list") {
