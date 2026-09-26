@@ -18,7 +18,7 @@ claude plugin marketplace add delimit-ai/delimit-mcp-server
 claude plugin install delimit@delimit
 ```
 
-The first launch downloads the pinned `delimit-cli` package from npm and may download Python requirements from the Python package index. It creates the plugin's own copy of the local MCP server under `~/.delimit/plugin-server/<version>` and a venv under `~/.delimit`; it never overwrites an existing `~/.delimit/server`. It does not run `delimit setup` or register another assistant configuration.
+The first launch downloads the pinned `delimit-cli` package from npm and may download Python requirements from the Python package index. It creates the plugin's own copy of the local MCP server under `~/.delimit/plugin-server/<version>` with its own Python venv inside that directory, separate from any `~/.delimit/venv`; it never overwrites an existing `~/.delimit/server`. It does not run `delimit setup` or register another assistant configuration.
 
 ## Data and removal
 

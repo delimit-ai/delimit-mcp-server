@@ -1,6 +1,6 @@
 # Data handling
 
-The plugin starts `delimit mcp --toolset records` locally. The records tools read and write ledger and handoff data in plain JSON and JSONL files under `~/.delimit`; those files belong to you. The launcher also stores the server and Python venv there. It does not change Claude, Codex, or other assistant configuration files.
+The plugin starts `delimit mcp --toolset records` locally. The records tools read and write ledger and handoff data in plain JSON and JSONL files under `~/.delimit`; those files belong to you. The launcher also stores its own server copy and Python venv under `~/.delimit/plugin-server/<version>`. It does not change Claude, Codex, or other assistant configuration files.
 
 On first launch, `npx` fetches `delimit-cli` from the npm registry and `pip` may fetch the server's Python requirements from the Python package index. The records tools themselves do not send record contents to a service. Claude Code still processes the content you choose to show it under its own terms.
 
