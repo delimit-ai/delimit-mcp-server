@@ -391,7 +391,7 @@ Deliberations use your configured model CLIs or API keys. Provider availability 
 
 - **TUI** -- terminal-native Ventures panel, real `delimit think` and `delimit build` commands
 - **Security hardening** -- notify.py stubbed in npm, axios pinned against supply chain attacks
-- **Free tier restructure** -- deliberations use Gemini Flash + GPT-4o-mini (cost: <$20/mo)
+- **Deliberation providers** -- deliberations run on the model CLIs or API keys you configure (`delimit models`); no hosted runs are included
 - **Zero-config onboarding** -- auto-detect framework, scan, and first evidence in one command
 - **Assistant permissions** -- `delimit setup` configures MCP access for Claude Code, Codex, Cursor, and Antigravity and sets approval defaults for some clients; review these settings for your environment
 
@@ -549,7 +549,7 @@ When installed into your AI coding assistant, Delimit provides tools across two 
 
 #### Pro
 
-- **Multi-model deliberation** -- AI models debate until they agree (free: Gemini Flash + GPT-4o-mini; BYOK: any models)
+- **Multi-model deliberation** -- the models you configure debate until they agree; provider availability depends on your setup
 - **Security audit** -- dependency scanning, secret detection, SAST analysis
 - **Test verification** -- confirms tests ran, measures coverage, generates new tests
 - **Memory & vault** -- persistent context and local plaintext secret files across sessions
