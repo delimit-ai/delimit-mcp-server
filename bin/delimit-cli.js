@@ -238,7 +238,7 @@ async function ensureAgent() {
 
 program
     .name('delimit')
-    .description('The merge gate for AI-written code, with signed, replayable attestation')
+    .description('Keep the state. Change the model. Shared context and a multi-model panel for your AI coding assistants.')
     .version(require('../package.json').version)
     .option('--print-continuity', 'Print resolved continuity context and continue');
 

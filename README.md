@@ -1,11 +1,10 @@
 # `</>` Delimit
 
-**Building your AI organization.**
+**Keep the state. Change the model.**
 
-Persistent memory, shared records and handoffs, and a merge gate for AI-written code with signed, replayable attestation — for Claude Code, Codex, Cursor, and Gemini CLI. Local-first, open source (MIT).
+Keep decisions, records, and handoffs across Claude Code, Codex, Cursor, Antigravity, GitHub Copilot, and Muse. Bring configured models together for hard calls. For code repositories, Delimit also offers a merge gate and local signed attestations.
 
 [![npm](https://img.shields.io/npm/v/delimit-cli)](https://www.npmjs.com/package/delimit-cli)
-[![Tests](https://img.shields.io/badge/tests-4800%2B%20passing-brightgreen)](https://github.com/delimit-ai/delimit-mcp-server)
 [![GitHub Action](https://img.shields.io/badge/GitHub%20Action-latest-blue)](https://github.com/marketplace/actions/delimit-merge-gate-for-ai-written-code)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Glama Score](https://glama.ai/mcp/servers/delimit-ai/delimit-mcp-server/badges/score.svg)](https://glama.ai/mcp/servers/delimit-ai/delimit-mcp-server/score)
@@ -124,7 +123,7 @@ delimit_impact       → blast radius: scans your dependency manifest for downst
 
 ```bash
 npx delimit-cli deliberate "Is dropping the deprecated v1 /users field a safe MINOR?"
-#   tool: delimit_deliberate — 3 hosted runs after `delimit signin` (free account), then bring your own keys
+#   tool: delimit_deliberate — uses your configured model CLIs or API keys
 ```
 
 `delimit setup` gives the Codex MCP server a 30-minute tool timeout so a
@@ -144,7 +143,7 @@ Every receipt is offline-verifiable with `npx delimit-cli seal-verify <receipt.j
 
 ### 3. Context that survives sessions and models
 
-Decisions, constraints, and tasks persist across sessions and across AI assistants — switch from Claude Code to Codex, Cursor, or Gemini CLI without losing the thread.
+Decisions, constraints, and tasks persist across sessions. Continue in Claude Code, Codex, Cursor, Antigravity, GitHub Copilot, or Muse with the saved record.
 
 **Memory** — persist and recall the *why*, not just the diff.
 
@@ -264,7 +263,7 @@ resume the exact native session and explicitly save a project-bound handoff.
 
 ## Think and Build
 
-Beyond the merge gate, Delimit orchestrates multi-model deliberation and autonomous builds. `delimit think` dispatches a strategic question to Claude, Codex, Gemini, and Grok; `delimit build` activates a background daemon that executes ledger tasks through the gate chain. `delimit vault` manages local secrets (AES-256).
+`delimit think` runs a multi-model deliberation using available configured providers. `delimit build` starts a detached planning worker that inspects the repository and writes briefs; it does not execute ledger tasks. `delimit vault` stores secrets as plaintext JSON in owner-only (0600) files.
 
 Works across any configuration, from a single model on a budget to a full panel.
 
@@ -273,7 +272,7 @@ Works across any configuration, from a single model on a budget to a full panel.
 ## Try it in 2 minutes
 
 ```bash
-npx delimit-cli doctor            # 14 prescriptive checks — tells you exactly what to fix
+npx delimit-cli doctor            # Checks your local setup and suggests fixes
 npx delimit-cli status            # Visual dashboard of your entire governance setup
 npx delimit-cli simulate          # Dry-run: see what would be blocked before you commit
 npx delimit-cli scan              # Instant health grade for your API spec
@@ -315,7 +314,7 @@ npx delimit-cli init        # Sets up governance + drift baseline
 - **`delimit wrap`** — pipe `claude -p`, `cursor`, `aider`, `codex`, or any AI-assisted CLI through a signed governance gate. Snapshots the git diff before/after, runs lint + tests, HMAC-signs an `att_*` attestation, and writes the receipt locally for offline verification. Advisory by default; `--enforce` blocks CI on policy violations; `--max-time <s>` is a kill switch that tags the attestation as a `liability_incident` and prints a cross-model handoff command.
 - **`delimit trust-page`** — renders a directory of attestations into a static HTML trust page + JSON Feed 1.1 feed. Single file, no framework, offline-renderable. Deploy anywhere.
 - **`delimit ai-sbom`** — aggregates attestations into a CycloneDX 1.6 bill-of-materials with AI-specific fields (detected models per vendor, tool-call surface, policy gate counts). Pipe straight into procurement.
-- **Cross-model by construction** — `wrap` is agnostic to the producer. Same attestation schema whether the pipe upstream is Claude Code, Cursor, Aider, Codex, or Gemini CLI. Switch producers without losing the audit chain.
+- **Cross-model by construction** — `wrap` uses the same local attestation schema across supported command-line producers. Delimit keeps session context across Claude Code, Codex, Cursor, Antigravity, GitHub Copilot, and Muse.
 
 ```bash
 # Gate any AI-assisted CLI
@@ -340,7 +339,7 @@ delimit ai-sbom -o ./ai-sbom.json
 
 *The highest state of AI governance — earlier features still active.*
 
-- **`delimit doctor`** -- 14 prescriptive diagnostics. Every failure prints the exact command to fix it. `--ci` for pipelines, `--fix` for auto-repair.
+- **`delimit doctor`** -- checks your local setup and suggests fixes. Supports `--ci` for pipelines and `--fix` for supported repairs.
 - **`delimit simulate`** -- policy dry-run. See what would be blocked before you commit. The `terraform plan` for API governance.
 - **`delimit status`** -- visual terminal dashboard. Policy, specs, hooks, CI, MCP, models, memory, ledger, evidence, git branch. `--watch` for live refresh.
 - **`delimit report`** -- governance report. `--since 7d --format md|html|json`. Audit-friendly output for PRs and compliance.
@@ -369,7 +368,7 @@ delimit deliberate "Should we build rate limiting in-house or use a managed serv
   Build rate limiting in-house with Redis + circuit breaker.
 ```
 
-3 free deliberations, then BYOK for unlimited. Works with Grok, Gemini, Claude, GPT-4o.
+Deliberations use your configured model CLIs or API keys. Provider availability depends on your setup.
 
 ### v4.18
 
@@ -394,7 +393,7 @@ delimit deliberate "Should we build rate limiting in-house or use a managed serv
 - **Security hardening** -- notify.py stubbed in npm, axios pinned against supply chain attacks
 - **Free tier restructure** -- deliberations use Gemini Flash + GPT-4o-mini (cost: <$20/mo)
 - **Zero-config onboarding** -- auto-detect framework, scan, and first evidence in one command
-- **Auto-approve tools** -- `delimit setup` configures permissions for Claude Code, Codex, and Gemini CLI
+- **Assistant permissions** -- `delimit setup` configures MCP access for Claude Code, Codex, Cursor, and Antigravity and sets approval defaults for some clients; review these settings for your environment
 
 ### v4.0
 
@@ -553,7 +552,7 @@ When installed into your AI coding assistant, Delimit provides tools across two 
 - **Multi-model deliberation** -- AI models debate until they agree (free: Gemini Flash + GPT-4o-mini; BYOK: any models)
 - **Security audit** -- dependency scanning, secret detection, SAST analysis
 - **Test verification** -- confirms tests ran, measures coverage, generates new tests
-- **Memory & vault** -- persistent context and encrypted secrets across sessions
+- **Memory & vault** -- persistent context and local plaintext secret files across sessions
 - **Evidence collection** -- governance audit trail for compliance
 - **Deploy pipeline** -- governed build, publish, and rollback
 - **OS layer** -- agent identity, execution plans, approval gates
@@ -562,45 +561,7 @@ When installed into your AI coding assistant, Delimit provides tools across two 
 
 ## What It Detects
 
-28 change types (17 breaking, 11 non-breaking) -- deterministic rules, not AI inference. Same input always produces the same result.
-
-### Breaking Changes
-
-| # | Change Type | Example |
-|---|-------------|---------|
-| 1 | `endpoint_removed` | `DELETE /users/{id}` removed entirely |
-| 2 | `method_removed` | `PATCH /orders` no longer exists |
-| 3 | `required_param_added` | New required header on `GET /items` |
-| 4 | `param_removed` | `sort` query parameter removed |
-| 5 | `response_removed` | `200 OK` response dropped |
-| 6 | `required_field_added` | Request body now requires `tenant_id` |
-| 7 | `field_removed` | `email` dropped from response object |
-| 8 | `type_changed` | `id` went from `string` to `integer` |
-| 9 | `format_changed` | `date-time` changed to `date` |
-| 10 | `enum_value_removed` | `status: "pending"` no longer valid |
-| 11 | `param_type_changed` | Query param `limit` changed from `integer` to `string` |
-| 12 | `param_required_changed` | `filter` param became required |
-| 13 | `response_type_changed` | Response `data` changed from `array` to `object` |
-| 14 | `security_removed` | OAuth2 security scheme removed |
-| 15 | `security_scope_removed` | `write:pets` scope removed from OAuth2 |
-| 16 | `max_length_decreased` | `name` maxLength reduced from 255 to 100 |
-| 17 | `min_length_increased` | `code` minLength increased from 1 to 5 |
-
-### Non-Breaking Changes
-
-| # | Change Type | Example |
-|---|-------------|---------|
-| 18 | `endpoint_added` | New `POST /webhooks` endpoint |
-| 19 | `method_added` | `PATCH /users/{id}` method added |
-| 20 | `optional_param_added` | Optional `format` query param added |
-| 21 | `response_added` | `201 Created` response added |
-| 22 | `optional_field_added` | Optional `nickname` field added to response |
-| 23 | `enum_value_added` | `status: "archived"` value added |
-| 24 | `description_changed` | Updated description for `/health` endpoint |
-| 25 | `security_added` | API key security scheme added |
-| 26 | `deprecated_added` | `GET /v1/users` marked as deprecated |
-| 27 | `default_changed` | Default value for `page_size` changed from 10 to 20 |
-| 28 | `field_requirement_relaxed` | Required field `nickname` became optional (context-aware severity) |
+Delimit checks OpenAPI and JSON Schema changes using deterministic rules for the cases each surface supports. Examples include removed endpoints, newly required parameters, and changed response fields. Review the result alongside your contract; rule coverage differs between the CLI and GitHub Action.
 
 ---
 
@@ -640,46 +601,28 @@ rules:
 
 **How does this compare to Obsidian Mind?**
 
-Obsidian Mind is a great Obsidian vault template for Claude Code users who want persistent memory via markdown files. Delimit takes a different approach: it's an MCP server that works across Claude Code, Codex, Gemini CLI, and Cursor. Your memory, ledger, and governance travel with you when you switch models. Delimit also adds API governance (28-type breaking change detection), CI gates, git hooks, and policy enforcement that Obsidian Mind doesn't cover. Use Obsidian Mind if you're all-in on Claude + Obsidian. Use Delimit if you switch between models or need governance.
+Obsidian Mind is a great Obsidian vault template for Claude Code users who want persistent memory via markdown files. Delimit takes a different approach: it keeps a shared record across Claude Code, Codex, Cursor, Antigravity, GitHub Copilot, and Muse. Your memory, ledger, and governance travel with you when you switch models. Delimit also adds API governance (28-type breaking change detection), CI gates, git hooks, and policy enforcement that Obsidian Mind doesn't cover. Use Obsidian Mind if you're all-in on Claude + Obsidian. Use Delimit if you switch between models or need governance.
 
 **Does this work without Claude Code?**
 
-Yes. Delimit works with Claude Code, Codex (OpenAI), Gemini CLI (Google), and Cursor. The `remember`/`recall` commands work standalone with zero config. The MCP server integrates with any client that supports the Model Context Protocol.
+Yes. Delimit supports Claude Code, Codex, Cursor, Antigravity, GitHub Copilot, and Muse. The `remember`/`recall` commands work standalone. The MCP server integrates with clients that support the Model Context Protocol.
 
 **Is this free?**
 
-The free tier includes API governance, persistent memory, zero-spec extraction, project scanning, and 3 multi-model deliberations. Pro ($10/mo) adds unlimited deliberation, security audit, test verification, deploy pipeline, and agent orchestration. Premium ($50-100/mo) adds priority support and team features. Enterprise is custom: see [delimit.ai/pricing](https://delimit.ai/pricing).
+Delimit lists Free, Pro, and Enterprise plans. Multi-model deliberation uses your configured model CLIs or API keys. See [current plan details](https://delimit.ai/pricing).
 
 ---
 
-## Telemetry & cloud sync
+## Local data and network calls
 
-**Short version: none by default.** Nothing leaves your machine unless you explicitly configure it.
+Delimit stores its ledger, records, and local attestations on your machine. Some setup and session paths make network requests by default:
 
-**What's always local (source of truth):**
-- `~/.delimit/events/events-YYYY-MM-DD.jsonl` — per-tool-call events (tool name, timestamp, status, model id, session id, trace id). No source code, no prompts, no responses.
-- `~/.delimit/ledger/` — your ledger items, work orders, deliberation transcripts.
-- `~/.delimit/attestations/` — `delimit wrap` output bundles.
+- Setup checks for a newer CLI release and can download the Pro module tarball.
+- The Claude Code SessionStart hook and installed shims can check for and install updates.
+- License activation contacts the license provider and sends your customer email, license ID, and machine hash to delimit.ai.
+- Multi-model deliberation sends your prompt and relevant context to the model providers you configure, through your CLI logins or API keys.
 
-**What's OPT-IN (requires you to provide your own Supabase project credentials):**
-- `gateway/ai/supabase_sync.py` mirrors the local event + ledger + work-order + deliberation rows into a Supabase project *you own* so you can view them in `app.delimit.ai`. **It only activates if you set `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` environment variables OR provide `~/.delimit/secrets/supabase.json` with those credentials.** No URL or key is hardcoded in the published package (verify with `grep -r aqbdqxnhzqzswdxifksc $(npm root -g)/delimit-cli/` — zero hits).
-- Data scope when enabled: metadata only (tool names, timestamps, IDs, statuses, venture tags). Never source code, prompts, or model responses.
-
-**Kill switch:**
-Set `DELIMIT_DISABLE_CLOUD_SYNC=1` in your environment to force all sync operations to no-op even if credentials are present. Local files continue to work normally.
-
-```bash
-# Disable cloud sync for a single invocation
-DELIMIT_DISABLE_CLOUD_SYNC=1 delimit lint api/openapi.yaml
-
-# Disable for the shell session
-export DELIMIT_DISABLE_CLOUD_SYNC=1
-```
-
-**Webhook notifications:**
-`gateway/ai/notify.py` emits governance events to a webhook endpoint *only if* you configure `DELIMIT_WEBHOOK_URL` explicitly. Unset by default.
-
-If you spot another code path that could phone home without disclosure, file an issue. This section is maintained as ship-truth, not aspirational.
+`gateway/ai/supabase_sync.py` is not bundled with this package. Webhook notifications are sent only when `DELIMIT_WEBHOOK_URL` is configured.
 
 ---
 
