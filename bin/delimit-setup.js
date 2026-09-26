@@ -1578,6 +1578,7 @@ if (require.main === module) {
 
 module.exports = {
     main,
+    copyDir,
     installProModulesUnlessSourceLinked,
     writeInstalledVersionMarker,
     removeArchiveOnlyProManifest,

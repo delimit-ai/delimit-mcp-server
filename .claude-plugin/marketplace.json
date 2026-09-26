@@ -1,0 +1,12 @@
+{
+  "name": "delimit",
+  "description": "Local records for decisions, tasks, and handoffs in coding sessions.",
+  "owner": { "name": "Delimit", "url": "https://delimit.ai" },
+  "plugins": [
+    {
+      "name": "delimit",
+      "source": "./claude-plugin",
+      "description": "Keep decisions, tasks, and handoffs in local files across coding sessions."
+    }
+  ]
+}

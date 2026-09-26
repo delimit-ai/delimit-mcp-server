@@ -122,7 +122,7 @@ function normalizeNaturalLanguageArgs(argv) {
     const explicitCommands = new Set([
         'install', 'mode', 'status', 'session', 'build', 'ask', 'policy', 'auth', 'audit',
         'explain-decision', 'uninstall', 'proxy', 'hook', 'version', 'vault', 'deliberate',
-        'remember', 'recall', 'forget', 'report', 'signin', 'signout', 'activate', 'seal-verify'
+        'remember', 'recall', 'forget', 'report', 'signin', 'signout', 'activate', 'seal-verify', 'mcp'
     ]);
     if (explicitCommands.has((raw[0] || '').toLowerCase())) {
         return raw;
@@ -7571,6 +7571,12 @@ program
             process.exitCode = 1;
         }
     });
+
+program
+    .command('mcp')
+    .description('Run the local Delimit MCP server over stdio')
+    .option('--toolset <name>', 'Server toolset', 'full')
+    .action(options => require('../lib/mcp-launcher').launchMcp(options.toolset));
 
 program
     .command('handoff [action] [repoPath]')

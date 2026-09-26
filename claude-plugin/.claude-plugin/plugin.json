@@ -1,0 +1,20 @@
+{
+  "name": "delimit",
+  "displayName": "Delimit",
+  "version": "1.0.0",
+  "description": "Keep decisions, tasks, and handoffs in local files across coding sessions.",
+  "author": {
+    "name": "Delimit",
+    "url": "https://delimit.ai",
+    "email": "pro@delimit.ai"
+  },
+  "homepage": "https://github.com/delimit-ai/delimit-mcp-server/tree/main/claude-plugin",
+  "repository": "https://github.com/delimit-ai/delimit-mcp-server",
+  "license": "MIT",
+  "keywords": [
+    "records",
+    "tasks",
+    "handoffs",
+    "mcp"
+  ]
+}
