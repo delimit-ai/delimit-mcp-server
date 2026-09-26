@@ -24,6 +24,8 @@ const REPO_ROOT = path.resolve(__dirname, '..');
 
 // The full file list (kept in sync with the underlying `node --test` invocation).
 const TEST_FILES = [
+    'tests/mcp-subcommand.test.js',
+    'tests/claude-plugin-structure.test.js',
     'tests/clean-tree-guard.test.js',
     'tests/_config-sentinel.test.js',
     'tests/setup-onboarding.test.js',
