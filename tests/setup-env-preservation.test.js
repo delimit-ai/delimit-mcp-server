@@ -5,12 +5,19 @@ const path = require('node:path');
 
 // Exercise the actual setup config block without running installation or touching HOME.
 const setupSource = fs.readFileSync(path.join(__dirname, '..', 'bin', 'delimit-setup.js'), 'utf8');
+const helperSource = setupSource.split('async function configureClaudeCodeMcp(')[1]
+    .split('\nasync function main(')[0];
+const makeClaudeHelper = new Function(
+    'fs', 'path', 'DELIMIT_HOME', 'MCP_CONFIG', 'logp', 'green', 'log', 'yellow',
+    'claudeMcpAddArgs', 'displayClaudeCommand', 'execFileSync',
+    `return async function configureClaudeCodeMcp(${helperSource}`,
+);
 const configSource = setupSource.split('    // Step 3: Configure Claude Code MCP')[1]
     .split('    // Checkpoint: MCP is configured')[0];
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 const configure = new AsyncFunction(
     'fs', 'path', 'os', 'DELIMIT_HOME', 'MCP_CONFIG', 'CLAUDE_DIR',
-    'python', 'step', 'logp', 'green', 'yellow', 'log',
+    'python', 'step', 'logp', 'green', 'yellow', 'log', 'hasClaude', 'configureClaudeCodeMcp',
     configSource,
 );
 
@@ -25,10 +32,16 @@ async function runSetup(home) {
     for (const dir of ['.claude', '.codex', '.cursor', '.gemini/antigravity-cli']) {
         fs.mkdirSync(path.join(home, dir), { recursive: true });
     }
+    const delimitHome = path.join(home, '.delimit');
+    const mcpConfig = path.join(home, '.mcp.json');
+    const { claudeMcpAddArgs, displayClaudeCommand } = require('../lib/claude-mcp-registration');
+    const configureClaudeCodeMcp = makeClaudeHelper(fs, path, delimitHome, mcpConfig,
+        async () => {}, s => s, () => {}, s => s,
+        claudeMcpAddArgs, displayClaudeCommand, () => {});
     await configure(
-        fs, path, { homedir: () => home }, path.join(home, '.delimit'),
-        path.join(home, '.mcp.json'), path.join(home, '.claude'),
-        '/managed/python', () => {}, async () => {}, s => s, s => s, () => {},
+        fs, path, { homedir: () => home }, delimitHome,
+        mcpConfig, path.join(home, '.claude'),
+        '/managed/python', () => {}, async () => {}, s => s, s => s, () => {}, false, configureClaudeCodeMcp,
     );
 }
 
