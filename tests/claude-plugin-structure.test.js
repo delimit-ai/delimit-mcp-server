@@ -15,6 +15,10 @@ test('Claude plugin manifests and records skills have the expected structure', (
     assert.equal(manifest.author.name, 'Delimit');
     const marketplace = JSON.parse(fs.readFileSync(path.join(root, '.claude-plugin', 'marketplace.json')));
     assert.equal(marketplace.plugins[0].source, './claude-plugin');
+    const hooks = JSON.parse(fs.readFileSync(path.join(plugin, 'hooks', 'hooks.json'))).hooks.SessionStart;
+    assert.equal(hooks[0].matcher, 'startup|resume|clear|compact');
+    assert.match(hooks[0].hooks[0].command, /\$\{CLAUDE_PLUGIN_ROOT\}\/hooks\/resume\.mjs/);
+    assert.match(fs.readFileSync(path.join(plugin, 'commands', 'handoff.md'), 'utf8'), /delimit_handoff_create/);
     const mcp = JSON.parse(fs.readFileSync(path.join(plugin, '.mcp.json'))).mcpServers.delimit;
     assert.equal(mcp.command, 'npx');
     assert.deepEqual(mcp.args.slice(2), ['mcp', '--toolset', 'records']);

@@ -26,6 +26,9 @@ const REPO_ROOT = path.resolve(__dirname, '..');
 const TEST_FILES = [
     'tests/mcp-subcommand.test.js',
     'tests/claude-plugin-structure.test.js',
+    'tests/claude-plugin-resume.test.js',
+    'tests/claude-plugin-panel-structure.test.js',
+    'tests/claude-plugin-governance-structure.test.js',
     'tests/clean-tree-guard.test.js',
     'tests/_config-sentinel.test.js',
     'tests/setup-onboarding.test.js',

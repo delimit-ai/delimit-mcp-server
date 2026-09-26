@@ -13,6 +13,7 @@ $HOME/.delimit; nothing else in HOME is written except npm's own cache.
 Synthetic data only. Uses no real user configuration.
 
 Usage: scripts/claude-plugin-e2e.py <delimit-cli spec or path to .tgz> [--keep]
+       scripts/claude-plugin-e2e.py --installed [--keep]  # use installed CLI
 """
 import json
 import os
@@ -31,8 +32,8 @@ EXPECTED = {
 
 
 class Server:
-    def __init__(self, env, cwd, err_path):
-        self.p = subprocess.Popen(["delimit", "mcp", "--toolset", "records"], cwd=cwd, env=env,
+    def __init__(self, env, cwd, err_path, toolset="records"):
+        self.p = subprocess.Popen(["delimit", "mcp", "--toolset", toolset], cwd=cwd, env=env,
                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                   stderr=open(err_path, "a"), text=True)
         self.n = 0
@@ -84,16 +85,19 @@ def main():
     if len(sys.argv) < 2:
         raise SystemExit(__doc__)
     spec, keep = sys.argv[1], "--keep" in sys.argv
+    installed = spec == "--installed"
     root = Path(tempfile.mkdtemp(prefix="delimit-plugin-e2e-"))
     home, prefix, project = root / "home", root / "npm", root / "home" / "projects" / "orders-service"
     for d in (home, prefix, project):
         d.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ, HOME=str(home), npm_config_prefix=str(prefix),
+               npm_config_cache=str(root / "npm-cache"),
                PATH=f"{prefix / 'bin'}:{os.environ['PATH']}")
     env.pop("DELIMIT_HOME", None)
     env.pop("DELIMIT_TOOLSET", None)
-    subprocess.run(["npm", "install", "-g", spec, "--no-fund", "--no-audit"], env=env, check=True,
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if not installed:
+        subprocess.run(["npm", "install", "-g", spec, "--no-fund", "--no-audit"], env=env, check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     before = snapshot(home)
     err = root / "server.stderr"
 
@@ -118,11 +122,20 @@ def main():
     assert any(i.get("id") == item_id for i in ctx.get("next_up", [])), f"decision not resumed: {ctx}"
     assert handoffs.get("count", 0) >= 1, f"handoff not resumed: {handoffs}"
 
+    full = Server(env, project, err, toolset="full")
+    full_tools = {t["name"] for t in full.rpc("tools/list")["tools"]}
+    assert {"delimit_ledger_context", "delimit_handoff_list"} <= full_tools, "full toolset lacks records reads"
+    full_ctx = full.call("delimit_ledger_context", {})
+    full_handoffs = full.call("delimit_handoff_list", {})
+    full.close()
+    assert any(i.get("id") == item_id for i in full_ctx.get("next_up", [])), f"full toolset missed decision: {full_ctx}"
+    assert full_handoffs.get("count", 0) >= 1, f"full toolset missed handoff: {full_handoffs}"
+
     written = snapshot(home) - before
     outside = sorted(p for p in written if not p.startswith((".delimit/", ".npm/")))
     assert not outside, f"files written outside ~/.delimit: {outside[:10]}"
     print(json.dumps({"ok": True, "tools": len(tools), "decision": item_id,
-                      "handoffs": handoffs.get("count"), "files_under_delimit":
+                      "handoffs": handoffs.get("count"), "full_toolset_readback": True, "files_under_delimit":
                       len([p for p in written if p.startswith('.delimit/')]),
                       "home": str(home)}, indent=1))
     if not keep:
