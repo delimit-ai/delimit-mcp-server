@@ -30,7 +30,7 @@ The skills follow explicit requests and available records. They cannot reconstru
 
 ## Where records live
 
-- Inside a git repository, records are grouped for that repository. Outside a repository they go to one default ledger under `~/.delimit/ledger/`.
+- Records are kept in one local ledger under `~/.delimit/ledger/`. Each record is tagged with the project it was created in: the repository name from the git remote, or `unsorted` when there is none. Listing shows records from all projects; the tag tells you where each one came from.
 - The server also keeps local operational logs under `~/.delimit` (`tool_usage.jsonl`, `events/`, `traces/`). They contain tool names, timestamps and outcomes, not your record content, and they stay local.
 - Once installed, the records workflow runs with no network access. We tested it in a network-isolated environment.
 
