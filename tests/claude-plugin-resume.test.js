@@ -11,7 +11,7 @@ function fixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'delimit-resume-'));
   const home = path.join(root, 'home'); const project = path.join(root, 'project');
   fs.mkdirSync(home); fs.mkdirSync(project);
-  const run = () => spawnSync(process.execPath, [script], { cwd: project, env: { ...process.env, HOME: home, DELIMIT_HOME: path.join(home, '.delimit'), GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' }, encoding: 'utf8', timeout: 2000 });
+  const run = () => spawnSync(process.execPath, [script], { cwd: project, env: { ...process.env, GIT_DIR: undefined, GIT_WORK_TREE: undefined, GIT_INDEX_FILE: undefined, HOME: home, DELIMIT_HOME: path.join(home, '.delimit'), GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' }, encoding: 'utf8', timeout: 2000 });
   const store = path.join(home, '.delimit');
   function ledger(lines) { fs.mkdirSync(path.join(store, 'ledger'), { recursive: true }); fs.writeFileSync(path.join(store, 'ledger', 'operations.jsonl'), lines.join('\n')); }
   function receipt(id, attrs = {}) {

@@ -43,8 +43,12 @@ function projectName() {
     }
   } catch {}
   try {
+    // Ignore an inherited GIT_DIR/GIT_WORK_TREE (set inside git hooks and by some tools):
+    // the project is the directory the session runs in, not whichever repo the caller was operating on.
+    const gitEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) =>
+      !['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_COMMON_DIR', 'GIT_PREFIX', 'GIT_OBJECT_DIRECTORY'].includes(k)));
     const url = execFileSync('git', ['config', '--get', 'remote.origin.url'], {
-      cwd: process.cwd(), encoding: 'utf8', timeout: 250, stdio: ['ignore', 'pipe', 'ignore']
+      cwd: process.cwd(), encoding: 'utf8', timeout: 250, stdio: ['ignore', 'pipe', 'ignore'], env: gitEnv
     }).trim();
     const name = url.replace(/\/$/, '').split(/[/:]/).pop().replace(/\.git$/, '');
     if (name) return name.slice(0, 100);
