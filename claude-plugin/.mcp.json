@@ -2,7 +2,7 @@
   "mcpServers": {
     "delimit": {
       "command": "npx",
-      "args": ["-y", "delimit-cli@4.20.0", "mcp", "--toolset", "records"]
+      "args": ["-y", "delimit-cli@4.20.1", "mcp", "--toolset", "records"]
     }
   }
 }
