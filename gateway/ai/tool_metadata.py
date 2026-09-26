@@ -10,6 +10,12 @@ Each tool is assigned a visibility tier:
 Tier cascade: experimental > internal > ops_pack > public.
 
 Reference: Consensus 118/119/120 — Tool Segmentation Architecture.
+
+The records profile serves a Claude plugin's explicit decision and handoff
+records. It excludes memory, soul and session capture, transcript extraction
+(session_handoff reads transcript/git state), deliberation (model providers),
+notify/social/outreach (network), security audit (auto-notifies), and all
+Pro, experimental and internal tools.
 """
 
 from typing import Dict, Literal
@@ -246,6 +252,13 @@ TOOL_TIERS: Dict[str, Tier] = {
 #                              ledger + handoff set (see CORE_SET below).
 #                              Sized for clients with tight tool caps
 #                              (e.g. VS Code agent mode's 128-tool limit).
+#    records                 → explicit decision and handoff records for a
+#                              Claude plugin. Excludes memory, soul and session
+#                              capture, transcript extraction (session_handoff
+#                              reads transcripts/git state), deliberation
+#                              (model providers), notify/social/outreach
+#                              (network), security audit (auto-notifies), and
+#                              all Pro, experimental and internal tools.
 #
 #  This reuses the existing TOOL_TIERS classification and CORE_TOOLS set;
 #  it does NOT introduce a parallel taxonomy. Where CORE_TOOLS was too
@@ -254,8 +267,15 @@ TOOL_TIERS: Dict[str, Tier] = {
 #  the "5 workflows" documentation stays accurate.
 # ─────────────────────────────────────────────────────────────────────
 
-VALID_TOOLSETS = ("core", "standard", "full")
+VALID_TOOLSETS = ("core", "standard", "full", "records")
 DEFAULT_TOOLSET = "full"
+
+RECORDS_TOOLS = frozenset({
+    "delimit_ledger_add", "delimit_ledger_list", "delimit_ledger_update",
+    "delimit_ledger_done", "delimit_ledger_context",
+    "delimit_handoff_create", "delimit_handoff_list",
+    "delimit_handoff_acknowledge", "delimit_version", "delimit_help",
+})
 
 # Essential tools added to the core profile on top of CORE_TOOLS. These are
 # the merge-gate + governance + continuity surfaces the audit (LED-3709)
@@ -301,6 +321,8 @@ def tool_in_toolset(tool_name: str, toolset: str) -> bool:
         return True
     if toolset == "core":
         return tool_name in core_tool_set()
+    if toolset == "records":
+        return tool_name in RECORDS_TOOLS
     if toolset == "standard":
         tier = TOOL_TIERS.get(tool_name, "public")
         return tier not in _STANDARD_EXCLUDED_TIERS

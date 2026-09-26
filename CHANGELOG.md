@@ -1,3 +1,13 @@
+## [4.20.0] - 2026-09-26
+
+### Added
+- Added the Claude plugin in `claude-plugin/` with three skills for recording decisions and tasks, creating handoffs, and resuming from saved records. Its `delimit mcp --toolset records` launcher exposes the ledger, handoff, version, and help tools. The plugin pins `delimit-cli@4.20.0` and installs a versioned local server and Python environment under `~/.delimit/plugin-server/`.
+- The `records` MCP toolset limits tool discovery and suggested next steps to the record workflow. It does not start the optional inbox daemon.
+
+### Fixed
+- Continuity recovery now retains the latest user instruction from a transcript, within a bounded and redacted text field.
+- `delimit_sensor_github_issue` no longer depends on an internal module that the npm package does not include.
+
 ## [4.19.11] - 2026-09-23
 
 ### Added

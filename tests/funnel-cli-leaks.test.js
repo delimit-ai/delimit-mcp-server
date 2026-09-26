@@ -217,7 +217,7 @@ describe('delimit doctor: banner version is derived from package.json', () => {
         try {
             const r = runCli(['doctor'], { cwd: repo.dir, home, timeout: 90000 });
             assert.ok(r.stdout.includes(`Delimit Doctor v${PKG_VERSION}`), `expected v${PKG_VERSION} in:\n${r.out}`);
-            if (PKG_VERSION !== '4.20') assert.doesNotMatch(r.stdout, /Doctor v4\.20\b/);
+            assert.doesNotMatch(r.stdout, /Doctor v4\.20(?![.\d])/); // the old literal, not a real 4.20.x
         } finally {
             repo.cleanup();
             try { fs.rmSync(home, { recursive: true, force: true }); } catch {}

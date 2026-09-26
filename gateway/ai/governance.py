@@ -1039,6 +1039,30 @@ def _check_repo_allowlist(repo: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _reply_watch_account() -> str:
+    """Posting account for full-body mention detection (single audited source:
+    ai.reply_watch._SELF_LOGINS). Alphanumeric/hyphen only, so it is safe to
+    embed in the jq regex."""
+    import re as _re_acct
+    try:
+        from ai.reply_watch import _POSTING_ACCOUNT
+    except ImportError:
+        # ai.reply_watch is internal and absent from the public npm bundle;
+        # installed users match on the product name alone.
+        return ""
+    if not _re_acct.fullmatch(r"[A-Za-z0-9-]{1,39}", _POSTING_ACCOUNT):
+        raise ValueError("invalid posting account")
+    return _POSTING_ACCOUNT
+
+
+def _mention_pattern() -> str:
+    """jq regex for comments that mention us: the posting account when the
+    internal reply watcher is installed, plus the product name."""
+    account = _reply_watch_account()
+    prefix = ("@" + account + "\\\\b|") if account else ""
+    return prefix + "delimit(-cli)?\\\\b"
+
+
 def _sensor_github_issue_impl(
     repo: str,
     issue_number: int,
@@ -1090,7 +1114,7 @@ def _sensor_github_issue_impl(
         # True from older comments. That reads as a successful check of a
         # thread nobody actually looked at.
         issue_jq = (
-            "{state: .state, title: .title, labels: [.labels[].name], "
+            "{state: .state, title: .title, issue_author: .user.login, labels: [.labels[].name], "
             "reactions: .reactions.total_count, comments: .comments}"
         )
         issue_proc = subprocess.run(
@@ -1129,7 +1153,10 @@ def _sensor_github_issue_impl(
         last_page = max(1, (total_comments + _COMMENT_PAGE_SIZE - 1) // _COMMENT_PAGE_SIZE)
         comments_jq = (
             "[.[] | {id: .id, author: .user.login, "
-            "created_at: .created_at, body: (.body | .[0:500])}]"
+            "author_association: .author_association, html_url: .html_url, "
+            "created_at: .created_at, mentions_us: ((.body // \"\") | test(\""
+            + _mention_pattern() + "\"; \"i\")), "
+            "body: (.body | .[0:4000])}]"
         )
         comments_proc = subprocess.run(
             ["gh", "api",
@@ -1176,6 +1203,7 @@ def _sensor_github_issue_impl(
             "issue_state": issue_state,
             # Additive: lets reply surfaces name the thread without a second read.
             "issue_title": str(issue_info.get("title") or "")[:300],
+            "issue_author": str(issue_info.get("issue_author") or ""),
             "new_comments": new_comments,
             "latest_comment_id": latest_comment_id,
             "total_comments": total_comments,

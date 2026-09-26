@@ -554,6 +554,19 @@ def _bounded_task_output(path: Optional[Path]) -> str:
                 pass
 
 
+_LATEST_USER_TEXT_MAX_BYTES = 16 * 1024
+
+
+def _cap_utf8_tail(text: str, max_bytes: int) -> str:
+    """Keep the END of ``text`` within ``max_bytes`` UTF-8 bytes, cut on a
+    character boundary. Applied AFTER redaction, so redaction markers and
+    multibyte text can never push the stored instruction past the cap."""
+    data = (text or "").encode("utf-8")
+    if len(data) <= max_bytes:
+        return text or ""
+    return data[-max_bytes:].decode("utf-8", errors="ignore")
+
+
 def parse_transcript_context(transcript_path: str) -> Dict[str, Any]:
     """Parse event-bound, public continuity facts from a Claude JSONL tail.
 
@@ -609,6 +622,7 @@ def parse_transcript_context(transcript_path: str) -> Dict[str, Any]:
 
     tool_calls: List[str] = []
     visible: List[str] = []
+    latest_user_text = ""
     task_by_id: Dict[str, Dict[str, Any]] = {}
     background_tool_ids: set[str] = set()
     # The durable decision may be farther back, but project/task events must be
@@ -637,6 +651,14 @@ def parse_transcript_context(transcript_path: str) -> Dict[str, Any]:
         role, content = _message_role_content(obj)
         if role == "assistant":
             visible.extend(_visible_text_blocks(content))
+        elif (role == "user" and obj.get("promptSource") != "system"
+              and not isinstance(obj.get("origin"), dict)):
+            # A user correction can arrive after the last assistant text. Tool
+            # results also have role=user in Claude JSONL; only plain user
+            # text blocks are instructions, never tool_result payloads.
+            parts = _visible_text_blocks(content)
+            if parts:
+                latest_user_text = "\n".join(parts)
     for obj in event_records:
         _role, content = _message_role_content(obj)
         blocks = content if isinstance(content, list) else []
@@ -777,6 +799,10 @@ def parse_transcript_context(transcript_path: str) -> Dict[str, Any]:
 
     return {
         "final_assistant_text": substantive,
+        "latest_user_text": _cap_utf8_tail(
+            _redact_continuity_text(latest_user_text[-_VISIBLE_TEXT_CAP:]),
+            _LATEST_USER_TEXT_MAX_BYTES,
+        ),
         "tool_calls": tool_calls,
         "turns": len(scoped),
         # Bounded structured records are kept in-memory for deterministic
