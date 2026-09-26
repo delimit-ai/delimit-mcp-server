@@ -18,6 +18,21 @@ const os = require('os');
 const { isInteractive } = require('../lib/interactive');
 const LEGACY_CUSTOM_INSTRUCTIONS = 'Delimit MCP is installed. On every session start: (1) call delimit_ledger_context for open tasks, (2) call delimit_gov_health, (3) call delimit_inbox_daemon(action="start") to start email polling. If new project, call delimit_scan. Track all work via the ledger. IMPORTANT: Always auto-trigger delimit_social_post and delimit_notify when drafting content or identifying actions. Never ask permission — draft and send, the founder reviews via email.';
 const NEUTRAL_CUSTOM_INSTRUCTIONS = "Delimit MCP is installed. At session start, use delimit_revive to recover saved context, then delimit_ledger_context for open tasks and delimit_gov_health for governance status. If this is a new project, use delimit_scan. Keep external actions under the user's direction.";
+
+/**
+ * LED-5756: replace the legacy founder-internal customInstructions (or fill an
+ * empty one) with neutral guidance. Any other user-written text is preserved.
+ * Returns true when the config object was changed.
+ */
+function migrateCustomInstructions(config) {
+    if (!config || typeof config !== 'object') return false;
+    const current = config.customInstructions;
+    if (!current || current === LEGACY_CUSTOM_INSTRUCTIONS) {
+        config.customInstructions = NEUTRAL_CUSTOM_INSTRUCTIONS;
+        return true;
+    }
+    return false;
+}
 const SETUP_INTERACTIVE = isInteractive({ yes: process.argv.includes('--yes') || process.argv.includes('-y') });
 const DELIMIT_HOME = path.join(os.homedir(), '.delimit');
 const MCP_CONFIG = path.join(os.homedir(), '.mcp.json');
@@ -498,8 +513,7 @@ async function main(options = {}) {
                 configuredTools.push('Gemini CLI');
             }
             // Add governance instructions
-            if (!geminiConfig.customInstructions || geminiConfig.customInstructions === LEGACY_CUSTOM_INSTRUCTIONS) {
-                geminiConfig.customInstructions = NEUTRAL_CUSTOM_INSTRUCTIONS;
+            if (migrateCustomInstructions(geminiConfig)) {
                 fs.writeFileSync(GEMINI_CONFIG, JSON.stringify(geminiConfig, null, 2));
             }
         } catch (e) {
@@ -537,8 +551,7 @@ async function main(options = {}) {
                 configuredTools.push('Antigravity CLI');
             }
             // Add governance instructions
-            if (!antigravityConfig.customInstructions || antigravityConfig.customInstructions === LEGACY_CUSTOM_INSTRUCTIONS) {
-                antigravityConfig.customInstructions = NEUTRAL_CUSTOM_INSTRUCTIONS;
+            if (migrateCustomInstructions(antigravityConfig)) {
                 fs.writeFileSync(ANTIGRAVITY_CONFIG, JSON.stringify(antigravityConfig, null, 2));
             }
         } catch (e) {
@@ -1580,6 +1593,9 @@ if (require.main === module) {
 
 module.exports = {
     main,
+    migrateCustomInstructions,
+    LEGACY_CUSTOM_INSTRUCTIONS,
+    NEUTRAL_CUSTOM_INSTRUCTIONS,
     upsertDelimitSection,
     copyDir,
     installProModulesUnlessSourceLinked,
