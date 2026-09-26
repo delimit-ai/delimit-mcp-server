@@ -4,18 +4,19 @@
  *
  * What it does:
  * 1. Creates ~/.delimit/ directory with the MCP server + core engine
- * 2. Adds "delimit" to Claude Code's MCP config (~/.mcp.json or .mcp.json)
+ * 2. Registers "delimit" with Claude Code at user scope and retains ~/.mcp.json
  * 3. Installs default agents into ~/.claude/agents/
  * 4. Prints next steps
  */
 const fs = require('fs');
 const path = require('path');
-const { execSync } = require('child_process');
+const { execSync, execFileSync } = require('child_process');
 const os = require('os');
 // Shared prompt gate: false when stdin/stdout is not a TTY, CI is set,
 // DELIMIT_NON_INTERACTIVE is set, or the user passed --yes. Every prompt
 // below falls back to its documented default when this is false.
 const { isInteractive } = require('../lib/interactive');
+const { claudeMcpAddArgs, displayClaudeCommand } = require('../lib/claude-mcp-registration');
 const LEGACY_CUSTOM_INSTRUCTIONS = 'Delimit MCP is installed. On every session start: (1) call delimit_ledger_context for open tasks, (2) call delimit_gov_health, (3) call delimit_inbox_daemon(action="start") to start email polling. If new project, call delimit_scan. Track all work via the ledger. IMPORTANT: Always auto-trigger delimit_social_post and delimit_notify when drafting content or identifying actions. Never ask permission — draft and send, the founder reviews via email.';
 const NEUTRAL_CUSTOM_INSTRUCTIONS = "Delimit MCP is installed. At session start, use delimit_revive to recover saved context, then delimit_ledger_context for open tasks and delimit_gov_health for governance status. If this is a new project, use delimit_scan. Keep external actions under the user's direction.";
 
@@ -120,7 +121,63 @@ function removeArchiveOnlyProManifest(proDir) {
     return true;
 }
 
+async function configureClaudeCodeMcp(python, hasClaude) {
+    let mcpConfig = {};
+    if (fs.existsSync(MCP_CONFIG)) {
+        try {
+            mcpConfig = JSON.parse(fs.readFileSync(MCP_CONFIG, 'utf-8'));
+        } catch {}
+    }
+    if (!mcpConfig.mcpServers) mcpConfig.mcpServers = {};
+    const serverPath = path.join(DELIMIT_HOME, 'server', 'ai', 'server.py');
+    const serverPathAlt = path.join(DELIMIT_HOME, 'server', 'mcp-server.py');
+    const actualServer = fs.existsSync(serverPath) ? serverPath : serverPathAlt;
+    const delimitMcp = {
+        command: python,
+        args: [actualServer],
+        cwd: path.join(DELIMIT_HOME, 'server'),
+        env: {
+            ...(mcpConfig.mcpServers.delimit?.env || {}),
+            PYTHONPATH: path.join(DELIMIT_HOME, 'server')
+        },
+        description: 'Delimit — AI agent guardrails'
+    };
+    const existed = !!mcpConfig.mcpServers.delimit;
+    mcpConfig.mcpServers.delimit = delimitMcp;
+    fs.writeFileSync(MCP_CONFIG, JSON.stringify(mcpConfig, null, 2));
+    if (existed) await logp(`  ${green('✓')} Delimit MCP paths updated`);
+    else await logp(`  ${green('✓')} Added delimit to ${MCP_CONFIG}`);
+
+    const claudeArgs = claudeMcpAddArgs(DELIMIT_HOME, delimitMcp.command, actualServer);
+    const manualClaudeCommand = displayClaudeCommand(claudeArgs);
+    if (hasClaude) {
+        const runClaude = args => execFileSync('claude', args, { encoding: 'utf8', stdio: 'pipe', timeout: 30000 });
+        try {
+            try {
+                runClaude(claudeArgs);
+            } catch (error) {
+                const output = `${error.stdout || ''}\n${error.stderr || ''}\n${error.message || ''}`;
+                if (!/already exists/i.test(output)) throw error;
+                runClaude(['mcp', 'remove', '--scope', 'user', 'delimit']);
+                runClaude(claudeArgs);
+            }
+            await logp(`  ${green('✓')} Claude Code: registered at user scope (~/.claude.json)`);
+        } catch (error) {
+            log(`  ${yellow('!')} Claude Code user-scope registration failed: ${error.message}. Run: ${manualClaudeCommand}`);
+        }
+    } else {
+        log(`  ${yellow('!')} Claude Code user-scope registration: when installed, run: ${manualClaudeCommand}`);
+    }
+    return actualServer;
+}
+
 async function main(options = {}) {
+    if (process.argv.includes('--dry-run')) {
+        const server = path.join(DELIMIT_HOME, 'server', 'ai', 'server.py');
+        const python = path.join(DELIMIT_HOME, 'venv', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
+        log(`  Would run: ${displayClaudeCommand(claudeMcpAddArgs(DELIMIT_HOME, python, server))}`);
+        return;
+    }
     // Self-update check: ensure we're running the latest version (skip if already re-execed)
     const _pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf-8'));
     if (!process.env.DELIMIT_SETUP_UPDATED) {
@@ -343,37 +400,8 @@ async function main(options = {}) {
     // Step 3: Configure Claude Code MCP
     step(3, 'Configuring Claude Code MCP...');
     const configuredTools = [];
-    let mcpConfig = {};
-    if (fs.existsSync(MCP_CONFIG)) {
-        try {
-            mcpConfig = JSON.parse(fs.readFileSync(MCP_CONFIG, 'utf-8'));
-        } catch {}
-    }
-    if (!mcpConfig.mcpServers) mcpConfig.mcpServers = {};
-    const serverPath = path.join(DELIMIT_HOME, 'server', 'ai', 'server.py');
-    const serverPathAlt = path.join(DELIMIT_HOME, 'server', 'mcp-server.py');
-    const actualServer = fs.existsSync(serverPath) ? serverPath : serverPathAlt;
-    // Always update paths to match this machine's directory structure
-    const delimitMcp = {
-        command: python,
-        args: [actualServer],
-        cwd: path.join(DELIMIT_HOME, 'server'),
-        env: {
-            ...(mcpConfig.mcpServers.delimit?.env || {}),
-            PYTHONPATH: path.join(DELIMIT_HOME, 'server')
-        },
-        description: 'Delimit — AI agent guardrails'
-    };
-    const existed = !!mcpConfig.mcpServers.delimit;
-    mcpConfig.mcpServers.delimit = delimitMcp;
-    fs.writeFileSync(MCP_CONFIG, JSON.stringify(mcpConfig, null, 2));
-    if (existed) {
-        await logp(`  ${green('✓')} Delimit MCP paths updated`);
-        configuredTools.push('Claude Code');
-    } else {
-        await logp(`  ${green('✓')} Added delimit to ${MCP_CONFIG}`);
-        configuredTools.push('Claude Code');
-    }
+    const actualServer = await configureClaudeCodeMcp(python, hasClaude);
+    configuredTools.push('Claude Code');
     // Auto-approve all Delimit tools in Claude Code settings.json
     const CLAUDE_SETTINGS = path.join(CLAUDE_DIR, 'settings.json');
     try {
@@ -1593,6 +1621,7 @@ if (require.main === module) {
 
 module.exports = {
     main,
+    configureClaudeCodeMcp,
     migrateCustomInstructions,
     LEGACY_CUSTOM_INSTRUCTIONS,
     NEUTRAL_CUSTOM_INSTRUCTIONS,

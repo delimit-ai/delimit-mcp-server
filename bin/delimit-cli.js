@@ -37,6 +37,7 @@ const program = new Command();
 
 const yaml = require('js-yaml');
 const { isInteractive } = require('../lib/interactive');
+const { claudeMcpAddArgs, displayClaudeCommand } = require('../lib/claude-mcp-registration');
 
 // Paced progress line used by `quickstart`. It was referenced there since
 // PR #95 but only ever defined in bin/delimit-setup.js, so `delimit quickstart`
@@ -4028,6 +4029,20 @@ program
                 }
             }
         }
+        // Claude Code owns ~/.claude.json; setup registers through its CLI.
+        try {
+            execSync('claude --version', { stdio: 'pipe', timeout: 30000 });
+            const claudeConfig = path.join(homeDir, '.claude.json');
+            let registered = false;
+            try {
+                registered = !!JSON.parse(fs.readFileSync(claudeConfig, 'utf8')).mcpServers?.delimit;
+            } catch {}
+            const venvPython = path.join(delimitHome, 'venv', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
+            const command = displayClaudeCommand(claudeMcpAddArgs(delimitHome, venvPython, mcpServerPath));
+            addResult('claude-user-scope-mcp', registered ? 'pass' : 'warn',
+                registered ? 'Claude Code user-scope MCP registration found' : 'Claude Code user-scope MCP registration missing',
+                registered ? null : command);
+        } catch { /* Claude Code is not installed. */ }
 
         // --- Check 8: Memory health ---
         const memoryDir = path.join(delimitHome, 'memory');

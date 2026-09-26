@@ -1,3 +1,8 @@
+## Unreleased
+
+### Fixed
+- Setup now registers the Delimit MCP server for Claude Code at user scope, so it is available in every project; previously only `~/.mcp.json` was written, which Claude Code treats as project-scoped.
+
 ## [4.20.0] - 2026-09-26
 
 ### Added

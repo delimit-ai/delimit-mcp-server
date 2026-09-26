@@ -29,6 +29,7 @@ const TEST_FILES = [
     'tests/clean-tree-guard.test.js',
     'tests/_config-sentinel.test.js',
     'tests/setup-onboarding.test.js',
+    'tests/setup-claude-user-scope.test.js',
     'tests/setup-matrix.test.js',
     'tests/setup-no-clobber.test.js',
     'tests/setup-env-preservation.test.js',
