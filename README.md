@@ -87,7 +87,7 @@ See the full index at **[delimit.ai/reports](https://delimit.ai/reports)**. For 
 
 ## Golden Path — your first 10 minutes
 
-The merge gate for AI-written code, end to end: lint a spec, see exactly what breaks, classify the bump, settle the hard calls with multiple models, and walk away with a signed, replayable attestation. Then keep the context that survives across sessions and models.
+The API check, end to end: lint a spec, see exactly what breaks, classify the bump, settle the hard calls with the model providers you configure, and keep a locally signed receipt of what ran. Then keep the context that survives across sessions and models.
 
 ### 1. Install
 
@@ -601,7 +601,7 @@ rules:
 
 **How does this compare to Obsidian Mind?**
 
-Obsidian Mind is a great Obsidian vault template for Claude Code users who want persistent memory via markdown files. Delimit takes a different approach: it keeps a shared record across Claude Code, Codex, Cursor, Antigravity, GitHub Copilot, and Muse. Your memory, ledger, and governance travel with you when you switch models. Delimit also adds API governance (28-type breaking change detection), CI gates, git hooks, and policy enforcement that Obsidian Mind doesn't cover. Use Obsidian Mind if you're all-in on Claude + Obsidian. Use Delimit if you switch between models or need governance.
+Obsidian Mind is a great Obsidian vault template for Claude Code users who want persistent memory via markdown files. Delimit takes a different approach: it keeps a shared record across Claude Code, Codex, Cursor, Antigravity, GitHub Copilot, and Muse. Your memory, ledger, and governance travel with you when you switch models. Delimit also adds API governance (breaking-change detection for OpenAPI specs), CI gates, git hooks, and policy enforcement that Obsidian Mind doesn't cover. Use Obsidian Mind if you're all-in on Claude + Obsidian. Use Delimit if you switch between models or need governance.
 
 **Does this work without Claude Code?**
 
