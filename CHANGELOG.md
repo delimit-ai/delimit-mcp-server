@@ -1,7 +1,22 @@
-## Unreleased
+## [4.21.0] - 2026-09-27
+
+### Added
+- Setup suggests saving a decision, then asking Claude Code or Codex to recall it; a first-session hook shows the same prompt when no saved state exists.
+- `DELIMIT_NO_AUTO_UPDATE=1` skips the session-start auto-update check.
+
+### Changed
+- Package metadata, the MCP registry record, and README now describe the shipped context, multi-model, and merge-gate features.
+- Managed setup instructions use neutral language and preserve user-written instructions.
+- Model status and vault output describe configured model access and plaintext secret storage without claiming hosted free deliberations or encryption.
 
 ### Fixed
-- Setup now registers the Delimit MCP server for Claude Code at user scope, so it is available in every project; previously only `~/.mcp.json` was written, which Claude Code treats as project-scoped.
+- Setup registers the Delimit MCP server for Claude Code at user scope; doctor checks that registration when Claude Code is installed.
+- Doctor warns when no OpenAPI spec or policy file exists in a project without a spec.
+
+## [4.20.1] - 2026-09-26
+
+### Changed
+- The npm package now ships npm-shrinkwrap.json with the dependency versions tested for this release.
 
 ## [4.20.0] - 2026-09-26
 
