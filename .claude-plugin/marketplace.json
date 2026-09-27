@@ -1,12 +1,25 @@
 {
   "name": "delimit",
   "description": "Local records for decisions, tasks, and handoffs in coding sessions.",
-  "owner": { "name": "Delimit", "url": "https://delimit.ai" },
+  "owner": {
+    "name": "Delimit",
+    "url": "https://delimit.ai"
+  },
   "plugins": [
     {
       "name": "delimit",
       "source": "./claude-plugin",
       "description": "Keep decisions, tasks, and handoffs in local files across coding sessions."
+    },
+    {
+      "name": "delimit-governance",
+      "source": "./claude-plugin-governance",
+      "description": "Check OpenAPI changes before merge: breaking-change diff, lint, explanation."
+    },
+    {
+      "name": "delimit-panel",
+      "source": "./claude-plugin-panel",
+      "description": "Put a hard call to the model providers you configure and read the agreement and dissent."
     }
   ]
 }

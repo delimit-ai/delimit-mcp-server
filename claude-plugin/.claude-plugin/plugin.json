@@ -1,7 +1,7 @@
 {
   "name": "delimit",
   "displayName": "Delimit",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "Keep decisions, tasks, and handoffs in local files across coding sessions.",
   "author": {
     "name": "Delimit",
