@@ -3,7 +3,7 @@ const assert = require('node:assert');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { execSync, spawnSync } = require('child_process');
+const { execSync, execFileSync, spawnSync } = require('child_process');
 
 // CI environments do not have the full gateway/lib stack installed, so tests
 // that spawn the CLI via execSync or depend on uncommitted lib changes will
@@ -27,6 +27,7 @@ function setupTmpHome() {
     process.env.HOME = tmpDir;
     delete process.env.DELIMIT_HOME;
     delete process.env.DELIMIT_NAMESPACE_ROOT;
+    process.env.DELIMIT_NO_AUTO_UPDATE = '1';  // never reach npm or rewrite hooks from a test
     return tmpDir;
 }
 
@@ -812,6 +813,18 @@ describe('first-session continuity prompt', () => {
         assert.ok(script.indexOf('First session?') < script.indexOf('=== Delimit Ready ==='));
         const project = path.join(tmpDir, 'project');
         fs.mkdirSync(project);
+        const runHook = cwd => {
+            const result = spawnSync('bash', [hookPath], {
+                cwd,
+                stdio: ['ignore', 'pipe', 'pipe'],
+                encoding: 'utf-8',
+                // DELIMIT_HOME must point at the temp store: the host running the suite has
+                // its own ~/.delimit with memories, which would silence the prompt.
+                env: { ...process.env, HOME: tmpDir, DELIMIT_HOME: path.join(tmpDir, '.delimit'), DELIMIT_SESSION_TYPE: 'subagent' },
+            });
+            assert.strictEqual(result.status, 0, result.stderr);
+            return result.stdout;
+        };
         const originalCwd = process.cwd();
         const originalWrite = process.stdout.write;
         const capture = async () => {
@@ -821,18 +834,49 @@ describe('first-session continuity prompt', () => {
             finally { process.stdout.write = originalWrite; }
             return output;
         };
+        // The in-process hook reads DELIMIT_HOME / HOME: point both at the temp store so the
+        // host's own ~/.delimit (which has memories) cannot silence the prompt.
+        const previousEnv = { HOME: process.env.HOME, DELIMIT_HOME: process.env.DELIMIT_HOME };
+        process.env.HOME = tmpDir;
+        process.env.DELIMIT_HOME = path.join(tmpDir, '.delimit');
         try {
             process.chdir(project);
             const first = await capture();
             assert.match(first, /First session\? Save a decision with: npx delimit-cli remember "<what you decided>"  — then ask this assistant what you decided\./);
             assert.ok(first.indexOf('First session?') < first.indexOf('=== Delimit Ready ==='));
+            const firstShell = runHook(project);
+            assert.match(firstShell, /First session\? Save a decision with: npx delimit-cli remember/);
+            assert.ok(firstShell.indexOf('First session?') < firstShell.indexOf('=== Delimit Ready ==='));
 
             fs.mkdirSync(path.join(tmpDir, '.delimit'), { recursive: true });
+            fs.writeFileSync(path.join(tmpDir, '.delimit', 'memories.jsonl'), '  \n\t\n');
+            assert.match(runHook(project), /First session\?/);
+            assert.match(await capture(), /First session\?/);
+
+            const nested = path.join(project, 'sub', 'dir');
+            fs.mkdirSync(nested, { recursive: true });
+            const ledgerDir = path.join(project, '.delimit', 'ledger');
+            fs.mkdirSync(ledgerDir, { recursive: true });
+            fs.writeFileSync(path.join(ledgerDir, 'x.jsonl'), '{"event":"saved"}\n');
+            assert.doesNotMatch(runHook(nested), /First session\?/);
+            process.chdir(nested);
+            assert.doesNotMatch(await capture(), /First session\?/);
+
+            fs.rmSync(path.join(ledgerDir, 'x.jsonl'));
+            fs.writeFileSync(path.join(ledgerDir, 'x.json'), '');
+            assert.doesNotMatch(runHook(nested), /First session\?/);
+            assert.doesNotMatch(await capture(), /First session\?/);
+
             fs.writeFileSync(path.join(tmpDir, '.delimit', 'memories.jsonl'), '{"content":"Use Postgres"}\n');
+            fs.rmSync(ledgerDir, { recursive: true, force: true });
             const returning = await capture();
             assert.doesNotMatch(returning, /First session\?/);
+            assert.doesNotMatch(runHook(nested), /First session\?/);
         } finally {
             process.chdir(originalCwd);
+            for (const [key, value] of Object.entries(previousEnv)) {
+                if (value === undefined) delete process.env[key]; else process.env[key] = value;
+            }
             process.stdout.write = originalWrite;
         }
     });
@@ -1274,8 +1318,10 @@ def acknowledge_revival(
             FAKE_CALL_LOG: callLog,
         };
         delete hookEnv.DELIMIT_HOME;
-        const run = spawnSync(hookPath, [], {
-            input: JSON.stringify(event),
+        const eventPath = path.join(tmpDir, 'session-start-event.json');
+        fs.writeFileSync(eventPath, JSON.stringify(event));
+        const run = spawnSync('bash', ['-c', 'exec "$1" < "$2"', 'bash', hookPath, eventPath], {
+            stdio: ['ignore', 'pipe', 'pipe'],
             encoding: 'utf-8',
             env: hookEnv,
         });
@@ -1422,14 +1468,14 @@ describe('STR-2202 subagent flight-recorder (PostToolUse)', () => {
             `print(_resolve_venture(os.path.expanduser("~")))\n` + // own home -> registry
             `print(_resolve_venture("/home/x/delimit-gateway"))\n` + // real venture dir wins
             `print(_resolve_venture(""))\n`;                     // empty -> registry
-        const withReg = execSync('python3', { input: harness, env: { ...process.env, HOME: regHome } })
+        const withReg = execFileSync('python3', ['-c', harness], { env: { ...process.env, HOME: regHome } })
             .toString().trim().split('\n');
         assert.deepStrictEqual(withReg, ['wire-report', 'wire-report', 'delimit-gateway', 'wire-report']);
 
         // Accepted floor without a registry: neutral cwds fall back to their
         // basename ("/root" -> "root", the home dir -> its basename), empty
         // falls to "all" — exactly the pre-LED-4244 behavior.
-        const noReg = execSync('python3', { input: harness, env: { ...process.env, HOME: bareHome } })
+        const noReg = execFileSync('python3', ['-c', harness], { env: { ...process.env, HOME: bareHome } })
             .toString().trim().split('\n');
         assert.deepStrictEqual(noReg, ['root', 'home-without-registry', 'delimit-gateway', 'all']);
 
@@ -1447,8 +1493,7 @@ describe('STR-2202 subagent flight-recorder (PostToolUse)', () => {
             path.join(namespaceRoot, 'active_venture.json'),
             JSON.stringify({ venture: 'namespace-venture' })
         );
-        const namespaced = execSync('python3', {
-            input: harness,
+        const namespaced = execFileSync('python3', ['-c', harness], {
             env: { ...process.env, HOME: namespacedHome, DELIMIT_HOME: namespaceRoot },
         }).toString().trim().split('\n');
         assert.deepStrictEqual(

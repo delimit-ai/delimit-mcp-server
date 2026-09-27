@@ -31,19 +31,37 @@ function run(args, opts = {}) {
 // doctor
 // ---------------------------------------------------------------------------
 describe('v4.20: doctor command', () => {
-    it('treats missing spec and policy as warnings in an empty project', { skip: SKIP_IN_CI }, (t) => {
+    it('treats missing spec and policy as warnings in an empty project', { skip: SKIP_IN_CI }, () => {
         const project = fs.mkdtempSync(path.join(os.tmpdir(), 'delimit-doctor-'));
+        const home = fs.mkdtempSync(path.join(os.tmpdir(), 'delimit-doctor-home-'));
         try {
+            // Keep machine setup checks healthy so this exercises project checks
+            // and their --ci exit contract, including in restricted sandboxes.
+            const serverDir = path.join(home, '.delimit', 'server', 'ai');
+            fs.mkdirSync(serverDir, { recursive: true });
+            fs.writeFileSync(path.join(serverDir, 'server.py'), '');
+            const pythonProbe = path.join(home, 'python-probe.cjs');
+            fs.writeFileSync(pythonProbe, `const child = require('child_process');
+const original = child.execSync;
+child.execSync = function(command, options) {
+    if (command === 'python3 --version') return Buffer.from('Python 3.11.0\\n');
+    return original.call(this, command, options);
+};
+`);
             const doctor = () => spawnSync(process.execPath, [CLI, 'doctor', '--ci'], {
                 cwd: project,
                 encoding: 'utf-8',
-                env: { ...process.env, HOME: project, DELIMIT_HOME: path.join(project, '.delimit'), FORCE_COLOR: '0' },
+                env: {
+                    ...process.env, HOME: home, DELIMIT_HOME: path.join(home, '.delimit'), FORCE_COLOR: '0',
+                    NODE_OPTIONS: `${process.env.NODE_OPTIONS || ''} --require=${pythonProbe}`.trim(),
+                },
             });
             let result = doctor();
-            if (result.error && result.error.code === 'EPERM') return t.skip('sandbox denies child processes');
+            assert.strictEqual(result.status, 0, result.stderr);
             assert.ok(result.stdout, result.stderr);
             let output = result.stdout;
             const data = JSON.parse(output);
+            assert.strictEqual(data.summary.fail, 0);
             const policy = data.checks.find(check => check.name === 'policy-file');
             const spec = data.checks.find(check => check.name === 'openapi-spec');
             assert.strictEqual(policy.status, 'warn');
@@ -56,6 +74,7 @@ describe('v4.20: doctor command', () => {
 
             fs.writeFileSync(path.join(project, 'openapi.yaml'), 'openapi: 3.0.0\ninfo:\n  title: Test\n  version: 1.0.0\npaths: {}\n');
             result = doctor();
+            assert.notStrictEqual(result.status, 0, result.stderr);
             assert.ok(result.stdout, result.stderr);
             output = result.stdout;
             const withSpec = JSON.parse(output);
@@ -63,6 +82,7 @@ describe('v4.20: doctor command', () => {
             assert.strictEqual(withSpec.checks.find(check => check.name === 'openapi-spec').status, 'pass');
         } finally {
             fs.rmSync(project, { recursive: true, force: true });
+            fs.rmSync(home, { recursive: true, force: true });
         }
     });
     it('runs without error', { skip: SKIP_IN_CI }, () => {
