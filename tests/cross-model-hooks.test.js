@@ -797,6 +797,47 @@ describe('hookSessionStart with strategy items', () => {
     });
 });
 
+describe('first-session continuity prompt', () => {
+    beforeEach(() => { setupTmpHome(); });
+    afterEach(() => { teardownTmpHome(); });
+
+    it('appears for an empty store and disappears after a memory is saved', async () => {
+        const claudeDir = path.join(tmpDir, '.claude');
+        fs.mkdirSync(claudeDir, { recursive: true });
+        const tool = { id: 'claude', name: 'Claude Code', configPath: path.join(claudeDir, 'settings.json') };
+        crossModelHooks.installClaudeHooks(tool, { session_start: true, session_digest_echo: false });
+        const hookPath = path.join(claudeDir, 'hooks', 'delimit');
+        const script = fs.readFileSync(hookPath, 'utf-8');
+        assert.match(script, /First session\? Save a decision with: npx delimit-cli remember/);
+        assert.ok(script.indexOf('First session?') < script.indexOf('=== Delimit Ready ==='));
+        const project = path.join(tmpDir, 'project');
+        fs.mkdirSync(project);
+        const originalCwd = process.cwd();
+        const originalWrite = process.stdout.write;
+        const capture = async () => {
+            let output = '';
+            process.stdout.write = chunk => { output += chunk; return true; };
+            try { await crossModelHooks.hookSessionStart(); }
+            finally { process.stdout.write = originalWrite; }
+            return output;
+        };
+        try {
+            process.chdir(project);
+            const first = await capture();
+            assert.match(first, /First session\? Save a decision with: npx delimit-cli remember "<what you decided>"  — then ask this assistant what you decided\./);
+            assert.ok(first.indexOf('First session?') < first.indexOf('=== Delimit Ready ==='));
+
+            fs.mkdirSync(path.join(tmpDir, '.delimit'), { recursive: true });
+            fs.writeFileSync(path.join(tmpDir, '.delimit', 'memories.jsonl'), '{"content":"Use Postgres"}\n');
+            const returning = await capture();
+            assert.doesNotMatch(returning, /First session\?/);
+        } finally {
+            process.chdir(originalCwd);
+            process.stdout.write = originalWrite;
+        }
+    });
+});
+
 describe('loadHookConfig with deliberation settings', () => {
     it('defaults include deliberate_on_commit as false', () => {
         const config = crossModelHooks.loadHookConfig();

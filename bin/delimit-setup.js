@@ -1476,25 +1476,14 @@ exit 127
             }
         } catch {}
     }
-    if (projectFindings === 0) {
-        log(`  ${dim('  New project — run')} ${blue('delimit-cli demo')} ${dim('to see governance in action')}`);
-    }
     log('');
-    // Suggested next action based on findings
+    // The first path is continuity across assistants; the API demo remains available.
     log(`  ${bold("What's next:")}`);
-    if (specFound) {
-        log(`    ${green('npx delimit-cli lint')}    — check your API spec for breaking changes`);
-        log(`    ${green('npx delimit-cli doctor')}  — verify setup health`);
-    } else if (projectFindings > 0) {
-        log(`    ${green('npx delimit-cli scan')}    — detect API specs and potential issues`);
-        log(`    ${green('npx delimit-cli doctor')}  — verify setup health`);
-    } else {
-        log(`    ${green('npx delimit-cli demo')}    — see governance in action (30 seconds)`);
-        log(`    ${green('npx delimit-cli doctor')}  — verify setup health`);
-    }
+    log(`    ${green('npx delimit-cli remember "Rejected Redis for sessions: no persistence guarantee on our plan"')}`);
+    log(`    ${dim('then open Claude Code or Codex and ask: what did we decide about session storage?')}`);
+    log(`    ${green('npx delimit-cli doctor')}   ${dim('— verify the setup')}`);
     log('');
-    log(`  ${dim('Docs: https://delimit.ai/docs')}`);
-    log(`  ${dim('Try:  https://delimit.ai/try')}`);
+    log(`  ${dim('Docs: https://delimit.ai/docs/quickstart   (API release safety:')} ${blue('npx delimit-cli demo')}${dim(')')}`);
     log('');
     log(`  ${bold('Keep Building.')}`);
     log('');

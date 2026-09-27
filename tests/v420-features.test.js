@@ -10,7 +10,7 @@ const assert = require('node:assert');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { execSync } = require('child_process');
+const { execSync, spawnSync } = require('child_process');
 
 const CLI = path.join(__dirname, '..', 'bin', 'delimit-cli.js');
 const CLI_CWD = path.join(__dirname, '..');
@@ -31,6 +31,40 @@ function run(args, opts = {}) {
 // doctor
 // ---------------------------------------------------------------------------
 describe('v4.20: doctor command', () => {
+    it('treats missing spec and policy as warnings in an empty project', { skip: SKIP_IN_CI }, (t) => {
+        const project = fs.mkdtempSync(path.join(os.tmpdir(), 'delimit-doctor-'));
+        try {
+            const doctor = () => spawnSync(process.execPath, [CLI, 'doctor', '--ci'], {
+                cwd: project,
+                encoding: 'utf-8',
+                env: { ...process.env, HOME: project, DELIMIT_HOME: path.join(project, '.delimit'), FORCE_COLOR: '0' },
+            });
+            let result = doctor();
+            if (result.error && result.error.code === 'EPERM') return t.skip('sandbox denies child processes');
+            assert.ok(result.stdout, result.stderr);
+            let output = result.stdout;
+            const data = JSON.parse(output);
+            const policy = data.checks.find(check => check.name === 'policy-file');
+            const spec = data.checks.find(check => check.name === 'openapi-spec');
+            assert.strictEqual(policy.status, 'warn');
+            assert.strictEqual(policy.fix, 'delimit init');
+            assert.strictEqual(spec.status, 'warn');
+            assert.match(spec.fix, /delimit scan/);
+            assert.strictEqual(data.summary.fail, data.checks.filter(check => check.status === 'fail').length);
+            const otherPasses = data.checks.filter(check => check.status === 'pass').length;
+            assert.strictEqual(data.health_score, `${Math.round((otherPasses + 2) / data.checks.length * 10)}/10`);
+
+            fs.writeFileSync(path.join(project, 'openapi.yaml'), 'openapi: 3.0.0\ninfo:\n  title: Test\n  version: 1.0.0\npaths: {}\n');
+            result = doctor();
+            assert.ok(result.stdout, result.stderr);
+            output = result.stdout;
+            const withSpec = JSON.parse(output);
+            assert.strictEqual(withSpec.checks.find(check => check.name === 'policy-file').status, 'fail');
+            assert.strictEqual(withSpec.checks.find(check => check.name === 'openapi-spec').status, 'pass');
+        } finally {
+            fs.rmSync(project, { recursive: true, force: true });
+        }
+    });
     it('runs without error', { skip: SKIP_IN_CI }, () => {
         const output = run('doctor');
         assert.ok(output.length > 0, 'Should produce output');
