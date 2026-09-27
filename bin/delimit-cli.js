@@ -3901,6 +3901,16 @@ program
             manifestActions.push({ path: filePath, action: 'created', timestamp: new Date().toISOString() });
         }
 
+        const specPatterns = [
+            'openapi.yaml', 'openapi.yml', 'openapi.json',
+            'swagger.yaml', 'swagger.yml', 'swagger.json',
+            'docs/openapi.yaml', 'docs/openapi.yml', 'docs/openapi.json',
+            'spec/openapi.yaml', 'spec/openapi.json',
+            'api/openapi.yaml', 'api/openapi.json',
+            'contrib/openapi.json',
+        ];
+        const foundSpecs = specPatterns.filter(p => fs.existsSync(path.join(process.cwd(), p)));
+
         // --- Check 1: Policy file ---
         const policyPath = path.join(process.cwd(), '.delimit', 'policies.yml');
         if (fs.existsSync(policyPath)) {
@@ -3916,7 +3926,7 @@ program
                 addResult('policy-valid', 'fail', `Policy file has invalid YAML: ${e.message}`, 'delimit init --force');
             }
         } else {
-            addResult('policy-file', 'fail', 'No .delimit/policies.yml', 'delimit init');
+            addResult('policy-file', foundSpecs.length ? 'fail' : 'warn', 'No .delimit/policies.yml', 'delimit init');
             if (fixMode) {
                 try {
                     const delimitDirPre = fs.existsSync(path.join(process.cwd(), '.delimit'));
@@ -3933,25 +3943,10 @@ program
         }
 
         // --- Check 2: OpenAPI spec ---
-        const specPatterns = [
-            'openapi.yaml', 'openapi.yml', 'openapi.json',
-            'swagger.yaml', 'swagger.yml', 'swagger.json',
-            'docs/openapi.yaml', 'docs/openapi.yml', 'docs/openapi.json',
-            'spec/openapi.yaml', 'spec/openapi.json',
-            'api/openapi.yaml', 'api/openapi.json',
-            'contrib/openapi.json',
-        ];
-        const foundSpecs = specPatterns.filter(p => fs.existsSync(path.join(process.cwd(), p)));
         if (foundSpecs.length > 0) {
             addResult('openapi-spec', 'pass', `OpenAPI spec found: ${foundSpecs[0]}`);
         } else {
-            const pkgJson = path.join(process.cwd(), 'package.json');
-            const reqTxt = path.join(process.cwd(), 'requirements.txt');
-            if (fs.existsSync(pkgJson) || fs.existsSync(reqTxt)) {
-                addResult('openapi-spec', 'warn', 'No OpenAPI spec file — Zero-Spec Mode may work if this is a FastAPI/NestJS/Express project');
-            } else {
-                addResult('openapi-spec', 'fail', 'No OpenAPI spec file found', 'Create openapi.yaml in project root or run: delimit scan');
-            }
+            addResult('openapi-spec', 'warn', 'No OpenAPI spec file found', 'Create openapi.yaml in project root or run: delimit scan');
         }
 
         // --- Check 3: GitHub workflow ---
@@ -4148,7 +4143,8 @@ program
             const warn = results.filter(r => r.status === 'warn').length;
             const fail = results.filter(r => r.status === 'fail').length;
             const total = results.length;
-            const score = total > 0 ? Math.round((ok / total) * 10) : 0;
+            const optional = !foundSpecs.length ? results.filter(r => r.status === 'warn' && ['policy-file', 'openapi-spec'].includes(r.name)).length : 0;
+            const score = total > 0 ? Math.round(((ok + optional) / total) * 10) : 0;
             const output = {
                 version: '4.20',
                 health_score: `${score}/10`,
@@ -4235,7 +4231,8 @@ program
         const warn = results.filter(r => r.status === 'warn').length;
         const fail = results.filter(r => r.status === 'fail').length;
         const total = results.length;
-        const score = total > 0 ? Math.round((ok / total) * 10) : 0;
+        const optional = !foundSpecs.length ? results.filter(r => r.status === 'warn' && ['policy-file', 'openapi-spec'].includes(r.name)).length : 0;
+        const score = total > 0 ? Math.round(((ok + optional) / total) * 10) : 0;
 
         console.log(chalk.bold(`  Health: ${score}/10`));
         console.log('');

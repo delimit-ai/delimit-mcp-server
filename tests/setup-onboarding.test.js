@@ -411,7 +411,7 @@ describe('setup script structure', () => {
         assert.ok(setupContent.includes('Delimit is installed'), 'Should confirm installation');
         assert.ok(setupContent.includes('What\'s next'), 'Should show what\'s next box');
         assert.ok(setupContent.includes('Keep Building'), 'Should end with Keep Building');
-        assert.ok(setupContent.includes('npx delimit-cli lint'), 'Should suggest lint command');
+        assert.ok(setupContent.includes('npx delimit-cli remember'), 'Should lead with the continuity path (save a decision)');
         assert.ok(setupContent.includes('npx delimit-cli doctor'), 'Should suggest doctor command');
     });
 
