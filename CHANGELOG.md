@@ -3,6 +3,11 @@
 ### Fixed
 - Setup now registers the Delimit MCP server for Claude Code at user scope, so it is available in every project; previously only `~/.mcp.json` was written, which Claude Code treats as project-scoped.
 
+## [4.20.1] - 2026-09-26
+
+### Changed
+- The npm package now ships npm-shrinkwrap.json with the dependency versions tested for this release.
+
 ## [4.20.0] - 2026-09-26
 
 ### Added

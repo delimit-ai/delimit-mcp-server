@@ -1,8 +1,8 @@
 {
   "name": "delimit-cli",
   "mcpName": "io.github.delimit-ai/delimit-mcp-server",
-  "version": "4.20.0",
-  "description": "Keep the state. Change the model. Shared context and a multi-model panel across Claude Code, Codex, Cursor, Antigravity, GitHub Copilot, and Muse.",
+  "version": "4.20.1",
+  "description": "Keep the state. Change the model. Shared context and a multi-model panel across Claude Code, Codex, Cursor, Antigravity, GitHub Copilot, and Muse."
   "main": "index.js",
   "files": [
     "bin/",
@@ -153,6 +153,7 @@
     "scripts/postinstall.js",
     "scripts/muse_mcp.py",
     "server.json",
+    "npm-shrinkwrap.json",
     "README.md",
     "LICENSE",
     "CHANGELOG.md",
