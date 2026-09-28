@@ -485,9 +485,10 @@ supply-chain-sensitive pipelines, pin the exact commit and bump on review:
 - uses: delimit-ai/delimit-action@<commit-sha>   # gh api repos/delimit-ai/delimit-action/git/refs/tags/v1
 ```
 
-**Keep BYOK keys out of plaintext config.** If you bring your own model keys
-for deliberation, store them with `delimit_secret_store` (encrypted vault,
-access-logged via `delimit_secret_access_log`) rather than in dotfiles.
+**Keep BYOK keys out of repo and dotfile config.** If you bring your own model
+keys for deliberation, store them with `delimit_secret_store` (kept locally in
+owner-only 0600 files, base64-encoded, not encrypted; access-logged via
+`delimit_secret_access_log`) rather than in dotfiles.
 
 Our own releases ship under the same discipline: every release carries a
 signed, replayable Seal receipt (see the latest

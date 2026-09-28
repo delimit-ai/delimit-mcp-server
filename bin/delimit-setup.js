@@ -123,10 +123,18 @@ function removeArchiveOnlyProManifest(proDir) {
 
 async function configureClaudeCodeMcp(python, hasClaude) {
     let mcpConfig = {};
+    // An existing ~/.mcp.json that is not plain JSON (comments, trailing comma,
+    // half-written) must be left untouched: resetting it to {} and writing back
+    // deletes every other MCP server the user configured.
+    let mcpConfigWritable = true;
     if (fs.existsSync(MCP_CONFIG)) {
         try {
             mcpConfig = JSON.parse(fs.readFileSync(MCP_CONFIG, 'utf-8'));
-        } catch {}
+            if (!mcpConfig || typeof mcpConfig !== 'object' || Array.isArray(mcpConfig)) throw new Error('not an object');
+        } catch {
+            mcpConfig = {};
+            mcpConfigWritable = false;
+        }
     }
     if (!mcpConfig.mcpServers) mcpConfig.mcpServers = {};
     const serverPath = path.join(DELIMIT_HOME, 'server', 'ai', 'server.py');
@@ -144,9 +152,13 @@ async function configureClaudeCodeMcp(python, hasClaude) {
     };
     const existed = !!mcpConfig.mcpServers.delimit;
     mcpConfig.mcpServers.delimit = delimitMcp;
-    fs.writeFileSync(MCP_CONFIG, JSON.stringify(mcpConfig, null, 2));
-    if (existed) await logp(`  ${green('✓')} Delimit MCP paths updated`);
-    else await logp(`  ${green('✓')} Added delimit to ${MCP_CONFIG}`);
+    if (!mcpConfigWritable) {
+        log(`  ${yellow('!')} Left ${MCP_CONFIG} untouched: it is not plain JSON. Fix it, then re-run setup to add the delimit entry there.`);
+    } else {
+        fs.writeFileSync(MCP_CONFIG, JSON.stringify(mcpConfig, null, 2));
+        if (existed) await logp(`  ${green('✓')} Delimit MCP paths updated`);
+        else await logp(`  ${green('✓')} Added delimit to ${MCP_CONFIG}`);
+    }
 
     const claudeArgs = claudeMcpAddArgs(DELIMIT_HOME, delimitMcp.command, actualServer);
     const manualClaudeCommand = displayClaudeCommand(claudeArgs);
@@ -238,8 +250,8 @@ async function main(options = {}) {
     log(`    • Set up CLAUDE.md instruction file`);
     log('');
     log(`  ${purple('🔒 Security First:')}`);
-    log(`    • Your secrets are ${bold('stored locally')} and ${bold('encrypted')}.`);
-    log(`    • No API keys ever leave your machine.`);
+    log(`    • Secrets you store with Delimit are ${bold('kept locally')} in ~/.delimit (not encrypted).`);
+    log(`    • Model API keys you add are sent to that model's provider when Delimit calls it.`);
     log(`    • You own your data and your governance policies.`);
     log('');
     log(`  ${dim('Undo anytime:')} rm -rf ~/.delimit && delimit uninstall`);
@@ -436,8 +448,13 @@ async function main(options = {}) {
     }
     if (fs.existsSync(CODEX_CONFIG)) {
         try {
-            // Fix permissions on existing config
-            fs.chmodSync(CODEX_CONFIG, 0o644);
+            // Ensure the owner can read/write the existing config. Only ADD
+            // owner bits: never widen group/other access, because this file
+            // commonly holds MCP env tokens (audit 2026-09-28 F8).
+            const codexMode = fs.statSync(CODEX_CONFIG).mode & 0o7777;
+            if ((codexMode & 0o600) !== 0o600) {
+                fs.chmodSync(CODEX_CONFIG, codexMode | 0o600);
+            }
             let toml = fs.readFileSync(CODEX_CONFIG, 'utf-8');
             const serverDir = path.join(DELIMIT_HOME, 'server');
             // approval_policy = "never" means auto-approve all tools from this server (no per-prompt confirmations).
@@ -828,7 +845,7 @@ Run full governance compliance checks. Verify security, policy compliance, evide
             models.openai = { name: 'OpenAI', api_url: 'https://api.openai.com/v1/chat/completions', model: 'gpt-4o', env_key: 'OPENAI_API_KEY', prefer_cli: true, enabled: true };
         }
         if (process.env.ANTHROPIC_API_KEY) {
-            models.anthropic = { name: 'Claude', api_url: 'https://api.anthropic.com/v1/messages', model: 'claude-sonnet-4-5-20250514', env_key: 'ANTHROPIC_API_KEY', format: 'anthropic', enabled: true };
+            models.anthropic = { name: 'Claude', api_url: 'https://api.anthropic.com/v1/messages', model: 'claude-sonnet-4-5-20250929', env_key: 'ANTHROPIC_API_KEY', format: 'anthropic', enabled: true };
         }
         if (Object.keys(models).length > 0) {
             fs.writeFileSync(modelsPath, JSON.stringify(models, null, 2));
