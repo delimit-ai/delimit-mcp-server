@@ -33,7 +33,11 @@ PKG_NAME=$(node -p "require('./package.json').name")
 
 # Length in characters, not bytes: the registry counts characters, and the
 # canon line is ASCII, but a future em-dash must not be double-counted.
-DESC_LEN=$(node -p "[...require('./server.json').description].length")
+# `node -e` + stdout.write, not `node -p`: -p renders numbers through
+# util.inspect, which adds ANSI colour codes when FORCE_COLOR is set; the
+# integer test below then errored and the guard passed a 204-char description.
+DESC_LEN=$(node -e "process.stdout.write(String([...require('./server.json').description].length))")
+[[ "$DESC_LEN" =~ ^[0-9]+$ ]] || fail "could not measure the description length (got '${DESC_LEN}')"
 if [ "$DESC_LEN" -gt "$MAX_DESC" ]; then
   fail "description is ${DESC_LEN} chars; the MCP Registry caps it at ${MAX_DESC} (returns 422). Shorten it."
 fi
