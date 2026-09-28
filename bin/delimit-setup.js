@@ -448,8 +448,13 @@ async function main(options = {}) {
     }
     if (fs.existsSync(CODEX_CONFIG)) {
         try {
-            // Fix permissions on existing config
-            fs.chmodSync(CODEX_CONFIG, 0o644);
+            // Ensure the owner can read/write the existing config. Only ADD
+            // owner bits: never widen group/other access, because this file
+            // commonly holds MCP env tokens (audit 2026-09-28 F8).
+            const codexMode = fs.statSync(CODEX_CONFIG).mode & 0o7777;
+            if ((codexMode & 0o600) !== 0o600) {
+                fs.chmodSync(CODEX_CONFIG, codexMode | 0o600);
+            }
             let toml = fs.readFileSync(CODEX_CONFIG, 'utf-8');
             const serverDir = path.join(DELIMIT_HOME, 'server');
             // approval_policy = "never" means auto-approve all tools from this server (no per-prompt confirmations).
