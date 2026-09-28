@@ -112,3 +112,18 @@ test('vault set stores plaintext JSON at 0600 and vault status says so', () => {
         assert.match(status.stdout, /0600/);
     } finally { fs.rmSync(home, { recursive: true, force: true }); }
 });
+
+// Audit 2026-09-28 F5: the setup confirmation screen and README still claimed
+// secrets are "encrypted" (the vault and secrets broker store plaintext /
+// base64 at 0600) and that "No API keys ever leave your machine" (BYOK keys
+// are sent to the model providers that own them).
+test('setup confirmation screen and README make no encryption or key-locality claim', () => {
+    const setup = fs.readFileSync(path.join(root, 'bin/delimit-setup.js'), 'utf8');
+    const screen = setup.slice(setup.indexOf("log(`  ${blue('What Delimit will do:')}`);"), setup.indexOf('Undo anytime:'));
+    assert.ok(screen.length > 0, 'setup confirmation screen must stay locatable');
+    assert.doesNotMatch(screen, /(?<!not )encrypted/i);
+    assert.doesNotMatch(screen, /keys ever leave your machine/i);
+    assert.match(screen, /not encrypted/);
+    const readme = fs.readFileSync(path.join(root, 'README.md'), 'utf8');
+    assert.doesNotMatch(readme, /encrypted vault/i);
+});

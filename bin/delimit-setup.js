@@ -250,8 +250,8 @@ async function main(options = {}) {
     log(`    • Set up CLAUDE.md instruction file`);
     log('');
     log(`  ${purple('🔒 Security First:')}`);
-    log(`    • Your secrets are ${bold('stored locally')} and ${bold('encrypted')}.`);
-    log(`    • No API keys ever leave your machine.`);
+    log(`    • Secrets you store with Delimit are ${bold('kept locally')} in ~/.delimit (not encrypted).`);
+    log(`    • Model API keys you add are sent to that model's provider when Delimit calls it.`);
     log(`    • You own your data and your governance policies.`);
     log('');
     log(`  ${dim('Undo anytime:')} rm -rf ~/.delimit && delimit uninstall`);
