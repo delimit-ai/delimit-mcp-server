@@ -3860,7 +3860,7 @@ program
                 planned.push({ path: memoryDir, action: 'create_dir', description: '~/.delimit/memory/ directory' });
             }
             if (!fs.existsSync(mcpServerPath)) {
-                planned.push({ path: mcpServerPath, action: 'create_file', description: 'MCP server (via delimit setup --all)' });
+                planned.push({ path: mcpServerPath, action: 'create_file', description: 'MCP server (via delimit setup)' });
             }
             // GitHub workflow
             const workflowDir = path.join(process.cwd(), '.github', 'workflows');
@@ -4002,25 +4002,25 @@ program
                 if (hasDelimitMcp) {
                     addResult('mcp-config', 'pass', 'Delimit configured in ~/.mcp.json');
                 } else {
-                    addResult('mcp-config', 'warn', 'Delimit not configured in ~/.mcp.json', 'delimit setup --all');
+                    addResult('mcp-config', 'warn', 'Delimit not configured in ~/.mcp.json', 'delimit setup');
                 }
             } catch {
                 addResult('mcp-config', 'warn', '~/.mcp.json exists but failed to parse', 'Check ~/.mcp.json for valid JSON');
             }
         } else {
-            addResult('mcp-config', 'warn', 'No ~/.mcp.json found', 'delimit setup --all');
+            addResult('mcp-config', 'warn', 'No ~/.mcp.json found', 'delimit setup');
         }
         if (fs.existsSync(mcpServerPath)) {
             addResult('mcp-server', 'pass', 'MCP server file exists at ~/.delimit/server/ai/server.py');
         } else {
-            addResult('mcp-server', 'fail', 'MCP server not installed at ~/.delimit/server/ai/server.py', 'delimit setup --all');
+            addResult('mcp-server', 'fail', 'MCP server not installed at ~/.delimit/server/ai/server.py', 'delimit setup');
             if (fixMode) {
                 try {
-                    execSync('delimit setup --all', { stdio: 'pipe' });
-                    addResult('mcp-server-fix', 'pass', 'Auto-fixed: ran delimit setup --all');
+                    execSync('delimit setup --yes', { stdio: 'pipe' });
+                    addResult('mcp-server-fix', 'pass', 'Auto-fixed: ran delimit setup --yes');
                     trackCreated(mcpServerPath);
                 } catch {
-                    addResult('mcp-server-fix', 'warn', 'Auto-fix failed: run delimit setup --all manually');
+                    addResult('mcp-server-fix', 'warn', 'Auto-fix failed: run delimit setup manually');
                 }
             }
         }
@@ -4085,7 +4085,7 @@ program
                 addResult('models', 'warn', '~/.delimit/models.json exists but failed to parse', 'Check ~/.delimit/models.json for valid JSON');
             }
         } else {
-            addResult('models', 'warn', 'No ~/.delimit/models.json — multi-model features unavailable', 'delimit setup --all');
+            addResult('models', 'warn', 'No ~/.delimit/models.json — multi-model features unavailable', 'delimit setup');
         }
 
         // --- Check 10: License status ---
