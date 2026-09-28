@@ -68,6 +68,7 @@ const TEST_FILES = [
     'tests/release-tooling-hardening.test.js',
     'tests/quickstart-cli.test.js',
     'tests/truth-security-p0.test.js',
+    'tests/unparseable-config-no-clobber.test.js',
 ];
 
 const cfgPath = resolveSharedConfigPath();
