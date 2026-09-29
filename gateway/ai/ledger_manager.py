@@ -217,23 +217,16 @@ def _resolve_nonventure_name(path: str, name: str) -> str:
 
     The MCP server runs with cwd=~/.delimit/server, so ``_detect_venture``
     used to stamp ``venture="server"`` on every gov/deliberate/consensus item
-    (90+ mis-attributed rows). Likewise ``/tmp/wire-report-*`` scratch trees
-    stamped ``venture="wire-report-morning-presentation"`` etc. This helper
-    extracts a known-venture token from the path (or the basename) so those
+    (90+ mis-attributed rows). Likewise scratch trees can acquire an ephemeral
+    basename. This helper extracts a locally configured token so those
     writes land on the correct sub-ledger instead of pooling in the central
     store. When no token matches it returns ``"unsorted"`` — NEVER the raw
     ``server`` / ``tmpXXXX`` / ephemeral basename.
     """
     blob = f"{path} {name}".lower()
-    if "wire-report" in blob or "wirereport" in blob or "wire.report" in blob \
-            or "wire-api" in blob or "wr-" in blob:
-        return "wire-report"
-    if "stake" in blob:  # stake / stakeone / stake-one / stake.one
-        return "stake-one"
-    if "domain" in blob or "electricgrill" in blob:
-        return "domainvested"
-    if "solicit" in blob:
-        return "solicitsignal"
+    for token, slug in _local_venture_config()["path_tokens"].items():
+        if token in blob:
+            return slug
     if "delimit" in blob or name in ("server", ".delimit"):
         return "delimit"
     return "unsorted"
@@ -383,24 +376,36 @@ _VENTURE_CANONICAL = {
     "delimit-gateway": "delimit",    # gateway repo
     ".delimit": "delimit",
     "server": "delimit",             # LED-3925: MCP server cwd basename
-    "wirereport": "wire-report",
-    "wire.report": "wire-report",    # LED-3925
-    "wire-api": "wire-report",       # LED-3925
-    "action-wire-report": "wire-report",  # LED-3925
-    "wirereportwnba": "wire-report",      # LED-3925
-    "wr-phase1": "wire-report",      # LED-3925
-    "stakeone": "stake-one",
-    "stake.one": "stake-one",        # LED-3925
-    "domain-monetization": "domainvested",  # LED-3925 (matches focus_gate)
-    "domainvested-console": "domainvested",  # LED-3925
-    "electricgrill-com": "domainvested",     # LED-3925
-    "solicitsignal": "solicitsignal",        # LED-3925 (known slug)
 }
-_KNOWN_VENTURE_SLUGS = {
-    "delimit", "wire-report", "domainvested",
-    "livetube", "stake-one", "root", "unsorted",
-    "solicitsignal",
-}
+_KNOWN_VENTURE_SLUGS = {"delimit", "unsorted"}
+
+
+def _local_venture_config() -> Dict[str, Dict[str, str]]:
+    """Read optional machine-local aliases; missing or invalid config is inert."""
+    config = _global_dir() / "venture_map.json"
+    try:
+        data = json.loads(config.read_text())
+        result = {}
+        for key in ("aliases", "path_tokens"):
+            value = data.get(key, {})
+            if not isinstance(value, dict) or any(
+                not isinstance(alias, str) or not alias
+                or not isinstance(slug, str) or not slug
+                for alias, slug in value.items()
+            ):
+                raise ValueError(f"{key} must map strings to strings")
+            result[key] = {alias.lower(): slug.lower() for alias, slug in value.items()}
+        return result
+    except FileNotFoundError:
+        return {"aliases": {}, "path_tokens": {}}
+    except (OSError, ValueError, TypeError, AttributeError) as exc:
+        logger.warning("Ignoring invalid local venture map: %s", exc)
+        return {"aliases": {}, "path_tokens": {}}
+
+
+def _known_venture_slugs() -> set:
+    config = _local_venture_config()
+    return _KNOWN_VENTURE_SLUGS | set(config["aliases"].values()) | set(config["path_tokens"].values())
 
 
 def _canonical_venture_slug(name: str) -> Optional[str]:
@@ -412,8 +417,8 @@ def _canonical_venture_slug(name: str) -> Optional[str]:
     if not name:
         return None
     n = name.lower().strip()
-    n = _VENTURE_CANONICAL.get(n, n)
-    return n if n in _KNOWN_VENTURE_SLUGS else None
+    n = _VENTURE_CANONICAL.get(n, _local_venture_config()["aliases"].get(n, n))
+    return n if n in _known_venture_slugs() else None
 
 
 def _detect_model() -> str:
@@ -586,7 +591,7 @@ def _unknown_venture_write_error(project_path: str) -> Optional[Dict[str, Any]]:
             "non-canonical store."
         ),
         "unknown_venture": name,
-        "known_ventures": sorted(_KNOWN_VENTURE_SLUGS),
+        "known_ventures": sorted(_known_venture_slugs()),
     }
 
 
@@ -594,7 +599,7 @@ def _known_venture_hint() -> str:
     """Human-readable list of valid ventures/namespaces for a fail-closed
     error message (LED-5658 review follow-up)."""
     return (
-        f"recognized venture slugs ({', '.join(sorted(_KNOWN_VENTURE_SLUGS))}), "
+        f"recognized venture slugs ({', '.join(sorted(_known_venture_slugs()))}), "
         "an existing project directory (pass its path), or an already-"
         "initialized dedicated namespace under ~/.delimit/ventures/<name>/"
     )
@@ -605,7 +610,7 @@ def _project_ledger_dir(project_path: str = ".") -> Path:
 
     Resolution order (LED-1188 D3, deliberation att_f86e1f51110e8ed6):
       1. Detect venture from project_path -> canonical slug (delimit,
-         wire-report, domainvested, livetube, stake-one).
+         as configured by the local venture map).
       2. If LEDGER_V2_DIR / <slug> / operations.jsonl exists, return that
          per-venture sub-ledger. (Plan-C staged but not yet swapped.)
       3. If CENTRAL_LEDGER_DIR / <slug> / operations.jsonl exists, return
@@ -1351,7 +1356,7 @@ def update_item(
                 f"Refusing to look up or update {item_id} under it."
             ),
             "unknown_venture": _unknown_name,
-            "known_ventures": sorted(_KNOWN_VENTURE_SLUGS),
+            "known_ventures": sorted(_known_venture_slugs()),
         }
         if _elsewhere is not None:
             _err["item_found_in"] = _elsewhere["venture"]
@@ -3653,7 +3658,7 @@ def _legacy_handoff_write(
     (``~/.delimit/souls/<project-hash>/``, read by ``delimit_revive``) used to
     be DISJOINT — a fresh handoff never surfaced in revive, so revive could
     return a month-old soul instead of the state written minutes earlier (this
-    bit a real wire-report session). To close the gap, a handoff now ALSO
+    bit a real venture session). To close the gap, a handoff now ALSO
     refreshes a lightweight pointer-soul in the souls store for the SAME
     project via ``session_phoenix.capture_soul`` when present, or the shipped
     Free core otherwise (one shared schema, no duplication), keyed by the same

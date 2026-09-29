@@ -84,6 +84,63 @@ INTERNAL_BACKENDS: Dict[str, str] = {
     "ai.sensing.schema": "sensing runtime",
 }
 
+# Required lazy backends for MCP tools.  Keep this explicit: some tools import
+# an internal module only for an optional feature and have a shipped fallback
+# (for example diagnose, notify, soul_capture, and revive).  Those tools must
+# remain registered in a public install.
+TOOL_REQUIRED_BACKENDS: Dict[str, tuple[str, ...]] = {
+    "delimit_substantive_content_check": ("ai.outreach_substantive", "ai.outreach_gate"),
+    "delimit_outreach_loop_tick": ("ai.outreach_loop_daemon",),
+    "delimit_digest": ("ai.daily_digest",),
+    "delimit_executor": ("ai.workers.executor",),
+    "delimit_sense": ("ai.sensing",),
+    "delimit_siem": ("ai.siem_streaming",),
+    "delimit_sensor_github_migrations": ("ai.social_target",),
+    "delimit_swarm": ("ai.swarm",),
+    "delimit_x_fetch": ("ai.social_target",),
+    "delimit_social_post": ("ai.social",),
+    "delimit_social_generate": ("ai.social",),
+    "delimit_social_accounts": ("ai.social",),
+    "delimit_social_history": ("ai.social",),
+    "delimit_social_approve": ("ai.social",),
+    "delimit_social_target": ("ai.social_target", "ai.report_backlog"),
+    "delimit_social_target_config": ("ai.social_target",),
+    "delimit_reddit_scan": ("ai.reddit_scanner",),
+    "delimit_github_scan": ("ai.github_scanner",),
+    "delimit_vendor_news_scan": ("ai.vendor_news",),
+    "delimit_vendor_news_health": ("ai.vendor_news.sensor", "ai.vendor_news.drafter"),
+    "delimit_vendor_news_draft": ("ai.vendor_news", "ai.vendor_news.sensor", "ai.social_target"),
+    "delimit_content_schedule": ("ai.content_engine",),
+    "delimit_content_publish": ("ai.content_engine",),
+    "delimit_content_queue": ("ai.content_engine",),
+    "delimit_daemon_status": ("ai.daemon",),
+    "delimit_daemon_run": ("ai.daemon",),
+    "delimit_daemon_classify": ("ai.daemon",),
+    "delimit_build_loop": ("ai.loop_engine",),
+    "delimit_build_loop_daemon": ("ai.loop_daemon",),
+    "delimit_inbox_daemon": ("ai.inbox_daemon",),
+    "delimit_social_daemon": ("ai.social_daemon",),
+    "delimit_self_repair_daemon": ("ai.self_repair_daemon",),
+    "delimit_corp_dashboard": ("ai.corp_dashboard",),
+    "delimit_screen_record": ("ai.screen_record",),
+    "delimit_screenshot": ("ai.screen_record",),
+    "delimit_next_task": ("ai.loop_engine",),
+    "delimit_task_complete": ("ai.loop_engine",),
+    "delimit_loop_status": ("ai.loop_engine",),
+    "delimit_loop_config": ("ai.loop_engine",),
+    "delimit_content_intel_daily": ("ai.content_intel",),
+    "delimit_content_intel_topic": ("ai.content_intel",),
+    "delimit_content_intel_weekly": ("ai.content_intel",),
+    "delimit_reddit_fetch_thread": ("ai.reddit_scanner",),
+    "delimit_think": ("ai.thinktank_pipeline",),
+    "delimit_build": ("ai.thinktank_pipeline",),
+}
+
+
+def tool_backend_absent(tool: str) -> bool:
+    """Whether a tool's required implementation is missing from this install."""
+    return any(module_absent(module) for module in TOOL_REQUIRED_BACKENDS.get(tool, ()))
+
 # Generic label for a missing ai.* backend with no explicit entry above.
 # Deliberately vague: the module name is already public (it appears in the
 # shipped ai/server.py import statements), but there is no need to repeat a
