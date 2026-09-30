@@ -4137,6 +4137,31 @@ program
             addResult('disk-space', 'pass', '~/.delimit/ does not exist yet');
         }
 
+        // --- Check 13: Codex AGENTS.md instruction size ---
+        // Codex may budget project and global instructions jointly or separately.
+        const agentsPaths = [
+            path.join(process.cwd(), 'AGENTS.md'),
+            path.join(process.env.CODEX_HOME || path.join(homeDir, '.codex'), 'AGENTS.md'),
+        ];
+        const agentsFiles = [];
+        for (const filePath of agentsPaths) {
+            try {
+                const stat = fs.statSync(filePath);
+                if (stat.isFile()) agentsFiles.push({ filePath, bytes: stat.size });
+            } catch { /* Missing or unreadable files do not affect doctor. */ }
+        }
+        if (agentsFiles.length > 0) {
+            const limit = 30 * 1024;
+            const total = agentsFiles.reduce((sum, file) => sum + file.bytes, 0);
+            const sizes = agentsFiles.map(file => `${file.filePath}: ${file.bytes} bytes`).join(', ');
+            if (total > limit || agentsFiles.some(file => file.bytes > limit)) {
+                addResult('codex-agents-size', 'warn',
+                    `Codex AGENTS.md instructions may be truncated (Codex embeds at most 32 KiB; warning above 30 KiB): ${sizes}; combined: ${total} bytes — trim or move content outside the Delimit-managed section`);
+            } else {
+                addResult('codex-agents-size', 'pass', `Codex AGENTS.md size: ${sizes}; combined: ${total} bytes`);
+            }
+        }
+
         // --- CI mode: output JSON and exit ---
         if (ciMode) {
             const ok = results.filter(r => r.status === 'pass').length;
