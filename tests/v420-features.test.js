@@ -140,6 +140,106 @@ child.execSync = function(command, options) {
     });
 });
 
+describe('doctor: Codex AGENTS.md size', () => {
+    function fixture() {
+        const root = fs.mkdtempSync(path.join('/tmp', 'delimit-doctor-agents-'));
+        const project = path.join(root, 'project');
+        const home = path.join(root, 'home');
+        const codexHome = path.join(root, 'codex');
+        fs.mkdirSync(project);
+        fs.mkdirSync(home);
+        fs.mkdirSync(codexHome);
+        const serverDir = path.join(home, '.delimit', 'server', 'ai');
+        fs.mkdirSync(serverDir, { recursive: true });
+        fs.writeFileSync(path.join(serverDir, 'server.py'), '');
+        const pythonProbe = path.join(root, 'python-probe.cjs');
+        fs.writeFileSync(pythonProbe, `const child = require('child_process');
+const original = child.execSync;
+child.execSync = function(command, options) {
+    if (command === 'python3 --version') return Buffer.from('Python 3.11.0\\n');
+    return original.call(this, command, options);
+};
+`);
+        const env = {
+            ...process.env,
+            HOME: home,
+            DELIMIT_HOME: path.join(home, '.delimit'),
+            CODEX_HOME: codexHome,
+            FORCE_COLOR: '0',
+            NODE_OPTIONS: `${process.env.NODE_OPTIONS || ''} --require=${pythonProbe}`.trim(),
+        };
+        const doctor = (args = ['doctor', '--ci']) => {
+            const result = spawnSync(process.execPath, [CLI, ...args], {
+                cwd: project, env, encoding: 'utf8', timeout: 30000,
+            });
+            assert.ifError(result.error);
+            assert.strictEqual(result.status, 0, result.stderr || result.stdout);
+            return args.includes('--ci') ? JSON.parse(result.stdout) : result.stdout;
+        };
+        return {
+            project, home, codexHome, env, doctor,
+            cleanup: () => fs.rmSync(root, { recursive: true, force: true }),
+        };
+    }
+
+    it('passes at the 30 KiB combined boundary', () => {
+        const f = fixture();
+        try {
+            fs.writeFileSync(path.join(f.project, 'AGENTS.md'), 'a'.repeat(15360));
+            fs.writeFileSync(path.join(f.codexHome, 'AGENTS.md'), 'b'.repeat(15360));
+            const check = f.doctor().checks.find(item => item.name === 'codex-agents-size');
+            assert.strictEqual(check.status, 'pass');
+            assert.match(check.message, /combined: 30720 bytes/);
+        } finally { f.cleanup(); }
+    });
+
+    it('warns when the two files exceed 30 KiB together', () => {
+        const f = fixture();
+        try {
+            const projectFile = path.join(f.project, 'AGENTS.md');
+            const globalFile = path.join(f.codexHome, 'AGENTS.md');
+            fs.writeFileSync(projectFile, 'a'.repeat(20000));
+            fs.writeFileSync(globalFile, 'b'.repeat(11000));
+            const check = f.doctor().checks.find(item => item.name === 'codex-agents-size');
+            assert.strictEqual(check.status, 'warn');
+            assert.ok(check.message.includes(`${projectFile}: 20000 bytes`));
+            assert.ok(check.message.includes(`${globalFile}: 11000 bytes`));
+            assert.match(check.message, /combined: 31000 bytes/);
+            assert.match(check.message, /trim or move content outside the Delimit-managed section/);
+            assert.match(f.doctor(['doctor']), /  ⚠ Codex AGENTS\.md instructions may be truncated/);
+        } finally { f.cleanup(); }
+    });
+
+    it('warns when either file alone exceeds 30 KiB', () => {
+        const f = fixture();
+        try {
+            for (const directory of [f.project, f.codexHome]) {
+                const file = path.join(directory, 'AGENTS.md');
+                fs.writeFileSync(file, 'x'.repeat(30721));
+                const check = f.doctor().checks.find(item => item.name === 'codex-agents-size');
+                assert.strictEqual(check.status, 'warn');
+                assert.ok(check.message.includes(`${file}: 30721 bytes`));
+                fs.unlinkSync(file);
+            }
+        } finally { f.cleanup(); }
+    });
+
+    it('omits the check when both files are missing, including with the default CODEX_HOME', () => {
+        const f = fixture();
+        try {
+            assert.strictEqual(f.doctor().checks.some(item => item.name === 'codex-agents-size'), false);
+            delete f.env.CODEX_HOME;
+            assert.strictEqual(f.doctor().checks.some(item => item.name === 'codex-agents-size'), false);
+            const defaultGlobalFile = path.join(f.home, '.codex', 'AGENTS.md');
+            fs.mkdirSync(path.dirname(defaultGlobalFile));
+            fs.writeFileSync(defaultGlobalFile, 'global instructions');
+            const check = f.doctor().checks.find(item => item.name === 'codex-agents-size');
+            assert.strictEqual(check.status, 'pass');
+            assert.ok(check.message.includes(`${defaultGlobalFile}: 19 bytes`));
+        } finally { f.cleanup(); }
+    });
+});
+
 // ---------------------------------------------------------------------------
 // status
 // ---------------------------------------------------------------------------
