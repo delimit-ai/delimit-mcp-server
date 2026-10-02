@@ -28,6 +28,7 @@ const TEST_FILES = [
     'tests/server-json-guard.test.js',
     'tests/setup-flag-references.test.js',
     'tests/claude-plugin-structure.test.js',
+    'tests/claude-plugin-release-guard.test.js',
     'tests/clean-tree-guard.test.js',
     'tests/_config-sentinel.test.js',
     'tests/setup-onboarding.test.js',

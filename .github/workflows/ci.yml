@@ -58,6 +58,31 @@ jobs:
 
       - run: npm test
 
+  # Claude plugin release lane (docs/claude-plugin-release.md): a change under
+  # claude-plugin/ or .claude-plugin/ must bump plugin.json, carry a provenance
+  # row and pin a delimit-cli version that exists on npm. Pull requests only;
+  # node builtins plus the npm CLI that setup-node provides, no npm install.
+  claude-plugin-release-guard:
+    if: github.event_name == 'pull_request' && github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    name: Claude plugin release guard
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Plugin version, provenance and pin
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: node scripts/claude-plugin-release-guard.js --base "$BASE_SHA"
+
   bundle-guards:
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
