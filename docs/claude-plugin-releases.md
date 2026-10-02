@@ -1,21 +1,28 @@
 # Delimit Claude plugin: release provenance
 
-One row per plugin version (`claude-plugin/.claude-plugin/plugin.json`). The
-rows are append-only, and their versions must strictly increase. CI checks this
-file with `scripts/claude-plugin-release-guard.js`. The procedure is in
+One row per (plugin, version), for every plugin listed in
+`.claude-plugin/marketplace.json`. The first cell is the plugin name from the
+marketplace entry, the second its `plugin.json` version. Rows are append-only,
+and each plugin's versions must strictly increase. CI checks this file with
+`scripts/claude-plugin-release-guard.js`. The procedure is in
 [claude-plugin-release.md](claude-plugin-release.md).
 
-This file is kept outside `claude-plugin/` on purpose. The directory scans that
-folder, so a provenance edit there would look like a new plugin version.
+This file is kept outside every plugin folder on purpose. The directory scans
+the plugin folder, so a provenance edit there would look like a new plugin
+version.
+
+Only `delimit` (folder `claude-plugin/`) is listed in the Claude plugin
+directory: listing `plugin_018cApt644QshHNw7fmjQn64`, install id
+`delimit@anthropic-plugin-directory`.
 
 A listing in the Claude plugin directory, a passed directory scan and a clean
 install show only that the plugin is distributed and installs. They do not
 show demand, and they are not a certification or an endorsement by Anthropic.
 
-| Version | Source commit | Tag | delimit-cli pin | Directory scan result + warnings | Published at | Clean-install acceptance |
-|---|---|---|---|---|---|---|
-| 1.0.0 | `430bb43` (#246, 2026-09-25 23:50 ET) | `delimit--v1.0.0` | 4.20.0 | Not submitted. Superseded before the 2026-09-26 10:20 ET submission (LED-5721). | Not published | Not run against the directory |
-| 1.0.1 | `dd03b6d` (#248, 2026-09-26 01:02 ET) | `delimit--v1.0.1` | 4.20.0 | Not submitted. Superseded before submission. | Not published | Not run against the directory |
-| 1.0.2 | `1c0a288` (#249, 2026-09-26 07:14 ET) | `delimit--v1.0.2` | 4.20.0 | Not submitted. Superseded before submission. | Not published | Not run against the directory |
-| 1.0.3 | `041b0ad` (#250, 2026-09-26 08:31 ET) | `delimit--v1.0.3` | 4.20.1 | Not submitted. Superseded before submission. | Not published | Not run against the directory |
-| 1.0.4 | `9b417f8` (#251, 2026-09-26 08:57 ET; full SHA `9b417f8061bf40bbf3bf93abd18cab0234154bac`) | `delimit--v1.0.4` | 4.20.1 | Submitted 2026-09-26 10:20 ET. The security scan passed, then the version was held for content-policy review because it launches a pinned npx package (LED-5721). The portal shows "Scan passed, with directory policy warnings" and "Version passed, ready to publish" (about 2026-10-01 20:30 ET). Which warnings: pending the owner's screenshot of the Review tab. The public directory cache reports `checks.review.state: "none"`. | 2026-10-02 16:28 ET. The owner clicked Publish at 16:27 ET in the directory portal; Auto-publish was Off. Listed for Claude Code and Cowork. | Passed 2026-10-02 about 16:44 ET, in a throwaway HOME with no claude.ai login, on Claude Code 2.1.288. `claude plugin install delimit@anthropic-plugin-directory` installed `1.0.4-9b417f8061bf`, and all 8 files match `9b417f8` by sha256. The exact `.mcp.json` command completed the MCP handshake: delimit 4.20.1, 10 records tools. The cold start took 26 s, including the npx fetch and venv; the warm start took 2 s. A ledger write, its read-back and a handoff all passed. `claude mcp list` reported Connected, and `claude plugin validate` passed. Not tested: the interactive /plugin Discover view, Cowork, and a signed-in `@synced` install. |
+| Plugin | Version | Source commit | Tag | delimit-cli pin | Directory scan result + warnings | Published at | Clean-install acceptance |
+|---|---|---|---|---|---|---|---|
+| delimit | 1.0.0 | `430bb43` (#246, 2026-09-25 23:50 ET) | `delimit--v1.0.0` | 4.20.0 | Not submitted. Superseded before the 2026-09-26 10:20 ET submission (LED-5721). | Not published | Not run against the directory |
+| delimit | 1.0.1 | `dd03b6d` (#248, 2026-09-26 01:02 ET) | `delimit--v1.0.1` | 4.20.0 | Not submitted. Pre-submission portal validation (owner, about 2026-09-26 07:30 ET; ledger record LED-5721, 2026-09-26T11:15Z): "7 checks, 1 warning, 1 policy hold". Warning: no icon (fixed in 1.0.2). Policy hold: "Runs a pinned npx package — prefer a package that ships a lockfile, or vendor readable source" (answered by delimit-cli 4.20.1 shipping npm-shrinkwrap.json, pinned in 1.0.3). Informational: "Local MCP server not on claude.ai". Superseded before submission. | Not published | Not run against the directory |
+| delimit | 1.0.2 | `1c0a288` (#249, 2026-09-26 07:14 ET) | `delimit--v1.0.2` | 4.20.0 | Not submitted. Superseded before submission. | Not published | Not run against the directory |
+| delimit | 1.0.3 | `041b0ad` (#250, 2026-09-26 08:31 ET) | `delimit--v1.0.3` | 4.20.1 | Not submitted. Superseded before submission. | Not published | Not run against the directory |
+| delimit | 1.0.4 | `9b417f8` (#251, 2026-09-26 08:57 ET); reviewed_commit `9b417f8061bf40bbf3bf93abd18cab0234154bac` | `delimit--v1.0.4` | 4.20.1 | Submitted 2026-09-26 10:20 ET at tag `delimit--v1.0.4`, scheduled check only (ledger record LED-5721, 2026-09-26T14:21Z). Security scan passed 10:30 ET, then held for content-policy review because it runs a pinned npx package (ledger record LED-5721, 2026-09-26T14:30Z). Portal, about 2026-10-01 20:30 ET: "Scan passed, with directory policy warnings", "Version passed, ready to publish". Review tab (owner screenshot 2026-10-02 16:45 ET), informational, no action required: `UNKNOWN_KEY` x4, "Unrecognized field in plugin.json" (documentationUrl, privacyPolicyUrl, supportUrl, termsOfServiceUrl; the directory reads them, Claude Code ignores them); `LOCAL_MCP_SERVER`, "Runs a local program for an MCP server"; "Local MCP server: not on claude.ai" (.mcp.json · mcpServers.delimit is stdio). Waived by review: `LAUNCHER_PACKAGE_REVIEW`, "Runs a pinned npx or uvx package" (.mcp.json · mcpServers.delimit). The public directory cache reports `checks.review.state: "none"`. | 2026-10-02 16:28 ET. The owner clicked Publish at 16:27 ET in the directory portal; Auto-publish was Off. Listed for Claude Code and Cowork. | Passed 2026-10-02 about 16:44 ET, in a throwaway HOME with no claude.ai login, on Claude Code 2.1.288. `claude plugin install delimit@anthropic-plugin-directory` installed `1.0.4-9b417f8061bf` (listing `plugin_018cApt644QshHNw7fmjQn64`), and all 8 files match `9b417f8` by sha256. The exact `.mcp.json` command completed the MCP handshake: delimit 4.20.1, 10 records tools. The cold start took 26 s, including the npx fetch and venv; the warm start took 2 s. A ledger write, its read-back and a handoff all passed. `claude mcp list` reported Connected, and `claude plugin validate --strict` passed. Not tested: the interactive /plugin Discover view, Cowork, and a signed-in `@synced` install. |

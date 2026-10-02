@@ -58,10 +58,13 @@ jobs:
 
       - run: npm test
 
-  # Claude plugin release lane (docs/claude-plugin-release.md): a change under
-  # claude-plugin/ or .claude-plugin/ must bump plugin.json, carry a provenance
-  # row and pin a delimit-cli version that exists on npm. Pull requests only;
-  # node builtins plus the npm CLI that setup-node provides, no npm install.
+  # Claude plugin release lane (docs/claude-plugin-release.md). Guards EVERY
+  # plugin listed in .claude-plugin/marketplace.json (base and head): a change
+  # to a plugin's folder or marketplace entry must bump that plugin's
+  # plugin.json, carry its provenance row and pin npx packages that exist on
+  # npm. The diff runs with rename detection off. Pull requests only, and not a
+  # required status check: governed merges refuse a red guard. Node builtins
+  # plus the npm CLI that setup-node provides, no npm install.
   claude-plugin-release-guard:
     if: github.event_name == 'pull_request' && github.event.pull_request.draft == false
     runs-on: ubuntu-latest

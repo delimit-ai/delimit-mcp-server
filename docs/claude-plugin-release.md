@@ -1,14 +1,17 @@
 # Releasing the Delimit Claude plugin
 
 This is the release lane for the plugin in `claude-plugin/`, which is listed in
-the Claude plugin directory as **Delimit** by delimit-ai. It has four stages:
+the Claude plugin directory as **Delimit** by delimit-ai. The CI guard in this
+lane covers every plugin listed in `.claude-plugin/marketplace.json`, because
+all of them reach repo-marketplace users on merge; only `delimit` goes through
+the directory stages below. It has four stages:
 
 1. Pre-release, in this repo.
 2. Anthropic acceptance, in the directory portal.
 3. Publication, an explicit Publish click with Auto-publish off.
 4. Post-publish acceptance, a clean install from the directory.
 
-Each version gets one row in [claude-plugin-releases.md](claude-plugin-releases.md).
+Each (plugin, version) gets one row in [claude-plugin-releases.md](claude-plugin-releases.md).
 
 Directory listing, a passed scan and a clean install are platform and
 distribution checks. They show that the plugin is distributed and installs.
@@ -25,6 +28,7 @@ endorsement. Copy about the listing must say no more than that.
 | Plugin version | `version` in plugin.json. This is the only version field. It is independent of the delimit-cli package version |
 | Runtime | `.mcp.json` runs `npx -y delimit-cli@<exact version> mcp --toolset records` |
 | Tags | `delimit--v<version>`, created by `claude plugin tag` |
+| Directory listing | id `plugin_018cApt644QshHNw7fmjQn64`; install id `delimit@anthropic-plugin-directory`; installed version label `<version>-<first 12 chars of reviewed_commit>`, for 1.0.4 `1.0.4-9b417f8061bf`; reviewed_commit for 1.0.4 `9b417f8061bf40bbf3bf93abd18cab0234154bac` |
 
 Users get the plugin through two channels, and they update differently:
 
@@ -39,8 +43,9 @@ Users get the plugin through two channels, and they update differently:
 
 ## Stage 1: pre-release (repo)
 
-1. **Branch and change.** Edit files under `claude-plugin/` or
-   `.claude-plugin/` only on a branch that will become a release.
+1. **Branch and change.** Edit a plugin's folder (for `delimit`,
+   `claude-plugin/`) or its `.claude-plugin/marketplace.json` entry only on a
+   branch that will become a release of that plugin.
 2. **Bump `version`** in plugin.json in the same PR. Never reuse a number, even
    for a version that failed review. As a rule of thumb:
    - patch: wording, links or docs;
@@ -56,14 +61,21 @@ Users get the plugin through two channels, and they update differently:
 5. **Run local checks** with a throwaway `HOME`, never your real one:
    ```sh
    node scripts/claude-plugin-release-guard.js --base origin/main
-   T=$(mktemp -d); HOME=$T claude plugin validate --strict ./claude-plugin
-   HOME=$T claude plugin validate --strict .
+   T=$(mktemp -d); E="env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=$T XDG_CONFIG_HOME=$T/.config CLAUDE_CONFIG_DIR=$T/.claude npm_config_cache=$T/npm-cache"
+   $E claude plugin validate --strict ./claude-plugin
+   $E claude plugin validate --strict .
    python3 scripts/claude-plugin-e2e.py delimit-cli@X.Y.Z
    npm test
    ```
 6. **Open the PR and merge** through the normal review. The `Tests` workflow
    runs the guard job **Claude plugin release guard** (see "CI guard" below).
-   A red guard blocks the merge.
+   The job is not a required status check (ruleset "Protect Main" holds only
+   deletion, non-fast-forward and pull-request rules), so it does not block a
+   merge by itself: governed merges (`scripts/governed_merge.py`) refuse a red
+   guard, and an admin or web-UI merge must not land one. The job runs only on
+   pull requests, never on push to `main`. If another plugin PR merged after
+   yours last ran, re-run the guard against the current `main` before merging,
+   so two PRs cannot both claim the same version.
 7. **Tag the merged commit:**
    ```sh
    git checkout <merged main commit>
@@ -80,16 +92,22 @@ Users get the plugin through two channels, and they update differently:
 ## Stage 2: Anthropic acceptance (directory portal)
 
 9. **Make the directory see the version.** This depends on what the listing
-   tracks (Settings tab, "tracked branch or tag"):
+   tracks (Settings tab, "tracked branch or tag"). The ledger record of the
+   submission (LED-5721, 2026-09-26T14:21Z) says the source was
+   "claude-plugin @ tag delimit--v1.0.4 (9b417f8)" with "scheduled check only",
+   which points to a tag; confirm on the Settings tab:
    - **A tag:** change the tracked tag to `delimit--vX.Y.Z`. A tag stays on its
      commit, so the directory never sees a new version until the tracked tag
      changes.
    - **The default branch:** select **Check for new commits**, or wait for the
      scheduled check.
 10. **Wait for the result.** A version ends in one of three states: it passes,
-    it is held for a reviewer, or it doesn't pass. Expect a reviewer hold on
-    every version: the directory holds plugins whose launcher runs a pinned
-    `npx` package, and the hold can recur on each new version.
+    it is held for a reviewer, or it doesn't pass. A reviewer hold is possible
+    on any version: the docs say "The scan can raise the same hold again on
+    each new version" [checklist]. A version that changes the pinned npx
+    package (for example delimit-cli 4.20.1 to 4.21.0) should be expected to
+    be held for a reviewer, because v1.0.4's `LAUNCHER_PACKAGE_REVIEW` finding
+    says "a reviewer looks at the package" and the waiver covered that pin.
 11. **Record the result** in the row: the scan result and every warning,
     verbatim from the **Review** and **Versions** tabs.
 12. **If the version doesn't pass**, fix the problem on a new branch and
@@ -133,28 +151,60 @@ Users get the plugin through two channels, and they update differently:
     example the interactive /plugin view, Cowork, or a signed-in `@synced`
     install). If acceptance fails, stop and roll back (see "Rollback").
 
+## Release procedure (summary)
+
+For the directory-listed `delimit` plugin, each release runs in this order:
+
+1. Bump `version` in `claude-plugin/.claude-plugin/plugin.json` and add the
+   provenance row, in one PR.
+2. PR, green guard, governed merge.
+3. On the merged commit, `claude plugin tag claude-plugin` creates
+   `delimit--v<version>`; push that one tag.
+4. Point the directory's tracked ref at the new tag (owner, plugin
+   **Settings** tab, **Tracked branch or tag**), or first confirm on that tab
+   that the listing follows something that moves on its own. The docs say "If
+   the submission follows a tag, release a new version by changing the tag"
+   [submit].
+5. The directory scans the new commit (validation plus security scan).
+6. The owner selects **Publish update** (Auto-publish stays Off).
+7. Post-publish clean-install acceptance (stage 4), recorded in the row.
+
 ## CI guard
 
 `scripts/claude-plugin-release-guard.js` runs in the `Tests` workflow as the job
-**Claude plugin release guard**, on pull requests. Its unit tests are
+**Claude plugin release guard**, on pull requests. Its tests are
 `tests/claude-plugin-release-guard.test.js`, which run under `npm test`.
 
+**Scope.** The guarded plugins are derived from every entry's `source` in
+`.claude-plugin/marketplace.json`, at the base and at the head (the union). A
+file belongs to a plugin only when its path starts with that plugin's folder
+plus `/`, so `claude-plugin-panel/` is a different plugin from
+`claude-plugin/`. The change set is `git diff --no-renames` from the merge base,
+and every path of every status counts, so moving a file out of a plugin folder
+changes that plugin.
+
 On every run it checks, offline:
-- plugin.json, marketplace.json and `.mcp.json` parse;
-- the plugin and the marketplace are named `delimit`;
-- the marketplace source is `./claude-plugin`;
-- `.mcp.json` pins exactly one `delimit-cli@X.Y.Z`;
-- provenance rows strictly increase, include the current version, and no row
-  recorded at the base was removed.
+- marketplace.json parses, is named `delimit`, and lists the plugin `delimit`
+  at `./claude-plugin`; every entry's source is a relative folder in the repo;
+- each listed plugin's plugin.json parses, carries its marketplace name and an
+  X.Y.Z version, and its `.mcp.json` (if any) pins every npx package to one
+  exact X.Y.Z version (`delimit` must pin `delimit-cli`);
+- each plugin's provenance rows strictly increase and include its current
+  version, and no row recorded at the base was removed;
+- no plugin listed at the base was removed from, or renamed in, the
+  marketplace (that is an owner decision outside the guard).
 
-When the PR changes `claude-plugin/**` or `.claude-plugin/**`, it also requires:
-- the plugin.json version is greater than both the base version and every
-  version recorded at the base;
-- a provenance row exists for the new version;
-- `npm view delimit-cli@<pin>` confirms the pin exists. A lookup error fails
-  the job.
+For each plugin the PR touches (a file under its folder, its marketplace
+entry, or a marketplace-wide field, which touches all of them), it also
+requires:
+- that plugin's version is greater than both its base version and every
+  version recorded for it at the base;
+- a provenance row exists for (plugin, new version);
+- `npm view <package>@<pin>` confirms each npx pin exists. A lookup error
+  fails the job.
 
-The guard does not tag, push, submit or publish anything.
+A marketplace edit that concerns only one plugin's entry requires a bump of
+that plugin only. The guard does not tag, push, submit or publish anything.
 
 ## Lifecycle facts
 
@@ -202,8 +252,13 @@ These were read on 2026-10-02. Sources:
   can be declined [submit].
 - "A version that is already live stays up when you change the tracked branch
   or tag" [submit].
-- "Revert to this version" exists only for org-uploaded items, and is "not
-  available for an item synced from a repository" [admin].
+- The admin docs describe **Revert to this version** for a Team or Enterprise
+  organization's own plugins in **Organization settings > Plugins & skills**,
+  not for public directory listings. They add: "Reverting isn't available for
+  an item synced from a repository" [admin]. The directory docs describe no
+  revert [submit].
+- "If the submission follows a tag, release a new version by changing the
+  tag" [submit].
 
 **How users get updates**
 - On claude.ai and Cowork, a synced new version arrives "automatically, with
@@ -226,30 +281,57 @@ These were read on 2026-10-02. Sources:
 
 ### OBSERVED
 
-These come from the owner portal (screenshots, 2026-10-02) and from local checks.
+Each item names its source: **ledger record 2026-09-26** (LED-5721 updates in
+`/root/.delimit/ledger-v2/delimit/operations.jsonl`, written at the time from
+the owner's portal session), **owner screenshot 2026-10-02**, or **local
+check 2026-10-02**.
 
-- The listing was submitted 2026-09-26. The ledger records 10:20 ET, at tag
-  `delimit--v1.0.4` (LED-5721). It was held for content-policy review because
-  of the pinned npx package.
-- About 20 hours before 2026-10-02 16:27 ET, version `v1.0.4 · 9b417f8` showed
-  "Scan passed, with directory policy warnings" and "Version passed, ready to
-  publish".
-- The owner clicked Publish at 16:27 ET. The portal showed the listing as
-  Published/Live at 16:28 ET, for Claude Code and Cowork. Auto-publish was Off
+- **Ledger record 2026-09-26 (LED-5721, 11:15Z).** Owner portal validation of
+  `delimit--v1.0.1` before submission: "7 checks, 1 warning, 1 policy hold".
+  The warning was the missing icon; the hold was "Runs a pinned npx package —
+  prefer a package that ships a lockfile, or vendor readable source"; "Local
+  MCP server not on claude.ai" was informational.
+- **Ledger record 2026-09-26 (LED-5721, 14:21Z).** Submitted 10:20 ET; source
+  "claude-plugin @ tag delimit--v1.0.4 (9b417f8)", "auto-publish OFF,
+  scheduled check only".
+- **Ledger record 2026-09-26 (LED-5721, 14:30Z).** At 10:30 ET the security
+  scan passed and v1.0.4 was "held for Content policy review (reason: runs a
+  pinned npx package)".
+- **Owner screenshot 2026-10-02.** About 20 hours before 16:45 ET, version
+  `v1.0.4 · 9b417f8` showed "Scan passed, with directory policy warnings" and
+  "Version passed, ready to publish".
+- **Owner screenshot 2026-10-02 16:45 ET (Review tab).** "Your newest version,
+  v1.0.4 · 9b417f8, is live in the directory." Findings marked informational,
+  no action required: `UNKNOWN_KEY` x4 "Unrecognized field in plugin.json"
+  (documentationUrl, privacyPolicyUrl, supportUrl, termsOfServiceUrl; "No
+  action needed"); `LOCAL_MCP_SERVER` "Runs a local program for an MCP server"
+  ("Listed for information only. Nothing to do."); "Local MCP server: not on
+  claude.ai" (`.mcp.json · mcpServers.delimit` is stdio). Waived by review:
+  `LAUNCHER_PACKAGE_REVIEW` "Runs a pinned npx or uvx package", guidance:
+  "Prefer a package that ships a lockfile, or vendor the package's readable
+  source into the plugin ... The pin fixes the package but not its
+  dependencies, which resolve at install time, so a reviewer looks at the
+  package."
+- **Owner screenshot 2026-10-02.** The owner clicked Publish at 16:27 ET.
+  The portal showed the listing as Published/Live at 16:28 ET, for Claude Code and Cowork. Auto-publish was Off
   ("you publish each version yourself").
-- The portal shows 3 skills and 1 connector. The Usage tab says "Usage numbers
-  appear here once the directory has data".
-- Portal text: the directory checks "about every 6 hours"; a push webhook
-  notifies it on push; and "New listings and updates can take up to an hour to
-  show in the directory". No webhook is configured on the repository
+- **Owner screenshot 2026-10-02.** The portal shows 3 skills and 1
+  connector. The Usage tab says "Usage numbers appear here once the directory
+  has data".
+- **Owner screenshot 2026-10-02.** Portal text: the directory checks "about
+  every 6 hours"; a push webhook notifies it on push; and "New listings and
+  updates can take up to an hour to show in the directory".
+- **Local check 2026-10-02.** No webhook is configured on the repository
   (`gh api repos/delimit-ai/delimit-mcp-server/hooks` returns `[]`).
-- Nine commits landed on `main` after `9b417f8` (2026-09-26 to 09-29). None of
-  them touched `claude-plugin/` or `.claude-plugin/`, and the `claude-plugin`
+- **Local check 2026-10-02.** Nine commits landed on `main` after `9b417f8`
+  (2026-09-26 to 09-29). None of them touched `claude-plugin/` or `.claude-plugin/`, and the `claude-plugin`
   tree hash is identical at `9b417f8`, at `delimit--v1.0.4` and at `main`. The
   portal still showed v1.0.4 · 9b417f8 as the latest version, so those commits
   produced no new version candidate.
-- About 16:43 ET, a clean install from the built-in `anthropic-plugin-directory`
-  marketplace worked with no claude.ai login, on Claude Code 2.1.288.
+- **Local check 2026-10-02.** About 16:43 ET, a clean install from the
+  built-in `anthropic-plugin-directory` marketplace worked with no claude.ai
+  login, on Claude Code 2.1.288 (`claude plugin install
+  delimit@anthropic-plugin-directory`).
   - The directory cache showed listing id `plugin_018cApt644QshHNw7fmjQn64`,
     `release.version` 1.0.4, and `reviewed_commit`
     `9b417f8061bf40bbf3bf93abd18cab0234154bac`.
@@ -257,21 +339,24 @@ These come from the owner portal (screenshots, 2026-10-02) and from local checks
     reported policy warnings.
   - The installed version string is `1.0.4-9b417f8061bf`, and the installed
     files match the commit by sha256.
-- `claude plugin tag claude-plugin --dry-run` refuses to recreate an existing
-  tag. It says "Bump the version".
+  - The MCP handshake listed the 10 records tools; a ledger write read back,
+    a handoff was created and listed, and `claude plugin validate --strict`
+    passed.
+- **Local check 2026-10-02.** `claude plugin tag claude-plugin --dry-run`
+  refuses to recreate an existing tag. It says "Bump the version".
 
 ### UNKNOWN, and how the next release cycle measures each
 
 | Unknown | Measurement in the next cycle |
 |---|---|
-| Whether the listing tracks `main` or the tag `delimit--v1.0.4`. Either explains the absent candidate, since the plugin folder is unchanged on both | Read the Settings tab before step 9 and record it in the row |
+| Whether the listing tracks `main` or the tag `delimit--v1.0.4`. The ledger record of the submission (LED-5721, 2026-09-26T14:21Z: "claude-plugin @ tag delimit--v1.0.4 (9b417f8) ... scheduled check only") points to the tag, but the Settings tab has not been read. Either explains the absent candidate, since the plugin folder is unchanged on both | Read the Settings tab before step 9 and record it in the row |
 | Whether a commit outside the plugin folder can create a candidate | Already observed: none in nine commits. Keep noting whether any candidate appears that does not match a plugin change |
 | Whether the directory requires a plugin.json version bump | Not tested on purpose. The guard always requires a bump |
 | Real interval of the scheduled check | If the listing tracks a branch, record the merge time and the time the candidate appears without clicking **Check for new commits**. If you clicked, record the click time |
 | Scan and review duration | Record the times from candidate visible, to scan result, to "ready to publish" |
-| Whether the pinned-npx hold recurs | Record held or not held in the row |
+| Whether the pinned-npx hold recurs, and whether an unchanged pin keeps the waiver | Record held or not held in the row, and whether the pin changed |
 | Propagation time from Publish to the directory | After the click, poll `claude plugin marketplace update anthropic-plugin-directory` in a throwaway HOME until `release.version` changes. Record the delay |
-| What "directory policy warnings" means, and which warnings v1.0.4 has | Copy the Review tab text verbatim into the row (1.0.4: pending the owner's screenshot) |
+| Whether the next version gets the same Review-tab findings as v1.0.4 (`UNKNOWN_KEY` x4, `LOCAL_MCP_SERVER`, not on claude.ai, `LAUNCHER_PACKAGE_REVIEW` waived) | Copy the Review tab findings, with codes, into the row |
 | Which publish setting Anthropic applied to the listing | Copy the Overview tab's Auto-publish row text verbatim |
 | Whether `@synced` installs key on the manifest version or a directory-recorded version | After the next publish, check the version string in a signed-in Claude Code install and record it |
 | Webhook payload, events and permissions | Not measured, since no webhook is set up (see below) |
@@ -293,7 +378,8 @@ user fix.
 listing to an earlier version. Recovery is either a forward fix or delisting,
 and delisting can remove installed copies. The manual Publish click is the last
 point where a bad version can be stopped. Auto-publish also would not remove
-the expected reviewer hold, so it would save little. Revisit only when all of
+a reviewer hold, which the pinned-npx launcher can raise on any version, so it
+would save little. Revisit only when all of
 the following hold:
 - at least three consecutive versions went through this lane with no
   post-publish acceptance failure;
@@ -302,6 +388,18 @@ the following hold:
 - the listing tracks a release tag, so only a deliberate tag creates a
   candidate;
 - the change is recorded as an explicit decision in the provenance file.
+
+**Supply chain: lock the Python side before the next pin bump.** The npm side
+of the pinned package is locked: the delimit-cli 4.20.1 tarball ships
+`npm-shrinkwrap.json`. The Python side is only partly locked: the plugin
+launcher (`lib/mcp-launcher.js`) creates its own venv and installs
+`FALLBACK_PY_DEPS` (`fastmcp==3.2.4 pyyaml==6.0.3 pydantic==2.12.5
+packaging==26.0`), because no requirements file ships; their transitive
+dependencies resolve at install time, without hashes. Before the next
+delimit-cli pin bump, ship a hashed Python lock in delimit-cli (a requirements
+file installed with `--require-hashes` by `mcp-launcher.js`), then bump the
+plugin pin in one later release. This closes the gap the `LAUNCHER_PACKAGE_REVIEW`
+reviewer waived for v1.0.4. Expect that pin bump to be held for a reviewer.
 
 ## Rollback
 
@@ -326,8 +424,8 @@ submission.
 |---|---|---|
 | Listing identity | What identifies our listing, and from which source? | Listing `plugin_018cApt644QshHNw7fmjQn64`, "Delimit" by delimit-ai. Source: repo `delimit-ai/delimit-mcp-server`, path `claude-plugin` |
 | Update detection | What makes the provider see a new version? | The tracked branch or tag: scheduled check, optional push webhook, or **Check for new commits**. The plugin.json version is raised for clients |
-| Provider scan | What review runs on each version, and what holds it? | Validation plus a security scan on every version. The pinned-npx launcher is held for a reviewer |
+| Provider scan | What review runs on each version, and what holds it? | Validation plus a security scan on every version. The pinned-npx launcher (`LAUNCHER_PACKAGE_REVIEW`) is held for a reviewer; v1.0.4's hold was waived by review |
 | Publication gate | Who or what makes a version live? | The owner's Publish click. Auto-publish is Off; the publish setting is applied by Anthropic |
 | Install acceptance | How do we prove the published artifact installs and works? | Stage 4: a clean-HOME install from the provider's own channel, a file hash match, and the MCP handshake plus a records round trip |
-| Receipts | Where is each version's evidence kept? | One row per version in `docs/claude-plugin-releases.md`: commit, tag, pin, scan result, publication time and actor, acceptance |
+| Receipts | Where is each version's evidence kept? | One row per (plugin, version) in `docs/claude-plugin-releases.md`: commit, tag, pin, scan result and findings, publication time and actor, acceptance |
 | Rollback | How do we undo a bad version, and what does it cost users? | A forward fix under a higher version. Delisting is the last resort and may remove installed copies. There is no documented revert |

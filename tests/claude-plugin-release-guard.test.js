@@ -1,12 +1,14 @@
 'use strict';
 
-// Unit tests for scripts/claude-plugin-release-guard.js (Claude plugin release
-// lane, docs/claude-plugin-release.md). Pure fixtures plus the repo's own
-// files; no git, no network (the npm lookup is injected).
+// Tests for scripts/claude-plugin-release-guard.js (Claude plugin release
+// lane, docs/claude-plugin-release.md). Pure fixtures, the repo's own files,
+// and git-backed cases in throwaway repositories. No network: the npm lookup
+// is injected, and the git-backed runs use --offline.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const yaml = require('js-yaml');
@@ -14,23 +16,35 @@ const yaml = require('js-yaml');
 const guard = require('../scripts/claude-plugin-release-guard.js');
 
 const ROOT = path.join(__dirname, '..');
+const SCRIPT = path.join(ROOT, 'scripts', 'claude-plugin-release-guard.js');
 const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8');
 
-const TABLE_HEAD = '| Version | Source commit | Tag | delimit-cli pin | Scan | Published at | Acceptance |\n|---|---|---|---|---|---|---|\n';
-const row = (v) => `| ${v} | \`abc1234\` | \`delimit--v${v}\` | 4.20.1 | passed | Pending | Pending |\n`;
-const releases = (...versions) => `# Releases\n\n${TABLE_HEAD}${versions.map(row).join('')}`;
+const TABLE_HEAD = '| Plugin | Version | Source commit | Tag | Pin | Scan | Published at | Acceptance |\n|---|---|---|---|---|---|---|---|\n';
+const row = ([plugin, v]) => `| ${plugin} | ${v} | \`abc1234\` | \`${plugin}--v${v}\` | 4.20.1 | passed | Pending | Pending |\n`;
+const releases = (...pairs) => `# Releases\n\n${TABLE_HEAD}${pairs.map((p) => row(Array.isArray(p) ? p : ['delimit', p])).join('')}`;
 const pluginJson = (version, name = 'delimit') => JSON.stringify({ name, version });
-const marketJson = (source = './claude-plugin', name = 'delimit') =>
-    JSON.stringify({ name, plugins: [{ name: 'delimit', source }] });
-const mcpJson = (spec = 'delimit-cli@4.20.1') =>
-    JSON.stringify({ mcpServers: { delimit: { command: 'npx', args: ['-y', spec, 'mcp', '--toolset', 'records'] } } });
+const PANEL = { name: 'delimit-panel', source: './claude-plugin-panel', description: 'panel' };
+const DELIMIT = { name: 'delimit', source: './claude-plugin', description: 'records' };
+const marketJson = (entries = [DELIMIT], name = 'delimit') => JSON.stringify({ name, owner: { name: 'Delimit' }, plugins: entries });
+const mcpJson = (spec = 'delimit-cli@4.20.1', server = 'delimit') =>
+    JSON.stringify({ mcpServers: { [server]: { command: 'npx', args: ['-y', spec, 'mcp', '--toolset', 'records'] } } });
 
-function headFiles(over = {}) {
-    return { plugin: pluginJson('1.0.4'), marketplace: marketJson(), mcp: mcpJson(), releases: releases('1.0.3', '1.0.4'), ...over };
+function side({ market = marketJson(), rel = releases('1.0.3', '1.0.4'), delimit = '1.0.4', mcp = mcpJson(), panel = null, panelMcp = mcpJson('delimit-cli@4.21.0', 'delimit-panel') } = {}) {
+    const files = {
+        'claude-plugin/.claude-plugin/plugin.json': delimit === null ? null : pluginJson(delimit),
+        'claude-plugin/.mcp.json': mcp,
+    };
+    if (panel !== null) {
+        files['claude-plugin-panel/.claude-plugin/plugin.json'] = pluginJson(panel, 'delimit-panel');
+        files['claude-plugin-panel/.mcp.json'] = panelMcp;
+    }
+    return { marketplace: market, releases: rel, files };
 }
-const BASE = { plugin: pluginJson('1.0.4'), releases: releases('1.0.3', '1.0.4') };
+const BASE = side();
 const npmYes = () => true;
 const npmNo = () => false;
+const has = (res, re) => res.errors.some((e) => re.test(e));
+const show = (res) => res.errors.join('\n');
 
 test('semver parsing and comparison', () => {
     assert.deepEqual(guard.parseSemver('1.0.10'), [1, 0, 10]);
@@ -40,60 +54,70 @@ test('semver parsing and comparison', () => {
     assert.equal(guard.compareSemver('1.9.0', '2.0.0'), -1);
 });
 
-test('provenance table rows are read from any table line whose first cell is X.Y.Z', () => {
-    const rows = guard.parseReleases(releases('1.0.0', '1.0.4'));
-    assert.deepEqual(rows.map((r) => r.version), ['1.0.0', '1.0.4']);
-    assert.deepEqual(guard.parseReleases('| `2.1.0` | x |').map((r) => r.version), ['2.1.0']);
+test('provenance rows carry the plugin name in the first cell and X.Y.Z in the second', () => {
+    const rows = guard.parseReleases(releases('1.0.0', ['delimit-panel', '1.0.0'], '1.0.4'));
+    assert.deepEqual(rows.map((r) => `${r.plugin} ${r.version}`), ['delimit 1.0.0', 'delimit-panel 1.0.0', 'delimit 1.0.4']);
+    assert.deepEqual(guard.parseReleases('| `delimit` | `2.1.0` | x |').map((r) => r.version), ['2.1.0']);
+    assert.deepEqual(guard.parseReleases('| 1.0.4 | x |'), [], 'a row without a plugin name is not a release row');
 });
 
-test('plugin scope covers both plugin folders but not the provenance file', () => {
-    assert.ok(guard.inPluginScope('claude-plugin/README.md'));
-    assert.ok(guard.inPluginScope('.claude-plugin/marketplace.json'));
-    assert.ok(!guard.inPluginScope('docs/claude-plugin-releases.md'));
-    assert.ok(!guard.inPluginScope('lib/cli.js'));
-    assert.ok(!guard.PROVENANCE.startsWith('claude-plugin/'), 'provenance must live outside the scanned plugin folder');
+test('folders match by exact prefix plus a slash; sources must be relative folders', () => {
+    assert.ok(guard.inFolder('claude-plugin/README.md', 'claude-plugin'));
+    assert.ok(!guard.inFolder('claude-plugin-panel/README.md', 'claude-plugin'));
+    assert.ok(!guard.inFolder('claude-plugin', 'claude-plugin'));
+    assert.equal(guard.normalizeSource('./claude-plugin/'), 'claude-plugin');
+    for (const bad of ['.', './', '/abs', '../up', 'a/../b', 'https://x', { source: 'github' }, 7]) assert.equal(guard.normalizeSource(bad), null, JSON.stringify(bad));
+    assert.ok(!guard.PROVENANCE.startsWith('claude-plugin'), 'provenance must live outside every plugin folder');
+});
+
+test('npx package specs are read from every server', () => {
+    const specs = guard.npxSpecs(JSON.parse(mcpJson('@scope/pkg@1.2.3', 'x')));
+    assert.deepEqual(specs, [{ server: 'x', spec: '@scope/pkg@1.2.3' }]);
+    assert.deepEqual(guard.splitSpec('@scope/pkg@1.2.3'), { pkg: '@scope/pkg', version: '1.2.3' });
+    assert.deepEqual(guard.splitSpec('delimit-cli'), { pkg: 'delimit-cli', version: null });
 });
 
 test('the repository as committed passes the offline invariants', () => {
-    const res = guard.evaluate({
-        head: {
-            plugin: read(guard.PLUGIN_MANIFEST), marketplace: read(guard.MARKETPLACE),
-            mcp: read(guard.MCP_CONFIG), releases: read(guard.PROVENANCE),
-        },
-    });
-    assert.deepEqual(res.errors, []);
-    const r = spawnSync(process.execPath, [path.join(ROOT, 'scripts', 'claude-plugin-release-guard.js')], { encoding: 'utf8' });
+    const r = spawnSync(process.execPath, [SCRIPT], { encoding: 'utf8' });
     assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, /delimit 1\.0\.4 \(claude-plugin\/\)/);
     assert.match(r.stdout, /PASS/);
+    // Every listed plugin in the committed marketplace has a provenance row.
+    const market = JSON.parse(read(guard.MARKETPLACE));
+    const rows = guard.parseReleases(read(guard.PROVENANCE));
+    for (const p of market.plugins) {
+        const v = JSON.parse(read(`${guard.normalizeSource(p.source)}/.claude-plugin/plugin.json`)).version;
+        assert.ok(rows.some((r) => r.plugin === p.name && r.version === v), `${p.name} ${v}`);
+    }
 });
 
-test('a change outside the plugin needs no bump and no npm lookup', () => {
+test('a change outside every plugin folder needs no bump and no npm lookup', () => {
     let called = false;
-    const res = guard.evaluate({ changedFiles: ['lib/cli.js', 'docs/claude-plugin-releases.md'], head: headFiles(), base: BASE, npmVersionExists: () => { called = true; return false; } });
+    const res = guard.evaluate({ changedFiles: ['lib/cli.js', 'docs/claude-plugin-releases.md', 'claude-plugin-notes.md'], head: side(), base: BASE, npmVersionExists: () => { called = true; return false; } });
     assert.deepEqual(res.errors, []);
     assert.equal(called, false);
 });
 
 test('(a) a plugin change without a version bump fails', () => {
-    const res = guard.evaluate({ changedFiles: ['claude-plugin/README.md'], head: headFiles(), base: BASE, npmVersionExists: npmYes });
-    assert.ok(res.errors.some((e) => /not greater than the base version 1\.0\.4/.test(e)), res.errors.join('\n'));
+    const res = guard.evaluate({ changedFiles: ['claude-plugin/README.md'], head: side(), base: BASE, npmVersionExists: npmYes });
+    assert.ok(has(res, /plugin delimit changed .* not greater than the base version 1\.0\.4/), show(res));
 });
 
 test('(a) a version already recorded at the base cannot be reused', () => {
-    const base = { plugin: pluginJson('1.0.4'), releases: releases('1.0.4', '1.0.5') };
-    const head = headFiles({ plugin: pluginJson('1.0.5'), releases: releases('1.0.4', '1.0.5') });
+    const base = side({ rel: releases('1.0.4', '1.0.5') });
+    const head = side({ delimit: '1.0.5', rel: releases('1.0.4', '1.0.5') });
     const res = guard.evaluate({ changedFiles: ['claude-plugin/.claude-plugin/plugin.json'], head, base, npmVersionExists: npmYes });
-    assert.ok(res.errors.some((e) => /latest recorded release 1\.0\.5/.test(e)), res.errors.join('\n'));
+    assert.ok(has(res, /latest recorded release 1\.0\.5/), show(res));
 });
 
 test('(b) a bumped version without a provenance row fails', () => {
-    const head = headFiles({ plugin: pluginJson('1.0.5') });
+    const head = side({ delimit: '1.0.5' });
     const res = guard.evaluate({ changedFiles: ['claude-plugin/.claude-plugin/plugin.json'], head, base: BASE, npmVersionExists: npmYes });
-    assert.ok(res.errors.some((e) => /no row for plugin version 1\.0\.5/.test(e)), res.errors.join('\n'));
+    assert.ok(has(res, /no row for plugin delimit version 1\.0\.5/), show(res));
 });
 
 test('a bump with a row and an existing pin passes', () => {
-    const head = headFiles({ plugin: pluginJson('1.0.5'), releases: releases('1.0.3', '1.0.4', '1.0.5') });
+    const head = side({ delimit: '1.0.5', rel: releases('1.0.3', '1.0.4', '1.0.5') });
     let asked = null;
     const res = guard.evaluate({
         changedFiles: ['claude-plugin/skills/record/SKILL.md', 'claude-plugin/.claude-plugin/plugin.json', 'docs/claude-plugin-releases.md'],
@@ -104,48 +128,197 @@ test('a bump with a row and an existing pin passes', () => {
 });
 
 test('(c) a pin that is not on npm fails, and a lookup error fails closed', () => {
-    const head = headFiles({ plugin: pluginJson('1.0.5'), releases: releases('1.0.3', '1.0.4', '1.0.5'), mcp: mcpJson('delimit-cli@9.9.9') });
+    const head = side({ delimit: '1.0.5', rel: releases('1.0.3', '1.0.4', '1.0.5'), mcp: mcpJson('delimit-cli@9.9.9') });
     const args = { changedFiles: ['claude-plugin/.mcp.json'], head, base: BASE };
-    assert.ok(guard.evaluate({ ...args, npmVersionExists: npmNo }).errors.some((e) => /9\.9\.9 does not exist on npm/.test(e)));
+    assert.ok(has(guard.evaluate({ ...args, npmVersionExists: npmNo }), /delimit-cli@9\.9\.9 does not exist on npm/));
     const thrown = guard.evaluate({ ...args, npmVersionExists: () => { throw new Error('ETIMEDOUT'); } });
-    assert.ok(thrown.errors.some((e) => /lookup .* failed: ETIMEDOUT/.test(e)), thrown.errors.join('\n'));
+    assert.ok(has(thrown, /lookup .* failed: ETIMEDOUT/), show(thrown));
     const offline = guard.evaluate({ ...args, npmVersionExists: null });
     assert.deepEqual(offline.errors, []);
     assert.ok(offline.warnings.some((w) => /--offline/.test(w)));
 });
 
-test('(c) the pin must be one exact X.Y.Z version', () => {
+test('(c) every npx pin must be one exact X.Y.Z version', () => {
     for (const spec of ['delimit-cli@^4.20.1', 'delimit-cli@latest', 'delimit-cli']) {
-        const res = guard.evaluate({ head: headFiles({ mcp: mcpJson(spec) }) });
-        assert.ok(res.errors.some((e) => /\.mcp\.json/.test(e)), `${spec}: ${res.errors.join('\n')}`);
+        const res = guard.evaluate({ head: side({ mcp: mcpJson(spec) }) });
+        assert.ok(has(res, /\.mcp\.json/), `${spec}: ${show(res)}`);
     }
 });
 
-test('(d) manifests must be valid JSON named delimit, with the marketplace pointing at the plugin', () => {
+test('(d) manifests must be valid JSON with matching names, and the listed plugin stays at ./claude-plugin', () => {
     const cases = [
-        [{ plugin: '{"name": "delimit",' }, /plugin\.json: invalid JSON/],
-        [{ plugin: pluginJson('1.0.4', 'other') }, /plugin\.json: name must be "delimit"/],
-        [{ plugin: pluginJson('1.0') }, /version must be X\.Y\.Z/],
-        [{ marketplace: 'not json' }, /marketplace\.json: invalid JSON/],
-        [{ marketplace: marketJson('./claude-plugin', 'other') }, /marketplace\.json: name must be "delimit"/],
-        [{ marketplace: marketJson('./elsewhere') }, /source must be \.\/claude-plugin/],
+        [{ market: 'not json' }, /marketplace\.json \(head\): invalid JSON/],
+        [{ market: marketJson([DELIMIT], 'other') }, /marketplace\.json: name must be "delimit"/],
+        [{ market: marketJson([{ ...DELIMIT, source: './elsewhere' }]) }, /source must be \.\/claude-plugin/],
+        [{ market: marketJson([PANEL]) }, /no plugin entry named "delimit"/],
+        [{ market: marketJson([DELIMIT, { ...PANEL, source: '../outside' }]) }, /not a relative folder/],
+        [{ market: marketJson([DELIMIT, { ...PANEL, source: './claude-plugin' }]) }, /listed twice/],
+        [{ delimit: null }, /plugin\.json: missing/],
         [{ mcp: null }, /\.mcp\.json: missing/],
     ];
     for (const [over, re] of cases) {
-        const res = guard.evaluate({ head: headFiles(over) });
-        assert.ok(res.errors.some((e) => re.test(e)), `${re}: ${res.errors.join('\n')}`);
+        const res = guard.evaluate({ head: side(over) });
+        assert.ok(has(res, re), `${re}: ${show(res)}`);
     }
+    const badName = guard.evaluate({ head: { ...side(), files: { ...side().files, 'claude-plugin/.claude-plugin/plugin.json': pluginJson('1.0.4', 'other') } } });
+    assert.ok(has(badName, /name must be "delimit" \(its marketplace entry\)/), show(badName));
+    const badVersion = guard.evaluate({ head: side({ delimit: '1.0' }) });
+    assert.ok(has(badVersion, /version must be X\.Y\.Z/), show(badVersion));
 });
 
-test('provenance rows must strictly increase and are append-only', () => {
-    const dup = guard.evaluate({ head: headFiles({ releases: releases('1.0.4', '1.0.4') }) });
-    assert.ok(dup.errors.some((e) => /strictly increase/.test(e)));
-    const down = guard.evaluate({ head: headFiles({ releases: releases('1.0.4', '1.0.3') }) });
-    assert.ok(down.errors.some((e) => /strictly increase/.test(e)));
-    const removed = guard.evaluate({ changedFiles: ['docs/claude-plugin-releases.md'], head: headFiles({ releases: releases('1.0.4') }), base: BASE });
-    assert.ok(removed.errors.some((e) => /row 1\.0\.3 was removed/.test(e)), removed.errors.join('\n'));
-    const missing = guard.evaluate({ head: headFiles({ releases: null }) });
-    assert.ok(missing.errors.some((e) => /claude-plugin-releases\.md: missing/.test(e)));
+test('provenance rows strictly increase per plugin and are append-only', () => {
+    const dup = guard.evaluate({ head: side({ rel: releases('1.0.4', '1.0.4') }) });
+    assert.ok(has(dup, /delimit versions must strictly increase/));
+    const down = guard.evaluate({ head: side({ rel: releases('1.0.4', '1.0.3') }) });
+    assert.ok(has(down, /strictly increase/));
+    const interleaved = guard.evaluate({ head: side({ rel: releases('1.0.3', ['delimit-panel', '1.0.0'], '1.0.4') }) });
+    assert.deepEqual(interleaved.errors, [], 'rows of different plugins do not have to be ordered against each other');
+    const removed = guard.evaluate({ changedFiles: ['docs/claude-plugin-releases.md'], head: side({ rel: releases('1.0.4') }), base: BASE });
+    assert.ok(has(removed, /row delimit 1\.0\.3 was removed/), show(removed));
+    const missing = guard.evaluate({ head: side({ rel: null }) });
+    assert.ok(has(missing, /claude-plugin-releases\.md: missing/));
+});
+
+// ---- sibling plugins (open PR #255 adds claude-plugin-governance/ and claude-plugin-panel/) ----
+
+const SUITE_REL = releases('1.0.3', '1.0.4', ['delimit-panel', '1.0.0']);
+const SUITE_BASE = side({ market: marketJson([DELIMIT, PANEL]), rel: SUITE_REL, panel: '1.0.0' });
+
+test('a sibling folder claude-plugin-panel/ is guarded as its own plugin, not as claude-plugin/', () => {
+    const head = side({ market: marketJson([DELIMIT, PANEL]), rel: SUITE_REL, panel: '1.0.0', panelMcp: mcpJson('delimit-cli@0.0.0-nope', 'delimit-panel') });
+    const res = guard.evaluate({ changedFiles: ['claude-plugin-panel/.mcp.json'], head, base: SUITE_BASE, npmVersionExists: npmYes });
+    assert.ok(has(res, /claude-plugin-panel\/\.mcp\.json: server "delimit-panel" must pin delimit-cli to an exact/), show(res));
+    assert.ok(has(res, /plugin delimit-panel changed .* not greater than the base version 1\.0\.0/), show(res));
+    assert.ok(!has(res, /plugin delimit changed/), 'the delimit plugin is not touched by a sibling change');
+});
+
+test('a sibling bump needs its own provenance row, and a missing npm pin fails for it', () => {
+    const head = side({ market: marketJson([DELIMIT, PANEL]), rel: SUITE_REL, panel: '1.0.1', panelMcp: mcpJson('delimit-cli@4.99.99', 'delimit-panel') });
+    const res = guard.evaluate({ changedFiles: ['claude-plugin-panel/skills/x/SKILL.md', 'claude-plugin-panel/.claude-plugin/plugin.json'], head, base: SUITE_BASE, npmVersionExists: (p, v) => v !== '4.99.99' });
+    assert.ok(has(res, /no row for plugin delimit-panel version 1\.0\.1/), show(res));
+    assert.ok(has(res, /claude-plugin-panel\/\.mcp\.json: delimit-cli@4\.99\.99 does not exist on npm/), show(res));
+});
+
+test('a marketplace edit that only concerns a sibling requires only the sibling bump', () => {
+    const market = marketJson([DELIMIT, { ...PANEL, description: 'panel, reworded' }]);
+    const noBump = guard.evaluate({ changedFiles: ['.claude-plugin/marketplace.json'], head: side({ market, rel: SUITE_REL, panel: '1.0.0' }), base: SUITE_BASE, npmVersionExists: npmYes });
+    assert.ok(has(noBump, /plugin delimit-panel changed \(\.claude-plugin\/marketplace\.json \(entry "delimit-panel"\)\)/), show(noBump));
+    assert.ok(!has(noBump, /plugin delimit changed/), show(noBump));
+    const bumped = guard.evaluate({
+        changedFiles: ['.claude-plugin/marketplace.json', 'claude-plugin-panel/.claude-plugin/plugin.json', 'docs/claude-plugin-releases.md'],
+        head: side({ market, rel: releases('1.0.3', '1.0.4', ['delimit-panel', '1.0.0'], ['delimit-panel', '1.0.1']), panel: '1.0.1' }),
+        base: SUITE_BASE, npmVersionExists: npmYes,
+    });
+    assert.deepEqual(bumped.errors, []);
+});
+
+test('a new sibling entry needs a provenance row; reordering entries changes nothing', () => {
+    const added = guard.evaluate({ changedFiles: ['.claude-plugin/marketplace.json', 'claude-plugin-panel/.claude-plugin/plugin.json', 'claude-plugin-panel/.mcp.json'], head: side({ market: marketJson([DELIMIT, PANEL]), panel: '1.0.0' }), base: BASE, npmVersionExists: npmYes });
+    assert.ok(has(added, /no row for plugin delimit-panel version 1\.0\.0/), show(added));
+    assert.ok(!has(added, /plugin delimit changed/), show(added));
+    const reordered = guard.evaluate({ changedFiles: ['.claude-plugin/marketplace.json'], head: side({ market: marketJson([PANEL, DELIMIT]), rel: SUITE_REL, panel: '1.0.0' }), base: SUITE_BASE, npmVersionExists: npmYes });
+    assert.deepEqual(reordered.errors, []);
+});
+
+test('marketplace-wide edits touch every plugin; removing or renaming a listed plugin fails', () => {
+    const wide = guard.evaluate({ changedFiles: ['.claude-plugin/marketplace.json'], head: side({ market: JSON.stringify({ name: 'delimit', owner: { name: 'Other' }, plugins: [DELIMIT, PANEL] }), rel: SUITE_REL, panel: '1.0.0' }), base: SUITE_BASE, npmVersionExists: npmYes });
+    assert.ok(has(wide, /plugin delimit changed/) && has(wide, /plugin delimit-panel changed/), show(wide));
+    const removed = guard.evaluate({ changedFiles: ['.claude-plugin/marketplace.json'], head: side({ rel: SUITE_REL }), base: SUITE_BASE, npmVersionExists: npmYes });
+    assert.ok(has(removed, /"delimit-panel" \(claude-plugin-panel\/\) was removed/), show(removed));
+    const renamed = guard.evaluate({ changedFiles: ['.claude-plugin/marketplace.json'], head: side({ market: marketJson([DELIMIT, { ...PANEL, name: 'delimit-council' }]), rel: SUITE_REL, panel: '1.0.0' }), base: SUITE_BASE, npmVersionExists: npmYes });
+    assert.ok(has(renamed, /named "delimit-panel" at the base but "delimit-council"/), show(renamed));
+});
+
+// ---- git-backed: the real diff, through main() ----
+
+function gitRepo(t) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'plugin-guard-'));
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+    const env = { ...process.env, HOME: dir, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: path.join(dir, 'no-gitconfig') };
+    for (const k of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_COMMON_DIR']) delete env[k];
+    const repo = path.join(dir, 'repo');
+    fs.mkdirSync(repo);
+    const g = (...args) => {
+        const r = spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', '-c', 'commit.gpgsign=false', ...args], { cwd: repo, env, encoding: 'utf8' });
+        assert.equal(r.status, 0, `git ${args.join(' ')}: ${r.stderr}`);
+        return r.stdout;
+    };
+    const write = (rel, text) => { fs.mkdirSync(path.dirname(path.join(repo, rel)), { recursive: true }); fs.writeFileSync(path.join(repo, rel), text); };
+    const run = () => spawnSync(process.execPath, [SCRIPT, '--root', repo, '--base', 'base', '--offline'], { cwd: repo, env, encoding: 'utf8' });
+    g('init', '-q', '-b', 'main');
+    // Rename and copy detection ON in config: --no-renames must still win.
+    g('config', 'diff.renames', 'copies');
+    return { repo, g, write, run };
+}
+
+function seedSuite({ write, g }) {
+    write('.claude-plugin/marketplace.json', marketJson([DELIMIT, PANEL]));
+    write('claude-plugin/.claude-plugin/plugin.json', pluginJson('1.0.4'));
+    write('claude-plugin/.mcp.json', mcpJson());
+    write('claude-plugin/PRIVACY.md', 'privacy\n'.repeat(20));
+    write('claude-plugin-panel/.claude-plugin/plugin.json', pluginJson('1.0.0', 'delimit-panel'));
+    write('claude-plugin-panel/.mcp.json', mcpJson('delimit-cli@4.21.0', 'delimit-panel'));
+    write(guard.PROVENANCE, SUITE_REL);
+    g('add', '-A');
+    g('commit', '-q', '-m', 'base');
+    g('tag', 'base');
+}
+
+test('git: moving a file OUT of the plugin folder is a plugin change (no rename bypass)', (t) => {
+    const r = gitRepo(t);
+    seedSuite(r);
+    r.g('mv', 'claude-plugin/PRIVACY.md', 'docs/PRIVACY-moved.md');
+    r.g('commit', '-q', '-m', 'move out');
+    const out = r.run();
+    assert.equal(out.status, 1, out.stdout + out.stderr);
+    assert.match(out.stdout, /FAIL {2}plugin delimit changed \(claude-plugin\/PRIVACY\.md\)/);
+    assert.doesNotMatch(out.stdout, /plugin delimit-panel changed/);
+});
+
+test('git: moving a file INTO a plugin folder is also a plugin change', (t) => {
+    const r = gitRepo(t);
+    seedSuite(r);
+    r.write('docs/extra.md', 'x\n'.repeat(20));
+    r.g('add', '-A');
+    r.g('commit', '-q', '-m', 'extra');
+    r.g('tag', '-f', 'base');
+    r.g('mv', 'docs/extra.md', 'claude-plugin-panel/extra.md');
+    r.g('commit', '-q', '-m', 'move in');
+    const out = r.run();
+    assert.equal(out.status, 1, out.stdout);
+    assert.match(out.stdout, /plugin delimit-panel changed \(claude-plugin-panel\/extra\.md\)/);
+});
+
+test('git: a sibling claude-plugin-panel/ pin change without a bump fails; a proper sibling release passes', (t) => {
+    const r = gitRepo(t);
+    seedSuite(r);
+    r.write('claude-plugin-panel/.mcp.json', mcpJson('delimit-cli@0.0.0-nope', 'delimit-panel'));
+    r.g('commit', '-qam', 'bad pin');
+    const bad = r.run();
+    assert.equal(bad.status, 1, bad.stdout);
+    assert.match(bad.stdout, /must pin delimit-cli to an exact X\.Y\.Z version, got "delimit-cli@0\.0\.0-nope"/);
+    assert.match(bad.stdout, /plugin delimit-panel changed/);
+    assert.doesNotMatch(bad.stdout, /plugin delimit changed/);
+
+    r.write('claude-plugin-panel/.mcp.json', mcpJson('delimit-cli@4.21.1', 'delimit-panel'));
+    r.write('claude-plugin-panel/.claude-plugin/plugin.json', pluginJson('1.0.1', 'delimit-panel'));
+    r.write(guard.PROVENANCE, releases('1.0.3', '1.0.4', ['delimit-panel', '1.0.0'], ['delimit-panel', '1.0.1']));
+    r.g('commit', '-qam', 'panel 1.0.1');
+    const good = r.run();
+    assert.equal(good.status, 0, good.stdout);
+    assert.match(good.stdout, /delimit-panel 1\.0\.1 \(claude-plugin-panel\/\), delimit-cli@4\.21\.1, changed/);
+    assert.match(good.stdout, /delimit 1\.0\.4 \(claude-plugin\/\), delimit-cli@4\.20\.1, unchanged/);
+});
+
+test('git: a marketplace edit that only concerns the sibling does not force a delimit bump', (t) => {
+    const r = gitRepo(t);
+    seedSuite(r);
+    r.write('.claude-plugin/marketplace.json', marketJson([DELIMIT, { ...PANEL, description: 'reworded' }]));
+    r.write('claude-plugin-panel/.claude-plugin/plugin.json', pluginJson('1.0.1', 'delimit-panel'));
+    r.write(guard.PROVENANCE, releases('1.0.3', '1.0.4', ['delimit-panel', '1.0.0'], ['delimit-panel', '1.0.1']));
+    r.g('commit', '-qam', 'panel description');
+    const out = r.run();
+    assert.equal(out.status, 0, out.stdout);
 });
 
 test('the CI workflow parses without duplicate keys and runs the guard against the PR base', () => {
