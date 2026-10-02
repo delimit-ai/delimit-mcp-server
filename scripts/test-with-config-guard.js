@@ -70,6 +70,7 @@ const TEST_FILES = [
     'tests/quickstart-cli.test.js',
     'tests/truth-security-p0.test.js',
     'tests/unparseable-config-no-clobber.test.js',
+    'tests/license-activation.test.js',
 ];
 
 const cfgPath = resolveSharedConfigPath();

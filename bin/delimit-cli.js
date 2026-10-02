@@ -5870,50 +5870,23 @@ program
 
         console.log(chalk.gray('  Validating license key...'));
 
-        // Validate against Lemon Squeezy API
-        let validated = false;
-        let licenseId = null;
-        let customerEmail = '';
-        try {
-            const resp = await axios.post('https://api.lemonsqueezy.com/v1/licenses/validate', {
-                license_key: key,
-            }, {
-                headers: { 'Accept': 'application/json' },
-                timeout: 10000,
-            });
-            if (resp.data && resp.data.valid) {
-                validated = true;
-                licenseId = resp.data.license_key?.id;
-                customerEmail = resp.data.meta?.customer_email || '';
-                console.log(chalk.green('  License valid.'));
-            } else {
-                console.log(chalk.red(`  License invalid: ${resp.data?.error || 'unknown error'}`));
-                process.exit(1);
+        // Pro is granted ONLY on a positive Lemon Squeezy confirmation. An
+        // invalid key (404/200 valid:false), any other HTTP error, or a
+        // network failure refuses activation and never touches an existing
+        // license.json. See lib/license-activation.js.
+        const { activateLicense } = require('../lib/license-activation');
+        const activation = await activateLicense(key, licensePath);
+        if (!activation.activated) {
+            console.error(chalk.red(`  ${activation.message}`));
+            if (fs.existsSync(licensePath)) {
+                console.error(chalk.dim('  Your existing license file was left unchanged.'));
             }
-        } catch (err) {
-            // If API unreachable, accept locally (grace period)
-            console.log(chalk.yellow('  Could not reach license server. Activating locally (7-day grace).'));
-            validated = true;
+            process.exit(1);
         }
-
-        // Write license file
-        const crypto = require('crypto');
-        const machineHash = crypto.createHash('sha256').update(os.homedir()).digest('hex').slice(0, 16);
-        const licenseData = {
-            key: key,
-            tier: 'pro',
-            valid: validated,
-            license_id: licenseId,
-            customer_email: customerEmail,
-            activated_at: Date.now() / 1000,
-            machine_hash: machineHash,
-            validated_at: Date.now() / 1000,
-        };
-
-        if (!fs.existsSync(licenseDir)) {
-            fs.mkdirSync(licenseDir, { recursive: true });
-        }
-        fs.writeFileSync(licensePath, JSON.stringify(licenseData, null, 2));
+        const licenseId = activation.record.license_id;
+        const customerEmail = activation.record.customer_email;
+        const machineHash = activation.record.machine_hash;
+        console.log(chalk.green('  License valid.'));
         console.log(chalk.green('\n  License activated successfully.'));
         console.log(chalk.dim(`  Tier: pro`));
         if (customerEmail) console.log(chalk.dim(`  Email: ${customerEmail}`));
