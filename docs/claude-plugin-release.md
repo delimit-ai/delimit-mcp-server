@@ -73,9 +73,10 @@ Users get the plugin through two channels, and they update differently:
    deletion, non-fast-forward and pull-request rules), so it does not block a
    merge by itself: governed merges (`scripts/governed_merge.py`) refuse a red
    guard, and an admin or web-UI merge must not land one. The job runs only on
-   pull requests, never on push to `main`. If another plugin PR merged after
-   yours last ran, re-run the guard against the current `main` before merging,
-   so two PRs cannot both claim the same version.
+   pull requests, never on push to `main`. Two PRs that claim the same
+   version can both pass the guard, because each is judged against its own
+   merge base; `claude plugin tag` in step 7 refuses the existing tag, which
+   catches it.
 7. **Tag the merged commit:**
    ```sh
    git checkout <merged main commit>
@@ -172,27 +173,48 @@ For the directory-listed `delimit` plugin, each release runs in this order:
 ## CI guard
 
 `scripts/claude-plugin-release-guard.js` runs in the `Tests` workflow as the job
-**Claude plugin release guard**, on pull requests. Its tests are
+**Claude plugin release guard**, on pull requests. CI runs the script as it is
+on the base commit (`git show "$BASE_SHA":scripts/claude-plugin-release-guard.js`),
+not the PR's copy. A PR that changes the script, its test or the guard job
+fails as `guard changed: needs owner review`. Its tests are
 `tests/claude-plugin-release-guard.test.js`, which run under `npm test`.
+
+### What this guard is and is not
+
+The guard is an accident guard: it catches honest mistakes, such as a plugin
+edit without a version bump. It is not an adversarial boundary. The real
+controls are the fixed tracked tag the directory reviews, governed review of
+every PR, the owner's Publish click, Anthropic's scan, and `claude plugin tag`
+refusing a tag that already exists. Known adversarial cases are out of its
+scope: alternate launchers or registries in `.mcp.json` (only `npx` pins are
+checked), inline `mcpServers` in plugin.json, edits to an existing provenance
+row (only removal is caught), and the stale-base race where two PRs claim the
+same version (caught by `claude plugin tag`).
 
 **Scope.** The guarded plugins are derived from every entry's `source` in
 `.claude-plugin/marketplace.json`, at the base and at the head (the union). A
 file belongs to a plugin only when its path starts with that plugin's folder
 plus `/`, so `claude-plugin-panel/` is a different plugin from
-`claude-plugin/`. The change set is `git diff --no-renames` from the merge base,
-and every path of every status counts, so moving a file out of a plugin folder
-changes that plugin.
+`claude-plugin/`. Each source must be exactly `./<folder>` (no whitespace, no
+trailing slash, no bare name), and `metadata.pluginRoot` must be unset. A
+changed path that matches a plugin folder only when case is ignored fails. The
+change set is `git diff --no-renames --ignore-submodules=none` from the merge
+base, and every path of every status counts, so moving a file out of a plugin
+folder changes that plugin. A `.gitattributes` or `.gitmodules` at the repo
+root or in an ancestor of a plugin folder touches every plugin.
 
 On every run it checks, offline:
 - marketplace.json parses, is named `delimit`, and lists the plugin `delimit`
-  at `./claude-plugin`; every entry's source is a relative folder in the repo;
+  at `./claude-plugin`; every entry's source is exactly `./<folder>`;
 - each listed plugin's plugin.json parses, carries its marketplace name and an
   X.Y.Z version, and its `.mcp.json` (if any) pins every npx package to one
   exact X.Y.Z version (`delimit` must pin `delimit-cli`);
 - each plugin's provenance rows strictly increase and include its current
   version, and no row recorded at the base was removed;
 - no plugin listed at the base was removed from, or renamed in, the
-  marketplace (that is an owner decision outside the guard).
+  marketplace (that is an owner decision outside the guard);
+- no symlink (mode 120000) or submodule gitlink (mode 160000) is in, or is, a
+  plugin folder.
 
 For each plugin the PR touches (a file under its folder, its marketplace
 entry, or a marketplace-wide field, which touches all of them), it also

@@ -65,8 +65,9 @@ test('folders match by exact prefix plus a slash; sources must be relative folde
     assert.ok(guard.inFolder('claude-plugin/README.md', 'claude-plugin'));
     assert.ok(!guard.inFolder('claude-plugin-panel/README.md', 'claude-plugin'));
     assert.ok(!guard.inFolder('claude-plugin', 'claude-plugin'));
-    assert.equal(guard.normalizeSource('./claude-plugin/'), 'claude-plugin');
-    for (const bad of ['.', './', '/abs', '../up', 'a/../b', 'https://x', { source: 'github' }, 7]) assert.equal(guard.normalizeSource(bad), null, JSON.stringify(bad));
+    assert.equal(guard.normalizeSource('./claude-plugin'), 'claude-plugin');
+    assert.equal(guard.normalizeSource('./a/b'), 'a/b');
+    for (const bad of ['.', './', '/abs', '../up', 'a/../b', './a/../b', 'https://x', { source: 'github' }, 7]) assert.equal(guard.normalizeSource(bad), null, JSON.stringify(bad));
     assert.ok(!guard.PROVENANCE.startsWith('claude-plugin'), 'provenance must live outside every plugin folder');
 });
 
@@ -93,7 +94,7 @@ test('the repository as committed passes the offline invariants', () => {
 
 test('a change outside every plugin folder needs no bump and no npm lookup', () => {
     let called = false;
-    const res = guard.evaluate({ changedFiles: ['lib/cli.js', 'docs/claude-plugin-releases.md', 'claude-plugin-notes.md'], head: side(), base: BASE, npmVersionExists: () => { called = true; return false; } });
+    const res = guard.evaluate({ changedFiles: ['lib/cli.js', 'docs/claude-plugin-releases.md', 'claude-plugin-notes.md', 'docs/.gitattributes'], head: side(), base: BASE, npmVersionExists: () => { called = true; return false; } });
     assert.deepEqual(res.errors, []);
     assert.equal(called, false);
 });
@@ -151,7 +152,7 @@ test('(d) manifests must be valid JSON with matching names, and the listed plugi
         [{ market: marketJson([DELIMIT], 'other') }, /marketplace\.json: name must be "delimit"/],
         [{ market: marketJson([{ ...DELIMIT, source: './elsewhere' }]) }, /source must be \.\/claude-plugin/],
         [{ market: marketJson([PANEL]) }, /no plugin entry named "delimit"/],
-        [{ market: marketJson([DELIMIT, { ...PANEL, source: '../outside' }]) }, /not a relative folder/],
+        [{ market: marketJson([DELIMIT, { ...PANEL, source: '../outside' }]) }, /not exactly "\.\/<folder>"/],
         [{ market: marketJson([DELIMIT, { ...PANEL, source: './claude-plugin' }]) }, /listed twice/],
         [{ delimit: null }, /plugin\.json: missing/],
         [{ mcp: null }, /\.mcp\.json: missing/],
@@ -248,7 +249,7 @@ function gitRepo(t) {
     g('init', '-q', '-b', 'main');
     // Rename and copy detection ON in config: --no-renames must still win.
     g('config', 'diff.renames', 'copies');
-    return { repo, g, write, run };
+    return { repo, g, write, run, env };
 }
 
 function seedSuite({ write, g }) {
@@ -329,6 +330,114 @@ test('the CI workflow parses without duplicate keys and runs the guard against t
     assert.match(job.if, /pull_request/);
     assert.equal(job.steps[0].with['fetch-depth'], 0);
     const run = job.steps.map((s) => s.run || '').join('\n');
-    assert.match(run, /node scripts\/claude-plugin-release-guard\.js --base "\$BASE_SHA"/);
+    // The guard runs as it is on the base commit, never the PR's copy.
+    assert.match(run, /git show "\$BASE_SHA":scripts\/claude-plugin-release-guard\.js > "\$RUNNER_TEMP\/claude-plugin-release-guard\.js"/);
+    assert.match(run, /node "\$RUNNER_TEMP\/claude-plugin-release-guard\.js" --root "\$GITHUB_WORKSPACE" --base "\$BASE_SHA"/);
+    assert.doesNotMatch(run, /node scripts\/claude-plugin-release-guard\.js/);
+    assert.match(run, /guard changed: needs owner review/);
     assert.match(job.steps.find((s) => s.run).env.BASE_SHA, /pull_request\.base\.sha/);
+});
+
+// ---- verifier defects, 2026-10-02 (accident guard, see the runbook's "What this guard is and is not") ----
+
+test('1: a PR that changes the guard, its test or its CI job needs owner review', () => {
+    for (const f of guard.GUARD_FILES) {
+        const res = guard.evaluate({ changedFiles: [f], head: side(), base: BASE, npmVersionExists: npmYes });
+        assert.ok(has(res, new RegExp(`guard changed: needs owner review \\(${f.replace(/[./]/g, '\\$&')}\\)`)), show(res));
+    }
+    const ci = read(guard.WORKFLOW);
+    assert.ok(guard.guardJobBlock(ci), 'job block found');
+    const other = ci.replace('  bundle-guards:', '  bundle-guards:\n    # unrelated edit');
+    const unrelated = guard.evaluate({ changedFiles: [guard.WORKFLOW], head: { ...side(), workflow: other }, base: { ...BASE, workflow: ci }, npmVersionExists: npmYes });
+    assert.deepEqual(unrelated.errors, [], 'an edit to another job is not a guard change');
+    const jobEdit = ci.replace(/--root "\$GITHUB_WORKSPACE" --base "\$BASE_SHA"/, '--offline || true');
+    assert.notEqual(jobEdit, ci);
+    const edited = guard.evaluate({ changedFiles: [guard.WORKFLOW], head: { ...side(), workflow: jobEdit }, base: { ...BASE, workflow: ci }, npmVersionExists: npmYes });
+    assert.ok(has(edited, /guard changed: needs owner review \(\.github\/workflows\/ci\.yml job claude-plugin-release-guard\)/), show(edited));
+    const dropped = guard.evaluate({ changedFiles: [guard.WORKFLOW], head: { ...side(), workflow: 'jobs: {}\n' }, base: { ...BASE, workflow: ci }, npmVersionExists: npmYes });
+    assert.ok(has(dropped, /guard changed/), show(dropped));
+});
+
+test('1 (git): the base copy of the guard fails a PR that edits the guard to exit 0', (t) => {
+    const r = gitRepo(t);
+    r.write('scripts/claude-plugin-release-guard.js', fs.readFileSync(SCRIPT, 'utf8'));
+    seedSuite(r);
+    r.write('claude-plugin/README.md', 'changed\n');
+    r.write('scripts/claude-plugin-release-guard.js', 'process.exitCode = 0;\n');
+    r.g('add', '-A');
+    r.g('commit', '-q', '-m', 'self edit');
+    // What CI does: extract the guard from the base commit and run that copy.
+    const baseCopy = path.join(path.dirname(r.repo), 'base-guard.js');
+    fs.writeFileSync(baseCopy, r.g('show', 'base:scripts/claude-plugin-release-guard.js'));
+    const out = spawnSync(process.execPath, [baseCopy, '--root', r.repo, '--base', 'base', '--offline'], { cwd: r.repo, env: r.env, encoding: 'utf8' });
+    assert.equal(out.status, 1, out.stdout + out.stderr);
+    assert.match(out.stdout, /guard changed: needs owner review \(scripts\/claude-plugin-release-guard\.js\)/);
+    assert.match(out.stdout, /plugin delimit changed \(claude-plugin\/README\.md\)/);
+});
+
+test('2 (git): a gitlink hidden by .gitmodules ignore=all is seen and refused', (t) => {
+    const r = gitRepo(t);
+    seedSuite(r);
+    const sha = r.g('rev-parse', 'HEAD').trim();
+    r.write('.gitmodules', '[submodule "vendor"]\n\tpath = claude-plugin/vendor\n\turl = https://example.invalid/x.git\n\tignore = all\n');
+    r.g('add', '.gitmodules');
+    r.g('update-index', '--add', '--cacheinfo', `160000,${sha},claude-plugin/vendor`);
+    r.g('commit', '-q', '-m', 'gitlink');
+    const out = r.run();
+    assert.equal(out.status, 1, out.stdout + out.stderr);
+    assert.match(out.stdout, /claude-plugin\/vendor: submodule \(gitlink\) in plugin folder claude-plugin\/ is not allowed/);
+    assert.match(out.stdout, /delimit 1\.0\.4 \(claude-plugin\/\), .*changed: .*claude-plugin\/vendor/);
+});
+
+test('2 (git): a symlink in a plugin folder is refused even with a proper bump', (t) => {
+    const r = gitRepo(t);
+    seedSuite(r);
+    r.write('shared/evil/SKILL.md', 'x\n');
+    fs.mkdirSync(path.join(r.repo, 'claude-plugin/skills'), { recursive: true });
+    fs.symlinkSync('../../shared/evil', path.join(r.repo, 'claude-plugin/skills/evil'));
+    r.write('claude-plugin/.claude-plugin/plugin.json', pluginJson('1.0.5'));
+    r.write(guard.PROVENANCE, releases('1.0.3', '1.0.4', ['delimit-panel', '1.0.0'], '1.0.5'));
+    r.g('add', '-A');
+    r.g('commit', '-q', '-m', 'symlink');
+    const out = r.run();
+    assert.equal(out.status, 1, out.stdout + out.stderr);
+    assert.match(out.stdout, /claude-plugin\/skills\/evil: symlink in plugin folder claude-plugin\/ is not allowed/);
+});
+
+test('3: sources match "./<folder>" exactly; pluginRoot and case variants fail closed', () => {
+    for (const src of ['./claude-plugin ', ' ./claude-plugin', 'claude-plugin', './claude-plugin/', '.\\claude-plugin']) {
+        assert.equal(guard.normalizeSource(src), null, JSON.stringify(src));
+        const res = guard.evaluate({ head: side({ market: marketJson([DELIMIT, { ...PANEL, source: src }]) }) });
+        assert.ok(has(res, /is not exactly "\.\/<folder>"/), `${JSON.stringify(src)}: ${show(res)}`);
+    }
+    const rooted = guard.evaluate({ head: side({ market: JSON.stringify({ name: 'delimit', metadata: { pluginRoot: './shadow' }, plugins: [DELIMIT] }) }) });
+    assert.ok(has(rooted, /metadata\.pluginRoot must not be set/), show(rooted));
+    const cased = guard.evaluate({ changedFiles: ['CLAUDE-PLUGIN/skills/evil/SKILL.md', 'Claude-Plugin'], head: side(), base: BASE, npmVersionExists: npmYes });
+    assert.ok(has(cased, /CLAUDE-PLUGIN\/skills\/evil\/SKILL\.md: differs only in case from plugin folder claude-plugin\//), show(cased));
+    assert.ok(has(cased, /^Claude-Plugin: differs only in case/), show(cased));
+    const twice = guard.evaluate({ head: side({ market: marketJson([DELIMIT, { ...PANEL, source: './Claude-Plugin' }]) }) });
+    assert.ok(has(twice, /listed twice/), show(twice));
+});
+
+test('4: .gitattributes or .gitmodules at the root or above a plugin folder touches every plugin', () => {
+    for (const f of ['.gitattributes', '.gitmodules', '.GITATTRIBUTES']) {
+        const res = guard.evaluate({ changedFiles: [f], head: side({ market: marketJson([DELIMIT, PANEL]), rel: SUITE_REL, panel: '1.0.0' }), base: SUITE_BASE, npmVersionExists: npmYes });
+        assert.ok(has(res, /plugin delimit changed .*git attributes or submodules/), `${f}: ${show(res)}`);
+        assert.ok(has(res, /plugin delimit-panel changed/), `${f}: ${show(res)}`);
+    }
+    assert.ok(guard.gitMetaAbove('a/.gitattributes', 'a/b'));
+    assert.ok(!guard.gitMetaAbove('a/b/.gitattributes', 'a/b'), 'inside the folder it is a file of that plugin');
+    assert.ok(!guard.gitMetaAbove('c/.gitattributes', 'a/b'));
+    assert.ok(!guard.gitMetaAbove('docs/notes.md', 'claude-plugin'));
+});
+
+test('5 and 6: provenance time label and the guard scope statement', () => {
+    const prov = read(guard.PROVENANCE);
+    assert.match(prov, /per ledger note \(written 07:15 ET; icon fix committed 07:14 ET\)/);
+    assert.doesNotMatch(prov, /07:30 ET/);
+    const runbook = read('docs/claude-plugin-release.md');
+    assert.match(runbook, /### What this guard is and is not/);
+    for (const text of [runbook, read(guard.WORKFLOW)]) {
+        for (const re of [/accident guard/i, /claude plugin tag/, /inline\s+(#\s*)?`?mcpServers/, /provenance\s+(#\s*)?row/, /stale-base race/, /launchers or registries/]) assert.match(text, re);
+    }
 });

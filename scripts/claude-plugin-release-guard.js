@@ -8,10 +8,23 @@
  * change to a marketplace plugin that would reach users without a version
  * bump and a provenance row.
  *
+ * It is an ACCIDENT guard: it catches honest mistakes, it is not an
+ * adversarial boundary. The adversarial controls are the fixed tracked tag,
+ * governed review of every PR, the owner's Publish click, Anthropic's scan,
+ * and `claude plugin tag` refusing an existing tag. Known out-of-scope cases:
+ * alternate launchers or registries, inline mcpServers in plugin.json,
+ * edits to an existing provenance row, and the stale-base race (caught by
+ * `claude plugin tag`). CI runs this script as it is on the BASE commit, and a
+ * PR that changes this script, its test or its CI job fails as
+ * "guard changed: needs owner review".
+ *
  * Guarded plugins are derived from EVERY entry's `source` in
  * .claude-plugin/marketplace.json, at the base AND at the head (union). Each
- * source is a folder; a file belongs to a plugin only if its path starts with
- * that exact folder plus "/" (so claude-plugin-panel/ is not claude-plugin/).
+ * source must be exactly "./<folder>" (no whitespace, no trailing slash) and
+ * metadata.pluginRoot must be unset; a file belongs to a plugin only if its
+ * path starts with that exact folder plus "/" (so claude-plugin-panel/ is not
+ * claude-plugin/). A changed path that matches a plugin folder only when case
+ * is ignored fails.
  *
  * Always checked (offline):
  *   - marketplace.json parses, is named "delimit", lists the plugin "delimit"
@@ -22,7 +35,9 @@
  *   - the provenance table (docs/claude-plugin-releases.md) has, per plugin,
  *     strictly increasing versions and a row for the current version;
  *   - with a base: no provenance row recorded at the base was removed, and no
- *     plugin listed at the base was removed or renamed.
+ *     plugin listed at the base was removed or renamed;
+ *   - no symlink (mode 120000) or submodule gitlink (mode 160000) sits in, or
+ *     is, a plugin folder.
  *
  * Checked per plugin that the change touches (a file under its folder, its
  * marketplace entry, or a marketplace-wide field):
@@ -31,9 +46,10 @@
  *   (b) the provenance table has a row for (plugin, new version);
  *   (c) every pinned npx package exists on npm (`npm view`).
  *
- * The change set is `git diff --no-renames` from the merge base, and every
- * path of every status counts, so moving a file OUT of a plugin folder is a
- * change to that plugin.
+ * The change set is `git diff --no-renames --ignore-submodules=none` from the
+ * merge base, and every path of every status counts, so moving a file OUT of
+ * a plugin folder is a change to that plugin. A .gitattributes or .gitmodules
+ * at the root or in an ancestor of a plugin folder touches every plugin.
  *
  * Usage:
  *   node scripts/claude-plugin-release-guard.js                # invariants only
@@ -90,25 +106,64 @@ function canonical(value) {
     return JSON.stringify(value);
 }
 
+const SOURCE_RE = /^\.\/([A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*)$/;
+
 /**
- * "./claude-plugin" -> "claude-plugin". Returns null for anything that is not
- * a plain relative folder inside the repository (absolute, "..", ".", URL or
- * object sources), which the caller reports as an error.
+ * "./claude-plugin" -> "claude-plugin". Exact match only, no trimming: any
+ * other form (whitespace, trailing slash, bare name, "..", absolute, URL or
+ * object sources) returns null, which the caller reports as an error.
  */
 function normalizeSource(source) {
     if (typeof source !== 'string') return null;
-    let s = source.trim().replace(/\\/g, '/');
-    while (s.startsWith('./')) s = s.slice(2);
-    s = s.replace(/\/+$/, '');
-    if (!s || s.startsWith('/') || /^[a-z]+:/i.test(s)) return null;
-    const parts = s.split('/');
-    if (parts.some((p) => p === '' || p === '.' || p === '..')) return null;
-    return s;
+    const m = SOURCE_RE.exec(source);
+    if (!m) return null;
+    if (m[1].split('/').some((p) => p === '.' || p === '..')) return null;
+    return m[1];
 }
 
 /** True only for files strictly inside `folder` (exact prefix + "/"). */
 function inFolder(file, folder) {
     return file.startsWith(`${folder}/`);
+}
+
+/** inFolder, or the folder itself, ignoring case. */
+function inFolderAnyCase(file, folder) {
+    const f = file.toLowerCase();
+    const d = folder.toLowerCase();
+    return f === d || f.startsWith(`${d}/`);
+}
+
+/** Files that change how git checks out plugin files without being in them. */
+const GIT_META_FILES = new Set(['.gitattributes', '.gitmodules']);
+
+/**
+ * True when `file` is a .gitattributes or .gitmodules at the repo root or in
+ * a strict ancestor folder of `folder` (case ignored).
+ */
+function gitMetaAbove(file, folder) {
+    const lower = file.toLowerCase();
+    const name = lower.split('/').pop();
+    if (!GIT_META_FILES.has(name)) return false;
+    const dir = lower.slice(0, lower.length - name.length); // '' or 'a/b/'
+    const target = `${folder.toLowerCase()}/`;
+    return dir.length < target.length && target.startsWith(dir);
+}
+
+// The guard itself. CI runs the base copy of the script, and a PR that
+// changes any of these is not judged by the guard but sent to the owner.
+const GUARD_FILES = ['scripts/claude-plugin-release-guard.js', 'tests/claude-plugin-release-guard.test.js'];
+const WORKFLOW = '.github/workflows/ci.yml';
+const GUARD_JOB = 'claude-plugin-release-guard';
+
+/** Text of the guard job in the workflow (its key line to the next job), or null. */
+function guardJobBlock(text) {
+    if (typeof text !== 'string') return null;
+    const lines = text.split('\n');
+    const start = lines.findIndex((l) => l.replace(/\s+$/, '') === `  ${GUARD_JOB}:`);
+    if (start < 0) return null;
+    let end = start + 1;
+    while (end < lines.length && !/^ {0,2}\S/.test(lines[end])) end++;
+    return lines.slice(start, end).join('\n').replace(/\s+$/, '');
 }
 
 /**
@@ -152,6 +207,10 @@ function marketplacePlugins(text, side, errors) {
         errors.push(`${label}: "plugins" must be an array`);
         return { market, plugins: [] };
     }
+    // pluginRoot re-roots bare sources in Claude Code; the guard refuses it.
+    if (market.metadata && typeof market.metadata === 'object' && Object.prototype.hasOwnProperty.call(market.metadata, 'pluginRoot')) {
+        errors.push(`${label}: metadata.pluginRoot must not be set; the guard cannot check where it points`);
+    }
     const plugins = [];
     const seenNames = new Set();
     const seenFolders = new Set();
@@ -163,13 +222,13 @@ function marketplacePlugins(text, side, errors) {
         }
         const folder = normalizeSource(entry.source);
         if (!folder) {
-            errors.push(`${label}: plugin "${name}" source ${JSON.stringify(entry.source)} is not a relative folder in this repository; the guard cannot check it`);
+            errors.push(`${label}: plugin "${name}" source ${JSON.stringify(entry.source)} is not exactly "./<folder>"; the guard cannot check it`);
             return;
         }
         if (seenNames.has(name)) errors.push(`${label}: plugin name "${name}" is listed twice`);
-        if (seenFolders.has(folder)) errors.push(`${label}: folder ${folder}/ is listed twice`);
+        if (seenFolders.has(folder.toLowerCase())) errors.push(`${label}: folder ${folder}/ is listed twice`);
         seenNames.add(name);
-        seenFolders.add(folder);
+        seenFolders.add(folder.toLowerCase());
         plugins.push({ name, folder, entry });
     });
     return { market, plugins };
@@ -242,6 +301,9 @@ function touchedPlugins({ changedFiles, headMarket, baseMarket, union }) {
     for (const file of changedFiles) {
         if (file === PROVENANCE) continue;
         for (const p of union.values()) if (inFolder(file, p.folder)) add(p.folder, file);
+        if ([...union.values()].some((p) => gitMetaAbove(file, p.folder))) {
+            for (const p of union.values()) add(p.folder, `${file} (git attributes or submodules above a plugin folder)`);
+        }
         if (file === MARKETPLACE) {
             const h = headMarket ? headMarket.market : null;
             const b = baseMarket ? baseMarket.market : null;
@@ -270,8 +332,9 @@ function touchedPlugins({ changedFiles, headMarket, baseMarket, union }) {
 
 /**
  * Pure evaluation.
- *   head = { marketplace, releases, files: { path: text|null } }
- *   base = same shape, or null when no base was given.
+ *   head = { marketplace, releases, workflow, links, files: { path: text|null } }
+ *   base = same shape (links unused), or null when no base was given.
+ * `links` lists tree entries with mode 120000 or 160000 as { mode, path }.
  * `files` holds plugin.json and .mcp.json for every folder in the union.
  * `npmVersionExists(pkg, v)` returns true/false or throws (a throw fails
  * closed); null means offline (a warning).
@@ -328,6 +391,34 @@ function evaluate({ changedFiles = [], head, base = null, npmVersionExists = nul
     const baseRows = base ? parseReleases(base.releases) : [];
     for (const r of baseRows) {
         if (!rows.some((h) => h.plugin === r.plugin && h.version === r.version)) errors.push(`${PROVENANCE}: row ${r.plugin} ${r.version} was removed (the record is append-only)`);
+    }
+
+    // The guard itself: a PR that changes it goes to the owner.
+    if (base) {
+        for (const f of GUARD_FILES) if (changedFiles.includes(f)) errors.push(`guard changed: needs owner review (${f})`);
+        if (changedFiles.includes(WORKFLOW) && guardJobBlock(head.workflow) !== guardJobBlock(base.workflow)) {
+            errors.push(`guard changed: needs owner review (${WORKFLOW} job ${GUARD_JOB})`);
+        }
+    }
+
+    // Paths that differ from a plugin folder only by case land in it on a
+    // case-insensitive checkout.
+    for (const file of changedFiles) {
+        for (const u of union.values()) {
+            if (!inFolder(file, u.folder) && inFolderAnyCase(file, u.folder)) {
+                errors.push(`${file}: differs only in case from plugin folder ${u.folder}/`);
+            }
+        }
+    }
+
+    // No symlinks or gitlinks in, at, or above a plugin folder.
+    for (const link of head.links || []) {
+        const kind = link.mode === '120000' ? 'symlink' : 'submodule (gitlink)';
+        for (const u of union.values()) {
+            if (inFolderAnyCase(link.path, u.folder) || inFolderAnyCase(u.folder, link.path)) {
+                errors.push(`${link.path}: ${kind} in plugin folder ${u.folder}/ is not allowed`);
+            }
+        }
     }
 
     // Per-plugin manifests at the head.
@@ -409,7 +500,7 @@ function git(root, args) {
  * every path of every status included (a rename shows as delete + add).
  */
 function changedPaths(root, from, to) {
-    const d = git(root, ['-c', 'diff.renames=false', 'diff', '--no-renames', '--no-ext-diff', '--name-status', '-z', from, to]);
+    const d = git(root, ['-c', 'diff.renames=false', 'diff', '--no-renames', '--no-ext-diff', '--ignore-submodules=none', '--name-status', '-z', from, to]);
     if (!d.ok) return { ok: false, err: d.err };
     const fields = d.out.split('\0');
     const files = new Set();
@@ -420,6 +511,23 @@ function changedPaths(root, from, to) {
         for (let k = 0; k < n && i < fields.length; k++) files.add(fields[i++]);
     }
     return { ok: true, files: [...files] };
+}
+
+/**
+ * Symlink and gitlink entries: of commit `rev`, or of the index when rev is
+ * null. Returns { ok, links: [{ mode, path }] }.
+ */
+function treeLinks(root, rev) {
+    const r = rev ? git(root, ['ls-tree', '-r', '-z', '--full-tree', rev]) : git(root, ['ls-files', '-s', '-z']);
+    if (!r.ok) return { ok: false, err: r.err };
+    const links = [];
+    for (const rec of r.out.split('\0')) {
+        const tab = rec.indexOf('\t');
+        if (tab < 0) continue;
+        const mode = rec.slice(0, rec.indexOf(' '));
+        if (mode === '120000' || mode === '160000') links.push({ mode, path: rec.slice(tab + 1) });
+    }
+    return { ok: true, links };
 }
 
 function readFileOrNull(root, rel) {
@@ -466,8 +574,10 @@ function main(argv) {
         const showAt = (rev) => (rel) => { const s = git(root, ['show', `${rev}:${rel}`]); return s.ok ? s.out : null; };
         const readHead = showAt('HEAD');
         const readBase = showAt(mergeBase);
-        head = { marketplace: readHead(MARKETPLACE), releases: readHead(PROVENANCE), files: {} };
-        base = { marketplace: readBase(MARKETPLACE), releases: readBase(PROVENANCE), files: {} };
+        const lt = treeLinks(root, 'HEAD');
+        if (!lt.ok) { console.error(`git ls-tree failed: ${lt.err.trim()}`); return 2; }
+        head = { marketplace: readHead(MARKETPLACE), releases: readHead(PROVENANCE), workflow: readHead(WORKFLOW), links: lt.links, files: {} };
+        base = { marketplace: readBase(MARKETPLACE), releases: readBase(PROVENANCE), workflow: readBase(WORKFLOW), files: {} };
         for (const folder of folderList(head.marketplace, base.marketplace)) {
             for (const rel of [manifestPath(folder), mcpPath(folder)]) {
                 head.files[rel] = readHead(rel);
@@ -476,7 +586,9 @@ function main(argv) {
         }
     } else {
         const read = (rel) => readFileOrNull(root, rel);
-        head = { marketplace: read(MARKETPLACE), releases: read(PROVENANCE), files: {} };
+        const lt = treeLinks(root, null);
+        if (!lt.ok) { console.error(`git ls-files failed: ${lt.err.trim()}`); return 2; }
+        head = { marketplace: read(MARKETPLACE), releases: read(PROVENANCE), links: lt.links, files: {} };
         for (const folder of folderList(head.marketplace)) {
             for (const rel of [manifestPath(folder), mcpPath(folder)]) head.files[rel] = read(rel);
         }
@@ -501,8 +613,9 @@ function main(argv) {
 
 module.exports = {
     PLUGIN_MANIFEST, MCP_CONFIG, MARKETPLACE, PROVENANCE,
-    parseSemver, compareSemver, parseReleases, normalizeSource, inFolder,
-    marketplacePlugins, npxSpecs, splitSpec, touchedPlugins, evaluate, changedPaths, main,
+    GUARD_FILES, WORKFLOW, GUARD_JOB,
+    parseSemver, compareSemver, parseReleases, normalizeSource, inFolder, inFolderAnyCase, gitMetaAbove, guardJobBlock,
+    marketplacePlugins, npxSpecs, splitSpec, touchedPlugins, evaluate, changedPaths, treeLinks, main,
 };
 
 if (require.main === module) process.exitCode = main(process.argv.slice(2));
