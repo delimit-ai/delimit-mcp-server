@@ -162,8 +162,13 @@ For the directory-listed `delimit` plugin, each release runs in this order:
 3. On the merged commit, `claude plugin tag claude-plugin` creates
    `delimit--v<version>`; push that one tag.
 4. Point the directory's tracked ref at the new tag (owner, plugin
-   **Settings** tab, **Tracked branch or tag**), or first confirm on that tab
-   that the listing follows something that moves on its own. The docs say "If
+   **Settings** tab, **Source > Tracked branch or tag**). Confirmed on that tab
+   (owner screenshot, 2026-10-02 17:17 ET): the listing tracks the fixed tag
+   `delimit--v1.0.4`, with path `claude-plugin`. The tab says that saving a
+   change "scans the latest commit on the new branch or tag as a new version",
+   that "a version that is already live stays up while that happens", and that
+   "a publish request that is still waiting is cancelled". Commits to `main`
+   therefore never become a directory version on their own. The docs say "If
    the submission follows a tag, release a new version by changing the tag"
    [submit].
 5. The directory scans the new commit (validation plus security scan).
@@ -188,8 +193,10 @@ every PR, the owner's Publish click, Anthropic's scan, and `claude plugin tag`
 refusing a tag that already exists. Known adversarial cases are out of its
 scope: alternate launchers or registries in `.mcp.json` (only `npx` pins are
 checked), inline `mcpServers` in plugin.json, edits to an existing provenance
-row (only removal is caught), and the stale-base race where two PRs claim the
-same version (caught by `claude plugin tag`).
+row (only removal is caught), the stale-base race where two PRs claim the
+same version (caught by `claude plugin tag`), and a PR that edits its own
+`ci.yml` so the guard job stops calling the base copy (pull_request runs the
+PR's workflow file; governed review of the workflow diff is the control).
 
 **Scope.** The guarded plugins are derived from every entry's `source` in
 `.claude-plugin/marketplace.json`, at the base and at the head (the union). A
@@ -451,3 +458,13 @@ submission.
 | Install acceptance | How do we prove the published artifact installs and works? | Stage 4: a clean-HOME install from the provider's own channel, a file hash match, and the MCP handshake plus a records round trip |
 | Receipts | Where is each version's evidence kept? | One row per (plugin, version) in `docs/claude-plugin-releases.md`: commit, tag, pin, scan result and findings, publication time and actor, acceptance |
 | Rollback | How do we undo a bad version, and what does it cost users? | A forward fix under a higher version. Delisting is the last resort and may remove installed copies. There is no documented revert |
+
+## Listing icon
+
+The listing shows only the first letter of the name when `plugin.json` `icon`
+is an SVG path ("This page can't display it"). A 1024x1024 PNG rendering of
+`.claude-plugin/icon.svg` (the delimit.ai shield, fill opacity flattened to
+`#0d1529`) was sent to the owner on 2026-10-02 for upload under **Listing >
+Icon** (square PNG or JPEG, 512 to 2048 px, reviewed before use). For 1.0.5,
+ship that PNG in the plugin and point `icon` at it, so the listing no longer
+depends on a manual upload.
