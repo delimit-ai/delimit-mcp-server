@@ -54,8 +54,6 @@ DEFAULT_STALENESS_THRESHOLDS: Dict[str, int] = {
     "delimit-drift-check": 129600,
     # STR-3724 #2 loop closure: daily churn-report PR cron (14:45 UTC).
     "delimit-churn-reports": 129600,
-    # stake.one INJ-claim: daily 13:00 UTC. >30 hours = stale.
-    "stakeone-inj-claim": 108000,
     # Self-repair watcher: 1h pass loop (ai.self_repair_daemon). >2h = stale.
     "delimit-self-repair": 7200,
     # Inbox executor: 30s poll loop (ai.inbox_executor). >30 min = stale.

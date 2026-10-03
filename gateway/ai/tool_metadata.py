@@ -235,6 +235,20 @@ TOOL_TIERS: Dict[str, Tier] = {
     "delimit_generate_template": "internal",
 }
 
+# Founder-operated workflows that predate the tier metadata.  This is metadata
+# for future public surfaces; the compatibility profiles below retain their
+# historical membership so installed users keep the same tool lists.
+FOUNDER_TOOLS = frozenset({
+    "delimit_think", "delimit_build", "delimit_build_loop",
+    "delimit_build_loop_daemon", "delimit_swarm",
+    "delimit_social_post", "delimit_social_approve",
+    "delimit_social_daemon", "delimit_social_target",
+    "delimit_social_target_config", "delimit_x_fetch",
+    "delimit_outreach_loop_tick", "delimit_vendor_news_scan",
+    "delimit_vendor_news_health", "delimit_vendor_news_draft",
+})
+TOOL_TIERS.update({name: "internal" for name in FOUNDER_TOOLS})
+
 
 # ─────────────────────────────────────────────────────────────────────
 #  DELIMIT_TOOLSET — opt-in compatibility profiles (LED-3709)
@@ -252,13 +266,16 @@ TOOL_TIERS: Dict[str, Tier] = {
 #                              ledger + handoff set (see CORE_SET below).
 #                              Sized for clients with tight tool caps
 #                              (e.g. VS Code agent mode's 128-tool limit).
-#    records                 → explicit decision and handoff records for a
-#                              Claude plugin. Excludes memory, soul and session
+#    records                 → explicit decisions, handoffs, and local memory
+#                              for a Claude plugin. Excludes soul and session
 #                              capture, transcript extraction (session_handoff
 #                              reads transcripts/git state), deliberation
 #                              (model providers), notify/social/outreach
 #                              (network), security audit (auto-notifies), and
-#                              all Pro, experimental and internal tools.
+#                              all other Pro, experimental and internal tools.
+#    governance              → local API spec checks (URL lint inputs opt in to
+#                              fetching the supplied URL).
+#    panel                   → opt-in multi-model deliberation and model setup.
 #
 #  This reuses the existing TOOL_TIERS classification and CORE_TOOLS set;
 #  it does NOT introduce a parallel taxonomy. Where CORE_TOOLS was too
@@ -267,7 +284,7 @@ TOOL_TIERS: Dict[str, Tier] = {
 #  the "5 workflows" documentation stays accurate.
 # ─────────────────────────────────────────────────────────────────────
 
-VALID_TOOLSETS = ("core", "standard", "full", "records")
+VALID_TOOLSETS = ("core", "standard", "full", "records", "governance", "panel")
 DEFAULT_TOOLSET = "full"
 
 RECORDS_TOOLS = frozenset({
@@ -275,6 +292,17 @@ RECORDS_TOOLS = frozenset({
     "delimit_ledger_done", "delimit_ledger_context",
     "delimit_handoff_create", "delimit_handoff_list",
     "delimit_handoff_acknowledge", "delimit_version", "delimit_help",
+    "delimit_memory_store", "delimit_memory_search", "delimit_memory_recent",
+})
+
+GOVERNANCE_TOOLS = frozenset({
+    "delimit_lint", "delimit_diff", "delimit_semver", "delimit_spec_health",
+    "delimit_explain", "delimit_drift_check", "delimit_version", "delimit_help",
+})
+
+PANEL_TOOLS = frozenset({
+    "delimit_deliberate", "delimit_deliberation_status", "delimit_models",
+    "delimit_version", "delimit_help",
 })
 
 # Essential tools added to the core profile on top of CORE_TOOLS. These are
@@ -297,6 +325,7 @@ CORE_PROFILE_EXTRA = {
 
 # Tiers excluded from the "standard" profile.
 _STANDARD_EXCLUDED_TIERS = frozenset({"internal", "experimental"})
+_STANDARD_LEGACY_INCLUDED = FOUNDER_TOOLS
 
 
 def core_tool_set() -> set:
@@ -323,7 +352,13 @@ def tool_in_toolset(tool_name: str, toolset: str) -> bool:
         return tool_name in core_tool_set()
     if toolset == "records":
         return tool_name in RECORDS_TOOLS
+    if toolset == "governance":
+        return tool_name in GOVERNANCE_TOOLS
+    if toolset == "panel":
+        return tool_name in PANEL_TOOLS
     if toolset == "standard":
+        if tool_name in _STANDARD_LEGACY_INCLUDED:
+            return True
         tier = TOOL_TIERS.get(tool_name, "public")
         return tier not in _STANDARD_EXCLUDED_TIERS
     # Unknown / misconfigured value → behave like "full" (never hide).

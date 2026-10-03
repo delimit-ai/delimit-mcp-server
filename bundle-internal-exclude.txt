@@ -227,3 +227,10 @@ gateway/ai/build_selector.py
 gateway/ai/outreach_untrusted_text.py
 gateway/ai/founder_x_compose.py
 gateway/ai/outreach_staged_reply.py
+gateway/ai/competitor_intel.py
+gateway/ai/competitors.default.json
+gateway/ai/outreach_arming_attestation.py
+gateway/ai/outreach_comment_screen.py
+gateway/ai/outreach_staged_producer.py
+gateway/ai/social_publish_guard.py
+gateway/ai/social_sources.py

@@ -639,7 +639,7 @@ def _emit_policy_event(tool_name: str, status: str, reason: str) -> None:
 #      gateway/ai/server.py ← ../../package.json)
 #   3. the pinned fallback below (last resort so the delimit_version return
 #      schema never changes shape — never-break-installs).
-_VERSION_FALLBACK = "4.21.0"
+_VERSION_FALLBACK = "4.22.0"
 
 
 def _resolve_version(start_path: Optional[str] = None) -> str:
@@ -947,6 +947,11 @@ from ai.tool_metadata import resolve_toolset as _resolve_toolset, tool_in_toolse
 
 ACTIVE_TOOLSET = _resolve_toolset(os.environ.get("DELIMIT_TOOLSET"))
 
+# These plugin profiles promise local operation even when the surrounding
+# installation has opted into Supabase mirroring.
+if ACTIVE_TOOLSET in {"records", "governance"}:
+    os.environ["DELIMIT_DISABLE_CLOUD_SYNC"] = "1"
+
 if ACTIVE_TOOLSET != "full":
     _orig_mcp_tool = mcp.tool
 
@@ -993,12 +998,16 @@ import functools as _functools
 from ai.capability_guard import (  # noqa: E402
     guard_internal as _guard_internal,
     missing_module_name as _missing_module_name,
+    tool_backend_absent as _tool_backend_absent,
 )
 
 _pre_capability_mcp_tool = mcp.tool
 
 
 def _capability_guarded_tool(*args, **kwargs):
+    def _registerable(fn):
+        return not _tool_backend_absent(kwargs.get("name") or getattr(fn, "__name__", ""))
+
     def _wrap(fn):
         @_functools.wraps(fn)
         def _guarded(*a, **kw):
@@ -1014,11 +1023,15 @@ def _capability_guarded_tool(*args, **kwargs):
         return _guarded
 
     if args and callable(args[0]) and not isinstance(args[0], str):
+        if not _registerable(args[0]):
+            return args[0]
         return _pre_capability_mcp_tool(_wrap(args[0]), *args[1:], **kwargs)
 
     decorator = _pre_capability_mcp_tool(*args, **kwargs)
 
     def _apply(fn):
+        if not _registerable(fn):
+            return fn
         return decorator(_wrap(fn))
 
     return _apply
@@ -1141,6 +1154,10 @@ def _check_pro(tool_name: str) -> Optional[Dict]:
     instead of hard-blocking a free user during the migration window. Without
     this, _with_next_steps would re-gate (grace-unaware) every PRO_TOOLS member
     it wraps, silently defeating the grace for newly-enforced tools."""
+    # This profile exposes only the local keyword memory backend; avoid a
+    # license revalidation request for its search operation.
+    if ACTIVE_TOOLSET == "records" and tool_name == "delimit_memory_search":
+        return None
     if tool_name not in PRO_TOOLS:
         return None
     gate = _pro_gate_graced(tool_name)
@@ -2030,14 +2047,14 @@ def _cap_response(result: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _records_next_steps(result: Dict[str, Any]) -> Dict[str, Any]:
-    """Keep records-profile hints inside its registered MCP surface."""
-    if ACTIVE_TOOLSET == "records" and isinstance(result, dict):
+    """Keep plugin-profile hints inside the active registered MCP surface."""
+    if ACTIVE_TOOLSET in {"records", "governance", "panel"} and isinstance(result, dict):
         steps = result.get("next_steps")
         if isinstance(steps, list):
             result["next_steps"] = [
                 step for step in steps
                 if isinstance(step, dict)
-                and _tool_in_toolset(step.get("tool", ""), "records")
+                and _tool_in_toolset(step.get("tool", ""), ACTIVE_TOOLSET)
             ]
     return result
 
@@ -2057,7 +2074,7 @@ def _with_next_steps(tool_name: str, result: Dict[str, Any]) -> Dict[str, Any]:
     """
     # Auto-start inbox daemon on first tool call - works for ALL models
     global _inbox_daemon_autostarted
-    if ACTIVE_TOOLSET != "records" and not _inbox_daemon_autostarted:
+    if ACTIVE_TOOLSET not in {"records", "governance", "panel"} and not _inbox_daemon_autostarted:
         _inbox_daemon_autostarted = True
         _autostart_optional_inbox_daemon()
 
@@ -2129,11 +2146,13 @@ def _with_next_steps(tool_name: str, result: Dict[str, Any]) -> Dict[str, Any]:
     rate_gate = (None if tool_name.removeprefix("delimit_") == "agent_dispatch"
                  else _check_rate_limit(tool_name))
     if rate_gate:
-        _emit_event(tool_name, rate_gate)
+        if ACTIVE_TOOLSET not in {"records", "governance", "panel"}:
+            _emit_event(tool_name, rate_gate)
         return _cap_response(rate_gate)
 
     # Emit event for real-time dashboard
-    _emit_event(tool_name, result)
+    if ACTIVE_TOOLSET not in {"records", "governance", "panel"}:
+        _emit_event(tool_name, result)
 
     # STR-052: Policy kernel inline enforcement
     policy_gate = _check_policy_gate(tool_name, result if isinstance(result, dict) else {})
@@ -2237,7 +2256,7 @@ def delimit_lint(old_spec: Annotated[str, Field(description="Path or URL to the 
             )
 
             # Dry-run mode: return raw lint + semver, skip all chains and governance
-            if dry_run:
+            if dry_run or ACTIVE_TOOLSET == "governance":
                 lint_result["dry_run"] = True
                 lint_result["simulated"] = True
                 # Still classify semver (informational, no side effects)
@@ -2245,6 +2264,9 @@ def delimit_lint(old_spec: Annotated[str, Field(description="Path or URL to the 
                 if not semver_result.get("error"):
                     lint_result["semver"] = semver_result
                 lint_result["resolved_from"] = resolved_from
+                if ACTIVE_TOOLSET == "governance":
+                    lint_result["next_steps"] = NEXT_STEPS_REGISTRY.get("lint", [])
+                    return _records_next_steps(lint_result)
                 return lint_result
 
             chain: Dict[str, Any] = {"id": "lint_chain", "steps": []}
@@ -3560,7 +3582,7 @@ def delimit_memory_search(query: Annotated[str, Field(description="Natural-langu
         Dict with matching memory entries and next_steps.
     """
     from ai.license import require_premium
-    gate = require_premium("memory_search")
+    gate = None if ACTIVE_TOOLSET == "records" else require_premium("memory_search")
     if gate:
         return gate
     from backends.memory_bridge import search
@@ -3962,6 +3984,27 @@ def _delimit_deploy_impl(
             },
         )
 
+    # Policy kernel BEFORE side effects. _with_next_steps also calls
+    # _check_policy_gate, but only after the wrapped backend call has already
+    # run, so its "blocked" verdict could not stop an npm publish, git push,
+    # Vercel deploy, or rollback record: the action happened and the caller
+    # was told it was blocked. The Pro gate stays first so unlicensed callers
+    # still receive premium_required rather than a policy verdict.
+    if action in {"build", "npm", "publish", "site", "rollback"}:
+        from ai.license import require_premium
+
+        pro_gate = require_premium(f"deploy_{action}")
+        if pro_gate:
+            return pro_gate
+        policy_gate = _check_policy_gate(f"deploy_{action}", {})
+        if policy_gate:
+            policy_gate["governance"] = {
+                "action": "policy_blocked",
+                "reason": policy_gate["reason"],
+                "phase": "pre_execution",
+            }
+            return _cap_response(policy_gate)
+
     if action == "plan":
         # Delegate to the shared chain logic
         return _deploy_plan_chain(
@@ -4080,10 +4123,11 @@ def _delimit_deploy_impl(
 
         env_vars = {}
         if "delimit-ui" in project_path or "delimit-ui" in str(Path(project_path).resolve()):
-            chatops_token = os.environ.get("CHATOPS_AUTH_TOKEN", "")
+            # 2026-09-28 security audit: NEXT_PUBLIC_* values are compiled into
+            # the public JS bundle, so the operator bearer (CHATOPS_AUTH_TOKEN)
+            # must never be injected here. Only the public ChatOps URL is.
             env_vars = {
                 "NEXT_PUBLIC_CHATOPS_URL": "https://chatops.delimit.ai",
-                "NEXT_PUBLIC_CHATOPS_TOKEN": chatops_token,
             }
         return _with_next_steps(
             "deploy_site",
@@ -9170,8 +9214,7 @@ def delimit_deploy_site(
     images; delimit_deploy_npm publishes packages; this is the
     static-site / Vercel flavour. Compared to running `git push`
     by hand, this wraps the push with sanitisation, governance
-    hooks, and (for delimit-ui) automatic ChatOps env-var
-    injection from CHATOPS_AUTH_TOKEN.
+    hooks, and (for delimit-ui) the public ChatOps URL env var.
 
     Side effects: requires repo_path and is gated by require_premium.
     project_path must remain inside repo_path. The safe default commits only
@@ -9180,9 +9223,9 @@ def delimit_deploy_site(
     Git mutation. A timeout after push returns status=pending, commit SHA, and
     a delimit_deploy_verify continuation rather than raising. On success this
     performs LOCAL git operations and triggers a NETWORK deploy
-    (Vercel build webhook). For the delimit-ui project, automatically
-    injects ChatOps env vars from the CHATOPS_AUTH_TOKEN environment
-    variable into the build context. No rollback — use
+    (Vercel build webhook). For the delimit-ui project, injects only the
+    public ChatOps URL into the build context; no credential is ever injected
+    as a NEXT_PUBLIC_* value. No rollback — use
     delimit_deploy_rollback if the deploy regresses.
 
     Args:
@@ -9337,6 +9380,21 @@ def _resolve_venture(venture: str) -> str:
             return str(candidate)
     dedicated = Path.home() / ".delimit" / "ventures" / venture
     return str(dedicated)
+
+
+def _continue_venture_loop(response: Dict[str, Any], venture: str) -> Dict[str, Any]:
+    """Offer the next scoped task after ledger context or completion."""
+    steps = [dict(step) for step in response.get("next_steps", [])]
+    response["next_steps"] = steps
+    if not any(step.get("tool") == "delimit_next_task" for step in steps):
+        steps.append({"tool": "delimit_next_task", "reason": "Find the next task in this venture",
+                      "suggested_args": {"venture": venture}, "is_premium": True})
+    else:
+        for step in steps:
+            if step.get("tool") == "delimit_next_task":
+                step["suggested_args"] = {**step.get("suggested_args", {}), "venture": venture}
+    # Profiles without delimit_next_task (records) must not advertise it.
+    return _records_next_steps(response)
 
 
 @mcp.tool()
@@ -9573,7 +9631,9 @@ def delimit_ledger_done(
         review_diff_path=review_diff_path or None,
         review_diff_text=review_diff_text or None,
     )
-    return _with_next_steps("ledger_done", result)
+    from ai.ledger_manager import _detect_venture
+    scoped_venture = venture or _detect_venture(project)["name"]
+    return _continue_venture_loop(_with_next_steps("ledger_done", result), scoped_venture)
 
 
 @mcp.tool()
@@ -10000,7 +10060,7 @@ def delimit_ledger_context(venture: Annotated[str, Field(description="Project na
     from ai.ledger_manager import get_context
     project = _resolve_venture(venture) if venture else "."
     result = get_context(project_path=project)
-    return _with_next_steps("ledger_context", result)
+    return _continue_venture_loop(_with_next_steps("ledger_context", result), venture or result["venture"])
 
 
 @mcp.tool()
@@ -12416,10 +12476,18 @@ def delimit_social_post(text: Annotated[str, Field(description="Tweet text. Leav
         }
 
     draft = True  # Always draft, never auto-post
+    # LED-5813: the approval email below already presents an empty X account
+    # as @delimit_ai, but the saved row kept account="" and no venture, so the
+    # founder's Telegram card could not bind an owner-approved Delimit original
+    # (_is_delimit_x_original requires account=delimit_ai + venture=delimit).
+    # Save the row as the account the founder is shown. Reddit is unchanged.
+    _save_account, _save_venture = account, ""
+    if platform == "twitter" and account in ("", "delimit_ai"):
+        _save_account, _save_venture = "delimit_ai", "delimit"
     entry = save_draft(
-        post["text"], platform=platform, account=account,
+        post["text"], platform=platform, account=_save_account,
         quote_tweet_id=quote_tweet_id, reply_to_id=reply_to_id,
-        context=context,
+        context=context, venture=_save_venture,
     )
     # Send draft notification via email and store Message-ID for
     # In-Reply-To matching in the inbox daemon (Consensus 116)
@@ -15499,7 +15567,9 @@ def delimit_task_complete(task_id: Annotated[str, Field(description="Ledger item
     r = _safe_call(task_complete, task_id=task_id, result=result,
                    cost_incurred=cost_incurred, error=error,
                    session_id=session_id, venture=venture)
-    return _with_next_steps("task_complete", r)
+    from ai.ledger_manager import _detect_venture
+    scoped_venture = venture or _detect_venture(".")["name"]
+    return _continue_venture_loop(_with_next_steps("task_complete", r), scoped_venture)
 
 
 @mcp.tool()

@@ -1,3 +1,22 @@
+## [4.22.0] - 2026-09-29
+
+### Added
+- `delimit mcp --toolset governance` exposes only the OpenAPI tools (diff, lint, semver, explain, spec health, drift check) plus help and version. `delimit mcp --toolset panel` exposes only deliberation, deliberation status, models, help and version. Both profiles keep processing local: they skip the optional inbox daemon and dashboard events, and the governance and records profiles turn off cloud sync.
+
+### Changed
+- On installs where a tool's backend module is not shipped, that tool is no longer listed (gateway #642). Previously such tools were listed and returned `capability_unavailable` when called. None of them could run on those installs, so no working tool is removed. A tool is still listed wherever its backend module is present. On a stock npm install, `tools/list` drops from 220 to 175 entries.
+- The bundled server no longer carries venture names; they are read from local configuration.
+
+### Security
+- Context sent to review models now redacts AWS access key IDs (`AKIA`/`ASIA`), `aws_secret_access_key` values, and PEM private-key blocks. It also redacts hardcoded secrets passed as defaults to environment lookups.
+- `delimit_deploy` runs the policy gate before build, npm, publish, site and rollback side effects. Previously a "blocked" verdict arrived after the action had already run.
+- Deploys of the dashboard project no longer place the operator ChatOps token in a public `NEXT_PUBLIC_*` build variable.
+- The visual-test puppeteer fallback embeds its target URL as JSON instead of interpolating it into script source.
+- `delimit setup` never rewrites a user config file it cannot parse, and never widens Codex config file permissions. Its secrets messages describe plaintext storage accurately.
+
+### Fixed
+- `delimit doctor` recommends, and runs, setup flags that exist. It previously suggested `delimit setup --all`, which is not a real flag.
+
 ## [4.21.0] - 2026-09-27
 
 ### Added
