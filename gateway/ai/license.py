@@ -189,6 +189,56 @@ except ImportError:
     REVALIDATION_INTERVAL = 30 * 86400  # 30 days
     GRACE_PERIOD = 7 * 86400
     HARD_BLOCK = 14 * 86400
+    _LS_VALIDATE_URL = "https://api.lemonsqueezy.com/v1/licenses/validate"
+
+    def _classify_ls_response(status: int, body: bytes):
+        """Classify a Lemon Squeezy validate response (mirrors license_core).
+
+        True: 2xx with ``valid: true``. False: ``valid: false`` on 2xx or
+        4xx except 429
+        (an unknown key is answered with HTTP 404 ``{"valid": false}``).
+        None: anything else (5xx, 429, other 4xx, non-JSON) — the server
+        did not answer, treated like a network failure.
+        """
+        try:
+            result = json.loads(body or b"")
+        except Exception:
+            result = None
+        valid = result.get("valid") if isinstance(result, dict) else None
+        if valid is False and (
+            200 <= int(status) < 300 or (400 <= int(status) < 500 and int(status) != 429)
+        ):
+            return False
+        if valid is True and 200 <= int(status) < 300:
+            return True
+        return None
+
+    def _ls_validate(key: str, machine_hash: str) -> tuple:
+        """POST to Lemon Squeezy. Returns (verdict, http_status); http_status
+        is None when no HTTP response arrived (DNS/connect/timeout/TLS)."""
+        import urllib.error
+        import urllib.request
+        req_data = json.dumps({"license_key": key, "instance_name": machine_hash}).encode()
+        try:
+            req = urllib.request.Request(
+                _LS_VALIDATE_URL,
+                data=req_data,
+                headers={"Content-Type": "application/json", "Accept": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                status = getattr(resp, "status", None) or 200
+                body = resp.read()
+            return _classify_ls_response(status, body), status
+        except urllib.error.HTTPError as e:
+            # A non-2xx answer is still an HTTP response, not a network error.
+            try:
+                body = e.read()
+            except Exception:
+                body = b""
+            return _classify_ls_response(e.code, body), e.code
+        except Exception:
+            return None, None
 
     def get_license() -> dict:
         if not LICENSE_FILE.exists():
@@ -218,7 +268,6 @@ except ImportError:
 
     def revalidate_license(data: dict) -> dict:
         import hashlib
-        import urllib.request
         key = data.get("key", "")
         if not key:
             data["last_validated_at"] = time.time()
@@ -230,20 +279,7 @@ except ImportError:
         elapsed = time.time() - last_validated
         machine_hash = data.get("machine_hash", hashlib.sha256(str(Path.home()).encode()).hexdigest()[:16])
 
-        api_valid = None
-        try:
-            req_data = json.dumps({"license_key": key, "instance_name": machine_hash}).encode()
-            req = urllib.request.Request(
-                "https://api.lemonsqueezy.com/v1/licenses/validate",
-                data=req_data,
-                headers={"Content-Type": "application/json", "Accept": "application/json"},
-                method="POST",
-            )
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                result = json.loads(resp.read())
-            api_valid = result.get("valid", False)
-        except Exception:
-            api_valid = None
+        api_valid, _status = _ls_validate(key, machine_hash)
 
         if api_valid is True:
             data["last_validated_at"] = time.time()
@@ -251,6 +287,16 @@ except ImportError:
             data.pop("grace_days_remaining", None)
             _write_license(data)
             return {"status": "valid", "updated_data": data}
+
+        if api_valid is False:
+            # Definite "not valid" from the license server: Pro ends now. The
+            # grace windows below apply only to an UNAVAILABLE server.
+            data["validation_status"] = "invalid"
+            data["valid"] = False
+            data.pop("grace_days_remaining", None)
+            _write_license(data)
+            return {"status": "expired", "updated_data": data,
+                    "reason": "License key is no longer valid (the license server rejected it)."}
 
         if elapsed > REVALIDATION_INTERVAL + HARD_BLOCK:
             data["validation_status"] = "expired"
@@ -323,27 +369,13 @@ except ImportError:
         # >=10-char key with no network call at all — a Pro-access bypass.
         import re
         import hashlib
-        import urllib.request
         if not key or len(key) < 10:
             return {"error": "Invalid license key format"}
         if key.startswith("DELIMIT-") and not re.match(r"^DELIMIT-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$", key):
             return {"error": "Invalid key format. Expected: DELIMIT-XXXX-XXXX-XXXX"}
 
         machine_hash = hashlib.sha256(str(Path.home()).encode()).hexdigest()[:16]
-        api_valid = None
-        try:
-            req_data = json.dumps({"license_key": key, "instance_name": machine_hash}).encode()
-            req = urllib.request.Request(
-                "https://api.lemonsqueezy.com/v1/licenses/validate",
-                data=req_data,
-                headers={"Content-Type": "application/json", "Accept": "application/json"},
-                method="POST",
-            )
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                result = json.loads(resp.read())
-            api_valid = result.get("valid", False)
-        except Exception:
-            api_valid = None
+        api_valid, http_status = _ls_validate(key, machine_hash)
 
         if api_valid is True:
             license_data = {
@@ -358,6 +390,20 @@ except ImportError:
 
         if api_valid is False:
             return {"error": "Invalid license key.", "status": "invalid"}
+
+        if http_status is not None and 400 <= http_status < 500 and http_status != 429:
+            return {"error": f"The license server rejected this key (HTTP {http_status}). "
+                             "Pro was not activated.", "status": "invalid"}
+
+        if http_status is not None:
+            # 5xx / 429 / unparseable answer: no Pro grant, no write.
+            return {
+                "status": "pending",
+                "tier": "free",
+                "error": f"The license server returned an error (HTTP {http_status}). "
+                         "Pro was not activated. Try again later.",
+                "message": "License validation unavailable. Pro not granted — retry later.",
+            }
 
         # Unreachable — do NOT grant Pro on an unverified key and do NOT
         # clobber any existing license already on disk.
