@@ -25,6 +25,7 @@ const {
     LS_VALIDATE_URL,
     classifyValidateResponse,
     validateLicenseKey,
+    refusalMessage,
     activateLicense,
 } = require('../lib/license-activation');
 
@@ -92,6 +93,24 @@ const VALIDATED = {
     last_validated_at: 1700000000,
     validated_via: 'lemon_squeezy',
 };
+
+describe('refusalMessage sanitizes upstream errors', () => {
+    it('redacts literal, trimmed and case variants, including regex metacharacters', () => {
+        const key = '  AbCd-[test].+SECRET  ';
+        const variants = [key, key.trim(), key.toUpperCase(), key.toLowerCase()];
+        const message = refusalMessage({ outcome: 'invalid', error: variants.join(' / ') }, key);
+        for (const variant of variants) assert.ok(!message.includes(variant));
+        assert.match(message, /\[REDACTED\]/);
+    });
+
+    it('strips controls before capping text without reconstructing a secret', () => {
+        const message = refusalMessage({ outcome: 'invalid',
+            error: 'abc\u0000SECRET\n\r\u001b\u007f\u0085' + 'x'.repeat(1000) }, 'abcSECRET');
+        assert.ok(!message.includes('abcSECRET'));
+        assert.doesNotMatch(message, /[\x00-\x1f\x7f-\x9f]/);
+        assert.ok(message.length <= 300);
+    });
+});
 
 // ── 1. pure classifier ────────────────────────────────────────────────
 describe('classifyValidateResponse', () => {
@@ -231,6 +250,16 @@ describe('delimit activate (CLI, throwaway HOME, fake server)', () => {
     let fake;
     before(async () => { fake = await startFakeLs(); });
     after(async () => { await fake.close(); });
+
+    it('an upstream error echoing the key never prints it to stdout or stderr', async () => {
+        const key = '  Delimit-Mixed-Secret-1234  ';
+        const variants = [key, key.trim(), key.toUpperCase(), key.toLowerCase()];
+        fake.answer(404, { valid: false, error: variants.join(' / ') });
+        const r = await runActivate(tmpHome(), key, fake.url);
+        assert.notStrictEqual(r.code, 0);
+        for (const variant of variants) assert.ok(!r.out.includes(variant));
+        assert.match(r.out, /\[REDACTED\]/);
+    });
 
     it('unknown key answered 404 {valid:false} -> exit 1, no Pro, no license.json', async () => {
         const home = tmpHome();
