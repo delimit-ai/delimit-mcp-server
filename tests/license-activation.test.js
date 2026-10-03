@@ -109,6 +109,11 @@ describe('classifyValidateResponse', () => {
     it('200 + valid:false (disabled/expired key) -> invalid', () => {
         assert.strictEqual(classifyValidateResponse(200, { valid: false }).outcome, 'invalid');
     });
+    for (const status of [429, 500, 503]) {
+        it(`${status} + valid:false -> unavailable`, () => {
+            assert.strictEqual(classifyValidateResponse(status, { valid: false }).outcome, 'unavailable');
+        });
+    }
     it('valid:true on a non-2xx status is never valid', () => {
         assert.notStrictEqual(classifyValidateResponse(404, { valid: true }).outcome, 'valid');
         assert.notStrictEqual(classifyValidateResponse(500, { valid: true }).outcome, 'valid');
@@ -145,12 +150,13 @@ describe('activateLicense (local fake server, injected transport)', () => {
         const r = await activateLicense(FAKE_KEY, lp, { post: postTo(fake.url) });
         assert.strictEqual(r.activated, false);
         assert.strictEqual(r.result.outcome, 'invalid');
-        assert.match(r.message, /License invalid: license_key not found\./);
+        assert.strictEqual(r.message, 'License invalid: license_key not found. Pro was not activated.');
         assert.ok(!fs.existsSync(lp));
     });
 
     for (const [status, payload, outcome] of [
         [400, { errors: [{ detail: 'bad' }] }, 'rejected'],
+        ...[429, 500, 503].map(status => [status, { valid: false }, 'unavailable']),
         [500, '<html>oops</html>', 'unavailable'],
         [503, { message: 'down' }, 'unavailable'],
         [429, { message: 'slow down' }, 'unavailable'],

@@ -194,7 +194,8 @@ except ImportError:
     def _classify_ls_response(status: int, body: bytes):
         """Classify a Lemon Squeezy validate response (mirrors license_core).
 
-        True: 2xx with ``valid: true``. False: ``valid: false`` on ANY status
+        True: 2xx with ``valid: true``. False: ``valid: false`` on 2xx or
+        4xx except 429
         (an unknown key is answered with HTTP 404 ``{"valid": false}``).
         None: anything else (5xx, 429, other 4xx, non-JSON) — the server
         did not answer, treated like a network failure.
@@ -204,7 +205,9 @@ except ImportError:
         except Exception:
             result = None
         valid = result.get("valid") if isinstance(result, dict) else None
-        if valid is False:
+        if valid is False and (
+            200 <= int(status) < 300 or (400 <= int(status) < 500 and int(status) != 429)
+        ):
             return False
         if valid is True and 200 <= int(status) < 300:
             return True
