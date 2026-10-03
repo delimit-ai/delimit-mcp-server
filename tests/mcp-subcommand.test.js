@@ -49,7 +49,7 @@ test('mcp reports missing Python on stderr without writing assistant configs', t
     t.after(() => { process.env.HOME = saved.HOME; process.env.PATH = saved.PATH; });
     process.env.HOME = home;
     process.env.PATH = '/nonexistent';
-    assert.throws(() => require('../lib/mcp-launcher').ensureMcpInstall(), /Python 3\.9\+ is required/);
+    assert.throws(() => require('../lib/mcp-launcher').ensureMcpInstall(), /Python 3\.10\+ is required/);
     assert.equal(fs.existsSync(path.join(home, '.mcp.json')), false);
     assert.equal(fs.existsSync(path.join(home, '.claude')), false);
 });
@@ -96,4 +96,90 @@ test('launcher fallback Python deps stay in lockstep with delimit setup', () => 
     const { FALLBACK_PY_DEPS } = require('../lib/mcp-launcher');
     const setup = fs.readFileSync(path.join(__dirname, '..', 'bin', 'delimit-setup.js'), 'utf8');
     for (const dep of FALLBACK_PY_DEPS) assert.ok(setup.includes(dep), `setup no longer pins ${dep}`);
+});
+
+test('plugin lock ships in npm and every requirement is exactly pinned and hashed', () => {
+    const root = path.join(__dirname, '..');
+    assert.ok(require('../package.json').files.includes('requirements-plugin.lock'));
+    const lock = fs.readFileSync(path.join(root, 'requirements-plugin.lock'), 'utf8');
+    const entries = lock.replace(/\\\r?\n/g, '').split('\n')
+        .map(line => line.trim()).filter(line => line && !line.startsWith('#'));
+    assert.ok(entries.length > 4, 'lock must include transitive dependencies');
+    for (const entry of entries) {
+        assert.match(entry, /^[a-z0-9][a-z0-9._-]*==[^\s;]+/i);
+        assert.match(entry, /--hash=sha256:[a-f0-9]{64}(?:\s|$)/);
+    }
+    for (const dep of require('../lib/mcp-launcher').FALLBACK_PY_DEPS) {
+        assert.ok(entries.some(entry => entry.startsWith(`${dep} `)), `lock missing ${dep}`);
+    }
+});
+
+// Execute the real launcher with isolated filesystem paths and simulated Python
+// processes, so install arguments and version selection are tested without PyPI.
+function simulatedInstall(t, version, lockPresent = true, installStatus = 0) {
+    const home = tempHome(t);
+    const root = path.join(__dirname, '..');
+    const calls = [];
+    const vm = require('node:vm');
+    const module = { exports: {} };
+    const fakeFs = { ...fs, existsSync(target) {
+        if (target === path.join(root, 'requirements-plugin.lock')) return lockPresent;
+        if (!lockPresent && path.basename(target) === 'requirements.txt') return false;
+        return fs.existsSync(target);
+    } };
+    const childProcess = { spawnSync(command, args) {
+        calls.push({ command, args });
+        if (args[0] === '-c') return { status: 0, stdout: version };
+        if (args[1] === 'venv') {
+            const python = path.join(args[2], process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
+            fs.mkdirSync(path.dirname(python), { recursive: true });
+            fs.writeFileSync(python, '# fixture');
+            return { status: 0 };
+        }
+        return { status: installStatus };
+    } };
+    vm.runInNewContext(fs.readFileSync(path.join(root, 'lib/mcp-launcher.js'), 'utf8'), {
+        module, __dirname: path.join(root, 'lib'), process,
+        require(name) {
+            if (name === 'fs') return fakeFs;
+            if (name === 'os') return { homedir: () => home };
+            if (name === 'child_process') return childProcess;
+            if (name === '../bin/delimit-setup') return require('../bin/delimit-setup');
+            if (name === '../package.json') return require('../package.json');
+            return require(name);
+        },
+    });
+    return { run: module.exports.ensureMcpInstall, calls, home };
+}
+
+test('plugin installs the lock with --require-hashes and --no-deps on Python 3.10–3.13', t => {
+    for (const version of ['3.10', '3.11', '3.12', '3.13']) {
+        const fixture = simulatedInstall(t, version);
+        fixture.run();
+        const args = fixture.calls.find(call => call.args[1] === 'pip').args;
+        assert.deepEqual(Array.from(args), ['-m', 'pip', 'install', '--quiet', '--no-cache-dir',
+            '--require-hashes', '--no-deps', '-r', path.join(__dirname, '..', 'requirements-plugin.lock')]);
+    }
+});
+
+test('plugin rejects Python 3.9 before creating a venv', t => {
+    const fixture = simulatedInstall(t, '3.9');
+    assert.throws(fixture.run, /Python 3\.10\+ is required/);
+    assert.equal(fixture.calls.some(call => call.args[1] === 'venv'), false);
+    assert.match(fs.readFileSync(path.join(__dirname, '..', 'claude-plugin/README.md'), 'utf8'), /Python 3\.10 or later/);
+});
+
+test('plugin uses fallback pins only when the lock is missing', t => {
+    const fixture = simulatedInstall(t, '3.10', false);
+    fixture.run();
+    const args = fixture.calls.find(call => call.args[1] === 'pip').args;
+    assert.deepEqual(Array.from(args).slice(5), require('../lib/mcp-launcher').FALLBACK_PY_DEPS);
+});
+
+test('failed hash install never falls back or writes the success marker', t => {
+    const fixture = simulatedInstall(t, '3.10', true, 1);
+    assert.throws(fixture.run, /Could not install Delimit Python requirements/);
+    assert.equal(fixture.calls.filter(call => call.args[1] === 'pip').length, 1);
+    const venv = path.join(fixture.home, '.delimit', 'plugin-server', require('../package.json').version, 'venv');
+    assert.equal(fs.existsSync(venv), false);
 });
