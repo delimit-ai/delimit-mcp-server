@@ -306,6 +306,49 @@ describe('LED-4057 delimit chat project-bound continuity', () => {
         assert.doesNotMatch(repl.formatSessionExit(result), /Session saved/);
     });
 
+    test('Claude native id binds a quota exit receipt to its transcript', () => {
+        const nativeId = '12345678-1234-4234-8234-123456789abc';
+        const { repl } = replReturning(
+            { status: 'not_found', reason: 'no_project_evidence' },
+            { chatRunId: nativeId },
+        );
+        assert.deepStrictEqual(repl.nativeClaudeArgs(), ['--session-id', nativeId]);
+        repl.claudeNativeLaunched = true;
+        assert.deepStrictEqual(repl.nativeClaudeArgs(), ['--resume', nativeId]);
+        const result = repl.finalizeSession('claude');
+        const receipt = JSON.parse(fs.readFileSync(result.receipt, 'utf8'));
+        assert.strictEqual(receipt.chat_run_id, nativeId);
+        assert.strictEqual(receipt.native_session_id, nativeId);
+        assert.strictEqual(receipt.context_captured, false);
+    });
+
+    test('Codex receives only an exact native session excerpt, marked unbound', () => {
+        const { repl } = replReturning({ status: 'not_found' });
+        const exact = repl.nativeCodexRecoveryPrompt({
+            status: 'no_active_project', native_recovery: {
+                status: 'exact_session', summary_excerpt: 'Resume Delimit PR #691.',
+            },
+        });
+        assert.match(exact, /Resume Delimit PR #691/);
+        assert.match(exact, /project is unbound/);
+        assert.match(exact, /No Claude API handoff is required/);
+        assert.strictEqual(repl.nativeCodexRecoveryPrompt({
+            status: 'no_active_project', native_recovery: {
+                status: 'candidates', exits: [{ transcripts: ['/tmp/unverified.jsonl'] }],
+            },
+        }), '');
+        const candidate = repl.nativeCodexRecoveryPrompt({
+            status: 'no_active_project', native_recovery: {
+                status: 'candidates', exits: [{ transcripts: [
+                    '/root/.claude/projects/-root/12345678-1234-4234-8234-123456789abc.jsonl',
+                ] }],
+            },
+        });
+        assert.match(candidate, /transcript CANDIDATES/);
+        assert.match(candidate, /12345678-1234-4234-8234-123456789abc\.jsonl/);
+        assert.doesNotMatch(candidate, /Resume Delimit PR #691/);
+    });
+
     test('backend errors and unsafe receipt paths remain honest, without leaking raw errors', () => {
         const other = path.join(backendRoot, 'other');
         fs.mkdirSync(other, { mode: 0o700 });
