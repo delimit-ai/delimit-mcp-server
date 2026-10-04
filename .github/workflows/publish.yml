@@ -14,10 +14,19 @@ on:
         options:
           - 'true'
           - 'false'
+      fin_order_id:
+        description: 'Fin order (held until exact artifact-bound confirmation adapter is integrated)'
+        required: false
+        default: ''
+        type: string
 
 permissions:
-  contents: write   # Needed for GitHub Release creation
-  id-token: write   # Required for npm provenance
+  contents: read
+
+# One workflow owner per package; never cancel a publication in progress.
+concurrency:
+  group: npm-delimit-cli-release
+  cancel-in-progress: false
 
 env:
   # Reviewed source for this package release. Never resolve a moving branch
@@ -33,10 +42,17 @@ jobs:
     # Release job: generous but finite (observed <= ~9 min).
     timeout-minutes: 30
     steps:
+      - name: Hold unbound Fin publication
+        if: github.event.inputs.fin_order_id != ''
+        run: |
+          echo '::error::HOLD: Fin publication requires the exact accepted artifact and owner confirmation adapter.'
+          exit 1
+
       - name: Checkout npm-delimit
         uses: actions/checkout@v4
         with:
           path: npm-delimit
+          persist-credentials: false
 
       - name: Checkout delimit-gateway
         uses: actions/checkout@v4
@@ -45,6 +61,7 @@ jobs:
           ref: ${{ env.GATEWAY_SOURCE_SHA }}
           token: ${{ secrets.GATEWAY_TOKEN }}
           path: delimit-gateway
+          persist-credentials: false
 
       - name: Verify frozen gateway source
         run: |
@@ -248,17 +265,22 @@ jobs:
           done
           if [ $FAILED -ne 0 ]; then exit 1; fi
 
-  publish:
+  build_release:
     needs: validate
+    permissions:
+      contents: read
+    outputs:
+      artifact_id: ${{ steps.accepted.outputs.artifact-id }}
     # Keep the actual npm artifact on the same minimum Linux ABI as validation.
     runs-on: ubuntu-22.04
-    name: Publish
+    name: Build and accept immutable artifact
     timeout-minutes: 30
     steps:
       - name: Checkout npm-delimit
         uses: actions/checkout@v4
         with:
           path: npm-delimit
+          persist-credentials: false
 
       - name: Checkout delimit-gateway
         uses: actions/checkout@v4
@@ -267,6 +289,7 @@ jobs:
           ref: ${{ env.GATEWAY_SOURCE_SHA }}
           token: ${{ secrets.GATEWAY_TOKEN }}
           path: delimit-gateway
+          persist-credentials: false
 
       - name: Verify frozen gateway source
         run: |
@@ -300,9 +323,7 @@ jobs:
           python -m pip install 'nuitka==2.5.9'
 
       - name: Verify npm >= 11.5.1 for OIDC trusted publishing
-        # Node 24 bundles npm >= 11.5.1 already. Print versions so the run log
-        # proves which npm the publish step uses (OIDC needs >= 11.5.1). Same
-        # Node/PATH as the publish step, so this version == the publish version.
+        # The final publisher independently checks its own runtime below.
         run: |
           echo "node: $(node --version)"
           echo "npm:  $(npm --version)"
@@ -333,7 +354,31 @@ jobs:
           VERSION=$(node -p "require('./package.json').version")
           python3 scripts/accept-packed-artifact.py "$RELEASE_TARBALL" "$VERSION" "$RELEASE_EVIDENCE"
 
+      - name: Bind immutable publication metadata
+        working-directory: npm-delimit
+        env:
+          EXPECTED_SOURCE: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE"
+          cp server.json "$RUNNER_TEMP/delimit-release-artifact/server.json"
+          node <<'NODE'
+          const fs=require('fs'), crypto=require('crypto'), path=require('path');
+          const root=process.env.RUNNER_TEMP+'/delimit-release-artifact';
+          const pkg=JSON.parse(fs.readFileSync('package.json'));
+          const accepted=JSON.parse(fs.readFileSync(process.env.RELEASE_EVIDENCE+'/PASS.json'));
+          const hash=p=>crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex');
+          const metadata={format:'delimit-release-artifact/1',package:pkg.name,version:pkg.version,
+            source_sha:process.env.EXPECTED_SOURCE,gateway_sha:process.env.GATEWAY_SOURCE_SHA,
+            run_id:process.env.GITHUB_RUN_ID,run_attempt:process.env.GITHUB_RUN_ATTEMPT,
+            tarball:path.basename(process.env.RELEASE_TARBALL),sha256:hash(process.env.RELEASE_TARBALL),
+            acceptance_sha256:hash(process.env.RELEASE_EVIDENCE+'/PASS.json'),server_sha256:hash(root+'/server.json')};
+          if(accepted.version!==pkg.version || accepted.sha256!==metadata.sha256) throw Error('acceptance mismatch');
+          fs.writeFileSync(root+'/release.json',JSON.stringify(metadata)+'\n');
+          NODE
+
       - name: Retain exact artifact and acceptance evidence
+        id: accepted
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -341,36 +386,142 @@ jobs:
           path: ${{ runner.temp }}/delimit-release-artifact/
           if-no-files-found: error
 
+  publish:
+    needs: build_release
+    runs-on: ubuntu-22.04
+    name: Publish accepted bytes
+    timeout-minutes: 15
+    # No package checkout, dependency installation, build, or package code
+    # executes in this job. Only this publisher can request an npm OIDC token.
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Verify publisher npm runtime
+        run: |
+          node --version
+          npm --version
+          node -e 'const p=require("child_process").execFileSync("npm",["--version"],{encoding:"utf8"}).trim().split(".").map(Number); if(!(p[0]>11 || (p[0]===11 && (p[1]>5 || (p[1]===5 && p[2]>=1))))) process.exit(1)'
+
+      - name: Download exact accepted artifact
+        uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ needs.build_release.outputs.artifact_id }}
+          path: ${{ runner.temp }}/delimit-release-artifact
+          merge-multiple: true
+
+      - name: Verify immutable publication inputs
+        env:
+          EXPECTED_SOURCE: ${{ github.sha }}
+          EXPECTED_REPOSITORY: ${{ github.repository }}
+          EXPECTED_RUN_ID: ${{ github.run_id }}
+          EXPECTED_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PYVERIFY'
+          import base64,hashlib,json,os,re,stat,tarfile
+          from pathlib import Path
+          def require(ok,reason):
+              if not ok: raise RuntimeError(reason)
+          def read(path,maximum):
+              fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
+              try:
+                  st=os.fstat(fd)
+                  require(stat.S_ISREG(st.st_mode) and st.st_nlink==1 and 0<st.st_size<=maximum,'unsafe artifact file')
+                  raw=b''
+                  while len(raw)<=maximum:
+                      part=os.read(fd,min(65536,maximum+1-len(raw)))
+                      if not part: break
+                      raw+=part
+                  require(len(raw)<=maximum,'artifact too large')
+                  return raw
+              finally: os.close(fd)
+          def verify(root,source,repository,run_id,attempt,gateway):
+              require(repository=='delimit-ai/delimit-mcp-server','publication repository')
+              meta=json.loads(read(root/'release.json',16384))
+              require(set(meta)=={'format','package','version','source_sha','gateway_sha','run_id','run_attempt',
+                  'tarball','sha256','acceptance_sha256','server_sha256'},'metadata schema')
+              require(meta['format']=='delimit-release-artifact/1' and meta['package']=='delimit-cli'
+                  and meta['source_sha']==source and meta['gateway_sha']==gateway
+                  and meta['run_id']==run_id and meta['run_attempt']==attempt,'source/run binding')
+              require(re.fullmatch(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)',meta['version'])
+                  and meta['tarball']=='delimit-cli-'+meta['version']+'.tgz','package version/path')
+              raw=read(root/meta['tarball'],67108864)
+              accepted_raw=read(root/'acceptance/PASS.json',16384)
+              server_raw=read(root/'server.json',65536)
+              require(hashlib.sha256(raw).hexdigest()==meta['sha256']
+                  and hashlib.sha256(accepted_raw).hexdigest()==meta['acceptance_sha256']
+                  and hashlib.sha256(server_raw).hexdigest()==meta['server_sha256'],'artifact bytes changed')
+              accepted=json.loads(accepted_raw)
+              digest={'sha256':hashlib.sha256(raw).hexdigest(),'sha1':hashlib.sha1(raw).hexdigest(),
+                  'integrity':'sha512-'+base64.b64encode(hashlib.sha512(raw).digest()).decode(),'size':len(raw)}
+              require(accepted['version']==meta['version'] and all(accepted.get(k)==v for k,v in digest.items()),'acceptance binding')
+              # Parse only package metadata; never extract or execute package code.
+              import io
+              with tarfile.open(fileobj=io.BytesIO(raw),mode='r:gz') as archive:
+                  entries=[];count=0;expanded=0
+                  for member in archive:
+                      count+=1;expanded+=member.size
+                      require(count<=10000 and expanded<=536870912,'package archive bounds')
+                      if member.name=='package/package.json': entries.append(member)
+                  require(len(entries)==1 and entries[0].isfile() and 0<entries[0].size<=262144,'package metadata')
+                  package=json.load(archive.extractfile(entries[0]))
+              require(package.get('name')=='delimit-cli' and package.get('version')==meta['version']
+                  and package.get('publishConfig',{})=={},'package publication config')
+              repo=package.get('repository',{});url=repo.get('url') if isinstance(repo,dict) else repo
+              require(url in ('git+https://github.com/delimit-ai/delimit-mcp-server.git',
+                  'https://github.com/delimit-ai/delimit-mcp-server.git'),'package repository identity')
+              server=json.loads(server_raw)
+              require(server.get('version')==meta['version'] and server.get('name')=='io.github.delimit-ai/delimit-mcp-server'
+                  and len(server.get('packages',[]))==1 and server['packages'][0].get('identifier')=='delimit-cli'
+                  and server['packages'][0].get('version')==meta['version'],'registry record binding')
+              return meta,accepted,server_raw
+          if __name__=='__main__':
+              root=Path(os.environ['RUNNER_TEMP'])/'delimit-release-artifact'
+              meta,accepted,server=verify(root,os.environ['EXPECTED_SOURCE'],os.environ['EXPECTED_REPOSITORY'],
+                  os.environ['EXPECTED_RUN_ID'],os.environ['EXPECTED_RUN_ATTEMPT'],os.environ['GATEWAY_SOURCE_SHA'])
+              publish=Path(os.environ['RUNNER_TEMP'])/'delimit-publish';publish.mkdir(mode=0o700)
+              # Keep npm's cwd separate from every downloaded package-controlled file.
+              (publish/'server.json').write_bytes(server)
+              (publish/'accepted.json').write_text(json.dumps(accepted))
+              with open(os.environ['GITHUB_ENV'],'a') as out:
+                  out.write('RELEASE_TARBALL='+str(root/meta['tarball'])+'\n')
+                  out.write('RELEASE_VERSION='+meta['version']+'\n')
+          PYVERIFY
+
       - name: Publish (dry run)
         if: github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run == 'true'
-        working-directory: npm-delimit
-        env:
-          GATEWAY_OVERRIDE: ${{ github.workspace }}/delimit-gateway
+        working-directory: ${{ runner.temp }}/delimit-publish
         run: |
-          python3 scripts/accept-packed-artifact.py --verify "$RELEASE_TARBALL" "$RELEASE_EVIDENCE/PASS.json"
-          npm publish "$RELEASE_TARBALL" --dry-run
+          set -euo pipefail
+          npm publish "$RELEASE_TARBALL" --ignore-scripts --registry=https://registry.npmjs.org --tag latest --dry-run
 
       - name: Publish to npm
         if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run == 'false')
-        working-directory: npm-delimit
+        working-directory: ${{ runner.temp }}/delimit-publish
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          GATEWAY_OVERRIDE: ${{ github.workspace }}/delimit-gateway
         run: |
-          python3 scripts/accept-packed-artifact.py --verify "$RELEASE_TARBALL" "$RELEASE_EVIDENCE/PASS.json"
-          npm publish "$RELEASE_TARBALL" --access public
+          set -euo pipefail
+          npm publish "$RELEASE_TARBALL" --ignore-scripts --registry=https://registry.npmjs.org --tag latest --access public
 
       - name: Verify published version
         if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run == 'false')
-        working-directory: npm-delimit
+        working-directory: ${{ runner.temp }}/delimit-publish
         run: |
-          PKG_VERSION=$(node -p "require('./package.json').version")
+          set -euo pipefail
+          PKG_VERSION="$RELEASE_VERSION"
           # Registry propagation can take 30-90s after publish. Retry with
           # bounded backoff instead of racing a fixed 10s sleep (v4.3.4 hit
           # E404 on the 10s path even though the publish had succeeded).
           for attempt in 1 2 3 4 5 6; do
             if npm view "delimit-cli@$PKG_VERSION" dist --json > "$RUNNER_TEMP/published-dist.json"; then
-              node -e 'const fs=require("fs"); const d=JSON.parse(fs.readFileSync(process.argv[1])); const a=JSON.parse(fs.readFileSync(process.argv[2])); if(d.shasum!==a.sha1 || d.integrity!==a.integrity) throw Error("Published artifact differs from accepted tarball")' "$RUNNER_TEMP/published-dist.json" "$RELEASE_EVIDENCE/PASS.json"
+              node -e 'const fs=require("fs"); const d=JSON.parse(fs.readFileSync(process.argv[1])); const a=JSON.parse(fs.readFileSync(process.argv[2])); if(d.shasum!==a.sha1 || d.integrity!==a.integrity) throw Error("Published artifact differs from accepted tarball")' "$RUNNER_TEMP/published-dist.json" "$RUNNER_TEMP/delimit-publish/accepted.json"
               echo "accepted bytes verified on attempt $attempt"
               exit 0
             fi
@@ -391,7 +542,7 @@ jobs:
         id: mcp_registry
         if: startsWith(github.ref, 'refs/tags/v')
         continue-on-error: true
-        working-directory: npm-delimit
+        working-directory: ${{ runner.temp }}/delimit-publish
         env:
           # Pinned + checksum-verified (PR #190 review): this step runs with
           # the job's OIDC token in scope, so an unpinned "latest" binary was
@@ -436,6 +587,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

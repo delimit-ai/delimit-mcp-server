@@ -4,7 +4,7 @@ const fs=require('fs'), path=require('path'), yaml=require('js-yaml');
 const doc=yaml.load(fs.readFileSync(path.join(__dirname,'../.github/workflows/publish.yml'),'utf8'));
 test('validation and publication use the same immutable reviewed gateway source',()=>{
     assert.match(doc.env.GATEWAY_SOURCE_SHA,/^[0-9a-f]{40}$/);
-    for(const id of ['validate','publish']) {
+    for(const id of ['validate','build_release']) {
         const steps=doc.jobs[id].steps;
         const checkouts=steps.filter(s=>s.with?.repository==='delimit-ai/delimit-gateway');
         assert.equal(checkouts.length,1);
@@ -17,27 +17,110 @@ test('validation and publication use the same immutable reviewed gateway source'
     }
 });
 
-test('publication accepts then publishes the same packed file without another directory build',()=>{
-    const steps=doc.jobs.publish.steps;
-    const build=steps.findIndex(s=>s.name==='Build and pack exact release artifact');
-    const accept=steps.findIndex(s=>s.name==='Accept exact packed artifact');
+test('build and acceptance cannot access npm OIDC or persisted Git credentials',()=>{
+    assert.deepEqual(doc.permissions,{contents:'read'});
+    assert.equal(doc.concurrency.group,'npm-delimit-cli-release');
+    assert.equal(doc.concurrency['cancel-in-progress'],false);
+    for(const name of ['validate','build_release']) {
+        const job=doc.jobs[name];
+        assert.notEqual(job.permissions?.['id-token'],'write');
+        for(const step of job.steps) {
+            assert(!step.env?.NODE_AUTH_TOKEN);
+            if(step.uses?.startsWith('actions/checkout@')) assert.equal(step.with['persist-credentials'],false);
+        }
+    }
+    assert.deepEqual(doc.jobs.publish.permissions,{contents:'read','id-token':'write'});
+    assert(doc.jobs.validate.steps.find(s=>s.name==='Hold unbound Fin publication').run.includes('exit 1'));
+});
+
+test('publication consumes the immutable accepted artifact without package execution',()=>{
+    const buildSteps=doc.jobs.build_release.steps, steps=doc.jobs.publish.steps;
+    const build=buildSteps.findIndex(s=>s.name==='Build and pack exact release artifact');
+    const accept=buildSteps.findIndex(s=>s.name==='Accept exact packed artifact');
     assert(build>=0 && accept>build);
-    assert.match(steps[build].run,/npm run prepublishOnly/);
-    assert.match(steps[build].run,/npm pack --json --pack-destination/);
-    assert(steps[build].run.indexOf('npm run prepublishOnly')<steps[build].run.indexOf('npm pack'));
+    assert.match(buildSteps[build].run,/npm run prepublishOnly/);
+    assert.match(buildSteps[build].run,/npm pack --json --pack-destination/);
+    assert(buildSteps[build].run.indexOf('npm run prepublishOnly')<buildSteps[build].run.indexOf('npm pack'));
+    const download=steps.find(s=>s.name==='Download exact accepted artifact');
+    assert.equal(download.with['artifact-ids'],'${{ needs.build_release.outputs.artifact_id }}');
+    assert.equal(doc.jobs.build_release.outputs.artifact_id,'${{ steps.accepted.outputs.artifact-id }}');
+    assert.equal(doc.jobs.publish.needs,'build_release');
+    assert.equal(doc.jobs.build_release.needs,'validate');
+    assert(!steps.some(s=>s.uses?.startsWith('actions/checkout@')));
+    assert(!steps.some(s=>/npm ci|npm run|npm pack|accept-packed-artifact\.py/.test(s.run||'')));
+    const verify=steps.findIndex(s=>s.name==='Verify immutable publication inputs');
     for(const name of ['Publish (dry run)','Publish to npm']) {
         const index=steps.findIndex(s=>s.name===name);
-        assert(index>accept);
-        assert.match(steps[index].run,/--verify "\$RELEASE_TARBALL" "\$RELEASE_EVIDENCE\/PASS.json"/);
-        assert.match(steps[index].run,/npm publish "\$RELEASE_TARBALL"/);
-        assert(!steps[index].run.includes('--ignore-scripts'));
+        assert(index>verify);
+        assert.match(steps[index].run,/npm publish "\$RELEASE_TARBALL" --ignore-scripts/);
+        assert.match(steps[index].run,/--registry=https:\/\/registry\.npmjs\.org --tag latest/);
+        assert.equal(steps[index]['working-directory'],'${{ runner.temp }}/delimit-publish');
     }
-    assert.equal(doc.jobs.publish.needs,'validate');
+    assert.deepEqual(steps.filter(s=>s.env?.NODE_AUTH_TOKEN).map(s=>s.name),['Publish to npm']);
     assert.match(steps.find(s=>s.name==='Verify published version').run,/d\.shasum!==a\.sha1/);
     assert.match(steps.find(s=>s.name==='Verify published version').run,/d\.integrity!==a\.integrity/);
 });
 
 const {spawnSync}=require('child_process');
+const verificationStep=doc.jobs.publish.steps.find(s=>s.name==='Verify immutable publication inputs');
+const verifier=verificationStep.run.match(/python3 - <<'PYVERIFY'\n([\s\S]+)\nPYVERIFY/)[1];
+function publicationCheck(code) {
+    const setup=`import base64,hashlib,io,json,pathlib,tarfile,tempfile\nns={'__name__':'fixture'}\nexec(${JSON.stringify(verifier)},ns)\n`;
+    const fixture=`
+def fixture(root,mutate=None):
+ package={'name':'delimit-cli','version':'1.2.3','repository':{'url':'https://github.com/delimit-ai/delimit-mcp-server.git'},'scripts':{'postpublish':'exit 97'}}
+ if mutate: mutate(package)
+ tar=root/'delimit-cli-1.2.3.tgz'
+ with tarfile.open(tar,'w:gz') as t:
+  raw=json.dumps(package).encode();i=tarfile.TarInfo('package/package.json');i.size=len(raw);t.addfile(i,io.BytesIO(raw))
+ raw=tar.read_bytes()
+ accepted=dict(version='1.2.3',sha256=hashlib.sha256(raw).hexdigest(),sha1=hashlib.sha1(raw).hexdigest(),integrity='sha512-'+base64.b64encode(hashlib.sha512(raw).digest()).decode(),size=len(raw))
+ (root/'acceptance').mkdir();(root/'acceptance/PASS.json').write_text(json.dumps(accepted))
+ server={'name':'io.github.delimit-ai/delimit-mcp-server','version':'1.2.3','packages':[{'identifier':'delimit-cli','version':'1.2.3'}]}
+ (root/'server.json').write_text(json.dumps(server))
+ h=lambda p:hashlib.sha256(p.read_bytes()).hexdigest()
+ meta=dict(format='delimit-release-artifact/1',package='delimit-cli',version='1.2.3',source_sha='a'*40,gateway_sha='b'*40,run_id='123',run_attempt='1',tarball=tar.name,sha256=h(tar),acceptance_sha256=h(root/'acceptance/PASS.json'),server_sha256=h(root/'server.json'))
+ (root/'release.json').write_text(json.dumps(meta))
+ return meta,accepted
+def verify(root,**changes):
+ args=dict(source='a'*40,repository='delimit-ai/delimit-mcp-server',run_id='123',attempt='1',gateway='b'*40);args.update(changes)
+ return ns['verify'](root,**args)
+`;
+    const result=spawnSync('python3',['-c',setup+fixture+code],{encoding:'utf8',timeout:10000});
+    assert.equal(result.status,0,result.stdout+result.stderr);
+}
+
+test('publisher verifies exact accepted bytes and reads metadata without running package scripts',()=>publicationCheck(`
+with tempfile.TemporaryDirectory() as d:
+ root=pathlib.Path(d);meta,accepted=fixture(root)
+ got=verify(root);assert got[0]==meta and got[1]==accepted
+`));
+
+test('publisher rejects changed source, run, repository, bytes and unsafe publication metadata',()=>publicationCheck(`
+for fault in ('source','run','repo','gateway','artifact','receipt','server','path','version','publishConfig','packageName','packageRepo','symlink'):
+ with tempfile.TemporaryDirectory() as d:
+  root=pathlib.Path(d)
+  def mutate(p):
+   if fault=='publishConfig':p['publishConfig']={'registry':'https://attacker.invalid'}
+   if fault=='packageName':p['name']='another-package'
+   if fault=='packageRepo':p['repository']['url']='https://attacker.invalid/repo'
+  meta,accepted=fixture(root,mutate)
+  args={}
+  if fault=='source':args['source']='c'*40
+  if fault=='run':args['run_id']='456'
+  if fault=='repo':args['repository']='attacker/repo'
+  if fault=='gateway':args['gateway']='c'*40
+  if fault in ('artifact','receipt','server'):
+   p={'artifact':root/meta['tarball'],'receipt':root/'acceptance/PASS.json','server':root/'server.json'}[fault];p.write_bytes(p.read_bytes()+b'changed')
+  if fault=='path':meta['tarball']='../escape.tgz';(root/'release.json').write_text(json.dumps(meta))
+  if fault=='version':meta['version']='1.2.3\\nNPM_CONFIG_REGISTRY=https://attacker.invalid';(root/'release.json').write_text(json.dumps(meta))
+  if fault=='symlink':
+   p=root/'acceptance/PASS.json';other=root/'elsewhere';p.rename(other);p.symlink_to(other)
+  try:verify(root,**args)
+  except (ValueError,RuntimeError,OSError):pass
+  else:raise AssertionError('unsafe publication input accepted: '+fault)
+`));
+
 function pythonCheck(code) {
     const result=spawnSync('python3',['-c',`import importlib.util, tempfile, pathlib, os, sys, subprocess\np=pathlib.Path('scripts/accept-packed-artifact.py').resolve()\ns=importlib.util.spec_from_file_location('acceptance',p); m=importlib.util.module_from_spec(s);s.loader.exec_module(m)\n${code}`],{cwd:path.join(__dirname,'..'),encoding:'utf8',timeout:10000});
     assert.equal(result.status,0,result.stdout+result.stderr);
@@ -93,7 +176,7 @@ test('file publish dry-run preserves bytes and cannot rerun the directory build 
         const tar=path.join(dir,JSON.parse(pack.stdout)[0].filename);
         const sha=()=>crypto.createHash('sha256').update(fs.readFileSync(tar)).digest('hex');
         const before=sha();
-        const file=spawnSync('npm',['publish',tar,'--dry-run','--json'],options);
+        const file=spawnSync('npm',['publish',tar,'--ignore-scripts','--dry-run','--json'],options);
         assert.equal(file.status,0,file.stderr);
         assert.equal(sha(),before);
         const directory=spawnSync('npm',['publish','--dry-run'],options);
