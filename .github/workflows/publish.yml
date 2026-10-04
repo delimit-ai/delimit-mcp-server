@@ -496,7 +496,6 @@ jobs:
               return value['artifact_id'],value['build_run_id'],value['build_run_attempt']
           def trusted_event(event,order,raw,execution,*,actor_id,repository_id):
               require(str(actor_id)=='266558014' and event.get('sender',{}).get('id')==266558014
-                  and event.get('sender',{}).get('login')=='infracore'
                   and event.get('repository',{}).get('id')==repository_id
                   and event.get('inputs')=={'dry_run':'false','expected_source':'','fin_order_id':order,'fin_release':raw,'fin_execution':execution},
                   'authenticated Fin dispatch event')
@@ -505,7 +504,7 @@ jobs:
               if order or raw or execution:
                   event=decode(open(os.environ['GITHUB_EVENT_PATH']).read())
                   trusted_event(event,order,raw,execution,actor_id=os.environ['GITHUB_ACTOR_ID'],repository_id=int(os.environ['EXPECTED_REPOSITORY_ID']))
-                  require(os.environ['GITHUB_ACTOR']=='infracore' and os.environ['GITHUB_EVENT_NAME']=='workflow_dispatch' and os.environ['GITHUB_REF']=='refs/heads/main'
+                  require(os.environ['GITHUB_ACTOR']==event['sender'].get('login') and os.environ['GITHUB_EVENT_NAME']=='workflow_dispatch' and os.environ['GITHUB_REF']=='refs/heads/main'
                       and os.environ['DRY_RUN']=='false' and order and raw and execution,'complete Fin dispatch required')
                   ids=select(decode(raw),decode(execution),order,source=os.environ['EXPECTED_SOURCE'],
                       repository_id=int(os.environ['EXPECTED_REPOSITORY_ID']),read=api,now=datetime.now(timezone.utc))
@@ -727,8 +726,8 @@ jobs:
               registry=request('https://registry.npmjs.org/delimit-cli');now=datetime.now(timezone.utc)
               gate(registry,accepted,version,bound=bound,execution=execution,order=order,now=now)
               if bound is not None:
-                  require(os.environ['GITHUB_ACTOR']=='infracore' and os.environ['GITHUB_ACTOR_ID']=='266558014'
-                      and os.environ['GITHUB_TRIGGERING_ACTOR']=='infracore' and os.environ['GITHUB_RUN_ATTEMPT']=='1','Fin issuer/retry')
+                  require(os.environ['GITHUB_ACTOR_ID']=='266558014' and bool(os.environ['GITHUB_ACTOR'])
+                      and os.environ['GITHUB_TRIGGERING_ACTOR']==os.environ['GITHUB_ACTOR'] and os.environ['GITHUB_RUN_ATTEMPT']=='1','Fin issuer/retry')
                   claimed=claim_order(bound,execution,order,run_id=int(os.environ['GITHUB_RUN_ID']),attempt=int(os.environ['GITHUB_RUN_ATTEMPT']),actor_id=int(os.environ['GITHUB_ACTOR_ID']),read=request,now=datetime.now(timezone.utc))
                   (Path(os.environ['RUNNER_TEMP'])/'delimit-publish/fin-claim.json').write_text(json.dumps(claimed))
               # Re-read after the durable claim, immediately before npm. A

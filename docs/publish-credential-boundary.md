@@ -29,7 +29,7 @@ window. Fin publication never rebuilds the confirmed tarball. Missing, expired,
 changed or unsigned local authority stays held by the executor.
 
 The checkout-free selector verifies the GitHub runner's actual dispatch event:
-owner account ID 266558014 (`infracore`), original repository and exact input
+owner account ID 266558014, original repository and exact input
 bytes. The previous successful workflow/run/attempt/artifact must be from this
 repository's reviewed current main; the publisher verifies the accepted bytes
 again. An ordinary collaborator cannot claim to be the owner through an input

@@ -69,10 +69,12 @@ for key,bad in [('order_id','wo_other'),('trigger','autonomous'),('binding',{'ob
 
 test('authenticated event excludes ordinary collaborators and changed dispatch input',()=>check(`
 raw=json.dumps(value);cap=json.dumps(execution)
-event={'sender':{'id':266558014,'login':'infracore'},'repository':{'id':20},
+event={'sender':{'id':266558014,'login':'owner-alias'},'repository':{'id':20},
  'inputs':{'dry_run':'false','expected_source':'','fin_order_id':order,'fin_release':raw,'fin_execution':cap}}
 f=lambda:ns['trusted_event'](event,order,raw,cap,actor_id=266558014,repository_id=20)
 f()
+event['sender']['login']='renamed-owner-alias';f()
+refuses(lambda:ns['trusted_event'](event,order,raw,cap,actor_id=99,repository_id=20))
 event['sender']['id']=99;refuses(f);event['sender']['id']=266558014
 event['inputs']['fin_release']='{}';refuses(f);event['inputs']['fin_release']=raw
 event['repository']['id']=21;refuses(f)
