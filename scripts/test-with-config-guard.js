@@ -61,6 +61,7 @@ const TEST_FILES = [
     'tests/check-fail-closed-no-pyyaml.test.js',
     'tests/harness-launch.test.js',
     'tests/publish-source-pin.test.js',
+    'tests/fin-package-publisher.test.js',
     'tests/chat-repl-explicit-harness.test.js',
     'tests/chat-repl-model-flag.test.js',
     'tests/led-5369-shim-fail-closed.test.js',
