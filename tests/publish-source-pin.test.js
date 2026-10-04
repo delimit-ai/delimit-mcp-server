@@ -29,8 +29,9 @@ test('build and acceptance cannot access npm OIDC or persisted Git credentials',
             if(step.uses?.startsWith('actions/checkout@')) assert.equal(step.with['persist-credentials'],false);
         }
     }
-    assert.deepEqual(doc.jobs.publish.permissions,{contents:'read','id-token':'write'});
-    assert(doc.jobs.validate.steps.find(s=>s.name==='Hold unbound Fin publication').run.includes('exit 1'));
+    assert.deepEqual(doc.jobs.publish.permissions,{contents:'read',actions:'read',checks:'write','id-token':'write'});
+    assert(doc.jobs.validate.if.includes("fin_order_id == ''"));
+    assert(doc.jobs.select_artifact.steps[0].run.includes('complete Fin dispatch required'));
 });
 
 test('publication consumes the immutable accepted artifact without package execution',()=>{
@@ -42,9 +43,11 @@ test('publication consumes the immutable accepted artifact without package execu
     assert.match(buildSteps[build].run,/npm pack --json --pack-destination/);
     assert(buildSteps[build].run.indexOf('npm run prepublishOnly')<buildSteps[build].run.indexOf('npm pack'));
     const download=steps.find(s=>s.name==='Download exact accepted artifact');
-    assert.equal(download.with['artifact-ids'],'${{ needs.build_release.outputs.artifact_id }}');
+    assert.equal(download.with['artifact-ids'],'${{ needs.select_artifact.outputs.artifact_id }}');
+    assert.equal(download.with['run-id'],'${{ needs.select_artifact.outputs.run_id }}');
     assert.equal(doc.jobs.build_release.outputs.artifact_id,'${{ steps.accepted.outputs.artifact-id }}');
-    assert.equal(doc.jobs.publish.needs,'build_release');
+    assert.equal(doc.jobs.publish.needs,'select_artifact');
+    assert.deepEqual(doc.jobs.select_artifact.needs,['validate','build_release']);
     assert.equal(doc.jobs.build_release.needs,'validate');
     assert(!steps.some(s=>s.uses?.startsWith('actions/checkout@')));
     assert(!steps.some(s=>/npm ci|npm run|npm pack|accept-packed-artifact\.py/.test(s.run||'')));

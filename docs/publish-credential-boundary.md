@@ -21,19 +21,45 @@ the fallback token is supplied only to the publication step. The resulting
 registry integrity/shasum must match the accepted tarball. The existing MCP
 registry and GitHub Release steps remain after successful npm publication.
 
-Normal existing tag and manual release grants remain unchanged. A nonempty
-`fin_order_id` currently produces an explicit HOLD before build. The Fin
-executor must first bind an immutable accepted CI artifact, package/version,
-old/new channel state and original order to its own existing owner-confirmation
-snapshot. Only that trusted executor may consume W9 and issue its fixed
-workflow dispatch. A dispatch field or GitHub actor alone is not confirmation.
-No new signing keys, remote approval service, or direct Fin npm publisher is
-introduced by this change.
+Normal tag and manual standing release grants remain. Fin's fixed executor
+first obtains a previously successful build-only artifact, renders exact old/new
+`latest` movement for W9, consumes the existing owner confirmation, and submits
+that immutable object plus original order/envelope and nonrenewable execution
+window. Fin publication never rebuilds the confirmed tarball. Missing, expired,
+changed or unsigned local authority stays held by the executor.
 
-Workflow concurrency serializes this workflow's package release attempts and
-does not cancel an active publisher. A complete rolling 24-hour release policy
-and the exact Fin dispatch adapter are separate remaining integration work;
-this security repair does not claim that concurrency alone enforces batching.
+The checkout-free selector verifies the GitHub runner's actual dispatch event:
+owner account ID 266558014 (`infracore`), original repository and exact input
+bytes. The previous successful workflow/run/attempt/artifact must be from this
+repository's reviewed current main; the publisher verifies the accepted bytes
+again. An ordinary collaborator cannot claim to be the owner through an input
+field. The actor is transport authentication, never W9 approval by itself.
+
+The workflow's package-wide concurrency lock serializes every standing and Fin
+publication. Immediately before publication, the registry is re-read; all version
+publication timestamps, including prereleases, count toward the rolling 24-hour
+routine limit. Major versions/downgrades and already-published versions are held.
+The historical local `publish-guard.sh` entrypoint keeps its existing owner grant
+but routes to this sole workflow, pins the expected main SHA and fails on test
+failure. It no longer creates a second direct npm publisher.
+
+A Fin order creates one durable existing GitHub Checks record under that same
+lock. Any earlier claim (failed, in-progress, completed or uncertain) prevents
+reuse. Only the publisher has `checks: write`; claim data binds original order,
+object digest, envelope digest, expiry, immutable main, artifact and workflow run.
+The record is completed only after exact npm integrity and current `latest` are
+verified. The executor independently verifies that receipt and current registry
+state before reporting DONE. No network timeout creates an automatic retry.
+
+Residuals requiring combined review: a trusted owner or another holder of an
+owner token can dispatch; this design does not provide cryptographic process
+attribution. Credential inventory/host isolation must exclude FE/worker/runner
+access and protected workflow source must stay immutable. Dispatch is the
+irreversible external submission boundary. The remote workflow enforces the
+original expiry and current visible-action window, but cannot observe a host
+pause/census change after submission. There are no new signing keys, daemons,
+listeners or remote approval services. No live Fin publication or arming was
+performed as source acceptance.
 
 References: [npm trusted publishing](https://docs.npmjs.com/trusted-publishers/)
 documents OIDC permissions and states that `npm whoami` is not a test of
