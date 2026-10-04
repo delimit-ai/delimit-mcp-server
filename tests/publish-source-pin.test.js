@@ -135,6 +135,42 @@ for bad in ({'structuredContent':{}}, {'isError':True,'structuredContent':{'ok':
  else: raise AssertionError('accepted bad MCP response')
 assert m.payload({'content':[{'type':'text','text':'{"status":"ok"}'}]}) == {'status':'ok'}
 `));
+test('packed discovery accepts only the explicit backend exclusions and preserves legacy requirements',()=>pythonCheck(`
+with tempfile.TemporaryDirectory() as d:
+ root=pathlib.Path(d)
+ registry={'delimit_'+name:backends for name,backends in m.EXCLUDED_TOOL_BACKENDS.items()}
+ absent=m.expected_absent_tools(root,registry)
+ assert len(absent)==14
+ assert m.expected_absent_tools(root,None)==set()
+ base={'delimit_'+n for n in m.STAGED+m.GRANDFATHER}
+ base.update({'delimit_scan','delimit_quickstart','delimit_deliberation_status','delimit_license_status','delimit_version','delimit_deploy_plan','delimit_vault_search','delimit_evidence_collect'})
+ m.verify_tool_discovery(sorted(base),set())
+ m.verify_tool_discovery(sorted(base-absent),absent)
+ for names,missing in ((sorted(base-absent),set()),(sorted(base),absent),(sorted(base-absent-{'delimit_audit'}),absent),(sorted(base-absent)+['delimit_audit'],absent)):
+  try:m.verify_tool_discovery(names,missing)
+  except RuntimeError:pass
+  else:raise AssertionError('invalid tool discovery admitted')
+`));
+test('packed discovery refuses registry drift and any reintroduced excluded implementation',()=>pythonCheck(`
+with tempfile.TemporaryDirectory() as d:
+ root=pathlib.Path(d)
+ registry={'delimit_'+name:backends for name,backends in m.EXCLUDED_TOOL_BACKENDS.items()}
+ for mutation in ('missing','changed','unreviewed'):
+  changed=dict(registry)
+  if mutation=='missing':del changed['delimit_social_target']
+  elif mutation=='changed':changed['delimit_social_target']=('ai.other',)
+  else:changed['delimit_audit']=('ai.audit',)
+  try:m.expected_absent_tools(root,changed)
+  except RuntimeError:pass
+  else:raise AssertionError('registry drift admitted')
+ for relative in ('ai/social.py','ai/social/__init__.py','ai/social.cpython-310-x86_64-linux-gnu.so'):
+  file=root/relative;file.parent.mkdir(parents=True,exist_ok=True);file.write_bytes(b'unexpected')
+  try:m.expected_absent_tools(root,registry)
+  except RuntimeError:pass
+  else:raise AssertionError('excluded implementation admitted')
+  file.unlink()
+  if file.parent.name=='social':file.parent.rmdir()
+`));
 test('acceptance rejects changed bytes and persists failing process diagnostics',()=>pythonCheck(`
 with tempfile.TemporaryDirectory() as d:
  p=pathlib.Path(d)/'artifact';p.write_bytes(b'original');expected=m.digest(p)
@@ -172,7 +208,10 @@ test('file publish dry-run preserves bytes and cannot rerun the directory build 
     const dir=fs.mkdtempSync(path.join(os.tmpdir(),'delimit-publish-file-'));
     try {
         fs.mkdirSync(path.join(dir,'home'));
-        fs.writeFileSync(path.join(dir,'package.json'),JSON.stringify({name:'delimit-acceptance-never-publish',version:'0.0.0',scripts:{prepublishOnly:'node -e "process.exit(93)"'}}));
+        // Pack only stable fixture bytes; npm writes its cache/log below this
+        // directory and packing a concurrently appended log can raise EOF.
+        fs.writeFileSync(path.join(dir,'index.js'),'module.exports = {};\n');
+        fs.writeFileSync(path.join(dir,'package.json'),JSON.stringify({name:'delimit-acceptance-never-publish',version:'0.0.0',files:['index.js'],scripts:{prepublishOnly:'node -e "process.exit(93)"'}}));
         const options={cwd:dir,env:{HOME:path.join(dir,'home'),PATH:process.env.PATH,npm_config_cache:path.join(dir,'cache')},encoding:'utf8',timeout:30000};
         const pack=spawnSync('npm',['pack','--json'],options);
         assert.equal(pack.status,0,pack.stderr);

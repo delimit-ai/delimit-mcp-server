@@ -25,11 +25,63 @@ STAGED = ('audit build_loop_daemon vendor_news_scan vendor_news_draft '
           'social_daemon daemon_run notify_inbox').split()
 GRANDFATHER = ('social_post social_generate social_approve social_history '
                'security_deliberate security_ingest gov_new_task').split()
+# Gateway #642 hides these exact tools when their implementation is excluded
+# from the customer bundle. Admission remains tested directly above the backend;
+# discovery must match this independently enumerated packaging contract.
+EXCLUDED_TOOL_BACKENDS = {
+    'build_loop_daemon': ('ai.loop_daemon',),
+    'vendor_news_scan': ('ai.vendor_news',),
+    'vendor_news_draft': ('ai.vendor_news', 'ai.vendor_news.sensor', 'ai.social_target'),
+    'content_publish': ('ai.content_engine',),
+    'social_target': ('ai.social_target', 'ai.report_backlog'),
+    'github_scan': ('ai.github_scanner',),
+    'reddit_scan': ('ai.reddit_scanner',),
+    'inbox_daemon': ('ai.inbox_daemon',),
+    'social_daemon': ('ai.social_daemon',),
+    'daemon_run': ('ai.daemon',),
+    'social_post': ('ai.social',),
+    'social_generate': ('ai.social',),
+    'social_approve': ('ai.social',),
+    'social_history': ('ai.social',),
+}
 
 
 def require(condition, message):
     if not condition:
         raise RuntimeError(message)
+
+
+def expected_absent_tools(root, required_backends):
+    """Fail on an unreviewed packaging change; never turn arbitrary absence into a pass."""
+    if required_backends is None:  # pre-#642 gateway has the full discovery surface
+        return set()
+    require(isinstance(required_backends, dict), 'invalid required-backend registry')
+    absent = set()
+    for short, backends in EXCLUDED_TOOL_BACKENDS.items():
+        name = 'delimit_' + short
+        require(required_backends.get(name) == backends, 'backend contract changed: ' + name)
+        for backend in backends:
+            path = root.joinpath(*backend.split('.'))
+            require(not path.with_suffix('.py').exists() and not path.exists()
+                    and not list(path.parent.glob(path.name + '.*.so')),
+                    'excluded backend unexpectedly packaged: ' + backend)
+        absent.add(name)
+    for short in (set(STAGED) | set(GRANDFATHER)) - set(EXCLUDED_TOOL_BACKENDS):
+        require('delimit_' + short not in required_backends,
+                'unexpected admission tool exclusion: ' + short)
+    return absent
+
+
+def verify_tool_discovery(names, absent):
+    require(isinstance(names, list) and all(isinstance(n, str) and n for n in names)
+            and len(names) == len(set(names)), 'invalid or duplicate tool discovery')
+    visible = set(names)
+    require(not visible.intersection(absent), 'excluded backend tool is advertised')
+    expected = {'delimit_' + n for n in STAGED + GRANDFATHER} - absent
+    expected.update({'delimit_scan', 'delimit_quickstart', 'delimit_deliberation_status',
+                     'delimit_license_status', 'delimit_version', 'delimit_deploy_plan',
+                     'delimit_vault_search', 'delimit_evidence_collect'})
+    require(expected <= visible, 'required tools absent from discovery: ' + ', '.join(sorted(expected - visible)))
 
 
 def digest(path):
@@ -184,18 +236,36 @@ def serve(root):
 async def mcp_checks(root, project, version):
     from mcp import ClientSession, StdioServerParameters
     from mcp.client.stdio import stdio_client
+    from ai import capability_guard
+    absent = expected_absent_tools(root, getattr(capability_guard, 'TOOL_REQUIRED_BACKENDS', None))
     params = StdioServerParameters(command=sys.executable,
         args=[str(Path(__file__).resolve()), '--serve', str(root)], env=dict(os.environ), cwd=str(project))
     results = {}
     async with stdio_client(params) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
+            names, cursor = [], None
+            seen_cursors = set()
+            for _ in range(20):
+                page = await session.list_tools(cursor=cursor)
+                names.extend(tool.name for tool in page.tools)
+                cursor = page.nextCursor
+                if cursor is None:
+                    break
+                require(isinstance(cursor, str) and cursor and cursor not in seen_cursors,
+                        'invalid discovery pagination')
+                seen_cursors.add(cursor)
+            else:
+                raise RuntimeError('discovery pagination limit exceeded')
+            verify_tool_discovery(names, absent)
+            results['discovery'] = {'advertised_count': len(names),
+                                    'excluded_backend_tools': sorted(absent)}
             for name, args in [
                 ('delimit_scan', {'project_path': str(project)}),
                 ('delimit_quickstart', {'project_path': str(project)}),
                 ('delimit_deliberation_status', {}),
                 ('delimit_license_status', {}), ('delimit_version', {}),
-            ] + [('delimit_' + n, {}) for n in STAGED] + [
+            ] + [('delimit_' + n, {}) for n in STAGED if 'delimit_' + n not in absent] + [
                 ('delimit_deploy_plan', {}), ('delimit_vault_search', {'query': 'acceptance'}),
                 ('delimit_evidence_collect', {'target': str(project)})]:
                 response = await session.call_tool(name, args)
