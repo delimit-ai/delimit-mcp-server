@@ -2,7 +2,7 @@
 
 Keep the state. Change the model.
 
-This plugin adds three skills for recording stated decisions and tasks, creating handoffs, and reading open work when you resume. Its MCP server uses the records toolset. Records are plain local files that other tools can read.
+This plugin adds three skills for recording stated decisions and tasks, creating handoffs, and reading open work when you resume. At the start of every session it automatically surfaces your open tasks and any handoff from your last session. Its MCP server uses the records toolset. Records are plain local files that other tools can read.
 
 ## Requirements
 
@@ -11,7 +11,9 @@ This plugin adds three skills for recording stated decisions and tasks, creating
 
 ## Install
 
-Add the marketplace, then install the plugin in Claude Code:
+**From the Claude Code plugin directory (recommended):** search for "Delimit" and click Install. No extra steps needed.
+
+**From the command line:**
 
 ```sh
 claude plugin marketplace add delimit-ai/delimit-mcp-server

@@ -1,5 +1,5 @@
 {
-  "description": "Delimit session-start hook — surfaces open work at the start of every session",
+  "description": "Delimit hooks — surfaces open work at session start, prompts handoff at session end",
   "hooks": {
     "SessionStart": [
       {
@@ -7,6 +7,16 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/session-start.sh\""
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/session-stop.sh\""
           }
         ]
       }
