@@ -81,7 +81,7 @@ test('npx package specs are read from every server', () => {
 test('the repository as committed passes the offline invariants', () => {
     const r = spawnSync(process.execPath, [SCRIPT], { encoding: 'utf8' });
     assert.equal(r.status, 0, r.stdout + r.stderr);
-    assert.match(r.stdout, /delimit 1\.0\.4 \(claude-plugin\/\)/);
+    assert.match(r.stdout, /delimit \d+\.\d+\.\d+ \(claude-plugin\/\)/);
     assert.match(r.stdout, /PASS/);
     // Every listed plugin in the committed marketplace has a provenance row.
     const market = JSON.parse(read(guard.MARKETPLACE));
