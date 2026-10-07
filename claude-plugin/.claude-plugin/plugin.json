@@ -1,7 +1,7 @@
 {
   "name": "delimit",
   "displayName": "Delimit",
-  "version": "1.0.7",
+  "version": "1.0.8",
   "description": "Keep the state. Change the model. Persistent tasks, decisions, and handoffs across sessions and assistants.",
   "author": {
     "name": "Delimit",
@@ -15,10 +15,6 @@
     "records",
     "tasks",
     "handoffs",
-    "continuity",
-    "context",
-    "state",
-    "sessions",
     "mcp"
   ],
   "documentationUrl": "https://github.com/delimit-ai/delimit-mcp-server/blob/main/claude-plugin/README.md",
