@@ -80,3 +80,46 @@ jobs:
       # Guard B — npm pack ships EXACTLY the allowlist, nothing else.
       - name: Tarball parity guard (fail-closed)
         run: bash scripts/check-bundle-parity.sh
+
+  # Claude plugin release lane (docs/claude-plugin-release.md). Guards EVERY
+  # plugin listed in .claude-plugin/marketplace.json (base and head): a change
+  # to a plugin's folder or marketplace entry must bump that plugin's
+  # plugin.json, carry its provenance row and pin npx packages that exist on
+  # npm. The diff runs with rename detection off. Pull requests only, and not a
+  # required status check: governed merges refuse a red guard. Node builtins
+  # plus the npm CLI that setup-node provides, no npm install.
+  #
+  # What this guard is and is not: an ACCIDENT guard that catches honest
+  # mistakes, not an adversarial boundary. The script runs as it is on the
+  # BASE commit, and a PR that changes the script, its test or this job fails
+  # as "guard changed: needs owner review". The real controls are the fixed
+  # tracked tag, governed review of every PR, the owner's Publish click,
+  # Anthropic's scan, and `claude plugin tag` refusing an existing tag. Known
+  # out-of-scope adversarial cases: alternate launchers or registries, inline
+  # mcpServers in plugin.json, edits to an existing provenance row, and the
+  # stale-base race (caught by `claude plugin tag`).
+  claude-plugin-release-guard:
+    if: github.event_name == 'pull_request' && github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    name: Claude plugin release guard
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Plugin version, provenance and pin (guard from the base commit)
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if ! git show "$BASE_SHA":scripts/claude-plugin-release-guard.js > "$RUNNER_TEMP/claude-plugin-release-guard.js"; then
+            echo "guard changed: needs owner review (the guard is not on the base commit)"
+            exit 1
+          fi
+          node "$RUNNER_TEMP/claude-plugin-release-guard.js" --root "$GITHUB_WORKSPACE" --base "$BASE_SHA"
