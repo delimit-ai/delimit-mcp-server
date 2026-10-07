@@ -7,7 +7,7 @@ This plugin adds three skills for recording stated decisions and tasks, creating
 ## Requirements
 
 - Node.js 18 or later and `npx`
-- Python 3.9 or later with `venv` and `pip`
+- Python 3.10 or later with `venv` and `pip`
 
 ## Install
 

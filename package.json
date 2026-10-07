@@ -5,6 +5,7 @@
   "description": "Keep the state. Change the model. Shared context and a multi-model panel across Claude Code, Codex, Cursor, Antigravity, GitHub Copilot, and Muse.",
   "main": "index.js",
   "files": [
+    "requirements-plugin.lock",
     "bin/",
     "lib/",
     "adapters/",
