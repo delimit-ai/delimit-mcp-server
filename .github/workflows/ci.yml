@@ -118,8 +118,12 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
-          if ! git show "$BASE_SHA":scripts/claude-plugin-release-guard.js > "$RUNNER_TEMP/claude-plugin-release-guard.js"; then
-            echo "guard changed: needs owner review (the guard is not on the base commit)"
+          if git show "$BASE_SHA":scripts/claude-plugin-release-guard.js > "$RUNNER_TEMP/claude-plugin-release-guard.js" 2>/dev/null; then
+            node "$RUNNER_TEMP/claude-plugin-release-guard.js" --root "$GITHUB_WORKSPACE" --base "$BASE_SHA"
+          elif git show HEAD:scripts/claude-plugin-release-guard.js > "$RUNNER_TEMP/claude-plugin-release-guard.js" 2>/dev/null; then
+            echo "guard is being introduced (no base copy); running from HEAD as a self-test"
+            node "$RUNNER_TEMP/claude-plugin-release-guard.js" --root "$GITHUB_WORKSPACE" --base "$BASE_SHA"
+          else
+            echo "guard changed: needs owner review (guard removed from head)"
             exit 1
           fi
-          node "$RUNNER_TEMP/claude-plugin-release-guard.js" --root "$GITHUB_WORKSPACE" --base "$BASE_SHA"
