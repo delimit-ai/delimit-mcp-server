@@ -126,7 +126,7 @@ function main() {
     }
   }
   const order = { P0: 0, P1: 1, P2: 2, P3: 3 };
-  const items = [...state.values()].filter(x => x.venture === repo && x.status === 'open' && x.id && x.title)
+  const items = [...state.values()].filter(x => (x.venture === slug || x.venture === repo) && x.status === 'open' && x.id && x.title)
     .sort((a, b) => (order[a.priority] ?? 9) - (order[b.priority] ?? 9)).slice(0, 5);
   if (!handoff && !items.length) return;
   const lines = [`Delimit — saved state for ${repo}`];
