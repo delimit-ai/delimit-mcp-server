@@ -1,0 +1,8 @@
+{
+  "name": "delimit-plugin-hooks",
+  "version": "1.0.0",
+  "description": "Delimit Claude plugin session hooks — no npm dependencies; uses Node.js built-ins only.",
+  "type": "module",
+  "private": true,
+  "dependencies": {}
+}
