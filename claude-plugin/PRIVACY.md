@@ -6,9 +6,11 @@ On first launch, `npx` fetches `delimit-cli` from the npm registry and `pip` may
 
 Uninstalling the plugin leaves `~/.delimit` untouched. Inspect and delete that directory yourself if you want to remove the records.
 
+The session-start hook reads local records under `~/.delimit` and, to name the project, the `package.json` or `pyproject.toml` name and the git remote URL of the current directory; it writes nothing and sends nothing anywhere.
+
 ## Where records live
 
-- Records are kept in one local ledger under `~/.delimit/ledger/`. Each record is tagged with the project it was created in: the repository name from the git remote, or `unsorted` when there is none. Listing shows records from all projects; the tag tells you where each one came from.
+- Records are kept in one local ledger under `~/.delimit/ledger/`. Each record is tagged with the project it was created in: the CLI-detected name (package, Python project, git remote, or directory fallback; temporary scratch projects use `unsorted`). Listing shows records from all projects; the tag tells you where each one came from.
 - The server also keeps local operational logs under `~/.delimit` (`tool_usage.jsonl`, `events/`, `traces/`). They contain tool names, timestamps and outcomes, not your record content, and they stay local.
 - Once installed, the records workflow runs with no network access. We tested it in a network-isolated environment.
 

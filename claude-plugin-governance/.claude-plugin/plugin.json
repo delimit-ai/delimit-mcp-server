@@ -1,0 +1,19 @@
+{
+  "name": "delimit-governance",
+  "displayName": "Delimit Governance",
+  "version": "1.0.0",
+  "description": "Catch breaking API changes before you merge, locally.",
+  "author": {
+    "name": "Delimit",
+    "url": "https://delimit.ai",
+    "email": "pro@delimit.ai"
+  },
+  "homepage": "https://github.com/delimit-ai/delimit-mcp-server/tree/main/claude-plugin-governance",
+  "repository": "https://github.com/delimit-ai/delimit-mcp-server",
+  "license": "MIT",
+  "keywords": ["openapi", "api-governance", "breaking-changes", "semver", "mcp"],
+  "documentationUrl": "https://github.com/delimit-ai/delimit-mcp-server/blob/main/claude-plugin-governance/README.md",
+  "privacyPolicyUrl": "https://github.com/delimit-ai/delimit-mcp-server/blob/main/claude-plugin-governance/PRIVACY.md",
+  "termsOfServiceUrl": "https://delimit.ai/terms",
+  "supportUrl": "https://github.com/delimit-ai/delimit-mcp-server/issues"
+}

@@ -1,0 +1,19 @@
+{
+  "name": "delimit-panel",
+  "displayName": "Delimit Panel",
+  "version": "1.0.0",
+  "description": "Get agreement from several AI models on a hard call before you act.",
+  "author": {
+    "name": "Delimit",
+    "url": "https://delimit.ai",
+    "email": "pro@delimit.ai"
+  },
+  "homepage": "https://github.com/delimit-ai/delimit-mcp-server/tree/main/claude-plugin-panel",
+  "repository": "https://github.com/delimit-ai/delimit-mcp-server",
+  "license": "MIT",
+  "keywords": ["deliberation", "consensus", "models", "mcp"],
+  "documentationUrl": "https://github.com/delimit-ai/delimit-mcp-server/blob/main/claude-plugin-panel/README.md",
+  "privacyPolicyUrl": "https://github.com/delimit-ai/delimit-mcp-server/blob/main/claude-plugin-panel/PRIVACY.md",
+  "termsOfServiceUrl": "https://delimit.ai/terms",
+  "supportUrl": "https://github.com/delimit-ai/delimit-mcp-server/issues"
+}
