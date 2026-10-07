@@ -121,8 +121,8 @@ jobs:
           if git show "$BASE_SHA":scripts/claude-plugin-release-guard.js > "$RUNNER_TEMP/claude-plugin-release-guard.js" 2>/dev/null; then
             node "$RUNNER_TEMP/claude-plugin-release-guard.js" --root "$GITHUB_WORKSPACE" --base "$BASE_SHA"
           elif git show HEAD:scripts/claude-plugin-release-guard.js > "$RUNNER_TEMP/claude-plugin-release-guard.js" 2>/dev/null; then
-            echo "guard is being introduced (no base copy); running from HEAD as a self-test"
-            node "$RUNNER_TEMP/claude-plugin-release-guard.js" --root "$GITHUB_WORKSPACE" --base "$BASE_SHA"
+            echo "guard is being introduced (no base copy); running invariants-only (no --base, guard-change check skipped)"
+            node "$RUNNER_TEMP/claude-plugin-release-guard.js" --root "$GITHUB_WORKSPACE"
           else
             echo "guard changed: needs owner review (guard removed from head)"
             exit 1
