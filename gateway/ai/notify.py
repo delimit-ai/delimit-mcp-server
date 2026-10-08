@@ -229,7 +229,21 @@ OWNER_ACTION_SUBJECT_PATTERNS = [
 # exact shape is exempt. GitHub security/Dependabot/account mail, human
 # notifications (notifications@github.com) and other owners' repositories are
 # unaffected and still classify through the rules below.
-OWNED_GITHUB_OWNERS = frozenset({"delimit-ai", "wirereport"})
+OWNED_GITHUB_OWNERS = frozenset({"delimit-ai"})
+
+
+def _owned_github_owners() -> frozenset:
+    """Add owner-only repositories from a local, unshipped config."""
+    config = Path.home() / ".delimit" / "notify_owners.json"
+    try:
+        extra = json.loads(config.read_text()).get("github_owners", [])
+        if not isinstance(extra, list) or any(not isinstance(owner, str) for owner in extra):
+            raise ValueError("github_owners must be a list of strings")
+    except FileNotFoundError:
+        extra = []
+    except (OSError, ValueError, TypeError, AttributeError):
+        extra = []
+    return OWNED_GITHUB_OWNERS | frozenset(owner.lower() for owner in extra)
 _GITHUB_COMMIT_NOTIFICATION_SENDER = "noreply@github.com"
 _GITHUB_COMMIT_NOTIFICATION_SUBJECT = _re.compile(
     r"\A\[(?P<owner>[A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))/[A-Za-z0-9._-]{1,100}\]"
@@ -243,7 +257,7 @@ def is_owned_repo_commit_notification(sender: str, subject: str) -> bool:
     if (sender or "").strip().lower() != _GITHUB_COMMIT_NOTIFICATION_SENDER:
         return False
     match = _GITHUB_COMMIT_NOTIFICATION_SUBJECT.match(subject or "")
-    return bool(match) and match.group("owner").lower() in OWNED_GITHUB_OWNERS
+    return bool(match) and match.group("owner").lower() in _owned_github_owners()
 
 
 # Sender patterns that are definitely non-owner (automated/bot)
@@ -1070,7 +1084,7 @@ def send_email(
         body: Email body text (preferred). Falls back to 'message' for
             backward compatibility.
         from_account: Sender account key in ~/.delimit/secrets/smtp-all.json
-            (e.g. 'pro@delimit.ai', 'admin@wire.report'). If provided, SMTP
+            (e.g. 'pro@delimit.ai'). If provided, SMTP
             credentials are loaded from that file instead of env vars.
         message: Email body text (legacy parameter, use 'body' instead).
         event_type: Event category for filtering/logging.

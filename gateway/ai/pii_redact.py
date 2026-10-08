@@ -24,11 +24,25 @@ PATTERNS = {
         (r'\b(glpat-[a-zA-Z0-9_-]{20,})\b', "GitLab PAT"),
         (r'\b(npm_[a-zA-Z0-9]{36,})\b', "npm token"),
         (r'\b(pypi-[a-zA-Z0-9]{50,})\b', "PyPI token"),
+        (r'\b((?:AKIA|ASIA)[0-9A-Z]{16})\b', "AWS access key id"),
     ],
     "secret": [
-        (r'(?i)(password|passwd|pwd)\s*[=:]\s*["\']([^"\']{4,})["\']', "password"),
-        (r'(?i)(secret|token|api_key|apikey)\s*[=:]\s*["\']([^"\']{8,})["\']', "secret/token"),
+        # ["']? lets a quoted key match too ("api_key": "...", 'password': '...').
+        (r'(?i)(password|passwd|pwd)["\']?\s*[=:]\s*["\']([^"\']{4,})["\']', "password"),
+        (r'(?i)(secret|token|api_key|apikey|access_key|private_key|auth_key)["\']?\s*[=:]\s*["\']([^"\']{8,})["\']', "secret/token"),
         (r'(?i)bearer\s+([a-zA-Z0-9._-]{20,})', "bearer token"),
+        # A literal default in an env lookup is a hardcoded secret, and a diff
+        # that REMOVES one still carries it on its "-" lines. Only the literal
+        # (named group "v") is replaced, so the variable name stays readable.
+        (r'''(?i)(?:getenv|environ\.get|environ\.setdefault)\(\s*["'][A-Za-z0-9_]*(?:key|secret|token|passw(?:or)?d|pwd|credential)[A-Za-z0-9_]*["']\s*,\s*["'](?P<v>[^"'\s]{8,})["']''', "secret env default"),
+        (r'''(?i)process\.env\.[A-Za-z0-9_]*(?:key|secret|token|passw(?:or)?d|pwd|credential)[A-Za-z0-9_]*\s*(?:\|\||\?\?)\s*["'`](?P<v>[^"'`\s]{8,})["'`]''', "secret env default"),
+        (r'''(?i)\$\{[A-Za-z0-9_]*(?:key|secret|token|passw(?:or)?d|pwd|credential)[A-Za-z0-9_]*:?-(?P<v>[^}\s]{8,})\}''', "secret env default"),
+        # AWS secret keys carry no distinctive prefix; bind them to their name.
+        (r'''(?i)aws_secret_access_key["']?\s*[=:]\s*["']?(?P<v>[A-Za-z0-9/+=]{20,})''', "AWS secret access key"),
+        # A PEM private key block, whatever the algorithm; the whole block goes.
+        # END must repeat the BEGIN label, and the body cannot cross another
+        # BEGIN marker, so repeated unterminated BEGINs stay linear (#659 review).
+        (r'-----BEGIN (?P<pem>[A-Z0-9 ]{0,40}PRIVATE KEY)-----(?:(?!-----BEGIN )[\s\S]){0,20000}?-----END (?P=pem)-----', "private key block"),
     ],
     "pii": [
         (r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', "email"),
@@ -97,7 +111,8 @@ def redact(
 
         for pattern, label in PATTERNS[category]:
             for match in re.finditer(pattern, redacted):
-                matched_text = match.group(0)
+                # Patterns with a "v" group redact only that value.
+                matched_text = match.group("v") if "v" in match.re.groupindex else match.group(0)
 
                 if _is_allowlisted(matched_text):
                     continue

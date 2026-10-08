@@ -11,7 +11,7 @@ Design notes:
   - LED-id parsing is conservative: r"LED-\\d+" only. AGT-... and STR-...
     do not trigger the gate — only operational ledger items.
   - Repo discovery: prefer caller-supplied list, then fall back to a small
-    static list of canonical Delimit / wire-report / livetube / dv repos.
+    static list of known repositories.
     A missing repo logs a warning and is skipped (don't fail dispatch on
     infra issues — that's a worse failure mode than a false negative).
   - Match scope: only commits on the *first-parent* line of `main` count

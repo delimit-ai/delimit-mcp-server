@@ -372,7 +372,7 @@ def _load_ledger() -> List[Dict[str, Any]]:
 
 
 def _ledger_source_label(path: Path, home: Path) -> str:
-    """Compact source label, e.g. 'ledger-v2/wire-report/strategy'."""
+    """Compact source label, e.g. 'ledger-v2/project/strategy'."""
     try:
         rel = path.relative_to(home)
         return str(rel.with_suffix(""))
