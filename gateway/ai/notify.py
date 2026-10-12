@@ -229,7 +229,21 @@ OWNER_ACTION_SUBJECT_PATTERNS = [
 # exact shape is exempt. GitHub security/Dependabot/account mail, human
 # notifications (notifications@github.com) and other owners' repositories are
 # unaffected and still classify through the rules below.
-OWNED_GITHUB_OWNERS = frozenset({"delimit-ai", "wirereport"})
+OWNED_GITHUB_OWNERS = frozenset({"delimit-ai"})
+
+
+def _owned_github_owners() -> frozenset:
+    """Add owner-only repositories from a local, unshipped config."""
+    config = Path.home() / ".delimit" / "notify_owners.json"
+    try:
+        extra = json.loads(config.read_text()).get("github_owners", [])
+        if not isinstance(extra, list) or any(not isinstance(owner, str) for owner in extra):
+            raise ValueError("github_owners must be a list of strings")
+    except FileNotFoundError:
+        extra = []
+    except (OSError, ValueError, TypeError, AttributeError):
+        extra = []
+    return OWNED_GITHUB_OWNERS | frozenset(owner.lower() for owner in extra)
 _GITHUB_COMMIT_NOTIFICATION_SENDER = "noreply@github.com"
 _GITHUB_COMMIT_NOTIFICATION_SUBJECT = _re.compile(
     r"\A\[(?P<owner>[A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))/[A-Za-z0-9._-]{1,100}\]"
@@ -243,7 +257,7 @@ def is_owned_repo_commit_notification(sender: str, subject: str) -> bool:
     if (sender or "").strip().lower() != _GITHUB_COMMIT_NOTIFICATION_SENDER:
         return False
     match = _GITHUB_COMMIT_NOTIFICATION_SUBJECT.match(subject or "")
-    return bool(match) and match.group("owner").lower() in OWNED_GITHUB_OWNERS
+    return bool(match) and match.group("owner").lower() in _owned_github_owners()
 
 
 # Sender patterns that are definitely non-owner (automated/bot)
@@ -539,7 +553,12 @@ def send_telegram(
     chat_id: str = "",
     buttons: Optional[List[List[Dict[str, Any]]]] = None,
 ) -> Dict[str, Any]:
-    """Send a Telegram message via bot API."""
+    """Send a Telegram message via bot API.
+
+    ``buttons`` is an optional list-of-rows of InlineKeyboardButton dicts
+    (``text`` + ``url`` or ``callback_data``). When provided the payload
+    includes ``reply_markup: {inline_keyboard: buttons}``.
+    """
     bot_config = _load_json_file(
         Path.home() / ".delimit" / "secrets" / "telegram-delimitai-bot.json"
     )
@@ -560,7 +579,7 @@ def send_telegram(
 
     timestamp = datetime.now(timezone.utc).isoformat()
     prefix = f"[{event_type}] " if event_type else ""
-    payload = {
+    payload: Dict[str, Any] = {
         "chat_id": chat_id,
         "text": f"{prefix}{message}",
         "disable_web_page_preview": False,
@@ -1060,6 +1079,8 @@ def send_email(
     message: str = "",
     event_type: str = "",
     attachments: list = None,
+    *,
+    protected_confirmation: bool = False,
 ) -> Dict[str, Any]:
     """Send an email notification via SMTP.
 
@@ -1070,16 +1091,38 @@ def send_email(
         body: Email body text (preferred). Falls back to 'message' for
             backward compatibility.
         from_account: Sender account key in ~/.delimit/secrets/smtp-all.json
-            (e.g. 'pro@delimit.ai', 'admin@wire.report'). If provided, SMTP
+            (e.g. 'pro@delimit.ai'). If provided, SMTP
             credentials are loaded from that file instead of env vars.
         message: Email body text (legacy parameter, use 'body' instead).
         event_type: Event category for filtering/logging.
         attachments: List of file paths to attach to the email.
+        protected_confirmation: Existing owner challenge only: require the exact
+            account identity, use one resolved credential snapshot, and retain
+            no body in generic notification logs. This grants no approval.
 
     Credential resolution order:
         1. from_account lookup in ~/.delimit/secrets/smtp-all.json
         2. DELIMIT_SMTP_* environment variables
     """
+    # This opt-in narrows the existing notification sender. It never grants
+    # approval and never resolves a replacement/default/environment account.
+    if type(protected_confirmation) is not bool:
+        return {"channel": "email", "delivered": False, "error": "invalid confirmation mode"}
+    account_creds = None
+    if protected_confirmation:
+        from email.utils import parseaddr
+        if (event_type != "founder_directive" or not isinstance(from_account, str)
+                or not from_account or not isinstance(to, str) or not to or attachments):
+            return {"channel": "email", "delivered": False, "error": "invalid confirmation sender context"}
+        account_creds = _load_smtp_account(from_account)
+        sender = account_creds.get("from_alias", from_account) if isinstance(account_creds, dict) else ""
+        if (not isinstance(account_creds, dict) or not account_creds.get("host")
+                or not account_creds.get("pass")
+                or str(account_creds.get("user") or "").casefold() != from_account.casefold()
+                or not isinstance(sender, str) or any(c in sender for c in ("\r", "\n", ","))
+                or parseaddr(sender)[1].casefold() != from_account.casefold()):
+            return {"channel": "email", "delivered": False, "error": "confirmation SMTP identity unavailable"}
+
     # body takes precedence, fall back to message for backward compat
     email_body = body or message
 
@@ -1149,11 +1192,12 @@ def send_email(
         _email_send_times.append(now)
 
     # Try from_account first, then _defaults, then fall back to env vars
-    if not from_account:
-        defaults = _load_smtp_account("_defaults")
-        if defaults and defaults.get("from_account"):
-            from_account = defaults["from_account"]
-    account_creds = _load_smtp_account(from_account) if from_account else None
+    if not protected_confirmation:
+        if not from_account:
+            defaults = _load_smtp_account("_defaults")
+            if defaults and defaults.get("from_account"):
+                from_account = defaults["from_account"]
+        account_creds = _load_smtp_account(from_account) if from_account else None
 
     if account_creds:
         smtp_host = account_creds.get("host", "")
@@ -1181,7 +1225,7 @@ def send_email(
             "event_type": event_type,
             "to": smtp_to,
             "from": smtp_from,
-            "message": email_body,
+            "message": "[private owner confirmation]" if protected_confirmation else email_body,
             "subject": subject,
             "timestamp": timestamp,
             "success": False,
@@ -1270,7 +1314,7 @@ def send_email(
         "to": smtp_to,
         "from": smtp_from,
         "subject": subj,
-        "message": email_body,
+        "message": "[private owner confirmation]" if protected_confirmation else email_body,
         "timestamp": timestamp,
         "message_id": message_id,
     }
@@ -1339,7 +1383,7 @@ def send_email(
         record = {
             **receipt_projection,
             "success": False,
-            "error": str(e),
+            "error": "confirmation SMTP delivery uncertain" if protected_confirmation else str(e),
         }
         if direct_commercial:
             record["delivery_status"] = "failed"
@@ -1348,7 +1392,7 @@ def send_email(
             "channel": "email",
             "delivered": False,
             "timestamp": timestamp,
-            "error": str(e),
+            "error": "confirmation SMTP delivery uncertain" if protected_confirmation else str(e),
         }
         if direct_commercial:
             result.update(

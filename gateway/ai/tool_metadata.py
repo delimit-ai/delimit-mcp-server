@@ -235,6 +235,20 @@ TOOL_TIERS: Dict[str, Tier] = {
     "delimit_generate_template": "internal",
 }
 
+# Founder-operated workflows that predate the tier metadata.  This is metadata
+# for future public surfaces; the compatibility profiles below retain their
+# historical membership so installed users keep the same tool lists.
+FOUNDER_TOOLS = frozenset({
+    "delimit_think", "delimit_build", "delimit_build_loop",
+    "delimit_build_loop_daemon", "delimit_swarm",
+    "delimit_social_post", "delimit_social_approve",
+    "delimit_social_daemon", "delimit_social_target",
+    "delimit_social_target_config", "delimit_x_fetch",
+    "delimit_outreach_loop_tick", "delimit_vendor_news_scan",
+    "delimit_vendor_news_health", "delimit_vendor_news_draft",
+})
+TOOL_TIERS.update({name: "internal" for name in FOUNDER_TOOLS})
+
 
 # ─────────────────────────────────────────────────────────────────────
 #  DELIMIT_TOOLSET — opt-in compatibility profiles (LED-3709)
@@ -252,13 +266,16 @@ TOOL_TIERS: Dict[str, Tier] = {
 #                              ledger + handoff set (see CORE_SET below).
 #                              Sized for clients with tight tool caps
 #                              (e.g. VS Code agent mode's 128-tool limit).
-#    records                 → explicit decision and handoff records for a
-#                              Claude plugin. Excludes memory, soul and session
+#    records                 → explicit decisions, handoffs, and local memory
+#                              for a Claude plugin. Excludes soul and session
 #                              capture, transcript extraction (session_handoff
 #                              reads transcripts/git state), deliberation
 #                              (model providers), notify/social/outreach
 #                              (network), security audit (auto-notifies), and
-#                              all Pro, experimental and internal tools.
+#                              all other Pro, experimental and internal tools.
+#    governance              → local API spec checks (URL lint inputs opt in to
+#                              fetching the supplied URL).
+#    panel                   → opt-in multi-model deliberation and model setup.
 #
 #  This reuses the existing TOOL_TIERS classification and CORE_TOOLS set;
 #  it does NOT introduce a parallel taxonomy. Where CORE_TOOLS was too
@@ -267,14 +284,57 @@ TOOL_TIERS: Dict[str, Tier] = {
 #  the "5 workflows" documentation stays accurate.
 # ─────────────────────────────────────────────────────────────────────
 
-VALID_TOOLSETS = ("core", "standard", "full", "records")
+VALID_TOOLSETS = ("core", "standard", "full", "records", "governance", "panel", "assistant", "lead", "frontend", "worker")
 DEFAULT_TOOLSET = "full"
+# Assistant-profile caps (unchanged). The armed lead profile uses LEAD_LIMITS;
+# fin_lead.limits() selects between them at call time.
+PROPOSE_24H_LIMIT = 20
+RECORDS_24H_LIMIT = 60
+RECORDS_MINUTE_LIMIT = 10
+THINK_24H_LIMIT = 20
+LEAD_LIMITS = {"propose": 100, "records_24h": 300, "records_minute": 30, "think": 20}
+
+# LED-5835: an explicitly set but unrecognized DELIMIT_TOOLSET value used to
+# resolve to "full", so a typo'd reduced profile silently exposed every tool.
+# It now fails CLOSED to this profile, which registers only version/help.
+# Unset / empty still resolves to "full" (existing installs unchanged).
+FAIL_CLOSED_TOOLSET = "none"
+FAIL_CLOSED_TOOLS = frozenset({"delimit_version", "delimit_help"})
+ASSISTANT_TOOLS = frozenset({"delimit_brief", "delimit_item", "delimit_item_history", "delimit_search", "delimit_pending_handoffs",
+                             "delimit_version", "delimit_help", "delimit_propose", "delimit_review_queue",
+                             "delimit_mandate", "delimit_capabilities", "delimit_ledger_write", "delimit_deliberate_lite",
+                             "delimit_capture", "delimit_checkpoint_write", "delimit_checkpoint_read", "delimit_workstreams",
+                             "delimit_start_here"})
+# Panel tools also exposed to the assistant toolset (Fin / lead front-end operators).
+# These are NOT in ASSISTANT_TOOLS so they remain available in other profiles too.
+ASSISTANT_PANEL_TOOLS = frozenset({"delimit_deliberate", "delimit_deliberation_status"})
+_ASSISTANT_ONLY = ASSISTANT_TOOLS - FAIL_CLOSED_TOOLS
+LEAD_EXCLUDED_TOOLS = frozenset({"delimit_secret_get", "delimit_secret_store", "delimit_secret_revoke"})
+# Status tools a disarmed lead may still call, so it can say why it is disarmed.
+LEAD_STATUS_TOOLS = frozenset({"delimit_capabilities", "delimit_start_here", "delimit_mandate", "delimit_version"})
+
+
+def lead_excluded(tool_name: str) -> bool:
+    """Secret values never reach a front-end transcript: every secret tool, including
+    the unified _delimit_secret_impl dispatcher and metadata listings, is excluded."""
+    return tool_name in LEAD_EXCLUDED_TOOLS or "secret" in tool_name.lower()
 
 RECORDS_TOOLS = frozenset({
     "delimit_ledger_add", "delimit_ledger_list", "delimit_ledger_update",
     "delimit_ledger_done", "delimit_ledger_context",
     "delimit_handoff_create", "delimit_handoff_list",
     "delimit_handoff_acknowledge", "delimit_version", "delimit_help",
+    "delimit_memory_store", "delimit_memory_search", "delimit_memory_recent",
+})
+
+GOVERNANCE_TOOLS = frozenset({
+    "delimit_lint", "delimit_diff", "delimit_semver", "delimit_spec_health",
+    "delimit_explain", "delimit_drift_check", "delimit_version", "delimit_help",
+})
+
+PANEL_TOOLS = frozenset({
+    "delimit_deliberate", "delimit_deliberation_status", "delimit_models",
+    "delimit_version", "delimit_help",
 })
 
 # Essential tools added to the core profile on top of CORE_TOOLS. These are
@@ -297,6 +357,7 @@ CORE_PROFILE_EXTRA = {
 
 # Tiers excluded from the "standard" profile.
 _STANDARD_EXCLUDED_TIERS = frozenset({"internal", "experimental"})
+_STANDARD_LEGACY_INCLUDED = FOUNDER_TOOLS
 
 
 def core_tool_set() -> set:
@@ -314,29 +375,55 @@ def core_tool_set() -> set:
 def tool_in_toolset(tool_name: str, toolset: str) -> bool:
     """Return True if ``tool_name`` should register under ``toolset``.
 
-    Fails open (returns True) for any unknown toolset value so a
-    misconfigured env var never silently hides tools.
+    Fails CLOSED (LED-5835): an unknown toolset value exposes nothing
+    beyond the fail-closed profile, so a misconfigured reduced profile can
+    never widen the surface to every tool.
     """
+    if toolset in {"frontend", "worker"}:
+        from ai.frontend.registration import MODULE_MANIFEST
+        return tool_name in MODULE_MANIFEST[toolset]
+    if toolset == "assistant":
+        return tool_name in ASSISTANT_TOOLS or tool_name in ASSISTANT_PANEL_TOOLS
+    if toolset == "lead":
+        return not lead_excluded(tool_name)
+    if tool_name in _ASSISTANT_ONLY:
+        return False
     if toolset == "full":
         return True
     if toolset == "core":
         return tool_name in core_tool_set()
     if toolset == "records":
         return tool_name in RECORDS_TOOLS
+    if toolset == "governance":
+        return tool_name in GOVERNANCE_TOOLS
+    if toolset == "panel":
+        return tool_name in PANEL_TOOLS
+    if toolset == FAIL_CLOSED_TOOLSET:
+        return tool_name in FAIL_CLOSED_TOOLS
     if toolset == "standard":
+        if tool_name in _STANDARD_LEGACY_INCLUDED:
+            return True
         tier = TOOL_TIERS.get(tool_name, "public")
         return tier not in _STANDARD_EXCLUDED_TIERS
-    # Unknown / misconfigured value → behave like "full" (never hide).
-    return True
+    # Unknown / misconfigured value → fail closed (LED-5835).
+    return tool_name in FAIL_CLOSED_TOOLS
 
 
 def resolve_toolset(raw: str | None) -> str:
     """Normalize a raw DELIMIT_TOOLSET env value to a valid toolset name.
 
-    Unset, empty, or unrecognized values resolve to the default ("full"),
-    preserving byte-identical default behavior.
+    Unset or empty resolves to the default ("full"), preserving
+    byte-identical default behavior. An explicitly set but unrecognized
+    value fails CLOSED to FAIL_CLOSED_TOOLSET and warns on stderr
+    (LED-5835); stdout is never used because it carries MCP stdio.
     """
-    if not raw:
+    if not raw or not raw.strip():
         return DEFAULT_TOOLSET
     val = raw.strip().lower()
-    return val if val in VALID_TOOLSETS else DEFAULT_TOOLSET
+    if val in VALID_TOOLSETS or val == FAIL_CLOSED_TOOLSET:
+        return val
+    import sys
+    print(f"delimit: unrecognized DELIMIT_TOOLSET={raw.strip()!r}; exposing only "
+          f"{', '.join(sorted(FAIL_CLOSED_TOOLS))}. Valid: {', '.join(VALID_TOOLSETS)}.",
+          file=sys.stderr)
+    return FAIL_CLOSED_TOOLSET

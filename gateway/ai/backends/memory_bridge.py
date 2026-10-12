@@ -231,6 +231,7 @@ def store(
     tags: Optional[list] = None,
     context: Optional[str] = None,
     hot_load: bool = False,
+    origin: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Store a memory entry.
 
@@ -262,6 +263,8 @@ def store(
         "created_at": ts,
         "hot_load": bool(hot_load),
     }
+    if origin is not None:
+        entry["origin"] = origin
 
     path = _memory_dir() / f"{mem_id}.json"
     path.write_text(json.dumps(entry, indent=2))
@@ -403,6 +406,8 @@ def list_hot(limit: int = 200) -> Dict[str, Any]:
             "context": entry.get("context") or "",
             "created_at": entry.get("created_at") or entry.get("created") or "",
             "hot_load": True,
+            # G-3: projection must retain the origin predicate inputs.
+            **{key: entry[key] for key in ("origin", "source", "promoted") if key in entry},
         })
 
     return {"results": entries, "count": len(entries)}
@@ -437,6 +442,17 @@ def _format_hot_entry_as_markdown(entry: Dict[str, Any]) -> str:
     one_line = " ".join(content.split())
     if len(one_line) > 200:
         one_line = one_line[:197] + "..."
+    # G-3 (STR-10330 A2): non-owner-origin content is quoted data.
+    from ai.untrusted_records import frontend_tainted
+    if frontend_tainted(entry):
+        from ai.untrusted_records import label, quote_inline, md_code_span
+        # IDs and tags are record text too, including legacy imported entries.
+        # Quote each complete field before composition; never truncate a span.
+        safe_id = md_code_span(mid, max_len=60)
+        tags = entry.get("tags") or []
+        joined = ", ".join(str(tag) for tag in tags) if isinstance(tags, list) else str(tags)
+        safe_tags = f" [{md_code_span(joined, max_len=64)}]" if joined else ""
+        return f"- {safe_id}{safe_tags} — {quote_inline(content, label(entry))}"
     tags = entry.get("tags") or []
     tag_str = ""
     if tags:

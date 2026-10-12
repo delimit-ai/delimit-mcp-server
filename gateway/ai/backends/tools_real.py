@@ -477,7 +477,7 @@ def test_smoke(project_path: str, test_suite: Optional[str] = None, timeout_seco
     # The pre-fix order was (1) → (3), which broke for projects that have
     # their deps installed system-wide but no project-local venv: pytest
     # itself might exist in the delimit venv, but project-specific imports
-    # like `pika` (caught by codex against wirereport 2026-05-22) raise
+    # like `pika` raise
     # ModuleNotFoundError because the delimit venv is stripped to the MCP
     # server's deps only.
     if framework == "pytest":

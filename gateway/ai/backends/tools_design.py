@@ -1192,15 +1192,20 @@ def _puppeteer_screenshot_fallback(url: str, baselines_dir: Path) -> Dict[str, A
         safe_name = re.sub(r"[^a-zA-Z0-9]", "_", url)[:100]
         screenshot_path = baselines_dir / f"{safe_name}.png"
 
-        # Inline JS script for puppeteer
+        # Inline JS script for puppeteer. url and path are caller-controlled
+        # (MCP tool input), so embed them as JSON string literals: a quote in
+        # either must never terminate the literal and run as Node code.
+        # json.dumps escapes quotes, backslashes and (ensure_ascii) U+2028/9.
+        js_url = json.dumps(str(url))
+        js_path = json.dumps(str(screenshot_path))
         script = (
             "const puppeteer = require('puppeteer');"
             "(async () => {"
             "  const browser = await puppeteer.launch({headless: 'new', args: ['--no-sandbox']});"
             "  const page = await browser.newPage();"
             "  await page.setViewport({width: 1280, height: 720});"
-            f"  await page.goto('{url}', {{waitUntil: 'networkidle2', timeout: 15000}});"
-            f"  await page.screenshot({{path: '{screenshot_path}'}});"
+            f"  await page.goto({js_url}, {{waitUntil: 'networkidle2', timeout: 15000}});"
+            f"  await page.screenshot({{path: {js_path}}});"
             "  await browser.close();"
             "})();"
         )
@@ -1383,8 +1388,8 @@ def story_visual_test(
 
 # LED-1010 FIX: the original patterns used `<tag` with re.IGNORECASE but no
 # word boundary after the tag name. That meant `<ArrowLeft>` matched `<a` +
-# `rrowLeft>`, producing 128 false-positive link-href "errors" on a single
-# DomainVested scan. Require the character AFTER the tag name to be
+# `rrowLeft>`, producing false-positive link-href errors on a React scan.
+# Require the character AFTER the tag name to be
 # whitespace, `/`, or `>` so PascalCase React components can't collide with
 # HTML anchors / images / inputs / buttons.
 _IMG_NO_ALT_RE = re.compile(r"<img(?=[\s/>])(?![^>]*\salt=)[^>]*>", re.IGNORECASE)

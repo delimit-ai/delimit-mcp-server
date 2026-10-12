@@ -170,3 +170,4 @@ gateway/tasks/explain_diff_v2.py
 gateway/tasks/validate_api.py
 gateway/tasks/validate_api_v2.py
 gateway/tasks/validate_api_v3.py
+gateway/ai/untrusted_records.py
