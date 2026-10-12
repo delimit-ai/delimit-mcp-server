@@ -284,7 +284,7 @@ TOOL_TIERS.update({name: "internal" for name in FOUNDER_TOOLS})
 #  the "5 workflows" documentation stays accurate.
 # ─────────────────────────────────────────────────────────────────────
 
-VALID_TOOLSETS = ("core", "standard", "full", "records", "governance", "panel", "assistant", "lead", "frontend", "worker")
+VALID_TOOLSETS = ("core", "standard", "full", "records", "governance", "panel")
 DEFAULT_TOOLSET = "full"
 # Assistant-profile caps (unchanged). The armed lead profile uses LEAD_LIMITS;
 # fin_lead.limits() selects between them at call time.
