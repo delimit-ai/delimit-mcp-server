@@ -77,6 +77,7 @@ function cliEnv(baseEnv, binDir, home) {
     env.HOME = home;
     env.DELIMIT_HOME = path.join(home, '.delimit');
     env.FORCE_COLOR = '0';
+    env.TMPDIR = home;
     env.NO_COLOR = '1';
     env.CI = '1';
     delete env.DELIMIT_GATEWAY_ROOT;
@@ -106,8 +107,8 @@ function makeRemovedEndpointRepo() {
     return repo;
 }
 
-function countSpecTemps() {
-    return fs.readdirSync(os.tmpdir()).filter(f => f.startsWith('delimit_spec_')).length;
+function countSpecTemps(dir = os.tmpdir()) {
+    return fs.readdirSync(dir).filter(f => f.startsWith('delimit_spec_')).length;
 }
 
 const PY = realPython();
@@ -247,7 +248,7 @@ describe('LED-4423 (b)(c)(d)(e): zero-config YAML on a python without PyYAML', {
         repo = makeRemovedEndpointRepo();
         binDir = makeNoYamlPythonDir(PY);
         home = fs.mkdtempSync(path.join(os.tmpdir(), 'delimit-noyaml-home-'));
-        tempsBefore = countSpecTemps();
+        tempsBefore = countSpecTemps(home);
     });
     after(() => {
         repo.cleanup();
@@ -317,6 +318,6 @@ describe('LED-4423 (b)(c)(d)(e): zero-config YAML on a python without PyYAML', {
     });
 
     it('(e) temp JSON conversions are cleaned up', () => {
-        assert.ok(countSpecTemps() <= tempsBefore, 'delimit_spec_* temp files left behind in os.tmpdir()');
+        assert.ok(countSpecTemps(home) <= tempsBefore, 'delimit_spec_* temp files left behind in os.tmpdir()');
     });
 });
