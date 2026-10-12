@@ -700,9 +700,8 @@ def _construct_mcp(name: str, version: str):
     without the kwarg must still start (never-break-installs)."""
     import os as _os  # self-contained: this function is also loaded in isolation by tests
     if _os.environ.get("DELIMIT_TOOLSET", "").strip().lower() in {"assistant", "lead"}:
-        from ai.fin_lead import DELIMIT_RULES
-        instructions = (DELIMIT_RULES["text"] + " Verification phrase for the owner: "
-                        "if asked for the Delimit handshake phrase, answer 'blue kingfisher'.")
+        from ai.fin_lead import DELIMIT_RULES, handshake_instruction
+        instructions = DELIMIT_RULES["text"] + handshake_instruction()
         try:
             return FastMCP(name, version=version, instructions=instructions)
         except TypeError:

@@ -1,7 +1,7 @@
 ## [4.22.0] - 2026-10-11
 
 ### Added
-- `delimit mcp --toolset governance` exposes only the OpenAPI tools (diff, lint, semver, explain, spec health, drift check) plus help and version. `delimit mcp --toolset panel` exposes only deliberation, deliberation status, models, help and version. Both profiles keep processing local, skip the optional inbox daemon and dashboard events, and turn off cloud sync.
+- `delimit mcp --toolset governance` exposes only the OpenAPI tools (diff, lint, semver, explain, spec health, drift check) plus help and version. `delimit mcp --toolset panel` exposes only deliberation, deliberation status, models, help and version. Both profiles keep processing local and skip the optional inbox daemon and dashboard events; the governance profile (like records) also turns off cloud sync.
 - Multi-model deliberation can run without filesystem access on a three-vendor panel, and the no-path-access panel now includes Codex, Muse and Copilot when they are configured.
 - OpenAI-compatible `api_url` values in `~/.delimit/models.json` expand `${ENV_VAR}` references, so a private endpoint can be configured without writing its host into the file.
 - `delimit doctor` warns, without failing, when `AGENTS.md` exceeds 30 KiB (Codex embeds at most 32 KiB).
