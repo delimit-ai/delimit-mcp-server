@@ -146,11 +146,12 @@ def _sanitize_path(user_path: str, label: str = "path") -> Path:
 
     resolved = Path(user_path).resolve()
 
-    # Block /proc, /sys, /dev paths
+    # Block /proc, /sys, /dev paths.  /dev/shm/ is a standard POSIX tmpfs and
+    # is explicitly permitted (used by pytest TMPDIR on memory-constrained hosts).
     blocked_prefixes = ("/proc/", "/sys/", "/dev/")
     resolved_str = str(resolved)
     for prefix in blocked_prefixes:
-        if resolved_str.startswith(prefix):
+        if resolved_str.startswith(prefix) and not resolved_str.startswith("/dev/shm/"):
             raise ValueError(f"{label} points to restricted path: {prefix}")
 
     return resolved
@@ -639,7 +640,7 @@ def _emit_policy_event(tool_name: str, status: str, reason: str) -> None:
 #      gateway/ai/server.py ← ../../package.json)
 #   3. the pinned fallback below (last resort so the delimit_version return
 #      schema never changes shape — never-break-installs).
-_VERSION_FALLBACK = "4.21.0"
+_VERSION_FALLBACK = "4.22.0"
 
 
 def _resolve_version(start_path: Optional[str] = None) -> str:
@@ -697,6 +698,18 @@ def _construct_mcp(name: str, version: str):
     as ``serverInfo.version`` (fresh-user install test 2026-09-02, finding 6:
     "3.1.0" on a setup venv, "4.0.2" in Docker). Older fastmcp releases
     without the kwarg must still start (never-break-installs)."""
+    import os as _os  # self-contained: this function is also loaded in isolation by tests
+    if _os.environ.get("DELIMIT_TOOLSET", "").strip().lower() in {"assistant", "lead"}:
+        from ai.fin_lead import DELIMIT_RULES, handshake_instruction
+        instructions = DELIMIT_RULES["text"] + handshake_instruction()
+        try:
+            return FastMCP(name, version=version, instructions=instructions)
+        except TypeError:
+            # Older fastmcp without these kwargs must still start (never-break-installs).
+            try:
+                return FastMCP(name, instructions=instructions)
+            except TypeError:
+                return FastMCP(name)
     try:
         return FastMCP(name, version=version)
     except TypeError:
@@ -946,9 +959,137 @@ def _experimental_tool():
 from ai.tool_metadata import resolve_toolset as _resolve_toolset, tool_in_toolset as _tool_in_toolset
 
 ACTIVE_TOOLSET = _resolve_toolset(os.environ.get("DELIMIT_TOOLSET"))
+if ACTIVE_TOOLSET == "lead":
+    from ai.fin_lead import _armed as _lead_armed
+    if not _lead_armed("lead"):
+        print("delimit: lead not armed; falling back to assistant", file=_sys.stderr)
+        ACTIVE_TOOLSET = "assistant"
+# Reduced profiles that promise no background side effects (no inbox-daemon
+# autostart, no dashboard events). Includes the fail-closed profile (LED-5835).
+_SIDE_EFFECT_FREE_PROFILES = frozenset({"records", "governance", "panel", "none", "assistant", "lead", "frontend", "worker"})
+
+# These plugin profiles promise local operation even when the surrounding
+# installation has opted into Supabase mirroring.
+if ACTIVE_TOOLSET in {"records", "governance", "none", "assistant", "lead", "frontend", "worker"}:
+    os.environ["DELIMIT_DISABLE_CLOUD_SYNC"] = "1"
 
 if ACTIVE_TOOLSET != "full":
+    _REGISTERED_TOOL_NAMES = set()
+    from functools import wraps as _toolset_wraps
+    import inspect as _inspect
+    from ai.tool_metadata import LEAD_STATUS_TOOLS as _LEAD_STATUS_TOOLS
     _orig_mcp_tool = mcp.tool
+
+    def _lead_call_guard(fn, name):
+        # Lead only. Fail closed per call: a disarmed lead keeps only the status tools
+        # that explain why. Every result is scrubbed of secret values before it can
+        # reach the front-end transcript.
+        if ACTIVE_TOOLSET == "assistant":
+            # The assistant profile is a front-end principal too: every call passes the
+            # same PR-0 refusal table and the same secret scrub as the lead profile,
+            # not only its allowlist (review of #678).
+            from ai.fin_lead import scrub as _fe_scrub
+            from ai.frontend_pr0 import frontend_refusal as _fe_refusal
+            if name == "delimit_deliberate_lite":
+                @_toolset_wraps(fn)
+                def _assistant_metered_refusal(*args, **kwargs):
+                    return {"ok": False, "reason": "refused for front-end principals: metered"}
+                return _assistant_metered_refusal
+            if name == "delimit_deliberate":
+                # Route through _deliberate_assistant: think-class quota enforced,
+                # context_files / save_path stripped, no_path_access forced.
+                from ai.fin_lead import _deliberate_assistant as _da, scrub as _fe_scrub_da
+                @_toolset_wraps(fn)
+                def _assistant_deliberate_gated(*args, **kwargs):
+                    result = _da(
+                        question=kwargs.get("question", args[0] if args else ""),
+                        context=kwargs.get("context", ""),
+                        mode=kwargs.get("mode", "dialogue"),
+                        max_rounds=kwargs.get("max_rounds", 3),
+                        scope=kwargs.get("scope", ""),
+                    )
+                    return _fe_scrub_da(result)
+                return _assistant_deliberate_gated
+            if _inspect.iscoroutinefunction(fn):
+                @_toolset_wraps(fn)
+                async def _assistant_checked_async(*args, **kwargs):
+                    denied = _fe_refusal(name, fn, args, kwargs)
+                    if denied is not None:
+                        return denied
+                    try:
+                        result = await fn(*args, **kwargs)
+                    except Exception as exc:
+                        raise RuntimeError(_fe_scrub(f"{type(exc).__name__}: {exc}")) from None
+                    return _fe_scrub(result)
+                return _assistant_checked_async
+
+            @_toolset_wraps(fn)
+            def _assistant_checked(*args, **kwargs):
+                denied = _fe_refusal(name, fn, args, kwargs)
+                if denied is not None:
+                    return denied
+                try:
+                    result = fn(*args, **kwargs)
+                except Exception as exc:
+                    raise RuntimeError(_fe_scrub(f"{type(exc).__name__}: {exc}")) from None
+                if _inspect.isawaitable(result):
+                    async def _finish():
+                        try:
+                            value = await result
+                        except Exception as exc:
+                            raise RuntimeError(_fe_scrub(f"{type(exc).__name__}: {exc}")) from None
+                        return _fe_scrub(value)
+                    return _finish()
+                return _fe_scrub(result)
+            return _assistant_checked
+        if ACTIVE_TOOLSET != "lead":
+            return fn
+        from ai.fin_lead import scrub as _lead_scrub
+        from ai.frontend_pr0 import frontend_refusal as _frontend_refusal
+        status_tool = name in _LEAD_STATUS_TOOLS
+        refusal = {"ok": False, "reason": "class not armed: lead"}
+
+        if _inspect.iscoroutinefunction(fn):
+            @_toolset_wraps(fn)
+            async def _checked_async(*args, **kwargs):
+                if not status_tool and not _lead_armed("lead"):
+                    return refusal
+                denied = _frontend_refusal(name, fn, args, kwargs)
+                if denied is not None:
+                    return denied
+                try:
+                    result = await fn(*args, **kwargs)
+                except Exception as exc:
+                    # Error messages reach the client too: scrub them, and drop the
+                    # original exception so its unscrubbed text is not chained.
+                    raise RuntimeError(_lead_scrub(f"{type(exc).__name__}: {exc}")) from None
+                return _lead_scrub(result)
+            return _checked_async
+
+        @_toolset_wraps(fn)
+        def _checked(*args, **kwargs):
+            if not status_tool and not _lead_armed("lead"):
+                return refusal
+            denied = _frontend_refusal(name, fn, args, kwargs)
+            if denied is not None:
+                return denied
+            try:
+                result = fn(*args, **kwargs)
+            except Exception as exc:
+                raise RuntimeError(_lead_scrub(f"{type(exc).__name__}: {exc}")) from None
+            if _inspect.isawaitable(result):
+                # Async tools arrive here as sync wrappers returning a coroutine (the
+                # capability guard wraps them), so scrub the awaited result and error too.
+                async def _finish():
+                    try:
+                        value = await result
+                    except Exception as exc:
+                        raise RuntimeError(_lead_scrub(f"{type(exc).__name__}: {exc}")) from None
+                    return _lead_scrub(value)
+                return _finish()
+            return _lead_scrub(result)
+
+        return _checked
 
     def _toolset_gated_tool(*args, **kwargs):
         explicit_name = kwargs.get("name")
@@ -959,7 +1100,8 @@ if ACTIVE_TOOLSET != "full":
             name = explicit_name or getattr(fn, "__name__", "")
             if not _tool_in_toolset(name, ACTIVE_TOOLSET):
                 return fn
-            return _orig_mcp_tool(*args, **kwargs)
+            _REGISTERED_TOOL_NAMES.add(name)
+            return _orig_mcp_tool(_lead_call_guard(fn, name), *args[1:], **kwargs)
 
         # Case B: factory usage `@mcp.tool(...)` / `mcp.tool()(fn)`.
         decorator = _orig_mcp_tool(*args, **kwargs)
@@ -968,7 +1110,8 @@ if ACTIVE_TOOLSET != "full":
             name = explicit_name or getattr(fn, "__name__", "")
             if not _tool_in_toolset(name, ACTIVE_TOOLSET):
                 return fn
-            return decorator(fn)
+            _REGISTERED_TOOL_NAMES.add(name)
+            return decorator(_lead_call_guard(fn, name))
 
         return _gate
 
@@ -993,12 +1136,16 @@ import functools as _functools
 from ai.capability_guard import (  # noqa: E402
     guard_internal as _guard_internal,
     missing_module_name as _missing_module_name,
+    tool_backend_absent as _tool_backend_absent,
 )
 
 _pre_capability_mcp_tool = mcp.tool
 
 
 def _capability_guarded_tool(*args, **kwargs):
+    def _registerable(fn):
+        return not _tool_backend_absent(kwargs.get("name") or getattr(fn, "__name__", ""))
+
     def _wrap(fn):
         @_functools.wraps(fn)
         def _guarded(*a, **kw):
@@ -1014,11 +1161,15 @@ def _capability_guarded_tool(*args, **kwargs):
         return _guarded
 
     if args and callable(args[0]) and not isinstance(args[0], str):
+        if not _registerable(args[0]):
+            return args[0]
         return _pre_capability_mcp_tool(_wrap(args[0]), *args[1:], **kwargs)
 
     decorator = _pre_capability_mcp_tool(*args, **kwargs)
 
     def _apply(fn):
+        if not _registerable(fn):
+            return fn
         return decorator(_wrap(fn))
 
     return _apply
@@ -1100,9 +1251,18 @@ _pre_annotation_mcp_tool = mcp.tool
 
 
 def _annotating_tool(*args, **kwargs):
+    def scope(fn):
+        if ACTIVE_TOOLSET in {"assistant", "lead"}:
+            from ai.tool_metadata import ASSISTANT_TOOLS
+            if fn.__name__ in ASSISTANT_TOOLS:
+                prefix = "[Owner's ventures and private workspace] "
+                if fn.__doc__ and not fn.__doc__.lstrip().startswith(prefix):
+                    fn.__doc__ = prefix + fn.__doc__.lstrip()
+        return fn
+
     # Bare `@mcp.tool` — first positional arg is the function.
     if args and callable(args[0]) and not isinstance(args[0], str):
-        fn = args[0]
+        fn = scope(args[0])
         if "annotations" not in kwargs:
             kwargs["annotations"] = _derive_tool_annotations(fn)
         return _pre_annotation_mcp_tool(*args, **kwargs)
@@ -1113,6 +1273,7 @@ def _annotating_tool(*args, **kwargs):
         return _pre_annotation_mcp_tool(*args, **kwargs)
 
     def _apply(fn):
+        fn = scope(fn)
         local_kwargs = dict(kwargs)
         local_kwargs["annotations"] = _derive_tool_annotations(fn)
         return _pre_annotation_mcp_tool(*args, **local_kwargs)(fn)
@@ -1141,6 +1302,10 @@ def _check_pro(tool_name: str) -> Optional[Dict]:
     instead of hard-blocking a free user during the migration window. Without
     this, _with_next_steps would re-gate (grace-unaware) every PRO_TOOLS member
     it wraps, silently defeating the grace for newly-enforced tools."""
+    # This profile exposes only the local keyword memory backend; avoid a
+    # license revalidation request for its search operation.
+    if ACTIVE_TOOLSET == "records" and tool_name == "delimit_memory_search":
+        return None
     if tool_name not in PRO_TOOLS:
         return None
     gate = _pro_gate_graced(tool_name)
@@ -1909,9 +2074,11 @@ def _detect_environment() -> Dict[str, Any]:
                 detected_keys[service] = {"source": "env", "env_var": var}
                 break
 
-    # Check secrets broker
+    # A non-owner profile has no broker inventory access. Env key names are
+    # also omitted: only the aggregate count may leave this profile.
+    frontend_profile = ACTIVE_TOOLSET in {"assistant", "frontend", "worker", "none", "lead"}
     secrets_dir = Path.home() / ".delimit" / "secrets"
-    if secrets_dir.exists():
+    if not frontend_profile and secrets_dir.exists():
         for secret_file in secrets_dir.glob("*.json"):
             name = secret_file.stem
             if name not in detected_keys:
@@ -1943,7 +2110,7 @@ def _detect_environment() -> Dict[str, Any]:
             security_tools[tool] = path
 
     return {
-        "api_keys": detected_keys,
+        "api_keys": {} if frontend_profile else detected_keys,
         "clis": detected_clis,
         "security_tools": security_tools,
         "summary": {
@@ -2030,14 +2197,14 @@ def _cap_response(result: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _records_next_steps(result: Dict[str, Any]) -> Dict[str, Any]:
-    """Keep records-profile hints inside its registered MCP surface."""
-    if ACTIVE_TOOLSET == "records" and isinstance(result, dict):
+    """Keep plugin-profile hints inside the active registered MCP surface."""
+    if ACTIVE_TOOLSET in _SIDE_EFFECT_FREE_PROFILES and isinstance(result, dict):
         steps = result.get("next_steps")
         if isinstance(steps, list):
             result["next_steps"] = [
                 step for step in steps
                 if isinstance(step, dict)
-                and _tool_in_toolset(step.get("tool", ""), "records")
+                and _tool_in_toolset(step.get("tool", ""), ACTIVE_TOOLSET)
             ]
     return result
 
@@ -2057,7 +2224,7 @@ def _with_next_steps(tool_name: str, result: Dict[str, Any]) -> Dict[str, Any]:
     """
     # Auto-start inbox daemon on first tool call - works for ALL models
     global _inbox_daemon_autostarted
-    if ACTIVE_TOOLSET != "records" and not _inbox_daemon_autostarted:
+    if ACTIVE_TOOLSET not in _SIDE_EFFECT_FREE_PROFILES and not _inbox_daemon_autostarted:
         _inbox_daemon_autostarted = True
         _autostart_optional_inbox_daemon()
 
@@ -2129,11 +2296,13 @@ def _with_next_steps(tool_name: str, result: Dict[str, Any]) -> Dict[str, Any]:
     rate_gate = (None if tool_name.removeprefix("delimit_") == "agent_dispatch"
                  else _check_rate_limit(tool_name))
     if rate_gate:
-        _emit_event(tool_name, rate_gate)
+        if ACTIVE_TOOLSET not in _SIDE_EFFECT_FREE_PROFILES:
+            _emit_event(tool_name, rate_gate)
         return _cap_response(rate_gate)
 
     # Emit event for real-time dashboard
-    _emit_event(tool_name, result)
+    if ACTIVE_TOOLSET not in _SIDE_EFFECT_FREE_PROFILES:
+        _emit_event(tool_name, result)
 
     # STR-052: Policy kernel inline enforcement
     policy_gate = _check_policy_gate(tool_name, result if isinstance(result, dict) else {})
@@ -2237,7 +2406,7 @@ def delimit_lint(old_spec: Annotated[str, Field(description="Path or URL to the 
             )
 
             # Dry-run mode: return raw lint + semver, skip all chains and governance
-            if dry_run:
+            if dry_run or ACTIVE_TOOLSET == "governance":
                 lint_result["dry_run"] = True
                 lint_result["simulated"] = True
                 # Still classify semver (informational, no side effects)
@@ -2245,6 +2414,9 @@ def delimit_lint(old_spec: Annotated[str, Field(description="Path or URL to the 
                 if not semver_result.get("error"):
                     lint_result["semver"] = semver_result
                 lint_result["resolved_from"] = resolved_from
+                if ACTIVE_TOOLSET == "governance":
+                    lint_result["next_steps"] = NEXT_STEPS_REGISTRY.get("lint", [])
+                    return _records_next_steps(lint_result)
                 return lint_result
 
             chain: Dict[str, Any] = {"id": "lint_chain", "steps": []}
@@ -3560,7 +3732,7 @@ def delimit_memory_search(query: Annotated[str, Field(description="Natural-langu
         Dict with matching memory entries and next_steps.
     """
     from ai.license import require_premium
-    gate = require_premium("memory_search")
+    gate = None if ACTIVE_TOOLSET == "records" else require_premium("memory_search")
     if gate:
         return gate
     from backends.memory_bridge import search
@@ -3611,7 +3783,10 @@ def delimit_memory_store(
     from backends.memory_bridge import store
     return _with_next_steps(
         "memory_store",
-        _safe_call(store, content=content, tags=tags, context=context, hot_load=hot_load),
+        _safe_call(store, content=content, tags=tags, context=context,
+                   hot_load=False if ACTIVE_TOOLSET in {"lead", "assistant"} else hot_load,
+                   **({"origin": "frontend:" + (os.environ.get("DELIMIT_MODEL") or "unknown")}
+                      if ACTIVE_TOOLSET in {"lead", "assistant"} else {})),
     )
 
 
@@ -3962,6 +4137,27 @@ def _delimit_deploy_impl(
             },
         )
 
+    # Policy kernel BEFORE side effects. _with_next_steps also calls
+    # _check_policy_gate, but only after the wrapped backend call has already
+    # run, so its "blocked" verdict could not stop an npm publish, git push,
+    # Vercel deploy, or rollback record: the action happened and the caller
+    # was told it was blocked. The Pro gate stays first so unlicensed callers
+    # still receive premium_required rather than a policy verdict.
+    if action in {"build", "npm", "publish", "site", "rollback"}:
+        from ai.license import require_premium
+
+        pro_gate = require_premium(f"deploy_{action}")
+        if pro_gate:
+            return pro_gate
+        policy_gate = _check_policy_gate(f"deploy_{action}", {})
+        if policy_gate:
+            policy_gate["governance"] = {
+                "action": "policy_blocked",
+                "reason": policy_gate["reason"],
+                "phase": "pre_execution",
+            }
+            return _cap_response(policy_gate)
+
     if action == "plan":
         # Delegate to the shared chain logic
         return _deploy_plan_chain(
@@ -4080,10 +4276,11 @@ def _delimit_deploy_impl(
 
         env_vars = {}
         if "delimit-ui" in project_path or "delimit-ui" in str(Path(project_path).resolve()):
-            chatops_token = os.environ.get("CHATOPS_AUTH_TOKEN", "")
+            # 2026-09-28 security audit: NEXT_PUBLIC_* values are compiled into
+            # the public JS bundle, so the operator bearer (CHATOPS_AUTH_TOKEN)
+            # must never be injected here. Only the public ChatOps URL is.
             env_vars = {
                 "NEXT_PUBLIC_CHATOPS_URL": "https://chatops.delimit.ai",
-                "NEXT_PUBLIC_CHATOPS_TOKEN": chatops_token,
             }
         return _with_next_steps(
             "deploy_site",
@@ -9170,8 +9367,7 @@ def delimit_deploy_site(
     images; delimit_deploy_npm publishes packages; this is the
     static-site / Vercel flavour. Compared to running `git push`
     by hand, this wraps the push with sanitisation, governance
-    hooks, and (for delimit-ui) automatic ChatOps env-var
-    injection from CHATOPS_AUTH_TOKEN.
+    hooks, and (for delimit-ui) the public ChatOps URL env var.
 
     Side effects: requires repo_path and is gated by require_premium.
     project_path must remain inside repo_path. The safe default commits only
@@ -9180,9 +9376,9 @@ def delimit_deploy_site(
     Git mutation. A timeout after push returns status=pending, commit SHA, and
     a delimit_deploy_verify continuation rather than raising. On success this
     performs LOCAL git operations and triggers a NETWORK deploy
-    (Vercel build webhook). For the delimit-ui project, automatically
-    injects ChatOps env vars from the CHATOPS_AUTH_TOKEN environment
-    variable into the build context. No rollback — use
+    (Vercel build webhook). For the delimit-ui project, injects only the
+    public ChatOps URL into the build context; no credential is ever injected
+    as a NEXT_PUBLIC_* value. No rollback — use
     delimit_deploy_rollback if the deploy regresses.
 
     Args:
@@ -9337,6 +9533,21 @@ def _resolve_venture(venture: str) -> str:
             return str(candidate)
     dedicated = Path.home() / ".delimit" / "ventures" / venture
     return str(dedicated)
+
+
+def _continue_venture_loop(response: Dict[str, Any], venture: str) -> Dict[str, Any]:
+    """Offer the next scoped task after ledger context or completion."""
+    steps = [dict(step) for step in response.get("next_steps", [])]
+    response["next_steps"] = steps
+    if not any(step.get("tool") == "delimit_next_task" for step in steps):
+        steps.append({"tool": "delimit_next_task", "reason": "Find the next task in this venture",
+                      "suggested_args": {"venture": venture}, "is_premium": True})
+    else:
+        for step in steps:
+            if step.get("tool") == "delimit_next_task":
+                step["suggested_args"] = {**step.get("suggested_args", {}), "venture": venture}
+    # Profiles without delimit_next_task (records) must not advertise it.
+    return _records_next_steps(response)
 
 
 @mcp.tool()
@@ -9573,7 +9784,9 @@ def delimit_ledger_done(
         review_diff_path=review_diff_path or None,
         review_diff_text=review_diff_text or None,
     )
-    return _with_next_steps("ledger_done", result)
+    from ai.ledger_manager import _detect_venture
+    scoped_venture = venture or _detect_venture(project)["name"]
+    return _continue_venture_loop(_with_next_steps("ledger_done", result), scoped_venture)
 
 
 @mcp.tool()
@@ -10000,7 +10213,284 @@ def delimit_ledger_context(venture: Annotated[str, Field(description="Project na
     from ai.ledger_manager import get_context
     project = _resolve_venture(venture) if venture else "."
     result = get_context(project_path=project)
-    return _with_next_steps("ledger_context", result)
+    return _continue_venture_loop(_with_next_steps("ledger_context", result), venture or result["venture"])
+
+
+@mcp.tool() if ACTIVE_TOOLSET in {"assistant", "lead"} else (lambda fn: fn)
+def delimit_brief(venture: Annotated[str, Field(description="Allowlisted venture, or empty for all.")] = "",
+                  cursor: Annotated[int, Field(description="Item offset within each venture.")] = 0) -> Dict[str, Any]:
+    """Give an owner a compact update on allowlisted work.
+
+    When to use: for a short morning update across active ventures.
+    When NOT to use: for a full ledger export or hidden ventures.
+
+    Sibling contrast: delimit_item gives one item's latest note;
+    delimit_pending_handoffs gives handoff details.
+
+    Side effects: read-only; reads local ledger and handoff files only.
+
+    Args:
+        venture: Allowlisted venture, or empty for all.
+        cursor: Item offset within each venture.
+
+    Returns:
+        Redacted top work, owner waits, recent completions, and unknowns.
+    """
+    from ai.assistant_profile import brief
+    return brief(venture, cursor)
+
+
+@mcp.tool() if ACTIVE_TOOLSET in {"assistant", "lead"} else (lambda fn: fn)
+def delimit_item(item_id: Annotated[str, Field(description="Ledger item ID.")],
+                 note_offset: Annotated[int, Field(description="Offset into the redacted last note.")] = 0) -> Dict[str, Any]:
+    """Read one allowlisted ledger item without its raw description.
+
+    When to use: to answer a question about a specific ledger item.
+    When NOT to use: for a full ledger search or private venture.
+
+    Sibling contrast: delimit_brief summarizes multiple items;
+    this returns one item's last note.
+
+    Side effects: read-only; reads local ledger files only.
+
+    Args:
+        item_id: Exact ledger item ID.
+        note_offset: Character offset into the redacted last note.
+
+    Returns:
+        Redacted item fields or null, with source and timestamp.
+    """
+    from ai.assistant_profile import item
+    return item(item_id, note_offset)
+
+
+@mcp.tool() if ACTIVE_TOOLSET in {"assistant", "lead"} else (lambda fn: fn)
+def delimit_item_history(item_id: Annotated[str, Field(description="Ledger item ID.")],
+                         cursor: Annotated[int, Field(description="History event offset.")] = 0,
+                         limit: Annotated[int, Field(description="Maximum events, 1-20.")] = 10,
+                         note_offset: Annotated[int, Field(description="Character offset into each returned note.")] = 0) -> Dict[str, Any]:
+    """Read creation and update events for one visible ledger item.
+
+    When to use: to inspect changes behind an item summary.
+    When NOT to use: to change an item or read a hidden venture.
+
+    Sibling contrast: delimit_item returns the current item and paged last note.
+
+    Side effects: read-only; reads local ledger files only.
+
+    Args:
+        item_id: Exact ledger item ID.
+        cursor: Event offset, oldest first.
+        limit: Maximum events, clamped to 1-20.
+        note_offset: Offset into each note; to read one long historical note
+            in full, call with cursor=<event_index>, limit=1 and the returned
+            next_note_offset until it is null.
+
+    Returns:
+        Redacted events (event_index, 800-char note chunk, note_total_chars,
+        next_note_offset) and the next cursor, or null for a hidden item.
+    """
+    from ai.assistant_profile import item_history
+    return item_history(item_id, cursor, limit, note_offset)
+
+
+@mcp.tool() if ACTIVE_TOOLSET in {"assistant", "lead"} else (lambda fn: fn)
+def delimit_search(query: Annotated[str, Field(description="Words that must all appear in an item's title or last note.")],
+                   limit: Annotated[int, Field(description="Maximum results, 1-20.")] = 10,
+                   cursor: Annotated[int, Field(description="Search result offset.")] = 0) -> Dict[str, Any]:
+    """Find allowlisted ledger items by topic.
+
+    When to use: to locate items about a topic before reading one with delimit_item.
+    When NOT to use: for the daily summary (delimit_brief) or hidden ventures.
+
+    Sibling contrast: delimit_item reads one item by ID;
+    this returns matching item IDs and titles.
+
+    Side effects: read-only; reads local ledger files only.
+
+    Args:
+        query: Words that must all appear (case-insensitive), up to 8.
+        limit: Maximum results, clamped to 1-20.
+        cursor: Result offset for continuation.
+
+    Returns:
+        Redacted matches (newest first), total_matches, and unknowns.
+    """
+    from ai.assistant_profile import search
+    return search(query, limit, cursor)
+
+
+@mcp.tool() if ACTIVE_TOOLSET in {"assistant", "lead"} else (lambda fn: fn)
+def delimit_review_queue(venture: Annotated[str, Field(description="Allowlisted venture, or empty for all.")] = "",
+                         limit: Annotated[int, Field(description="Maximum items to review, 1-20.")] = 8,
+                         cursor: Annotated[int, Field(description="Queue result offset.")] = 0) -> Dict[str, Any]:
+    """Rank open items for an owner-led ledger review.
+
+    When to use: when the owner wants to clean up stale ledger items together.
+    When NOT to use: to change an item without the owner's explicit decision.
+
+    Sibling contrast: delimit_item reads a selected item's fuller last note.
+
+    Side effects: read-only; reads local ledger and assistant inbox files.
+
+    Args:
+        venture: Allowlisted venture, or empty for all.
+        limit: Maximum results, clamped to 1-20 and output size.
+        cursor: Result offset for continuation.
+
+    Returns:
+        Ranked, redacted items and a review protocol.
+    """
+    from ai.assistant_profile import review_queue
+    return review_queue(venture, limit, cursor)
+
+
+@mcp.tool() if ACTIVE_TOOLSET in {"assistant", "lead"} else (lambda fn: fn)
+def delimit_pending_handoffs(limit: Annotated[int, Field(description="Maximum receipts, 1-50.")] = 10) -> Dict[str, Any]:
+    """List safe pending handoff summaries.
+
+    When to use: to hear what work is awaiting a handoff.
+    When NOT to use: to acknowledge or create a receipt.
+
+    Sibling contrast: delimit_brief gives a handoff count;
+    this gives short receipt summaries.
+
+    Side effects: read-only; reads pending receipts only.
+
+    Args:
+        limit: Maximum receipt summaries, clamped to 1-50.
+
+    Returns:
+        Redacted receipt summaries with source and timestamp.
+    """
+    from ai.assistant_profile import pending_handoffs
+    return pending_handoffs(limit)
+
+
+@mcp.tool() if ACTIVE_TOOLSET in {"assistant", "lead"} else (lambda fn: fn)
+def delimit_propose(title: str, detail: str, next_action: str = "", item_id: str = "", venture: str = "",
+                    action: str = "note", priority: str = "") -> Dict[str, Any]:
+    """Leave a proposal for owner review.
+
+    When to use: to suggest a concrete action or checkpoint to the owner.
+    When NOT to use: to issue instructions to privileged agents.
+
+    Sibling contrast: delimit_brief summarizes current work; this leaves a proposal.
+
+    Side effects: appends a pending proposal to a quarantine inbox.
+
+    Args:
+        title: Short proposal title.
+        detail: Proposal explanation.
+        next_action: Suggested next action.
+        item_id: Existing allowlisted ledger item, if relevant.
+        venture: Allowlisted venture, or empty when item_id resolves it.
+        action: Note, close, cancel, reprioritize, or reopen.
+        priority: P0, P1, or P2 for reprioritize.
+
+    Returns:
+        Acceptance status and proposal receipt, without proposal text.
+    """
+    from ai.assistant_profile import propose
+    return propose(title, detail, next_action, item_id, venture, action, priority)
+
+
+@mcp.tool() if ACTIVE_TOOLSET in {"assistant", "lead"} else (lambda fn: fn)
+def delimit_mandate() -> Dict[str, Any]:
+    """Call at the start of every conversation. Read and follow Fin's founder-installed mandate.
+
+    Side effects: read-only; reads the installed mandate file.
+    """
+    from ai.fin_lead import mandate
+    return mandate()
+
+
+@mcp.tool() if ACTIVE_TOOLSET in {"assistant", "lead"} else (lambda fn: fn)
+def delimit_start_here() -> Dict[str, Any]:
+    """Call this FIRST in any conversation about the owner's ventures or tasks the owner wants tracked in Delimit.
+
+    Side effects: read-only; reads local mandate, arming, ledger and checkpoint files.
+    """
+    from ai.fin_lead import DELIMIT_RULES, capabilities
+    from ai.fin_continuity import workstreams
+    status = capabilities()
+    status.pop("_delimit_rules")
+    status.pop("front_end_bootstrap")
+    return {"_delimit_rules": DELIMIT_RULES, "capabilities": status,
+            "mandate_status": status["mandate"]["status"],
+            "data": {"workstreams": workstreams()}}
+
+
+@mcp.tool() if ACTIVE_TOOLSET in {"assistant", "lead"} else (lambda fn: fn)
+def delimit_capabilities() -> Dict[str, Any]:
+    """Call at the start of every conversation. Read Fin's capabilities and bootstrap.
+
+    Side effects: read-only; reads local mandate and arming files.
+    """
+    from ai.fin_lead import capabilities
+    return capabilities()
+
+
+@mcp.tool() if ACTIVE_TOOLSET in {"assistant", "lead"} else (lambda fn: fn)
+def delimit_ledger_write(action: str, title: str = "", note: str = "", item_id: str = "",
+                         venture: str = "", priority: str = "", idempotency_key: str = "") -> Dict[str, Any]:
+    """Write a bounded allowlisted ledger action when the records class is armed.
+
+    Side effects: writes the ledger and a local audit file.
+    """
+    from ai.fin_lead import ledger_write
+    return ledger_write(action, title, note, item_id, venture, priority, idempotency_key)
+
+
+@mcp.tool() if ACTIVE_TOOLSET in {"assistant", "lead"} else (lambda fn: fn)
+def delimit_deliberate_lite(question: str) -> Dict[str, Any]:
+    """Run a short operational deliberation when the think class is armed.
+
+    Side effects: calls model providers; writes a transcript and local audit file.
+    """
+    from ai.fin_lead import deliberate_lite
+    return deliberate_lite(question)
+
+
+@mcp.tool() if ACTIVE_TOOLSET in {"assistant", "lead"} else (lambda fn: fn)
+def delimit_capture(text: str, kind: str = "idea", venture: str = "", idempotency_key: str = "") -> Dict[str, Any]:
+    """Call IMMEDIATELY whenever the owner states a new idea, task, decision or open question — do not wait for the end of the conversation. Tell the owner the returned id.
+
+    Side effects: writes an allowlisted ledger item or quarantined inbox proposal and a capture receipt.
+    """
+    from ai.fin_continuity import capture
+    return capture(text, kind, venture, idempotency_key)
+
+
+@mcp.tool() if ACTIVE_TOOLSET in {"assistant", "lead"} else (lambda fn: fn)
+def delimit_checkpoint_write(venture: str, summary: str, thread: str = "main", open_threads: str = "",
+                             decisions: str = "", next_steps: str = "") -> Dict[str, Any]:
+    """Call before switching to another venture or topic, when the owner says 'pause', 'switch to …' or 'wrap up', and at the end of every working conversation.
+
+    Side effects: appends a redacted, untrusted front-end checkpoint or metered refusal.
+    """
+    from ai.fin_continuity import checkpoint_write
+    return checkpoint_write(venture, summary, thread, open_threads, decisions, next_steps)
+
+
+@mcp.tool() if ACTIVE_TOOLSET in {"assistant", "lead"} else (lambda fn: fn)
+def delimit_checkpoint_read(venture: str, thread: str = "") -> Dict[str, Any]:
+    """Call when the owner says 'switch to', 'resume' or 'back to' a venture, before answering about that venture.
+
+    Side effects: read-only; reads front-end checkpoints.
+    """
+    from ai.fin_continuity import checkpoint_read
+    return checkpoint_read(venture, thread)
+
+
+@mcp.tool() if ACTIVE_TOOLSET in {"assistant", "lead"} else (lambda fn: fn)
+def delimit_workstreams() -> Dict[str, Any]:
+    """Call when the owner asks what's in flight / where things stand across ventures.
+
+    Side effects: read-only; reads front-end checkpoints.
+    """
+    from ai.fin_continuity import workstreams
+    return workstreams()
 
 
 @mcp.tool()
@@ -10668,6 +11158,14 @@ def delimit_deliberate(
         Dict with the consensus result, per-round transcripts, and
         next_steps.
     """
+    # In the assistant toolset (Fin / front-end operators), context_files and
+    # save_path are stripped server-side and the think-class quota is enforced.
+    if ACTIVE_TOOLSET == "assistant":
+        from ai import fin_lead as _fin_lead
+        return _fin_lead._deliberate_assistant(
+            question=question, context=context, mode=mode,
+            max_rounds=max_rounds, scope=scope,
+        )
     from ai.license import require_premium
     gate = require_premium("deliberate")
     if gate:
@@ -12416,10 +12914,18 @@ def delimit_social_post(text: Annotated[str, Field(description="Tweet text. Leav
         }
 
     draft = True  # Always draft, never auto-post
+    # LED-5813: the approval email below already presents an empty X account
+    # as @delimit_ai, but the saved row kept account="" and no venture, so the
+    # founder's Telegram card could not bind an owner-approved Delimit original
+    # (_is_delimit_x_original requires account=delimit_ai + venture=delimit).
+    # Save the row as the account the founder is shown. Reddit is unchanged.
+    _save_account, _save_venture = account, ""
+    if platform == "twitter" and account in ("", "delimit_ai"):
+        _save_account, _save_venture = "delimit_ai", "delimit"
     entry = save_draft(
-        post["text"], platform=platform, account=account,
+        post["text"], platform=platform, account=_save_account,
         quote_tweet_id=quote_tweet_id, reply_to_id=reply_to_id,
-        context=context,
+        context=context, venture=_save_venture,
     )
     # Send draft notification via email and store Message-ID for
     # In-Reply-To matching in the inbox daemon (Consensus 116)
@@ -15499,7 +16005,9 @@ def delimit_task_complete(task_id: Annotated[str, Field(description="Ledger item
     r = _safe_call(task_complete, task_id=task_id, result=result,
                    cost_incurred=cost_incurred, error=error,
                    session_id=session_id, venture=venture)
-    return _with_next_steps("task_complete", r)
+    from ai.ledger_manager import _detect_venture
+    scoped_venture = venture or _detect_venture(".")["name"]
+    return _continue_venture_loop(_with_next_steps("task_complete", r), scoped_venture)
 
 
 @mcp.tool()
@@ -16331,3 +16839,10 @@ def delimit_build(
             "hint": "The supporting graduation workflow is not included in this installation.",
         })
     return _with_next_steps("build", run_build(record_id=record_id, founder_mandate_text=founder_mandate_text))
+
+
+# A1 / PR-1: module manifest is the only entry point for new profiles. Existing
+# profiles never execute this branch and keep their historical registrations.
+if ACTIVE_TOOLSET in {"frontend", "worker"}:
+    from ai.frontend.registration import register as _register_frontend_module
+    _register_frontend_module(mcp, ACTIVE_TOOLSET)

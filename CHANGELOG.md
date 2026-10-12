@@ -1,3 +1,30 @@
+## [4.22.0] - 2026-10-11
+
+### Added
+- `delimit mcp --toolset governance` exposes only the OpenAPI tools (diff, lint, semver, explain, spec health, drift check) plus help and version. `delimit mcp --toolset panel` exposes only deliberation, deliberation status, models, help and version. Both profiles keep processing local and skip the optional inbox daemon and dashboard events; the governance profile (like records) also turns off cloud sync.
+- Multi-model deliberation can run without filesystem access on a three-vendor panel, and the no-path-access panel now includes Codex, Muse and Copilot when they are configured.
+- OpenAI-compatible `api_url` values in `~/.delimit/models.json` expand `${ENV_VAR}` references, so a private endpoint can be configured without writing its host into the file.
+- `delimit doctor` warns, without failing, when `AGENTS.md` exceeds 30 KiB (Codex embeds at most 32 KiB).
+
+### Changed
+- On installs where a tool's backend module is not shipped, that tool is no longer listed. Previously such tools were listed and returned `capability_unavailable` when called. No working tool is removed; a tool is still listed wherever its backend is present.
+- The bundled server no longer carries venture names; deploy targets and ledger aliases are read from local configuration.
+- Setup never rewrites a user config file it cannot parse and never widens Codex config file permissions. Its secrets messages describe plaintext storage accurately.
+- `delimit doctor` recommends, and runs, setup flags that exist.
+
+### Security
+- An unknown `DELIMIT_TOOLSET` value now fails closed instead of exposing every tool.
+- License checks: a definite invalid answer ends Pro; only outages keep the grace period. An unknown or unconfirmed key is never granted Pro.
+- Context sent to review models redacts AWS access key IDs, `aws_secret_access_key` values, PEM private-key blocks, and hardcoded secrets passed as environment-lookup defaults.
+- `delimit_deploy` runs the policy gate before build, npm, publish, site and rollback side effects, and dashboard deploys no longer place the operator ChatOps token in a public `NEXT_PUBLIC_*` build variable.
+- The visual-test puppeteer fallback embeds its target URL as JSON instead of interpolating it into script source.
+- The security audit never blocks on FIFOs in the scanned tree.
+- Dependency updates: `fastmcp` pinned to 3.2.4 (security pin); `brace-expansion` patched for a denial-of-service advisory.
+
+### Fixed
+- Session continuity: Claude Code sessions can be bound and recovered across agents without a paid handoff.
+- Ledger reads label records that originated from an untrusted front-end source instead of presenting them as verified.
+
 ## [4.21.0] - 2026-09-27
 
 ### Added

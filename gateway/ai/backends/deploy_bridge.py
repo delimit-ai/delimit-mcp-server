@@ -184,8 +184,6 @@ def publish(app: str, git_ref: Optional[str] = None, repo_path: str = "") -> Dic
 
 DEPLOY_TARGETS = [
     {"name": "delimit.ai", "url": "https://delimit.ai", "kind": "vercel"},
-    {"name": "electricgrill.com", "url": "https://electricgrill.com", "kind": "vercel"},
-    {"name": "robotax.com", "url": "https://robotax.com", "kind": "vercel"},
     {"name": "npm:delimit-cli", "url": "https://www.npmjs.com/package/delimit-cli", "kind": "npm"},
     {
         "name": "github:delimit-mcp-server",
@@ -193,6 +191,25 @@ DEPLOY_TARGETS = [
         "kind": "github",
     },
 ]
+
+
+def _deploy_targets() -> List[Dict[str, str]]:
+    """Add machine-local targets without putting them in the public bundle."""
+    config = Path.home() / ".delimit" / "deploy_targets.json"
+    try:
+        extra = json.loads(config.read_text()).get("targets", [])
+        if not isinstance(extra, list) or any(
+            not isinstance(item, dict)
+            or not all(isinstance(item.get(key), str) and item[key] for key in ("name", "url", "kind"))
+            for item in extra
+        ):
+            raise ValueError("targets must be a list of name/url/kind objects")
+    except FileNotFoundError:
+        extra = []
+    except (OSError, ValueError, TypeError, AttributeError) as exc:
+        logger.warning("Ignoring invalid local deploy target config: %s", exc)
+        extra = []
+    return [*DEPLOY_TARGETS, *extra]
 
 
 def _check_http_health(url: str, timeout: int = 10) -> Dict[str, Any]:
@@ -475,8 +492,8 @@ def _configured_verify_targets(
 
     if app:
         app_key = app.casefold()
-        return [target for target in DEPLOY_TARGETS if target["name"].casefold() == app_key]
-    return list(DEPLOY_TARGETS)
+        return [target for target in _deploy_targets() if target["name"].casefold() == app_key]
+    return _deploy_targets()
 
 
 # ── LED-5321 M4: deployment binding ─────────────────────────────────

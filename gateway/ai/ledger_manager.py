@@ -217,23 +217,16 @@ def _resolve_nonventure_name(path: str, name: str) -> str:
 
     The MCP server runs with cwd=~/.delimit/server, so ``_detect_venture``
     used to stamp ``venture="server"`` on every gov/deliberate/consensus item
-    (90+ mis-attributed rows). Likewise ``/tmp/wire-report-*`` scratch trees
-    stamped ``venture="wire-report-morning-presentation"`` etc. This helper
-    extracts a known-venture token from the path (or the basename) so those
+    (90+ mis-attributed rows). Likewise scratch trees can acquire an ephemeral
+    basename. This helper extracts a locally configured token so those
     writes land on the correct sub-ledger instead of pooling in the central
     store. When no token matches it returns ``"unsorted"`` — NEVER the raw
     ``server`` / ``tmpXXXX`` / ephemeral basename.
     """
     blob = f"{path} {name}".lower()
-    if "wire-report" in blob or "wirereport" in blob or "wire.report" in blob \
-            or "wire-api" in blob or "wr-" in blob:
-        return "wire-report"
-    if "stake" in blob:  # stake / stakeone / stake-one / stake.one
-        return "stake-one"
-    if "domain" in blob or "electricgrill" in blob:
-        return "domainvested"
-    if "solicit" in blob:
-        return "solicitsignal"
+    for token, slug in _local_venture_config()["path_tokens"].items():
+        if token in blob:
+            return slug
     if "delimit" in blob or name in ("server", ".delimit"):
         return "delimit"
     return "unsorted"
@@ -383,24 +376,36 @@ _VENTURE_CANONICAL = {
     "delimit-gateway": "delimit",    # gateway repo
     ".delimit": "delimit",
     "server": "delimit",             # LED-3925: MCP server cwd basename
-    "wirereport": "wire-report",
-    "wire.report": "wire-report",    # LED-3925
-    "wire-api": "wire-report",       # LED-3925
-    "action-wire-report": "wire-report",  # LED-3925
-    "wirereportwnba": "wire-report",      # LED-3925
-    "wr-phase1": "wire-report",      # LED-3925
-    "stakeone": "stake-one",
-    "stake.one": "stake-one",        # LED-3925
-    "domain-monetization": "domainvested",  # LED-3925 (matches focus_gate)
-    "domainvested-console": "domainvested",  # LED-3925
-    "electricgrill-com": "domainvested",     # LED-3925
-    "solicitsignal": "solicitsignal",        # LED-3925 (known slug)
 }
-_KNOWN_VENTURE_SLUGS = {
-    "delimit", "wire-report", "domainvested",
-    "livetube", "stake-one", "root", "unsorted",
-    "solicitsignal",
-}
+_KNOWN_VENTURE_SLUGS = {"delimit", "unsorted"}
+
+
+def _local_venture_config() -> Dict[str, Dict[str, str]]:
+    """Read optional machine-local aliases; missing or invalid config is inert."""
+    config = _global_dir() / "venture_map.json"
+    try:
+        data = json.loads(config.read_text())
+        result = {}
+        for key in ("aliases", "path_tokens"):
+            value = data.get(key, {})
+            if not isinstance(value, dict) or any(
+                not isinstance(alias, str) or not alias
+                or not isinstance(slug, str) or not slug
+                for alias, slug in value.items()
+            ):
+                raise ValueError(f"{key} must map strings to strings")
+            result[key] = {alias.lower(): slug.lower() for alias, slug in value.items()}
+        return result
+    except FileNotFoundError:
+        return {"aliases": {}, "path_tokens": {}}
+    except (OSError, ValueError, TypeError, AttributeError) as exc:
+        logger.warning("Ignoring invalid local venture map: %s", exc)
+        return {"aliases": {}, "path_tokens": {}}
+
+
+def _known_venture_slugs() -> set:
+    config = _local_venture_config()
+    return _KNOWN_VENTURE_SLUGS | set(config["aliases"].values()) | set(config["path_tokens"].values())
 
 
 def _canonical_venture_slug(name: str) -> Optional[str]:
@@ -412,8 +417,8 @@ def _canonical_venture_slug(name: str) -> Optional[str]:
     if not name:
         return None
     n = name.lower().strip()
-    n = _VENTURE_CANONICAL.get(n, n)
-    return n if n in _KNOWN_VENTURE_SLUGS else None
+    n = _VENTURE_CANONICAL.get(n, _local_venture_config()["aliases"].get(n, n))
+    return n if n in _known_venture_slugs() else None
 
 
 def _detect_model() -> str:
@@ -480,6 +485,9 @@ def _unknown_venture_name(project_path: str = ".") -> Optional[str]:
     """
     if not _ledger_v2_dir().exists() and not (_central_ledger_dir() / "delimit").exists():
         return None  # legacy single-file layout; nothing to gate
+
+    if _canonical_venture_slug(project_path) is not None:
+        return None
 
     try:
         resolved = Path(project_path).expanduser().resolve()
@@ -586,7 +594,7 @@ def _unknown_venture_write_error(project_path: str) -> Optional[Dict[str, Any]]:
             "non-canonical store."
         ),
         "unknown_venture": name,
-        "known_ventures": sorted(_KNOWN_VENTURE_SLUGS),
+        "known_ventures": sorted(_known_venture_slugs()),
     }
 
 
@@ -594,7 +602,7 @@ def _known_venture_hint() -> str:
     """Human-readable list of valid ventures/namespaces for a fail-closed
     error message (LED-5658 review follow-up)."""
     return (
-        f"recognized venture slugs ({', '.join(sorted(_KNOWN_VENTURE_SLUGS))}), "
+        f"recognized venture slugs ({', '.join(sorted(_known_venture_slugs()))}), "
         "an existing project directory (pass its path), or an already-"
         "initialized dedicated namespace under ~/.delimit/ventures/<name>/"
     )
@@ -605,7 +613,7 @@ def _project_ledger_dir(project_path: str = ".") -> Path:
 
     Resolution order (LED-1188 D3, deliberation att_f86e1f51110e8ed6):
       1. Detect venture from project_path -> canonical slug (delimit,
-         wire-report, domainvested, livetube, stake-one).
+         as configured by the local venture map).
       2. If LEDGER_V2_DIR / <slug> / operations.jsonl exists, return that
          per-venture sub-ledger. (Plan-C staged but not yet swapped.)
       3. If CENTRAL_LEDGER_DIR / <slug> / operations.jsonl exists, return
@@ -646,8 +654,12 @@ def _project_ledger_dir(project_path: str = ".") -> Path:
     if not ledger_v2.exists() and not (central / "delimit").exists():
         return central
 
-    info = _detect_venture(project_path)
-    slug = _canonical_venture_slug(info.get("name", ""))
+    direct_slug = _canonical_venture_slug(project_path)
+    if direct_slug is not None:
+        slug = direct_slug
+    else:
+        info = _detect_venture(project_path)
+        slug = _canonical_venture_slug(info.get("name", ""))
     if slug is None:
         # _unknown_venture_name returned None above, so this is the
         # "unrecognized slug but a LEGITIMATE (marker/registered) real
@@ -729,13 +741,20 @@ def _replay_status_counts(
     return counts
 
 
-def _ensure(project_path: str = "."):
+def _ensure(project_path: str = ".", *, strict: bool = False):
     ledger_dir = _project_ledger_dir(project_path)
-    ledger_dir.mkdir(parents=True, exist_ok=True)
-    for name in ["strategy.jsonl", "operations.jsonl"]:
-        f = ledger_dir / name
-        if not f.exists():
-            f.write_text("")
+    if strict:
+        # STR-10330: bootstrap is part of the strict write boundary too. A
+        # dangling symlink must not be followed by the legacy exists/write.
+        from ai.frontend import ledger_io
+        for name in ("strategy.jsonl", "operations.jsonl"):
+            ledger_io.initialize(ledger_dir / name)
+    else:
+        ledger_dir.mkdir(parents=True, exist_ok=True)
+        for name in ["strategy.jsonl", "operations.jsonl"]:
+            f = ledger_dir / name
+            if not f.exists():
+                f.write_text("")
 
     # Auto-register venture on first use
     info = _detect_venture(project_path)
@@ -756,14 +775,29 @@ def _read_ledger(path: Path) -> List[Dict]:
     return items
 
 
-def _append(path: Path, entry: Dict) -> Dict:
+def _seal_entry(entry: Dict, items: List[Dict]) -> Dict:
+    """Chain ``entry`` to the last parsed record and stamp ``created_at``."""
+    prev_hash = items[-1].get("hash", "genesis") if items else "genesis"
+    entry["hash"] = hashlib.sha256(f"{prev_hash}{json.dumps(entry, sort_keys=True)}".encode()).hexdigest()[:16]
+    entry["created_at"] = _utc_timestamp()
+    return entry
+
+
+def _append(path: Path, entry: Dict, *, strict: bool = False) -> Dict:
+    """Append one ledger event.
+
+    ``strict`` (STR-10330 contract-05, opt-in, front-end writes only) goes
+    through ai.frontend.ledger_io: no symlink, size cap, exclusive flock,
+    strict re-read and torn-tail refusal under the lock. The default path is
+    unchanged for every existing caller."""
+    if strict:
+        from ai.frontend import ledger_io
+        return ledger_io.locked_append(path, lambda items: _seal_entry(entry, items))
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists():
         path.write_text("")
     items = _read_ledger(path)
-    prev_hash = items[-1].get("hash", "genesis") if items else "genesis"
-    entry["hash"] = hashlib.sha256(f"{prev_hash}{json.dumps(entry, sort_keys=True)}".encode()).hexdigest()[:16]
-    entry["created_at"] = _utc_timestamp()
+    _seal_entry(entry, items)
 
     with open(path, "a") as f:
         f.write(json.dumps(entry) + "\n")
@@ -1042,6 +1076,101 @@ def _default_assertion_evidence(
     }
 
 
+_ORIGIN_TAG_KEYS = ("origin", "trigger", "trigger_source", "content_binding")
+
+
+def _checked_origin_tags(tags: Dict[str, str]) -> Dict[str, str]:
+    """T-7: exactly the four §4 tag names, string values, origin required."""
+    if (not isinstance(tags, dict) or not set(tags) <= set(_ORIGIN_TAG_KEYS)
+            or not all(isinstance(value, str) and value for value in tags.values())
+            or "origin" not in tags):
+        raise ValueError("invalid origin tags")
+    return {key: tags[key] for key in _ORIGIN_TAG_KEYS if key in tags}
+
+
+def _next_item_id(items: List[Dict], path: Path, ledger: str, *, strict: bool = False) -> str:
+    """LED-824: the next free ID for ``path`` given its parsed ``items``.
+
+    The Plan-C resolver routes delimit-context queries to ledger-v2/<slug>/.
+    Per-venture ID counters used to scan only the active sub-ledger, so
+    newly-created items could collide with IDs already used in the legacy
+    CENTRAL_LEDGER_DIR root files. Now we union all known IDs across (a) the
+    resolved sub-ledger AND (b) every peer sub-ledger AND (c) the legacy
+    root, then pick the next free.
+
+    ``strict`` (STR-10330, front-end writes only) reads every peer file
+    through ai.frontend.ledger_io and propagates any failure instead of
+    skipping the peer, so an unreadable peer can never yield a colliding ID.
+    """
+    prefix = "STR" if ledger == "strategy" else "LED"
+    existing_ids = {i.get("id", "") for i in items if i.get("type") != "update"}
+
+    # Union with all peer files in ledger-v2/* and the legacy root files,
+    # for both strategy and operations ledgers (an LED-N could collide
+    # whether it lives in operations or strategy in any sub-ledger).
+    filename = "strategy.jsonl" if ledger == "strategy" else "operations.jsonl"
+    candidate_paths: list[Path] = []
+    _ledger_v2 = _ledger_v2_dir()
+    if _ledger_v2.exists():
+        for sub in _ledger_v2.iterdir():
+            if sub.is_dir():
+                candidate_paths.append(sub / filename)
+    candidate_paths.append(_central_ledger_dir() / filename)
+
+    if strict:
+        from ai.frontend import ledger_io
+    for cand in candidate_paths:
+        if cand == path:
+            continue  # already scanned
+        if strict:
+            if not ledger_io.exists(cand):
+                continue
+            for entry in ledger_io.read_strict(cand):
+                if entry.get("type") != "update" and entry.get("id", ""):
+                    existing_ids.add(entry.get("id", ""))
+            continue
+        if not cand.exists():
+            continue
+        try:
+            for entry in _read_ledger(cand):
+                if entry.get("type") == "update":
+                    continue
+                eid = entry.get("id", "")
+                if eid:
+                    existing_ids.add(eid)
+        except Exception:
+            # Best-effort: a malformed peer file shouldn't block id assignment
+            continue
+
+    # Walk forward from len()+1 until we find a non-colliding slot.
+    num = len(items) + 1
+    while f"{prefix}-{num:03d}" in existing_ids:
+        num += 1
+    return f"{prefix}-{num:03d}"
+
+
+@contextmanager
+def _item_allocation_lock(*, strict: bool):
+    """Share the Fin namespace lock with legacy add callers on POSIX.
+
+    Minimal public bundles without the frontend package and non-POSIX legacy
+    installs retain their prior behavior; neither can run the strict Fin
+    writer. Never degrade after a present Fin lock fails validation/opening.
+    """
+    if fcntl is None and not strict:
+        yield
+        return
+    try:
+        from ai.frontend.ledger_io import allocation_lock
+    except ModuleNotFoundError as error:
+        if strict or error.name not in {"ai.frontend", "ai.frontend.ledger_io"}:
+            raise
+        yield
+        return
+    with allocation_lock(_central_ledger_dir() / '.strict-id-allocation.lock'):
+        yield
+
+
 def add_item(
     title: str,
     ledger: str = "ops",
@@ -1057,8 +1186,17 @@ def add_item(
     estimated_complexity: str = "",
     worked_by: str = "",
     decision_card: Optional[Dict[str, Any]] = None,
+    origin_tags: Optional[Dict[str, str]] = None,
+    strict_io: bool = False,
 ) -> Dict[str, Any]:
     """Add a new item to the project's strategy or operational ledger.
+
+    STR-10330 A2 (T-7): ``origin_tags`` carries the §4 taint tags (origin,
+    trigger, trigger_source, content_binding) of a front-end write. They are
+    additive optional fields, stored only when given; old readers ignore them.
+    ``strict_io`` (contract-05, opt-in, default False) makes the append strict
+    (ai.frontend.ledger_io); a refused append raises. Both paths share ID
+    allocation serialization on Fin hosts; legacy parsing remains permissive.
 
     LED-189: Items can have acceptance_criteria (testable "done when" conditions).
     LED-190: Items can have context, tools_needed, and estimated_complexity
@@ -1084,90 +1222,71 @@ def add_item(
     if _unknown_err is not None:
         return _unknown_err
 
-    _ensure(project_path)
-    venture = _detect_venture(project_path)
+    # LED-5658 / local-tempdir fix: bare canonical slugs must not be remapped
+    # to "unsorted" by _detect_venture's ephemeral-CWD guard.
+    _direct_slug = _canonical_venture_slug(project_path)
+    venture = {"name": _direct_slug} if _direct_slug is not None else _detect_venture(project_path)
     ledger_dir = _project_ledger_dir(project_path)
     path = ledger_dir / ("strategy.jsonl" if ledger == "strategy" else "operations.jsonl")
 
-    # LED-824: ID-collision fix. The Plan-C resolver routes delimit-context
-    # queries to ledger-v2/<slug>/. Per-venture ID counters used to scan
-    # only the active sub-ledger, so newly-created items could collide with
-    # IDs already used in the legacy CENTRAL_LEDGER_DIR root files. Now we
-    # union all known IDs across (a) the resolved sub-ledger AND (b) every
-    # peer sub-ledger AND (c) the legacy root, then pick the next free.
-    items = _read_ledger(path)
-    prefix = "STR" if ledger == "strategy" else "LED"
-    existing_ids = {i.get("id", "") for i in items if i.get("type") != "update"}
+    # LED-824: ID-collision fix (see _next_item_id): IDs are unioned across
+    # the resolved sub-ledger, every peer sub-ledger and the legacy root.
+    def _make_entry(item_id: str) -> Dict[str, Any]:
+        entry = {
+            "id": item_id,
+            "title": title,
+            "type": type,
+            "priority": priority,
+            "description": description,
+            "source": source,
+            "venture": venture["name"],
+            "status": "open",
+            "tags": tags or [],
+            "worked_by": worked_by or _detect_model(),
+            # LED-5321 M4: compatible verified-states list; empty until a
+            # verified-class evidence object with ref advances it.
+            "verified_states": [],
+        }
+        # LED-189: Optional acceptance criteria
+        if acceptance_criteria:
+            entry["acceptance_criteria"] = acceptance_criteria
+        # LED-190: Optional agent-executable fields
+        if context:
+            entry["context"] = context
+        if tools_needed:
+            entry["tools_needed"] = tools_needed
+        if estimated_complexity:
+            entry["estimated_complexity"] = estimated_complexity
+        # Phase-0 autonomous-org (mem-b2a9762b78d8): a decision card is a ledger
+        # item of type="decision" carrying the founder-facing option set. The
+        # payload is stored on the initial (non-update) event so list_items' replay
+        # ({**item}) preserves it. Additive — items without a decision_card are
+        # unchanged. Only attached when type == "decision" to avoid polluting
+        # ordinary tasks.
+        if decision_card and type == "decision":
+            entry["decision_card"] = decision_card
+        if origin_tags is not None:
+            entry.update(_checked_origin_tags(origin_tags))
+        return entry
 
-    # Union with all peer files in ledger-v2/* and the legacy root files,
-    # for both strategy and operations ledgers (an LED-N could collide
-    # whether it lives in operations or strategy in any sub-ledger).
-    filename = "strategy.jsonl" if ledger == "strategy" else "operations.jsonl"
-    candidate_paths: list[Path] = []
-    _ledger_v2 = _ledger_v2_dir()
-    if _ledger_v2.exists():
-        for sub in _ledger_v2.iterdir():
-            if sub.is_dir():
-                candidate_paths.append(sub / filename)
-    candidate_paths.append(_central_ledger_dir() / filename)
+    # All Fin-host add callers share one lock around bootstrap, peer scan,
+    # ID selection and append. Acquire before every destination/peer flock.
+    # In particular a concurrent legacy exists/write_text bootstrap must not
+    # truncate another writer's first acknowledged row.
+    with _item_allocation_lock(strict=strict_io):
+        _ensure(project_path, strict=strict_io)
+        if strict_io:
+            from ai.frontend import ledger_io
 
-    for cand in candidate_paths:
-        if cand == path:
-            continue  # already scanned
-        if not cand.exists():
-            continue
-        try:
-            for entry in _read_ledger(cand):
-                if entry.get("type") == "update":
-                    continue
-                eid = entry.get("id", "")
-                if eid:
-                    existing_ids.add(eid)
-        except Exception:
-            # Best-effort: a malformed peer file shouldn't block id assignment
-            continue
-
-    # Walk forward from len()+1 until we find a non-colliding slot.
-    num = len(items) + 1
-    while f"{prefix}-{num:03d}" in existing_ids:
-        num += 1
-    item_id = f"{prefix}-{num:03d}"
-
-    entry = {
-        "id": item_id,
-        "title": title,
-        "type": type,
-        "priority": priority,
-        "description": description,
-        "source": source,
-        "venture": venture["name"],
-        "status": "open",
-        "tags": tags or [],
-        "worked_by": worked_by or _detect_model(),
-        # LED-5321 M4: compatible verified-states list; empty until a
-        # verified-class evidence object with ref advances it.
-        "verified_states": [],
-    }
-    # LED-189: Optional acceptance criteria
-    if acceptance_criteria:
-        entry["acceptance_criteria"] = acceptance_criteria
-    # LED-190: Optional agent-executable fields
-    if context:
-        entry["context"] = context
-    if tools_needed:
-        entry["tools_needed"] = tools_needed
-    if estimated_complexity:
-        entry["estimated_complexity"] = estimated_complexity
-    # Phase-0 autonomous-org (mem-b2a9762b78d8): a decision card is a ledger
-    # item of type="decision" carrying the founder-facing option set. The
-    # payload is stored on the initial (non-update) event so list_items' replay
-    # ({**item}) preserves it. Additive — items without a decision_card are
-    # unchanged. Only attached when type == "decision" to avoid polluting
-    # ordinary tasks.
-    if decision_card and type == "decision":
-        entry["decision_card"] = decision_card
-
-    result = _append(path, entry)
+            def _build(items: List[Dict[str, Any]]) -> Dict[str, Any]:
+                return _seal_entry(_make_entry(_next_item_id(items, path, ledger, strict=True)), items)
+            result = ledger_io.locked_append(path, _build)
+        else:
+            # Keep permissive legacy parsing and append semantics. Only ID
+            # allocation/bootstrap serialization is shared with strict IO.
+            items = _read_ledger(path)
+            entry = _make_entry(_next_item_id(items, path, ledger))
+            result = _append(path, entry)
 
     # Sync to Supabase for dashboard visibility
     try:
@@ -1271,8 +1390,15 @@ def update_item(
     review_transcript: Optional[str] = None,
     review_diff_path: Optional[str] = None,
     review_diff_text: Optional[str] = None,
+    origin_tags: Optional[Dict[str, str]] = None,
+    strict_io: bool = False,
 ) -> Dict[str, Any]:
     """Update an existing ledger item's fields.
+
+    STR-10330 A2 (T-7): ``origin_tags`` stamps the update event with the
+    writer's §4 taint tags; stored only when given. ``strict_io``
+    (contract-05, opt-in, default False) makes the append strict
+    (ai.frontend.ledger_io); a refused append raises. Default unchanged.
 
     LED-1408 Phase 1: when `status="done"` is requested, callers MAY provide
     `commit_sha` and/or `pr_url` as proof that the work shipped to main.
@@ -1351,13 +1477,16 @@ def update_item(
                 f"Refusing to look up or update {item_id} under it."
             ),
             "unknown_venture": _unknown_name,
-            "known_ventures": sorted(_KNOWN_VENTURE_SLUGS),
+            "known_ventures": sorted(_known_venture_slugs()),
         }
         if _elsewhere is not None:
             _err["item_found_in"] = _elsewhere["venture"]
         return _err
 
-    _ensure(project_path)
+    if strict_io:
+        _ensure(project_path, strict=True)
+    else:
+        _ensure(project_path)
     ledger_dir = _project_ledger_dir(project_path)
 
     # First, search the specified project's ledger
@@ -1383,6 +1512,8 @@ def update_item(
             "updated_at": _utc_timestamp(),
             "worked_by": worked_by or _detect_model(),
         }
+        if origin_tags is not None:
+            update.update(_checked_origin_tags(origin_tags))
         if status:
             update["status"] = status
         if note:
@@ -1523,7 +1654,7 @@ def update_item(
                 if _advanced != _base:
                     update["verified_states"] = _advanced
 
-        _append(path, update)
+        _append(path, update, strict=strict_io)
 
         # Sync to Supabase for dashboard visibility
         try:
@@ -1990,6 +2121,24 @@ def list_items(
     return response
 
 
+def _context_entry(item: Dict[str, Any]) -> Dict[str, Any]:
+    """One ``next_up`` row. G-3 (STR-10330 A2): a front-end- or
+    worker-written item is rendered as quoted data, never as an instruction."""
+    entry = {
+        "id": item["id"],
+        "title": item["title"],
+        "priority": item["priority"],
+        "truth_label": item.get("truth_label", LEGACY_TRUTH_LABEL),
+        "verified_states": list(item.get("verified_states", [])),
+    }
+    from ai.untrusted_records import frontend_tainted
+    if frontend_tainted(item):
+        from ai.untrusted_records import label, quote_text
+        entry["title"] = quote_text(item.get("title"), label(item))
+        entry["quoted"] = True
+    return entry
+
+
 def get_context(project_path: str = ".") -> Dict[str, Any]:
     """Get a concise ledger summary for AI context — what's open, what's next."""
     venture = _detect_venture(project_path)
@@ -2008,16 +2157,7 @@ def get_context(project_path: str = ".") -> Dict[str, Any]:
         "open_items": len(open_items),
         # LED-5321 M4: label each item ASSERTED/VERIFIED/STALE/UNAVAILABLE
         # where evidence exists; legacy records show "legacy/unclassified".
-        "next_up": [
-            {
-                "id": i["id"],
-                "title": i["title"],
-                "priority": i["priority"],
-                "truth_label": i.get("truth_label", LEGACY_TRUTH_LABEL),
-                "verified_states": list(i.get("verified_states", [])),
-            }
-            for i in open_items[:5]
-        ],
+        "next_up": [_context_entry(i) for i in open_items[:5]],
         "summary": result["summary"],
     }
     # LED-5658 review follow-up: propagate list_items' additive
@@ -3653,7 +3793,7 @@ def _legacy_handoff_write(
     (``~/.delimit/souls/<project-hash>/``, read by ``delimit_revive``) used to
     be DISJOINT — a fresh handoff never surfaced in revive, so revive could
     return a month-old soul instead of the state written minutes earlier (this
-    bit a real wire-report session). To close the gap, a handoff now ALSO
+    bit a real venture session). To close the gap, a handoff now ALSO
     refreshes a lightweight pointer-soul in the souls store for the SAME
     project via ``session_phoenix.capture_soul`` when present, or the shipped
     Free core otherwise (one shared schema, no duplication), keyed by the same
@@ -4773,7 +4913,10 @@ def auto_cancel_stale(
     stale_threshold = now - _dt.timedelta(days=threshold_days)
 
     stale_items: List[Dict[str, Any]] = []
+    from ai.untrusted_records import frontend_tainted
     for item in candidates:
+        if frontend_tainted(item):
+            continue
         ts = item.get("updated_at") or item.get("created_at")
         parsed = _parse_iso(ts)
         if parsed and parsed < stale_threshold:

@@ -383,6 +383,8 @@ def _scan_files(target: str, include_tests: bool = False) -> List[Path]:
                     rel = str(p)
                 if _is_test_path(rel):
                     continue
+            if not _regular_file(Path(dirpath) / filename):
+                continue  # FIFOs, sockets and devices would block the scan
             files.append(p)
             # Cap to avoid scanning massive repos
             if len(files) >= 5000:
@@ -391,6 +393,42 @@ def _scan_files(target: str, include_tests: bool = False) -> List[Path]:
 
 
 # ─── 5. security_audit ──────────────────────────────────────────────────
+
+def _regular_file(path: Path) -> bool:
+    """True only for a regular file (symlinks to regular files keep being
+    scanned, as before); FIFOs, sockets and devices are skipped."""
+    import stat as _stat
+    try:
+        return _stat.S_ISREG(os.stat(path).st_mode)
+    except OSError:
+        return False
+
+
+def _read_regular_text(path: Path) -> Optional[str]:
+    """Read a file for scanning without ever blocking, with the same result as
+    Path.read_text(errors="ignore") for regular files (no size limit; locale
+    encoding; universal newlines). The type is checked before open (stat, following symlinks as
+    before) so FIFOs, sockets and devices are never opened, the open is
+    non-blocking, and the descriptor is re-checked so a non-regular file swapped
+    in between the two checks is refused rather than read."""
+    import stat as _stat
+    try:
+        if not _stat.S_ISREG(os.stat(path).st_mode):
+            return None
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    except OSError:
+        return None
+    try:
+        if not _stat.S_ISREG(os.fstat(fd).st_mode):
+            os.close(fd)
+            return None
+        # Text mode on the checked descriptor: the same encoding, error handling
+        # and universal-newline translation as Path.read_text(errors="ignore").
+        with os.fdopen(fd, "r", errors="ignore") as handle:
+            return handle.read()
+    except OSError:
+        return None
+
 
 def security_audit(target: str = ".", include_tests: bool = False) -> Dict[str, Any]:
     """Audit security: dependency vulnerabilities + anti-patterns + secret detection.
@@ -554,9 +592,8 @@ def security_audit(target: str = ".", include_tests: bool = False) -> Dict[str, 
     tools_used.append(scan_label + ")")
 
     for fpath in files:
-        try:
-            content = fpath.read_text(errors="ignore")
-        except (OSError, PermissionError):
+        content = _read_regular_text(fpath)
+        if content is None:
             continue
 
         rel = str(fpath.relative_to(Path(target).resolve())) if Path(target).resolve() in fpath.parents or fpath == Path(target).resolve() else str(fpath)
