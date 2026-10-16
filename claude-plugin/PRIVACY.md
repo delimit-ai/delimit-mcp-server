@@ -6,7 +6,7 @@ On first launch, `npx` fetches `delimit-cli` from the npm registry and `pip` may
 
 Uninstalling the plugin leaves `~/.delimit` untouched. Inspect and delete that directory yourself if you want to remove the records.
 
-The session-start hook reads local records under `~/.delimit` and, to name the project, the `package.json` or `pyproject.toml` name and the git remote URL of the current directory; it writes nothing and sends nothing anywhere.
+The session-start and stop hooks emit fixed instructions for Claude Code. They do not read project files, local records, credentials, or the hook event input, and do not write files or make network requests. The session-start instructions ask Claude Code to call the records tools; any record access happens through those tool calls, not in the hook scripts.
 
 ## Where records live
 
