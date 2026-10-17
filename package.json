@@ -232,11 +232,23 @@
   "dependencies": {
     "axios": "^1.18.0",
     "chalk": "^4.1.2",
-    "commander": "^12.1.0",
+    "commander": "10.0.1",
     "express": "^4.18.0",
-    "inquirer": "^8.2.0",
     "js-yaml": "^4.3.1",
-    "minimatch": "^5.1.0"
+    "minimatch": "^5.1.0",
+    "ansi-escapes": "4.3.2",
+    "cli-cursor": "3.1.0",
+    "cli-width": "3.0.0",
+    "figures": "3.2.0",
+    "lodash": "4.18.1",
+    "mute-stream": "0.0.8",
+    "ora": "5.4.1",
+    "run-async": "2.4.1",
+    "rxjs": "7.8.2",
+    "string-width": "4.2.3",
+    "strip-ansi": "6.0.1",
+    "through": "2.3.8",
+    "wrap-ansi": "6.2.0"
   },
   "proModuleVersion": "3.10.1",
   "engines": {

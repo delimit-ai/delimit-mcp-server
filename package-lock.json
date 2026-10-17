@@ -12,11 +12,23 @@
       "dependencies": {
         "axios": "^1.18.0",
         "chalk": "^4.1.2",
-        "commander": "^12.1.0",
+        "commander": "10.0.1",
         "express": "^4.18.0",
-        "inquirer": "^8.2.0",
         "js-yaml": "^4.3.1",
-        "minimatch": "^5.1.0"
+        "minimatch": "^5.1.0",
+        "ansi-escapes": "4.3.2",
+        "cli-cursor": "3.1.0",
+        "cli-width": "3.0.0",
+        "figures": "3.2.0",
+        "lodash": "4.18.1",
+        "mute-stream": "0.0.8",
+        "ora": "5.4.1",
+        "run-async": "2.4.1",
+        "rxjs": "7.8.2",
+        "string-width": "4.2.3",
+        "strip-ansi": "6.0.1",
+        "through": "2.3.8",
+        "wrap-ansi": "6.2.0"
       },
       "bin": {
         "delimit": "bin/delimit-cli.js",
@@ -24,43 +36,6 @@
       },
       "engines": {
         "node": ">=14.0.0"
-      }
-    },
-    "node_modules/@inquirer/external-editor": {
-      "version": "1.0.3",
-      "resolved": "https://registry.npmjs.org/@inquirer/external-editor/-/external-editor-1.0.3.tgz",
-      "integrity": "sha512-RWbSrDiYmO4LbejWY7ttpxczuwQyZLBUyygsA9Nsv95hpzUWwnNTVQmAq3xuh7vNwCp07UTmE5i11XAEExx4RA==",
-      "license": "MIT",
-      "dependencies": {
-        "chardet": "^2.1.1",
-        "iconv-lite": "^0.7.0"
-      },
-      "engines": {
-        "node": ">=18"
-      },
-      "peerDependencies": {
-        "@types/node": ">=18"
-      },
-      "peerDependenciesMeta": {
-        "@types/node": {
-          "optional": true
-        }
-      }
-    },
-    "node_modules/@inquirer/external-editor/node_modules/iconv-lite": {
-      "version": "0.7.2",
-      "resolved": "https://registry.npmjs.org/iconv-lite/-/iconv-lite-0.7.2.tgz",
-      "integrity": "sha512-im9DjEDQ55s9fL4EYzOAv0yMqmMBSZp6G0VvFyTMPKWxiSBHUj9NW/qqLmXUwXrrM7AvqSlTCfvqRb0cM8yYqw==",
-      "license": "MIT",
-      "dependencies": {
-        "safer-buffer": ">= 2.1.2 < 3.0.0"
-      },
-      "engines": {
-        "node": ">=0.10.0"
-      },
-      "funding": {
-        "type": "opencollective",
-        "url": "https://opencollective.com/express"
       }
     },
     "node_modules/accepts": {
@@ -328,12 +303,6 @@
         "url": "https://github.com/chalk/chalk?sponsor=1"
       }
     },
-    "node_modules/chardet": {
-      "version": "2.1.1",
-      "resolved": "https://registry.npmjs.org/chardet/-/chardet-2.1.1.tgz",
-      "integrity": "sha512-PsezH1rqdV9VvyNhxxOW32/d75r01NY7TQCmOqomRo15ZSOKbpTFVsfjghxo6JloQUCGnH4k1LGu0R4yCLlWQQ==",
-      "license": "MIT"
-    },
     "node_modules/cli-cursor": {
       "version": "3.1.0",
       "resolved": "https://registry.npmjs.org/cli-cursor/-/cli-cursor-3.1.0.tgz",
@@ -407,12 +376,12 @@
       }
     },
     "node_modules/commander": {
-      "version": "12.1.0",
-      "resolved": "https://registry.npmjs.org/commander/-/commander-12.1.0.tgz",
-      "integrity": "sha512-Vw8qHK3bZM9y/P10u3Vib8o/DdkvA2OtPtZvD871QKjy74Wj1WSKFILMPRPSdUSx5RFK1arlJzEtA4PkFgnbuA==",
+      "version": "10.0.1",
+      "resolved": "https://registry.npmjs.org/commander/-/commander-10.0.1.tgz",
+      "integrity": "sha512-y4Mg2tXshplEbSGzx7amzPwKKOCGuoSRP/CjEdwwk0FOGlUbq6lKuoyDZTNZkmxHdJtp54hdfY/JUrdL7Xfdug==",
       "license": "MIT",
       "engines": {
-        "node": ">=18"
+        "node": ">=14"
       }
     },
     "node_modules/content-disposition": {
@@ -937,32 +906,6 @@
       "integrity": "sha512-k/vGaX4/Yla3WzyMCvTQOXYeIHvqOKtnqBduzTHpzpQZzAskKMhZ2K+EnBiSM9zGSoIFeMpXKxa4dYeZIQqewQ==",
       "license": "ISC"
     },
-    "node_modules/inquirer": {
-      "version": "8.2.7",
-      "resolved": "https://registry.npmjs.org/inquirer/-/inquirer-8.2.7.tgz",
-      "integrity": "sha512-UjOaSel/iddGZJ5xP/Eixh6dY1XghiBw4XK13rCCIJcJfyhhoul/7KhLLUGtebEj6GDYM6Vnx/mVsjx2L/mFIA==",
-      "license": "MIT",
-      "dependencies": {
-        "@inquirer/external-editor": "^1.0.0",
-        "ansi-escapes": "^4.2.1",
-        "chalk": "^4.1.1",
-        "cli-cursor": "^3.1.0",
-        "cli-width": "^3.0.0",
-        "figures": "^3.0.0",
-        "lodash": "^4.17.21",
-        "mute-stream": "0.0.8",
-        "ora": "^5.4.1",
-        "run-async": "^2.4.0",
-        "rxjs": "^7.5.5",
-        "string-width": "^4.1.0",
-        "strip-ansi": "^6.0.0",
-        "through": "^2.3.6",
-        "wrap-ansi": "^6.0.1"
-      },
-      "engines": {
-        "node": ">=12.0.0"
-      }
-    },
     "node_modules/ipaddr.js": {
       "version": "1.9.1",
       "resolved": "https://registry.npmjs.org/ipaddr.js/-/ipaddr.js-1.9.1.tgz",
@@ -1235,9 +1178,9 @@
       "license": "MIT"
     },
     "node_modules/proxy-addr": {
-      "version": "2.0.7",
-      "resolved": "https://registry.npmjs.org/proxy-addr/-/proxy-addr-2.0.7.tgz",
-      "integrity": "sha512-llQsMLSUDUPT44jdrU/O37qlnifitDP+ZwrmmZcoSKyLKvtZxpyV0n2/bD/N4tBAAZ/gJEdZU7KMraoK1+XYAg==",
+      "version": "2.0.8",
+      "resolved": "https://registry.npmjs.org/proxy-addr/-/proxy-addr-2.0.8.tgz",
+      "integrity": "sha512-5nnx0yGyVUcY6t9RnWcARWtwT9F1D8O9rt08htPvnd49W1IgZtmLkhu9WfMzQj1cFxjHIO6connUNVW5k7AVyQ==",
       "license": "MIT",
       "dependencies": {
         "forwarded": "0.2.0",

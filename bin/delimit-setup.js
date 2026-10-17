@@ -256,7 +256,7 @@ async function main(options = {}) {
     log('');
     log(`  ${dim('Undo anytime:')} rm -rf ~/.delimit && delimit uninstall`);
     log('');
-    const inquirerTop = (() => { try { return require('inquirer'); } catch { return null; } })();
+    const inquirerTop = (() => { try { return require('../lib/vendor/inquirer-8.2.7/lib/inquirer'); } catch { return null; } })();
     if (inquirerTop && SETUP_INTERACTIVE) {
         try {
             const { proceed } = await inquirerTop.prompt([{
@@ -612,7 +612,7 @@ async function main(options = {}) {
     log(`    • Update CLAUDE.md with Delimit instructions`);
     log(`    • Optional: governance wrapping + hooks`);
     log('');
-    const inquirerMid = (() => { try { return require('inquirer'); } catch { return null; } })();
+    const inquirerMid = (() => { try { return require('../lib/vendor/inquirer-8.2.7/lib/inquirer'); } catch { return null; } })();
     if (inquirerMid && SETUP_INTERACTIVE) {
         try {
             const { proceed } = await inquirerMid.prompt([{
@@ -876,7 +876,7 @@ Run full governance compliance checks. Verify security, policy compliance, evide
     let enableShims = shimsInstalled; // Auto-yes if already installed (just update)
     if (!shimsInstalled) {
         // First install — prompt
-        const inquirer = (() => { try { return require('inquirer'); } catch { return null; } })();
+        const inquirer = (() => { try { return require('../lib/vendor/inquirer-8.2.7/lib/inquirer'); } catch { return null; } })();
         enableShims = true;
         if (inquirer && SETUP_INTERACTIVE) {
             try {
@@ -1201,7 +1201,7 @@ exit 127
             log(`  ${dim('  Detected: ' + detected.map(t => t.name).join(', '))}`);
             // Install hooks (auto-accept in non-interactive or prompt if TTY)
             let installHooks = true;
-            const inq = (() => { try { return require('inquirer'); } catch { return null; } })();
+            const inq = (() => { try { return require('../lib/vendor/inquirer-8.2.7/lib/inquirer'); } catch { return null; } })();
             if (inq && SETUP_INTERACTIVE) {
                 try {
                     const answer = await inq.prompt([{
