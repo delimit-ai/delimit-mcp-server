@@ -1,0 +1,177 @@
+{
+  "component": {
+    "gitHead": "9c5259a889d37205829c2255171ef74c6336f7f3",
+    "license": "MIT",
+    "name": "inquirer",
+    "purl": "pkg:npm/inquirer@8.2.7",
+    "type": "library",
+    "upstream_integrity": "sha512-UjOaSel/iddGZJ5xP/Eixh6dY1XghiBw4XK13rCCIJcJfyhhoul/7KhLLUGtebEj6GDYM6Vnx/mVsjx2L/mFIA==",
+    "upstream_repository": "https://github.com/SBoudrias/Inquirer.js",
+    "upstream_tarball": "https://registry.npmjs.org/inquirer/-/inquirer-8.2.7.tgz",
+    "upstream_tarball_sha256": "2292ceb4b436243191ec6e1d42432d69b997158840384735ff1599491a9d22da",
+    "version": "8.2.7"
+  },
+  "license_sha256": "fa8f92d7a321046b6a9cd89d4d069f1fafb00728de04459536eafeb8daf78193",
+  "modification": "Only unused editor registerPrompt line removed from stock lib/inquirer.js; prompts/editor.js omitted. All other retained upstream files byte-identical. No replacement prompt implementation.",
+  "security_visibility": {
+    "npm_audit_covers_this_component": false,
+    "required": "Explicit named-component upstream advisory assessment plus normal packed-source security scan. HOLD if unavailable; provenance never permits skipping security findings.",
+    "vendored_source": true
+  },
+  "source_files": {
+    "lib/vendor/inquirer-8.2.7/lib/inquirer.js": {
+      "bytes": 2459,
+      "change": "remove only editor registerPrompt line",
+      "proposed_sha256": "899bb93e6795cb65881f4b56e095d2c6dedf3e3a3ca1543e01da5e80a6b58ba8",
+      "upstream_member": "package/lib/inquirer.js",
+      "upstream_sha256": "cd9586881c9cd2ac29621b02b12a6ff71c903f4f1ab739c227ed4f623b34e5ce"
+    },
+    "lib/vendor/inquirer-8.2.7/lib/objects/choice.js": {
+      "bytes": 1029,
+      "change": "MUST remain byte-identical",
+      "proposed_sha256": "d1a33de17677b2106de63221c41d8a9ee1ea5dffee410b11f64d50e41461ef31",
+      "upstream_member": "package/lib/objects/choice.js",
+      "upstream_sha256": "d1a33de17677b2106de63221c41d8a9ee1ea5dffee410b11f64d50e41461ef31"
+    },
+    "lib/vendor/inquirer-8.2.7/lib/objects/choices.js": {
+      "bytes": 2877,
+      "change": "MUST remain byte-identical",
+      "proposed_sha256": "8b691e24851f6a5eb38c16b7c80470fce327471afa4d7ff3e529ec79e8cc87aa",
+      "upstream_member": "package/lib/objects/choices.js",
+      "upstream_sha256": "8b691e24851f6a5eb38c16b7c80470fce327471afa4d7ff3e529ec79e8cc87aa"
+    },
+    "lib/vendor/inquirer-8.2.7/lib/objects/separator.js": {
+      "bytes": 784,
+      "change": "MUST remain byte-identical",
+      "proposed_sha256": "e79465608d3ed2c10ed8cc705ecdf160a76125d3e524a55927d3e3ee56029abd",
+      "upstream_member": "package/lib/objects/separator.js",
+      "upstream_sha256": "e79465608d3ed2c10ed8cc705ecdf160a76125d3e524a55927d3e3ee56029abd"
+    },
+    "lib/vendor/inquirer-8.2.7/lib/prompts/base.js": {
+      "bytes": 4650,
+      "change": "MUST remain byte-identical",
+      "proposed_sha256": "5402bb77646ddd459f07978f1051ca3f44aadf9a9c62edd8945a7370e456a190",
+      "upstream_member": "package/lib/prompts/base.js",
+      "upstream_sha256": "5402bb77646ddd459f07978f1051ca3f44aadf9a9c62edd8945a7370e456a190"
+    },
+    "lib/vendor/inquirer-8.2.7/lib/prompts/checkbox.js": {
+      "bytes": 6880,
+      "change": "MUST remain byte-identical",
+      "proposed_sha256": "1709d74af011e708644cbdca1b1e2700a960cbd8b154d2c1c053dcf3c883e377",
+      "upstream_member": "package/lib/prompts/checkbox.js",
+      "upstream_sha256": "1709d74af011e708644cbdca1b1e2700a960cbd8b154d2c1c053dcf3c883e377"
+    },
+    "lib/vendor/inquirer-8.2.7/lib/prompts/confirm.js": {
+      "bytes": 1818,
+      "change": "MUST remain byte-identical",
+      "proposed_sha256": "4ee3d2deea1502d2481d9e4716008335c46c0bc662880f419d6ca53e922068b3",
+      "upstream_member": "package/lib/prompts/confirm.js",
+      "upstream_sha256": "4ee3d2deea1502d2481d9e4716008335c46c0bc662880f419d6ca53e922068b3"
+    },
+    "lib/vendor/inquirer-8.2.7/lib/prompts/expand.js": {
+      "bytes": 6396,
+      "change": "MUST remain byte-identical",
+      "proposed_sha256": "e4b4af63281f003079be667bbb6dcec8f7e0ab3b500adf1572864c9f08472f5b",
+      "upstream_member": "package/lib/prompts/expand.js",
+      "upstream_sha256": "e4b4af63281f003079be667bbb6dcec8f7e0ab3b500adf1572864c9f08472f5b"
+    },
+    "lib/vendor/inquirer-8.2.7/lib/prompts/input.js": {
+      "bytes": 2207,
+      "change": "MUST remain byte-identical",
+      "proposed_sha256": "8d2a719d5435adb07f6bd629e8ba5bb685797c5c2573d2e717c9b155fce893bc",
+      "upstream_member": "package/lib/prompts/input.js",
+      "upstream_sha256": "8d2a719d5435adb07f6bd629e8ba5bb685797c5c2573d2e717c9b155fce893bc"
+    },
+    "lib/vendor/inquirer-8.2.7/lib/prompts/list.js": {
+      "bytes": 5238,
+      "change": "MUST remain byte-identical",
+      "proposed_sha256": "cad484ebcf24f35b9cb61ca55f0f6efb1662b22a7bd405f94e33896ec3325a98",
+      "upstream_member": "package/lib/prompts/list.js",
+      "upstream_sha256": "cad484ebcf24f35b9cb61ca55f0f6efb1662b22a7bd405f94e33896ec3325a98"
+    },
+    "lib/vendor/inquirer-8.2.7/lib/prompts/number.js": {
+      "bytes": 701,
+      "change": "MUST remain byte-identical",
+      "proposed_sha256": "d535661a3c0c5aa02ef979593b49c2af6e0f47a1fe136592da585c30de93640a",
+      "upstream_member": "package/lib/prompts/number.js",
+      "upstream_sha256": "d535661a3c0c5aa02ef979593b49c2af6e0f47a1fe136592da585c30de93640a"
+    },
+    "lib/vendor/inquirer-8.2.7/lib/prompts/password.js": {
+      "bytes": 2621,
+      "change": "MUST remain byte-identical",
+      "proposed_sha256": "3f435e120c29a8a3013a40f7686279608dfc6770485656b4672a6aae84d40450",
+      "upstream_member": "package/lib/prompts/password.js",
+      "upstream_sha256": "3f435e120c29a8a3013a40f7686279608dfc6770485656b4672a6aae84d40450"
+    },
+    "lib/vendor/inquirer-8.2.7/lib/prompts/rawlist.js": {
+      "bytes": 5322,
+      "change": "MUST remain byte-identical",
+      "proposed_sha256": "c23b7428e04849a20e71c472fc98388c2487d5b2d0401a051f9ecad600d7a73b",
+      "upstream_member": "package/lib/prompts/rawlist.js",
+      "upstream_sha256": "c23b7428e04849a20e71c472fc98388c2487d5b2d0401a051f9ecad600d7a73b"
+    },
+    "lib/vendor/inquirer-8.2.7/lib/ui/baseUI.js": {
+      "bytes": 2219,
+      "change": "MUST remain byte-identical",
+      "proposed_sha256": "74d0796b34353433df29916bf8ed1b09557122988a979472d4552197b4f73b08",
+      "upstream_member": "package/lib/ui/baseUI.js",
+      "upstream_sha256": "74d0796b34353433df29916bf8ed1b09557122988a979472d4552197b4f73b08"
+    },
+    "lib/vendor/inquirer-8.2.7/lib/ui/bottom-bar.js": {
+      "bytes": 2258,
+      "change": "MUST remain byte-identical",
+      "proposed_sha256": "1092df4f00937f906053f37bdbaf2e89b3d7f5f2561a15cc4bd419ce765670a8",
+      "upstream_member": "package/lib/ui/bottom-bar.js",
+      "upstream_sha256": "1092df4f00937f906053f37bdbaf2e89b3d7f5f2561a15cc4bd419ce765670a8"
+    },
+    "lib/vendor/inquirer-8.2.7/lib/ui/prompt.js": {
+      "bytes": 3764,
+      "change": "MUST remain byte-identical",
+      "proposed_sha256": "b795f9c34fd278eec28e835d7e9d55524cc8f1309ca3ec7b6f8eb19d041fbb94",
+      "upstream_member": "package/lib/ui/prompt.js",
+      "upstream_sha256": "b795f9c34fd278eec28e835d7e9d55524cc8f1309ca3ec7b6f8eb19d041fbb94"
+    },
+    "lib/vendor/inquirer-8.2.7/lib/utils/events.js": {
+      "bytes": 1419,
+      "change": "MUST remain byte-identical",
+      "proposed_sha256": "70f0c5da7038ad985587fab4cd850956616b97400f74e3f1b8d5b0b8e44ad569",
+      "upstream_member": "package/lib/utils/events.js",
+      "upstream_sha256": "70f0c5da7038ad985587fab4cd850956616b97400f74e3f1b8d5b0b8e44ad569"
+    },
+    "lib/vendor/inquirer-8.2.7/lib/utils/incrementListIndex.js": {
+      "bytes": 485,
+      "change": "MUST remain byte-identical",
+      "proposed_sha256": "a4478b1498f7faefd43d837db27206fcd156123ec98cff54d3bdc2040f68f729",
+      "upstream_member": "package/lib/utils/incrementListIndex.js",
+      "upstream_sha256": "a4478b1498f7faefd43d837db27206fcd156123ec98cff54d3bdc2040f68f729"
+    },
+    "lib/vendor/inquirer-8.2.7/lib/utils/paginator.js": {
+      "bytes": 2214,
+      "change": "MUST remain byte-identical",
+      "proposed_sha256": "2fff7401685df37df43cc63a82b3cb0f574c28c75cdc8b8becffac7a84a7a73f",
+      "upstream_member": "package/lib/utils/paginator.js",
+      "upstream_sha256": "2fff7401685df37df43cc63a82b3cb0f574c28c75cdc8b8becffac7a84a7a73f"
+    },
+    "lib/vendor/inquirer-8.2.7/lib/utils/readline.js": {
+      "bytes": 1186,
+      "change": "MUST remain byte-identical",
+      "proposed_sha256": "d26e999a301f8d77e15007ad43966dda6400dedc5ba96914ca0b65aa5d885e1c",
+      "upstream_member": "package/lib/utils/readline.js",
+      "upstream_sha256": "d26e999a301f8d77e15007ad43966dda6400dedc5ba96914ca0b65aa5d885e1c"
+    },
+    "lib/vendor/inquirer-8.2.7/lib/utils/screen-manager.js": {
+      "bytes": 4727,
+      "change": "MUST remain byte-identical",
+      "proposed_sha256": "05a63368032b4a3b1db6b83c23174961c8e08d23533b3cd4752bbe14561cbf4a",
+      "upstream_member": "package/lib/utils/screen-manager.js",
+      "upstream_sha256": "05a63368032b4a3b1db6b83c23174961c8e08d23533b3cd4752bbe14561cbf4a"
+    },
+    "lib/vendor/inquirer-8.2.7/lib/utils/utils.js": {
+      "bytes": 767,
+      "change": "MUST remain byte-identical",
+      "proposed_sha256": "c822399bcbb2c2ad3db82222eda3eaf4e946e0355a1f26c679b7360d38aed60e",
+      "upstream_member": "package/lib/utils/utils.js",
+      "upstream_sha256": "c822399bcbb2c2ad3db82222eda3eaf4e946e0355a1f26c679b7360d38aed60e"
+    }
+  }
+}
