@@ -25,6 +25,10 @@ npx delimit-cli setup
 
 `setup` adds Delimit to the assistants it finds on this machine. Open your assistant as usual and it can read and write the same saved record. You can also save and find a decision from the terminal:
 
+![Terminal recording: npx delimit-cli remember "Auth uses session cookies, not JWT. Decided after the token-leak review." prints "Remembered. (1 memory total)", then npx delimit-cli recall auth lists that same memory under "Delimit Memories" with the tag #jwt and "1 memory found (1 total)".](docs/demo-remember-recall.gif)
+
+The same session as text:
+
 ```console
 $ npx delimit-cli remember "Auth uses session cookies, not JWT. Decided after the token-leak review."
 
