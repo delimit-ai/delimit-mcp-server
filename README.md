@@ -2,7 +2,7 @@
 
 **Keep the state. Change the model.**
 
-Keep decisions, records, and handoffs across Claude Code, Codex, Cursor, Antigravity, GitHub Copilot, and Muse. Bring configured models together for hard calls. For code repositories, Delimit also offers a merge gate and local signed attestations.
+Delimit keeps your decisions, tasks, and handoffs on your machine, so the next AI coding session picks up where the last one stopped, even in a different assistant.
 
 [![npm](https://img.shields.io/npm/v/delimit-cli)](https://www.npmjs.com/package/delimit-cli)
 [![GitHub Action](https://img.shields.io/badge/GitHub%20Action-latest-blue)](https://github.com/marketplace/actions/delimit-merge-gate-for-ai-written-code)
@@ -10,6 +10,51 @@ Keep decisions, records, and handoffs across Claude Code, Codex, Cursor, Antigra
 [![Glama Score](https://glama.ai/mcp/servers/delimit-ai/delimit-mcp-server/badges/score.svg)](https://glama.ai/mcp/servers/delimit-ai/delimit-mcp-server/score)
 
 Glama directory grades: License A · Quality A · Maintenance A. Observed September 15, 2026, for this public repository. [View the listing](https://glama.ai/mcp/servers/delimit-ai/delimit-mcp-server).
+
+## The problem
+
+- Your agent forgets what you decided last session, then asks again or quietly decides differently.
+- It redoes work that was already finished, or says "done" when nothing shipped.
+- It takes actions you never approved.
+
+## Quick start
+
+```bash
+npx delimit-cli setup
+```
+
+`setup` adds Delimit to the assistants it finds on this machine. Open your assistant as usual and it can read and write the same saved record. You can also save and find a decision from the terminal:
+
+```console
+$ npx delimit-cli remember "Auth uses session cookies, not JWT. Decided after the token-leak review."
+
+  Remembered. (1 memory total)
+
+$ npx delimit-cli recall auth
+
+  Delimit Memories
+
+    [mem-9586382bff96] just now [cli] ✓
+    Auth uses session cookies, not JWT. Decided after the token-leak review.
+    #jwt
+
+  1 memory found (1 total)
+```
+
+**Works with:** Claude Code, Codex, Cursor, and Antigravity (configured by `setup`), plus GitHub Copilot and Muse as full sessions through `delimit chat`. Install and sign in to each client yourself; see [Lead chat, Copilot CLI and Muse Code sessions](#lead-chat-copilot-cli-and-muse-code-sessions).
+
+```bash
+npx delimit-cli chat --model copilot
+npx delimit-cli chat --model muse
+```
+
+**Hard calls:** `npx delimit-cli deliberate "<question>"` puts a question to the models you have configured (Claude, GPT via Codex, Gemini via Antigravity, Grok, DeepSeek, Muse) and shows you where they agree and where they disagree.
+
+If Delimit helps you, a ⭐ helps other people find it.
+
+## For code repositories: merge gate
+
+Delimit can also gate AI-assisted changes in a repository and keep a local signed attestation of each run.
 
 ```console
 $ delimit wrap -- claude "fix the flaky test in tests/api.spec.ts"
@@ -27,7 +72,7 @@ Every wrapped run emits a local `delimit.attestation.v1` bundle: repo head befor
 
 ---
 
-## Fastest path to value: `delimit check`
+## Zero-config PR check: `delimit check`
 
 Zero-config PR safety gate. No `init`, no setup, no account, no keys — run it on any repo and it applies deterministic checks (breaking API changes + leaked secrets) to your staged or modified files.
 
