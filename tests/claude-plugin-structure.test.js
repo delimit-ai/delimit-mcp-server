@@ -16,9 +16,9 @@ test('Claude plugin manifests and records skills have the expected structure', (
     const marketplace = JSON.parse(fs.readFileSync(path.join(root, '.claude-plugin', 'marketplace.json')));
     assert.equal(marketplace.plugins[0].source, './claude-plugin');
     const mcp = JSON.parse(fs.readFileSync(path.join(plugin, '.mcp.json'))).mcpServers.delimit;
-    assert.equal(mcp.command, 'npx');
-    assert.deepEqual(mcp.args.slice(2), ['mcp', '--toolset', 'records']);
-    assert.match(mcp.args[1], /^delimit-cli@/);
+    assert.equal(mcp.command, 'node');
+    assert.deepEqual(mcp.args, ['${CLAUDE_PLUGIN_ROOT}/server.cjs']);
+    assert.ok(fs.existsSync(path.join(plugin, 'server.cjs')));
     for (const name of ['record', 'handoff', 'resume']) {
         const content = fs.readFileSync(path.join(plugin, 'skills', name, 'SKILL.md'), 'utf8');
         assert.match(content, /^---\n[\s\S]*?\ndescription: .+\n---\n/);

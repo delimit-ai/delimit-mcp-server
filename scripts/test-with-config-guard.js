@@ -30,6 +30,7 @@ const TEST_FILES = [
     'tests/claude-plugin-structure.test.js',
     'tests/claude-plugin-release-guard.test.js',
     'tests/claude-plugin-resume.test.js',
+    'tests/claude-plugin-limits.test.js',
     'tests/claude-plugin-panel-structure.test.js',
     'tests/claude-plugin-governance-structure.test.js',
     'tests/clean-tree-guard.test.js',
