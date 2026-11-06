@@ -107,9 +107,124 @@ function getLedgerDir(cwd = process.cwd(), ventureArg = '') {
     return central;
 }
 
+/**
+ * Shared filesystem helper for directory and file creation with strict permissions.
+ *
+ * Backward compatibility note:
+ * Do NOT chmod pre-existing files or directories on users' machines
+ * (backward compatibility: other local readers may depend on their current mode).
+ * Directories created by the plugin get mode 0700 (mkdir with mode, then chmod to defeat umask).
+ * Files created by the plugin get mode 0600 (open with mode 0o600 / O_CREAT, or write to a temp
+ * file created 0600 then rename; atomic rewrites must preserve 0600 on the new file).
+ */
+function ensureDir0700(targetDir) {
+    if (!targetDir) return;
+    const resolved = path.resolve(targetDir);
+    if (fs.existsSync(resolved)) {
+        // Do NOT chmod pre-existing files or directories on users' machines
+        // (backward compatibility: other local readers may depend on their current mode).
+        return;
+    }
+    const stack = [];
+    let curr = resolved;
+    while (curr && !fs.existsSync(curr)) {
+        stack.push(curr);
+        const parent = path.dirname(curr);
+        if (parent === curr) break;
+        curr = parent;
+    }
+    while (stack.length > 0) {
+        const dir = stack.pop();
+        if (!fs.existsSync(dir)) {
+            try {
+                fs.mkdirSync(dir, { mode: 0o700 });
+                try {
+                    fs.chmodSync(dir, 0o700);
+                } catch {
+                    // Ignore chmod failures on platforms without POSIX permissions (e.g. Windows)
+                }
+            } catch (err) {
+                if (!err || err.code !== 'EEXIST') {
+                    throw err;
+                }
+            }
+        }
+    }
+}
+
+function writeFile0600(filePath, content) {
+    ensureDir0700(path.dirname(filePath));
+
+    let existingMode = null;
+    try {
+        const st = fs.statSync(filePath);
+        existingMode = st.mode & 0o777;
+    } catch (err) {
+        if (err && err.code !== 'ENOENT') {
+            throw err;
+        }
+    }
+
+    // If the file already existed, preserve its existing mode (e.g. 0644 or 0600).
+    // If it is newly created, use mode 0600.
+    // Backward compatibility note:
+    // Do NOT chmod pre-existing files or directories on users' machines
+    // (backward compatibility: other local readers may depend on their current mode).
+    const targetMode = existingMode !== null ? existingMode : 0o600;
+
+    const dir = path.dirname(filePath);
+    const tempPath = path.join(
+        dir,
+        `.${path.basename(filePath)}.${process.pid}.${Date.now()}.${crypto.randomBytes(4).toString('hex')}.tmp`
+    );
+
+    const fd = fs.openSync(tempPath, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, targetMode);
+    try {
+        try {
+            fs.fchmodSync(fd, targetMode);
+        } catch {
+            // Ignore chmod failures on platforms without POSIX permissions (e.g. Windows)
+        }
+        fs.writeFileSync(fd, content, 'utf8');
+    } finally {
+        fs.closeSync(fd);
+    }
+    try {
+        fs.renameSync(tempPath, filePath);
+    } catch (err) {
+        try { fs.unlinkSync(tempPath); } catch {}
+        throw err;
+    }
+}
+
+function appendFile0600(filePath, content) {
+    ensureDir0700(path.dirname(filePath));
+    const exists = fs.existsSync(filePath);
+    if (!exists) {
+        // File does not exist yet: create with mode 0o600 and chmod to defeat ambient umask.
+        // Backward compatibility note:
+        // Do NOT chmod pre-existing files or directories on users' machines
+        // (backward compatibility: other local readers may depend on their current mode).
+        const fd = fs.openSync(filePath, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_APPEND, 0o600);
+        try {
+            try {
+                fs.fchmodSync(fd, 0o600);
+            } catch {
+                // Ignore chmod failures on platforms without POSIX permissions (e.g. Windows)
+            }
+            fs.appendFileSync(fd, content, 'utf8');
+        } finally {
+            fs.closeSync(fd);
+        }
+    } else {
+        // Pre-existing file: do NOT chmod to preserve existing mode (e.g. 0644).
+        fs.appendFileSync(filePath, content, 'utf8');
+    }
+}
+
 function getLedgerFilePath(cwd = process.cwd(), ledger = 'ops', ventureArg = '') {
     const ledgerDir = getLedgerDir(cwd, ventureArg);
-    fs.mkdirSync(ledgerDir, { recursive: true });
+    ensureDir0700(ledgerDir);
     const filename = ledger === 'strategy' ? 'strategy.jsonl' : 'operations.jsonl';
     return path.join(ledgerDir, filename);
 }
@@ -176,8 +291,7 @@ function pyJsonDumps(obj) {
 }
 
 function appendJsonl(filePath, obj) {
-    fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    fs.appendFileSync(filePath, pyJsonDumps(obj) + '\n', 'utf8');
+    appendFile0600(filePath, pyJsonDumps(obj) + '\n');
 }
 
 function formatUtcTimestamp(d = new Date()) {
@@ -284,8 +398,7 @@ function loadHandoffIndex(handoffDir) {
 }
 
 function saveHandoffIndex(handoffDir, indexData) {
-    fs.mkdirSync(handoffDir, { recursive: true });
-    fs.writeFileSync(path.join(handoffDir, 'index.json'), JSON.stringify(indexData, null, 2), 'utf8');
+    writeFile0600(path.join(handoffDir, 'index.json'), JSON.stringify(indexData, null, 2));
 }
 
 const RECEIPT_BODY_FIELDS = [
@@ -933,7 +1046,7 @@ function handleHandoffCreate(args) {
     const nextAction = args.next_action || '';
 
     const handoffDir = getHandoffDir(cwd);
-    fs.mkdirSync(handoffDir, { recursive: true });
+    ensureDir0700(handoffDir);
 
     const bodyForDigest = {
         assumptions,
@@ -1010,7 +1123,7 @@ function handleHandoffCreate(args) {
         owner_backed: false,
     };
 
-    fs.writeFileSync(path.join(handoffDir, `${receiptId}.json`), JSON.stringify(receipt, null, 2), 'utf8');
+    writeFile0600(path.join(handoffDir, `${receiptId}.json`), JSON.stringify(receipt, null, 2));
 
     const index = loadHandoffIndex(handoffDir);
     index.receipts.push({
@@ -1199,7 +1312,7 @@ function handleHandoffAcknowledge(args) {
         receipt.acknowledged_at = new Date().toISOString();
         receipt.acknowledged_by = model;
         receipt.acknowledge_notes = notes;
-        fs.writeFileSync(foundPath, JSON.stringify(receipt, null, 2), 'utf8');
+        writeFile0600(foundPath, JSON.stringify(receipt, null, 2));
 
         const index = loadHandoffIndex(foundDir);
         for (const item of index.receipts) {
@@ -1389,4 +1502,7 @@ module.exports = {
     startServer,
     pyJsonDumps,
     escapePyString,
+    ensureDir0700,
+    writeFile0600,
+    appendFile0600,
 };

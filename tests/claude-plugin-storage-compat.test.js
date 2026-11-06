@@ -21,7 +21,7 @@ const crypto = require('node:crypto');
 const { spawn, spawnSync } = require('node:child_process');
 const pkg = require('../package.json');
 const { copyDir, writeInstalledVersionMarker } = require('../bin/delimit-setup');
-const { pyJsonDumps } = require('../lib/claude-plugin-server.cjs');
+const { pyJsonDumps, ensureDir0700, writeFile0600, appendFile0600 } = require('../lib/claude-plugin-server.cjs');
 
 const REPO_ROOT = path.resolve(__dirname, '..');
 const CLI_PATH = path.join(REPO_ROOT, 'bin', 'delimit-cli.js');
@@ -386,5 +386,219 @@ print("PYTHON_HASH_OK")
         assert.equal(rcptData.acknowledged, true);
         assert.match(rcptData.content_digest, /^[a-f0-9]{64}$/, 'content_digest must be 64-char sha256 hex');
         assert.equal(rcptData.integrity, 'ok');
+    }
+});
+
+test('permissions invariants under permissive umask: dirs 0700, files 0600 (new and rewritten), pre-existing 0644 preserved', async (t) => {
+    const oldUmask = process.umask(0o022);
+    t.after(() => {
+        try {
+            process.umask(oldUmask);
+        } catch {}
+    });
+
+    const testDir = fs.mkdtempSync(path.join('/tmp', 'delimit-perm-unit-test-'));
+    t.after(() => {
+        try {
+            fs.rmSync(testDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+        } catch {}
+    });
+
+    // 1. Newly created directories get mode 0700
+    const nestedDir = path.join(testDir, 'created_parent', 'created_child');
+    ensureDir0700(nestedDir);
+    if (process.platform !== 'win32') {
+        const parentMode = fs.statSync(path.join(testDir, 'created_parent')).mode & 0o777;
+        const childMode = fs.statSync(nestedDir).mode & 0o777;
+        assert.equal(parentMode, 0o700, `expected parent dir mode 0700, got 0o${parentMode.toString(8)}`);
+        assert.equal(childMode, 0o700, `expected child dir mode 0700, got 0o${childMode.toString(8)}`);
+    }
+
+    // 2. Pre-existing 0755 directory is not chmoded (backward compatibility)
+    const preDir = path.join(testDir, 'pre_existing_dir_0755');
+    fs.mkdirSync(preDir, { mode: 0o755 });
+    if (process.platform !== 'win32') {
+        fs.chmodSync(preDir, 0o755);
+        assert.equal(fs.statSync(preDir).mode & 0o777, 0o755);
+    }
+    ensureDir0700(preDir);
+    if (process.platform !== 'win32') {
+        assert.equal(fs.statSync(preDir).mode & 0o777, 0o755, 'pre-existing dir mode must be preserved');
+    }
+
+    // 3. Newly created files get mode 0600
+    const newFile = path.join(nestedDir, 'new_file.json');
+    writeFile0600(newFile, '{"created": true}\n');
+    if (process.platform !== 'win32') {
+        const fileMode = fs.statSync(newFile).mode & 0o777;
+        assert.equal(fileMode, 0o600, `expected new file mode 0600, got 0o${fileMode.toString(8)}`);
+    }
+
+    // 4. Atomic rewrite of newly created file preserves 0600
+    writeFile0600(newFile, '{"rewritten": true}\n');
+    if (process.platform !== 'win32') {
+        const rewrittenMode = fs.statSync(newFile).mode & 0o777;
+        assert.equal(rewrittenMode, 0o600, `expected rewritten file mode 0600, got 0o${rewrittenMode.toString(8)}`);
+    }
+
+    // 5. Pre-existing 0644 file keeps its mode on rewrite (backward compatibility)
+    const preFile = path.join(testDir, 'pre_existing_file_0644.json');
+    fs.writeFileSync(preFile, '{"initial": 1}\n', { mode: 0o644 });
+    if (process.platform !== 'win32') {
+        fs.chmodSync(preFile, 0o644);
+        assert.equal(fs.statSync(preFile).mode & 0o777, 0o644);
+    }
+    writeFile0600(preFile, '{"updated": 2}\n');
+    if (process.platform !== 'win32') {
+        const keptMode = fs.statSync(preFile).mode & 0o777;
+        assert.equal(keptMode, 0o644, `expected pre-existing 0644 file to keep mode 0644, got 0o${keptMode.toString(8)}`);
+    }
+
+    // 6. Newly created append file gets mode 0600, and subsequent append keeps 0600
+    const newAppendFile = path.join(nestedDir, 'append.jsonl');
+    appendFile0600(newAppendFile, '{"line": 1}\n');
+    if (process.platform !== 'win32') {
+        const appendMode1 = fs.statSync(newAppendFile).mode & 0o777;
+        assert.equal(appendMode1, 0o600, `expected initial append file mode 0600, got 0o${appendMode1.toString(8)}`);
+    }
+    appendFile0600(newAppendFile, '{"line": 2}\n');
+    if (process.platform !== 'win32') {
+        const appendMode2 = fs.statSync(newAppendFile).mode & 0o777;
+        assert.equal(appendMode2, 0o600, `expected subsequent append file mode 0600, got 0o${appendMode2.toString(8)}`);
+    }
+
+    // 7. Pre-existing 0644 append file keeps its mode on append
+    const preAppendFile = path.join(testDir, 'pre_existing_append_0644.jsonl');
+    fs.writeFileSync(preAppendFile, '{"line": 0}\n', { mode: 0o644 });
+    if (process.platform !== 'win32') {
+        fs.chmodSync(preAppendFile, 0o644);
+        assert.equal(fs.statSync(preAppendFile).mode & 0o777, 0o644);
+    }
+    appendFile0600(preAppendFile, '{"line": 1}\n');
+    if (process.platform !== 'win32') {
+        const keptAppendMode = fs.statSync(preAppendFile).mode & 0o777;
+        assert.equal(keptAppendMode, 0o644, `expected pre-existing 0644 append file to keep mode 0644, got 0o${keptAppendMode.toString(8)}`);
+    }
+});
+
+test('bundled MCP server under permissive umask creates 0700 dirs, 0600 files (rewrites preserve 0600)', async (t) => {
+    const oldUmask = process.umask(0o022);
+    t.after(() => {
+        try {
+            process.umask(oldUmask);
+        } catch {}
+    });
+
+    const tempHome = fs.mkdtempSync(path.join('/tmp', 'delimit-bundled-server-mode-test-'));
+    t.after(() => {
+        try {
+            fs.rmSync(tempHome, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+        } catch {}
+    });
+
+    const env = {
+        ...process.env,
+        HOME: tempHome,
+        DELIMIT_HOME: path.join(tempHome, '.delimit'),
+        DELIMIT_NON_INTERACTIVE: '1',
+    };
+
+    const proc = await startServer(process.execPath, [BUNDLED_PATH], env, t);
+
+    // 1. Create ledger item: triggers ledgerDir (0700) and operations.jsonl (0600)
+    const addRes = await runRpc(proc, 2, 'tools/call', {
+        name: 'delimit_ledger_add',
+        arguments: { title: 'Umask test task', priority: 'P1', description: 'Testing mode creation' },
+    });
+    assert.ok(addRes && addRes.content, 'Ledger add response returned');
+
+    // 2. Update ledger item: appends to operations.jsonl (must remain 0600)
+    await runRpc(proc, 3, 'tools/call', {
+        name: 'delimit_ledger_update',
+        arguments: { item_id: 'LED-001', note: 'Update note', priority: 'P0' },
+    });
+
+    // 3. Create handoff receipt: creates handoff dir (0700), receipt.json (0600), index.json (0600)
+    const createRes = await runRpc(proc, 4, 'tools/call', {
+        name: 'delimit_handoff_create',
+        arguments: { task_description: 'Umask Handoff Task', next_action: 'Ack receipt' },
+    });
+    const receiptData = JSON.parse(createRes.content[0].text);
+    const receiptId = receiptData.receipt_id;
+    assert.match(receiptId, /^[a-f0-9]{8}$/);
+
+    // 4. Acknowledge receipt: rewrites receipt file AND index.json (must remain 0600)
+    await runRpc(proc, 5, 'tools/call', {
+        name: 'delimit_handoff_acknowledge',
+        arguments: { receipt_id: receiptId, notes: 'Acknowledged under umask' },
+    });
+
+    proc.kill();
+
+    if (process.platform !== 'win32') {
+        const ledgerDir = path.join(tempHome, '.delimit', 'ledger');
+        const opsFile = path.join(ledgerDir, 'operations.jsonl');
+        assert.equal(fs.statSync(ledgerDir).mode & 0o777, 0o700, 'ledger dir created by bundled server must be 0700');
+        assert.equal(fs.statSync(opsFile).mode & 0o777, 0o600, 'operations.jsonl created by bundled server must be 0600');
+
+        const handoffBase = path.join(tempHome, '.delimit', 'handoff_receipts');
+        assert.equal(fs.statSync(handoffBase).mode & 0o777, 0o700, 'handoff_receipts base dir must be 0700');
+
+        const hashDirs = fs.readdirSync(handoffBase);
+        assert.equal(hashDirs.length, 1);
+        const projDir = path.join(handoffBase, hashDirs[0]);
+        assert.equal(fs.statSync(projDir).mode & 0o777, 0o700, 'project handoff dir must be 0700');
+
+        const indexJson = path.join(projDir, 'index.json');
+        const rcptJson = path.join(projDir, `${receiptId}.json`);
+        assert.equal(fs.statSync(indexJson).mode & 0o777, 0o600, 'index.json must be 0600 after rewrite');
+        assert.equal(fs.statSync(rcptJson).mode & 0o777, 0o600, 'receipt file must be 0600 after rewrite');
+    }
+});
+
+test('bundled MCP server preserves pre-existing 0755 dirs and 0644 files under permissive umask', async (t) => {
+    const oldUmask = process.umask(0o022);
+    t.after(() => {
+        try {
+            process.umask(oldUmask);
+        } catch {}
+    });
+
+    const tempHome = fs.mkdtempSync(path.join('/tmp', 'delimit-bundled-server-preserve-test-'));
+    t.after(() => {
+        try {
+            fs.rmSync(tempHome, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+        } catch {}
+    });
+
+    const env = {
+        ...process.env,
+        HOME: tempHome,
+        DELIMIT_HOME: path.join(tempHome, '.delimit'),
+        DELIMIT_NON_INTERACTIVE: '1',
+    };
+
+    // Pre-seed a pre-existing 0755 ledger dir and pre-existing 0644 operations.jsonl
+    const preLedgerDir = path.join(tempHome, '.delimit', 'ledger');
+    fs.mkdirSync(preLedgerDir, { recursive: true, mode: 0o755 });
+    if (process.platform !== 'win32') fs.chmodSync(preLedgerDir, 0o755);
+
+    const preOpsFile = path.join(preLedgerDir, 'operations.jsonl');
+    fs.writeFileSync(preOpsFile, '', { mode: 0o644 });
+    if (process.platform !== 'win32') fs.chmodSync(preOpsFile, 0o644);
+
+    const proc = await startServer(process.execPath, [BUNDLED_PATH], env, t);
+
+    // Add item (appends to pre-existing 0644 operations.jsonl)
+    await runRpc(proc, 2, 'tools/call', {
+        name: 'delimit_ledger_add',
+        arguments: { title: 'Pre-existing mode test', priority: 'P1' },
+    });
+
+    proc.kill();
+
+    if (process.platform !== 'win32') {
+        assert.equal(fs.statSync(preLedgerDir).mode & 0o777, 0o755, 'pre-existing ledger dir must retain 0755');
+        assert.equal(fs.statSync(preOpsFile).mode & 0o777, 0o644, 'pre-existing operations.jsonl must retain 0644');
     }
 });
