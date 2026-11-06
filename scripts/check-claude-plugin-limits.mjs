@@ -134,7 +134,7 @@ export function checkPluginLimits() {
             largestFile = { path: rel, size: stat.size };
         }
 
-        if (stat.size > MAX_FILE_SIZE) {
+        if (stat.size >= MAX_FILE_SIZE) {
             errors.push(`File ${rel} (${(stat.size / 1024).toFixed(1)} KiB) exceeds 256 KiB limit (${MAX_FILE_SIZE} bytes)`);
         }
 

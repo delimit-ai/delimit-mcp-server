@@ -105,7 +105,7 @@ export function buildPlugin() {
             largestFile = { path: rel, size: stat.size };
         }
 
-        if (stat.size > MAX_FILE_SIZE) {
+        if (stat.size >= MAX_FILE_SIZE) {
             throw new Error(`File ${rel} (${stat.size} bytes) exceeds limit of ${MAX_FILE_SIZE} bytes (256 KiB)`);
         }
 
