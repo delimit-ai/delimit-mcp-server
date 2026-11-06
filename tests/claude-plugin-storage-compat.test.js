@@ -27,6 +27,19 @@ const REPO_ROOT = path.resolve(__dirname, '..');
 const CLI_PATH = path.join(REPO_ROOT, 'bin', 'delimit-cli.js');
 const BUNDLED_PATH = path.join(REPO_ROOT, 'claude-plugin', 'server.cjs');
 
+function getFastmcpUnavailableReason() {
+    try {
+        const res = spawnSync('python3', ['-c', 'import fastmcp'], { encoding: 'utf8' });
+        if (res.status !== 0) {
+            return 'Python server dependencies unavailable (fastmcp not installed)';
+        }
+        return false;
+    } catch (err) {
+        return `Python server dependencies unavailable (${err.message})`;
+    }
+}
+const FASTMCP_UNAVAILABLE = getFastmcpUnavailableReason();
+
 function setupTempHome(t) {
     const tempHome = fs.mkdtempSync(path.join('/tmp', 'delimit-compat-test-'));
     t.after(() => {
@@ -102,7 +115,13 @@ async function startServer(cmd, args, env, t) {
     return proc;
 }
 
-test('tools/list schema parity between CLI records server and bundled server', async (t) => {
+test('tools/list schema parity between CLI records server and bundled server', {
+    skip: FASTMCP_UNAVAILABLE || false,
+}, async (t) => {
+    if (FASTMCP_UNAVAILABLE) {
+        t.skip(FASTMCP_UNAVAILABLE);
+        return;
+    }
     const { env } = setupTempHome(t);
 
     const cliProc = await startServer(process.execPath, [CLI_PATH, 'mcp', '--toolset', 'records'], env, t);
@@ -154,7 +173,13 @@ test('tools/list schema parity between CLI records server and bundled server', a
     }
 });
 
-test('bidirectional storage compatibility: CLI writes, bundled reads, then bundled writes, CLI reads', async (t) => {
+test('bidirectional storage compatibility: CLI writes, bundled reads, then bundled writes, CLI reads', {
+    skip: FASTMCP_UNAVAILABLE || false,
+}, async (t) => {
+    if (FASTMCP_UNAVAILABLE) {
+        t.skip(FASTMCP_UNAVAILABLE);
+        return;
+    }
     const { tempHome, env } = setupTempHome(t);
 
     const cliTitle = 'CLI Task LED-001: Don\u010di\u0107 caf\u00e9 na\u00efve';
@@ -386,6 +411,27 @@ print("PYTHON_HASH_OK")
         assert.equal(rcptData.acknowledged, true);
         assert.match(rcptData.content_digest, /^[a-f0-9]{64}$/, 'content_digest must be 64-char sha256 hex');
         assert.equal(rcptData.integrity, 'ok');
+    }
+});
+
+test('canonical serializer pyJsonDumps byte-identity matches Python json.dumps fixtures', () => {
+    const fixturePath = path.join(__dirname, 'fixtures', 'claude-plugin-canonical-serializer-vectors.json');
+    assert.ok(fs.existsSync(fixturePath), 'canonical serializer fixture file must exist');
+    const fixtures = JSON.parse(fs.readFileSync(fixturePath, 'utf8'));
+
+    // 1. Verify unit test vectors (accents, CJK, emoji, controls, escapes, nesting, primitives)
+    for (const { input, expected } of fixtures.unit_vectors) {
+        const actual = pyJsonDumps(input);
+        assert.equal(actual, expected, `Mismatch in unit vector for input: ${JSON.stringify(input)}`);
+    }
+
+    // 2. Verify hash chain vectors byte-identity and SHA-256 seal integrity
+    for (let i = 0; i < fixtures.chain_vectors.length; i++) {
+        const { unsealed, serialized, prev_hash, expected_hash } = fixtures.chain_vectors[i];
+        const actual = pyJsonDumps(unsealed);
+        assert.equal(actual, serialized, `Serialized string mismatch at chain vector index ${i}`);
+        const computedHash = crypto.createHash('sha256').update(prev_hash + actual).digest('hex').slice(0, 16);
+        assert.equal(computedHash, expected_hash, `Hash mismatch at chain vector index ${i}`);
     }
 });
 

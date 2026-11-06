@@ -1,0 +1,142 @@
+{
+  "_comment": "Canonical JSON serialization test vectors generated once from Python json.dumps(sort_keys=True) to verify Node pyJsonDumps byte-identity offline without Python fastmcp dependencies.",
+  "chain_vectors": [
+    {
+      "unsealed": {
+        "id": "LED-001",
+        "type": "add",
+        "title": "CLI Task LED-001: Don\u010di\u0107 caf\u00e9 na\u00efve",
+        "priority": "P1",
+        "description": "CLI Created Item with CJK: \u65e5\u672c\u8a9e and emoji: \ud83d\ude80 and controls: \u0001\u001f\u007f\t",
+        "status": "open"
+      },
+      "serialized": "{\"description\": \"CLI Created Item with CJK: \\u65e5\\u672c\\u8a9e and emoji: \\ud83d\\ude80 and controls: \\u0001\\u001f\\u007f\\t\", \"id\": \"LED-001\", \"priority\": \"P1\", \"status\": \"open\", \"title\": \"CLI Task LED-001: Don\\u010di\\u0107 caf\\u00e9 na\\u00efve\", \"type\": \"add\"}",
+      "prev_hash": "genesis",
+      "expected_hash": "0b6b1c1f51a2cd68"
+    },
+    {
+      "unsealed": {
+        "id": "LED-001",
+        "type": "update",
+        "priority": "P0",
+        "note": "CLI updated note with \u0161tra\u00dfe, CJK: \u7e41\u9ad4\u4e2d\u6587, emoji: \ud83c\udf89, controls: \u0002\u007f"
+      },
+      "serialized": "{\"id\": \"LED-001\", \"note\": \"CLI updated note with \\u0161tra\\u00dfe, CJK: \\u7e41\\u9ad4\\u4e2d\\u6587, emoji: \\ud83c\\udf89, controls: \\u0002\\u007f\", \"priority\": \"P0\", \"type\": \"update\"}",
+      "prev_hash": "0b6b1c1f51a2cd68",
+      "expected_hash": "9316fa6d8ceb0353"
+    },
+    {
+      "unsealed": {
+        "id": "LED-001",
+        "type": "update",
+        "status": "done",
+        "note": "CLI marked done with \u010d\u0107\u017e\u0161\u0111, emoji: \ud83d\udc68\u200d\ud83d\udc69\u200d\ud83d\udc67\u200d\ud83d\udc66, controls: \u0003\t"
+      },
+      "serialized": "{\"id\": \"LED-001\", \"note\": \"CLI marked done with \\u010d\\u0107\\u017e\\u0161\\u0111, emoji: \\ud83d\\udc68\\u200d\\ud83d\\udc69\\u200d\\ud83d\\udc67\\u200d\\ud83d\\udc66, controls: \\u0003\\t\", \"status\": \"done\", \"type\": \"update\"}",
+      "prev_hash": "9316fa6d8ceb0353",
+      "expected_hash": "24157e353e93c9ff"
+    },
+    {
+      "unsealed": {
+        "id": "LED-002",
+        "type": "add",
+        "title": "Bundled Task LED-002: \u0141\u00f3d\u017a & Don\u010di\u0107",
+        "priority": "P1",
+        "description": "Bundled Created Item with CJK: \ud55c\uad6d\uc5b4 \u4e2d\u6587 and emoji: \ud83c\udf1f \ud83d\udd25 and controls: \u0004\u001e\u007f\t",
+        "status": "open"
+      },
+      "serialized": "{\"description\": \"Bundled Created Item with CJK: \\ud55c\\uad6d\\uc5b4 \\u4e2d\\u6587 and emoji: \\ud83c\\udf1f \\ud83d\\udd25 and controls: \\u0004\\u001e\\u007f\\t\", \"id\": \"LED-002\", \"priority\": \"P1\", \"status\": \"open\", \"title\": \"Bundled Task LED-002: \\u0141\\u00f3d\\u017a & Don\\u010di\\u0107\", \"type\": \"add\"}",
+      "prev_hash": "24157e353e93c9ff",
+      "expected_hash": "c7f7afa35a950a39"
+    },
+    {
+      "unsealed": {
+        "id": "LED-002",
+        "type": "update",
+        "priority": "P0",
+        "note": "Bundled updated note with \u00e0\u00e8\u00e9\u00ec\u00f2\u00f9, CJK: \u65e5\u672c\u8a9e, emoji: \ud83d\udef8, controls: \u0005\u007f"
+      },
+      "serialized": "{\"id\": \"LED-002\", \"note\": \"Bundled updated note with \\u00e0\\u00e8\\u00e9\\u00ec\\u00f2\\u00f9, CJK: \\u65e5\\u672c\\u8a9e, emoji: \\ud83d\\udef8, controls: \\u0005\\u007f\", \"priority\": \"P0\", \"type\": \"update\"}",
+      "prev_hash": "c7f7afa35a950a39",
+      "expected_hash": "4f2538e408947f40"
+    },
+    {
+      "unsealed": {
+        "id": "LED-002",
+        "type": "update",
+        "status": "done",
+        "note": "Bundled marked done with \u00fc\u00f6\u00e4, emoji: \ud83c\udfc6, controls: \u0006\t"
+      },
+      "serialized": "{\"id\": \"LED-002\", \"note\": \"Bundled marked done with \\u00fc\\u00f6\\u00e4, emoji: \\ud83c\\udfc6, controls: \\u0006\\t\", \"status\": \"done\", \"type\": \"update\"}",
+      "prev_hash": "4f2538e408947f40",
+      "expected_hash": "0acb3925486f34d9"
+    }
+  ],
+  "unit_vectors": [
+    {
+      "input": {
+        "latin": "Don\u010di\u0107 caf\u00e9 na\u00efve \u0141\u00f3d\u017a fa\u00e7ade"
+      },
+      "expected": "{\"latin\": \"Don\\u010di\\u0107 caf\\u00e9 na\\u00efve \\u0141\\u00f3d\\u017a fa\\u00e7ade\"}"
+    },
+    {
+      "input": {
+        "cjk": "\u65e5\u672c\u8a9e \u7e41\u9ad4\u4e2d\u6587 \ud55c\uad6d\uc5b4"
+      },
+      "expected": "{\"cjk\": \"\\u65e5\\u672c\\u8a9e \\u7e41\\u9ad4\\u4e2d\\u6587 \\ud55c\\uad6d\\uc5b4\"}"
+    },
+    {
+      "input": {
+        "astral_emoji": "\ud83d\ude80 \ud83c\udf89 \ud83d\udc68\u200d\ud83d\udc69\u200d\ud83d\udc67\u200d\ud83d\udc66 \ud83c\udf1f \ud83d\udd25 \ud83d\udef8 \ud83c\udfc6"
+      },
+      "expected": "{\"astral_emoji\": \"\\ud83d\\ude80 \\ud83c\\udf89 \\ud83d\\udc68\\u200d\\ud83d\\udc69\\u200d\\ud83d\\udc67\\u200d\\ud83d\\udc66 \\ud83c\\udf1f \\ud83d\\udd25 \\ud83d\\udef8 \\ud83c\\udfc6\"}"
+    },
+    {
+      "input": {
+        "controls": "\u0000\u0001\u0002\u0003\u0004\u0005\u0006\u0007\b\t\n\u000b\f\r\u000e\u000f\u0010\u001f\u007f"
+      },
+      "expected": "{\"controls\": \"\\u0000\\u0001\\u0002\\u0003\\u0004\\u0005\\u0006\\u0007\\b\\t\\n\\u000b\\f\\r\\u000e\\u000f\\u0010\\u001f\\u007f\"}"
+    },
+    {
+      "input": {
+        "escapes": "Quotes: \"hello\" and backslash: \\ and slash /"
+      },
+      "expected": "{\"escapes\": \"Quotes: \\\"hello\\\" and backslash: \\\\ and slash /\"}"
+    },
+    {
+      "input": {
+        "nested": {
+          "z": 1,
+          "a": [
+            3,
+            2,
+            {
+              "k": "v"
+            }
+          ],
+          "m": {
+            "b": true,
+            "a": false
+          }
+        }
+      },
+      "expected": "{\"nested\": {\"a\": [3, 2, {\"k\": \"v\"}], \"m\": {\"a\": false, \"b\": true}, \"z\": 1}}"
+    },
+    {
+      "input": {
+        "types": {
+          "null": null,
+          "bool_t": true,
+          "bool_f": false,
+          "int": 12345,
+          "neg": -42,
+          "float": 3.14159,
+          "empty_str": "",
+          "empty_arr": [],
+          "empty_obj": {}
+        }
+      },
+      "expected": "{\"types\": {\"bool_f\": false, \"bool_t\": true, \"empty_arr\": [], \"empty_obj\": {}, \"empty_str\": \"\", \"float\": 3.14159, \"int\": 12345, \"neg\": -42, \"null\": null}}"
+    }
+  ]
+}
