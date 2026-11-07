@@ -11,6 +11,9 @@
 - Claude plugin cleanup: removed unused resume helper script and empty package manifests while preserving hooks and runtime configurations.
 - Documentation: updated README quick start with terminal demonstration recording.
 
+### Security
+- Patched runtime dependency advisories: `body-parser` 1.20.9, `follow-redirects` 1.16.2, `proxy-addr` 2.0.8, and `qs` 6.16.2.
+
 ## [4.22.0] - 2026-10-11
 
 ### Added
