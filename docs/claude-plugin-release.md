@@ -46,19 +46,22 @@ Users get the plugin through two channels, and they update differently:
 1. **Branch and change.** Edit a plugin's folder (for `delimit`,
    `claude-plugin/`) or its `.claude-plugin/marketplace.json` entry only on a
    branch that will become a release of that plugin.
-2. **Bump `version`** in plugin.json in the same PR. Never reuse a number, even
+2. **Check directory rules and update provenance.** Pull the latest portal
+   result into the provenance file and check the current directory rules
+   before cutting a version.
+3. **Bump `version`** in plugin.json in the same PR. Never reuse a number, even
    for a version that failed review. As a rule of thumb:
    - patch: wording, links or docs;
    - minor: a new skill, hook, command or MCP tool exposure;
    - major: removing or renaming something users rely on.
-3. **Pin delimit-cli exactly** in `.mcp.json`, to a version already on npm.
+4. **Pin delimit-cli exactly** in `.mcp.json`, to a version already on npm.
    Check it with `npm view delimit-cli@X.Y.Z version`, which must print `X.Y.Z`.
    Do not pin a version that is not yet published. Directory policy asks for
    reasonably current dependencies, so prefer the current release.
-4. **Add a provenance row** to `docs/claude-plugin-releases.md`. Fill in the
+5. **Add a provenance row** to `docs/claude-plugin-releases.md`. Fill in the
    version and pin. Set the remaining cells to `Pending`, and fill in the
    source commit and tag after merge.
-5. **Run local checks** with a throwaway `HOME`, never your real one:
+6. **Run local checks** with a throwaway `HOME`, never your real one:
    ```sh
    node scripts/claude-plugin-release-guard.js --base origin/main
    T=$(mktemp -d); E="env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=$T XDG_CONFIG_HOME=$T/.config CLAUDE_CONFIG_DIR=$T/.claude npm_config_cache=$T/npm-cache"
@@ -67,7 +70,7 @@ Users get the plugin through two channels, and they update differently:
    python3 scripts/claude-plugin-e2e.py delimit-cli@X.Y.Z
    npm test
    ```
-6. **Open the PR and merge** through the normal review. The `Tests` workflow
+7. **Open the PR and merge** through the normal review. The `Tests` workflow
    runs the guard job **Claude plugin release guard** (see "CI guard" below).
    The job is not a required status check (ruleset "Protect Main" holds only
    deletion, non-fast-forward and pull-request rules), so it does not block a
@@ -75,9 +78,9 @@ Users get the plugin through two channels, and they update differently:
    guard, and an admin or web-UI merge must not land one. The job runs only on
    pull requests, never on push to `main`. Two PRs that claim the same
    version can both pass the guard, because each is judged against its own
-   merge base; `claude plugin tag` in step 7 refuses the existing tag, which
+   merge base; `claude plugin tag` in step 8 refuses the existing tag, which
    catches it.
-7. **Tag the merged commit:**
+8. **Tag the merged commit:**
    ```sh
    git checkout <merged main commit>
    claude plugin tag claude-plugin --dry-run      # prints delimit--vX.Y.Z
@@ -86,7 +89,7 @@ Users get the plugin through two channels, and they update differently:
    ```
    Never pass `--force`, and never move or delete an existing `delimit--v*`
    tag. Pushing the tag is a separate, deliberate step.
-8. Record the source commit and tag in the row. This can go in a docs-only PR,
+9. Record the source commit and tag in the row. This can go in a docs-only PR,
    which the guard allows because the provenance file lives outside
    `claude-plugin/`.
 

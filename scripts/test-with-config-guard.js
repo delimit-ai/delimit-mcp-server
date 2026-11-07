@@ -34,6 +34,7 @@ const TEST_FILES = [
     'tests/claude-plugin-storage-compat.test.js',
     'tests/claude-plugin-panel-structure.test.js',
     'tests/claude-plugin-governance-structure.test.js',
+    'tests/claude-plugin-lite-structure.test.js',
     'tests/clean-tree-guard.test.js',
     'tests/_config-sentinel.test.js',
     'tests/setup-onboarding.test.js',

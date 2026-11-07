@@ -20,6 +20,11 @@
       "name": "delimit-panel",
       "source": "./claude-plugin-panel",
       "description": "Put a hard call to the model providers you configure and read the agreement and dissent."
+    },
+    {
+      "name": "delimit-lite",
+      "source": "./claude-plugin-lite",
+      "description": "Keep decisions, tasks, and handoffs across coding sessions (directory-compliant lite plugin, CLI-driven)."
     }
   ]
 }
