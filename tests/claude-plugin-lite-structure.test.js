@@ -106,6 +106,11 @@ function validateLiteDirectory(pluginDir) {
             violations.push(`MCP configuration file found in lite plugin: ${rel}`);
         }
 
+        // 5. Commands directory allowlist: commands/ only allows Markdown files
+        if (rel.split(path.sep)[0] === 'commands' && !['.md', '.markdown'].includes(ext)) {
+            violations.push(`Non-markdown file found in commands directory: ${rel}`);
+        }
+
         // 5. UTF-8 text and shebang checks
         const isTextFile = ['.md', '.markdown', '.json', '.yaml', '.yml'].includes(ext) || isAllowedSpecialBasename;
         if (isTextFile) {
@@ -174,7 +179,7 @@ test('claude-plugin-lite satisfies all directory compliance rules', () => {
     const manifest = JSON.parse(fs.readFileSync(path.join(LITE_DIR, '.claude-plugin', 'plugin.json'), 'utf8'));
     assert.equal(manifest.name, 'delimit-lite');
     assert.equal(manifest.displayName, 'Delimit Lite');
-    assert.equal(manifest.version, '1.0.0');
+    assert.equal(manifest.version, '1.1.0');
     assert.equal(manifest.author.name, 'Delimit');
     assert.equal(manifest.license, 'MIT');
     assert.ok(manifest.privacyPolicyUrl);
@@ -188,6 +193,16 @@ test('claude-plugin-lite satisfies all directory compliance rules', () => {
         assert.match(content, /delimit-cli|delimit/i);
         assert.match(content, /npm install -g delimit-cli/);
         assert.match(content, /explicit/i, `Skill ${skill} must specify explicit user invocation`);
+    }
+
+    // Verify commands
+    for (const cmd of ['handoff', 'record', 'resume']) {
+        const cmdPath = path.join(LITE_DIR, 'commands', `${cmd}.md`);
+        assert.ok(fs.existsSync(cmdPath), `Command file missing: ${cmdPath}`);
+        const content = fs.readFileSync(cmdPath, 'utf8');
+        assert.match(content, /^---\n([\s\S]*?\n)?description: [^\n]+(\n[\s\S]*?)?\n---\n/);
+        assert.match(content, /delimit-cli|delimit/i);
+        assert.match(content, /explicit/i, `Command ${cmd} must specify explicit user invocation`);
     }
 
     // Verify README and icon
@@ -245,6 +260,13 @@ test('validateLiteDirectory catches non-allowed files, hooks, mcpServers, lockfi
         fs.writeFileSync(path.join(tmp, '.mcp.json'), '{}');
         assert.ok(validateLiteDirectory(tmp).some((v) => v.includes('MCP configuration file found')));
         fs.unlinkSync(path.join(tmp, '.mcp.json'));
+
+        // 6b. Non-markdown file in commands/
+        fs.mkdirSync(path.join(tmp, 'commands'));
+        fs.writeFileSync(path.join(tmp, 'commands', 'cmd.json'), '{}');
+        assert.ok(validateLiteDirectory(tmp).some((v) => v.includes('Non-markdown file found in commands directory')));
+        fs.unlinkSync(path.join(tmp, 'commands', 'cmd.json'));
+        fs.rmdirSync(path.join(tmp, 'commands'));
 
         // 7. Lockfiles
         fs.writeFileSync(path.join(tmp, 'package.json'), '{}');

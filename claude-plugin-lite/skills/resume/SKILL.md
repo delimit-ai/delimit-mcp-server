@@ -1,6 +1,6 @@
 ---
 name: resume
-description: Use only when the user explicitly asks to resume, check prior context, or see open work (e.g. "resume", "what was I doing").
+description: Use only when the user explicitly asks to resume, check prior context, or see open work (e.g. "resume", "what was I doing"). Explicit invocation only.
 ---
 
 When the user explicitly asks to resume, check prior context, or view open work (e.g. "resume", "what was I doing"):

@@ -1,7 +1,7 @@
 {
   "name": "delimit-lite",
   "displayName": "Delimit Lite",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Keep decisions, tasks, and handoffs in local files across coding sessions.",
   "author": {
     "name": "Delimit",
