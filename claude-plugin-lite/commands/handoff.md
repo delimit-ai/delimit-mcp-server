@@ -7,7 +7,7 @@ When the user invokes `/delimit-lite:handoff` (or explicitly asks for a handoff 
 1. Check if `delimit` is available in PATH, or run via `npx delimit-cli@4.23.0`:
    - If `delimit` is not installed, inform the user they can install it globally with `npm install -g delimit-cli`.
 2. Inspect handoff status with `delimit handoff check` (or `npx delimit-cli@4.23.0 handoff check`).
-3. Save the handoff record via `delimit remember` (or `npx delimit-cli@4.23.0 remember --tag handoff "<summary>"`), detailing:
+3. Save the handoff record by running `delimit remember --tag handoff "<summary>"` (or `npx delimit-cli@4.23.0 remember --tag handoff "<summary>"`), detailing:
    - `task_description`: what this piece of work is;
    - `completed`: what was done, including test results as they actually ran (e.g. "679/679 unit tests passed");
    - `not_completed`: unfinished work;
