@@ -25,7 +25,7 @@ const { pyJsonDumps, ensureDir0700, writeFile0600, appendFile0600 } = require('.
 
 const REPO_ROOT = path.resolve(__dirname, '..');
 const CLI_PATH = path.join(REPO_ROOT, 'bin', 'delimit-cli.js');
-const BUNDLED_PATH = path.join(REPO_ROOT, 'claude-plugin', 'server.cjs');
+const BUNDLED_PATH = path.join(REPO_ROOT, 'claude-plugin-bundled', 'server.cjs');
 
 function getFastmcpUnavailableReason() {
     try {

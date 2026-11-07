@@ -25,6 +25,11 @@
       "name": "delimit-lite",
       "source": "./claude-plugin-lite",
       "description": "Keep decisions, tasks, and handoffs across coding sessions (directory-compliant lite plugin, CLI-driven)."
+    },
+    {
+      "name": "delimit-bundled",
+      "source": "./claude-plugin-bundled",
+      "description": "Keep decisions, tasks, and handoffs across coding sessions (bundled offline Node MCP server with hooks)."
     }
   ]
 }

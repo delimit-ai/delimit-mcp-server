@@ -116,8 +116,9 @@ Users get the plugin through two channels, and they update differently:
     verbatim from the **Review** and **Versions** tabs.
 12. **If the version doesn't pass**, fix the problem on a new branch and
     release a new, higher version (step 2). The published version stays live
-    meanwhile. To contest a decision, use **Appeal this decision** or write to
-    directory@anthropic.com.
+    meanwhile. To contest a decision, the in-portal **Appeal this decision**
+    button is the route to try (as of 2026-11-07, email to directory@anthropic.com
+    regarding v1.1.0's hold has gone unanswered), with the date recorded.
 
 ## Stage 3: publication
 

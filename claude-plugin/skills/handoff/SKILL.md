@@ -1,6 +1,6 @@
 ---
 name: handoff
-description: Use when the user asks for a handoff or a work session reaches a stopping point.
+description: Use when the user asks to hand off, asks to wrap up, or reaches a stopping point and asks for a handoff; never act without the user asking.
 ---
 
 At the stopping point, update relevant ledger items using `delimit_ledger_update` or `delimit_ledger_done`, then call `delimit_handoff_create` with:

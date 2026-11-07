@@ -6,7 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
-const plugin = path.resolve(__dirname, '../claude-plugin');
+const plugin = path.resolve(__dirname, '../claude-plugin-bundled');
 const declarations = JSON.parse(fs.readFileSync(path.join(plugin, 'hooks/hooks.json'), 'utf8')).hooks;
 
 function snapshotDirectory(directory, prefix = '') {

@@ -23,7 +23,7 @@ const __dirname = path.dirname(__filename);
 const REPO_ROOT = path.resolve(__dirname, '..');
 
 const SOURCE_SERVER = path.join(REPO_ROOT, 'lib', 'claude-plugin-server.cjs');
-const PLUGIN_DIR = path.join(REPO_ROOT, 'claude-plugin');
+const PLUGIN_DIR = path.join(REPO_ROOT, 'claude-plugin-bundled');
 const TARGET_SERVER = path.join(PLUGIN_DIR, 'server.cjs');
 const TARGET_MCP = path.join(PLUGIN_DIR, '.mcp.json');
 

@@ -21,7 +21,7 @@ import { fileURLToPath } from 'node:url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const REPO_ROOT = path.resolve(__dirname, '..');
-const PLUGIN_DIR = path.join(REPO_ROOT, 'claude-plugin');
+const PLUGIN_DIR = path.join(REPO_ROOT, 'claude-plugin-bundled');
 const MCP_CONFIG = path.join(PLUGIN_DIR, '.mcp.json');
 
 const MAX_FILE_SIZE = 256 * 1024; // 256 KiB

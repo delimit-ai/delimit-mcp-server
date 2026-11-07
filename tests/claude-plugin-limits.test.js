@@ -22,7 +22,7 @@ test('check-claude-plugin-limits passes on the committed plugin files', () => {
 });
 
 test('check-claude-plugin-limits catches files exceeding 256 KiB', () => {
-    const pluginDir = path.join(ROOT, 'claude-plugin');
+    const pluginDir = path.join(ROOT, 'claude-plugin-bundled');
     const oversizeFile = path.join(pluginDir, 'oversize-test-fixture.tmp');
     try {
         // Write 257 KiB of dummy text
@@ -39,7 +39,7 @@ test('check-claude-plugin-limits catches files exceeding 256 KiB', () => {
 });
 
 test('check-claude-plugin-limits boundary: exactly 262,144 bytes fails, 262,143 passes', () => {
-    const pluginDir = path.join(ROOT, 'claude-plugin');
+    const pluginDir = path.join(ROOT, 'claude-plugin-bundled');
     const boundaryFile = path.join(pluginDir, 'boundary-size-fixture.tmp');
     try {
         // 262,143 bytes (< 256 KiB) must pass
@@ -78,7 +78,7 @@ test('check-claude-plugin-limits boundary: exactly 262,144 bytes fails, 262,143 
 });
 
 test('check-claude-plugin-limits boundary: exactly 512 files fails, 511 passes', () => {
-    const pluginDir = path.join(ROOT, 'claude-plugin');
+    const pluginDir = path.join(ROOT, 'claude-plugin-bundled');
     const fixtureDir = path.join(pluginDir, 'boundary-count-fixtures');
     try {
         fs.mkdirSync(fixtureDir, { recursive: true });
@@ -142,7 +142,7 @@ test('check-claude-plugin-limits boundary: exactly 512 files fails, 511 passes',
 });
 
 test('check-claude-plugin-limits catches non-shell scripts in subfolders', () => {
-    const hooksDir = path.join(ROOT, 'claude-plugin', 'hooks');
+    const hooksDir = path.join(ROOT, 'claude-plugin-bundled', 'hooks');
     const forbiddenScript = path.join(hooksDir, 'forbidden.js');
     try {
         fs.writeFileSync(forbiddenScript, 'console.log("bad");', 'utf8');

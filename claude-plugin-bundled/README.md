@@ -1,0 +1,42 @@
+# Delimit Bundled for Claude Code
+
+Keep the state. Change the model.
+
+This plugin adds three skills for recording stated decisions and tasks, creating handoffs, and reading open work when you resume. At the start of every session it automatically surfaces your open tasks and any handoff from your last session. Its MCP server uses the records toolset running an offline bundled Node server. Records are plain local files that other tools can read.
+
+## Requirements
+
+- Node.js 18 or later
+
+## Install
+
+Install from the repository marketplace:
+
+```sh
+claude plugin marketplace add delimit-ai/delimit-mcp-server
+claude plugin install delimit-bundled@delimit
+```
+
+Or in one step:
+
+```sh
+/plugin install delimit-bundled --marketplace delimit-ai/delimit-mcp-server
+```
+
+## Data and removal
+
+The records tools read and write ledger and handoff data under `~/.delimit` as plain JSON and JSONL files you own. They do not send record contents over the network. The launcher starts a local stdio server. See [PRIVACY.md](PRIVACY.md).
+
+Uninstall with `claude plugin uninstall delimit-bundled@delimit`. Your records under `~/.delimit` remain. To delete them too, inspect that directory and remove it yourself.
+
+The skills follow explicit requests and available records. They cannot reconstruct work that was never recorded or guarantee recovery in another assistant. Other tools can read the plain files if configured to do so.
+
+## Where records live
+
+- Records are kept in one local ledger under `~/.delimit/ledger/`. Each record is tagged with the project it was created in: the repository name from the git remote, or `unsorted` when there is none. Listing shows records from all projects; the tag tells you where each one came from.
+- The server also keeps local operational logs under `~/.delimit` (`tool_usage.jsonl`, `events/`, `traces/`). They contain tool names, timestamps and outcomes, not your record content, and they stay local.
+- Once installed, the records workflow runs with no network access. We tested it in a network-isolated environment.
+
+## Support / contact
+
+pro@delimit.ai · https://github.com/delimit-ai/delimit-mcp-server/issues

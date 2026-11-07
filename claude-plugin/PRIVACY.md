@@ -6,11 +6,9 @@ On first launch, `npx` fetches `delimit-cli` from the npm registry and `pip` may
 
 Uninstalling the plugin leaves `~/.delimit` untouched. Inspect and delete that directory yourself if you want to remove the records.
 
-The session-start and stop hooks emit fixed instructions for Claude Code. They do not read project files, local records, credentials, or the hook event input, and do not write files or make network requests. The session-start instructions ask Claude Code to call the records tools; any record access happens through those tool calls, not in the hook scripts.
-
 ## Where records live
 
-- Records are kept in one local ledger under `~/.delimit/ledger/`. Each record is tagged with the project it was created in: the CLI-detected name (package, Python project, git remote, or directory fallback; temporary scratch projects use `unsorted`). Listing shows records from all projects; the tag tells you where each one came from.
+- Records are kept in one local ledger under `~/.delimit/ledger/`. Each record is tagged with the project it was created in: the repository name from the git remote, or `unsorted` when there is none. Listing shows records from all projects; the tag tells you where each one came from.
 - The server also keeps local operational logs under `~/.delimit` (`tool_usage.jsonl`, `events/`, `traces/`). They contain tool names, timestamps and outcomes, not your record content, and they stay local.
 - Once installed, the records workflow runs with no network access. We tested it in a network-isolated environment.
 

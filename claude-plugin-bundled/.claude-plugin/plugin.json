@@ -1,0 +1,24 @@
+{
+  "name": "delimit-bundled",
+  "displayName": "Delimit Bundled",
+  "version": "1.2.0",
+  "description": "Keep the state. Change the model. Persistent tasks, decisions, and handoffs across sessions and assistants.",
+  "author": {
+    "name": "Delimit",
+    "url": "https://delimit.ai",
+    "email": "pro@delimit.ai"
+  },
+  "homepage": "https://github.com/delimit-ai/delimit-mcp-server/tree/main/claude-plugin-bundled",
+  "repository": "https://github.com/delimit-ai/delimit-mcp-server",
+  "license": "MIT",
+  "keywords": [
+    "records",
+    "tasks",
+    "handoffs",
+    "mcp"
+  ],
+  "documentationUrl": "https://github.com/delimit-ai/delimit-mcp-server/blob/main/claude-plugin-bundled/README.md",
+  "privacyPolicyUrl": "https://github.com/delimit-ai/delimit-mcp-server/blob/main/claude-plugin-bundled/PRIVACY.md",
+  "termsOfServiceUrl": "https://delimit.ai/terms",
+  "supportUrl": "https://github.com/delimit-ai/delimit-mcp-server/issues"
+}
