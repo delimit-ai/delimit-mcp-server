@@ -282,10 +282,12 @@ function checkPlugin(p, files, errors) {
         }
         pins.push({ pkg, version: v });
     }
-    if (p.name === LISTED_PLUGIN && pins.filter((x) => x.pkg === CLI_PACKAGE).length !== 1) {
+    const servers = mcp && mcp.mcpServers && typeof mcp.mcpServers === 'object' ? mcp.mcpServers : {};
+    const isBundledNode = Object.values(servers).some((cfg) => cfg && cfg.command === 'node');
+    if (p.name === LISTED_PLUGIN && !isBundledNode && pins.filter((x) => x.pkg === CLI_PACKAGE).length !== 1) {
         errors.push(`${cPath}: expected exactly one ${CLI_PACKAGE}@<X.Y.Z> pin`);
     }
-    return { version, pins };
+    return { version, pins, isBundledNode };
 }
 
 /**
