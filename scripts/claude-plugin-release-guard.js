@@ -284,7 +284,10 @@ function checkPlugin(p, files, errors) {
     }
     const servers = mcp && mcp.mcpServers && typeof mcp.mcpServers === 'object' ? mcp.mcpServers : {};
     const isBundledNode = Object.values(servers).some((cfg) => cfg && cfg.command === 'node');
-    if (p.name === LISTED_PLUGIN && !isBundledNode && pins.filter((x) => x.pkg === CLI_PACKAGE).length !== 1) {
+    const cliPins = pins.filter((x) => x.pkg === CLI_PACKAGE).length;
+    const cliRefs = Object.values(servers).filter((cfg) => JSON.stringify(cfg || {}).includes(CLI_PACKAGE)).length;
+    // A bundled node server waives the pin only when no server references delimit-cli in any form.
+    if (p.name === LISTED_PLUGIN && !(isBundledNode && cliPins === 0 && cliRefs === 0) && cliPins !== 1) {
         errors.push(`${cPath}: expected exactly one ${CLI_PACKAGE}@<X.Y.Z> pin`);
     }
     return { version, pins, isBundledNode };

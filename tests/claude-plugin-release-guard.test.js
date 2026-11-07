@@ -441,3 +441,24 @@ test('5 and 6: provenance time label and the guard scope statement', () => {
         for (const re of [/accident guard/i, /claude plugin tag/, /inline\s+(#\s*)?`?mcpServers/, /provenance\s+(#\s*)?row/, /stale-base race/, /launchers or registries/]) assert.match(text, re);
     }
 });
+
+test('a bundled node server waives the delimit-cli pin only when nothing references delimit-cli', () => {
+    const bundled = { command: 'node', args: ['${CLAUDE_PLUGIN_ROOT}/server.cjs'] };
+    const pinned = { command: 'npx', args: ['-y', 'delimit-cli@4.20.1', 'mcp'] };
+    const run = (servers) => guard.evaluate({
+        changedFiles: ['claude-plugin/.mcp.json', 'claude-plugin/.claude-plugin/plugin.json', 'docs/claude-plugin-releases.md'],
+        head: side({ delimit: '1.0.5', rel: releases('1.0.3', '1.0.4', '1.0.5'), mcp: JSON.stringify({ mcpServers: servers }) }),
+        base: BASE, npmVersionExists: npmYes,
+    });
+    const PIN = /expected exactly one delimit-cli@<X\.Y\.Z> pin/;
+    // Bundled server alone: no pin required.
+    assert.ok(!has(run({ delimit: bundled }), PIN), 'bundled-only plugin must not need a pin');
+    // Hybrid: bundled server plus a second delimit-cli reference that is not a pin must still fail.
+    assert.ok(has(run({ delimit: bundled, other: { command: 'delimit-cli', args: ['mcp'] } }), PIN), 'hybrid with an unpinned delimit-cli reference must fail');
+    // Hybrid with exactly one valid pin still satisfies the original rule.
+    assert.ok(!has(run({ delimit: bundled, cli: pinned }), PIN), 'one exact pin remains valid');
+    // Two pins alongside a bundled server still fail the exactly-one rule.
+    assert.ok(has(run({ delimit: bundled, a: pinned, b: { command: 'npx', args: ['-y', 'delimit-cli@4.20.2', 'mcp'] } }), PIN), 'two pins must fail');
+    // No bundled server and no pin: the original rule applies.
+    assert.ok(has(run({ delimit: { command: 'python3', args: ['server.py'] } }), PIN), 'no bundled server and no pin must fail');
+});
