@@ -1,9 +1,9 @@
 ---
 name: handoff
-description: Use when the user asks for a handoff or a work session reaches a stopping point.
+description: Use only when the user explicitly asks for a handoff or to save session progress (e.g. "handoff", "wrap up").
 ---
 
-At the stopping point, capture session state using the Delimit CLI:
+When the user explicitly asks for a handoff or to record progress at a stopping point:
 
 1. Check if `delimit` is available in PATH, or run via `npx delimit-cli@4.23.0`:
    - If `delimit` is not installed, inform the user they can install it globally with `npm install -g delimit-cli`.

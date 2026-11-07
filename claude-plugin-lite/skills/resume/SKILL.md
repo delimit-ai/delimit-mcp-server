@@ -1,9 +1,9 @@
 ---
 name: resume
-description: Use at the start of a session, when the user asks to see open work, or when switching assistants mid-project.
+description: Use only when the user explicitly asks to resume, check prior context, or see open work (e.g. "resume", "what was I doing").
 ---
 
-At the start of a session or when resuming work:
+When the user explicitly asks to resume, check prior context, or view open work (e.g. "resume", "what was I doing"):
 
 1. Check if `delimit` is available in PATH, or run via `npx delimit-cli@4.23.0`:
    - If `delimit` is not installed, inform the user they can install it globally with `npm install -g delimit-cli`.

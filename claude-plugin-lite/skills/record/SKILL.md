@@ -1,9 +1,9 @@
 ---
 name: record
-description: Use when the user explicitly asks to record a stated decision or task in the Delimit ledger.
+description: Use only when the user explicitly asks to record a stated decision or task in the Delimit ledger (e.g. "record this").
 ---
 
-When the user explicitly asks to record a stated decision or task:
+When the user explicitly asks to record a stated decision or task (e.g. "record this"):
 
 1. Check if `delimit` is available in PATH, or run via `npx delimit-cli@4.23.0`:
    - If `delimit` is not installed, inform the user they can install it globally with `npm install -g delimit-cli`.

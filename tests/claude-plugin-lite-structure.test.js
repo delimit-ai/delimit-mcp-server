@@ -107,8 +107,9 @@ function validateLiteDirectory(pluginDir) {
         }
 
         // 5. UTF-8 text and shebang checks
-        const buf = fs.readFileSync(file);
-        if (['.md', '.markdown', '.json', '.yaml', '.yml'].includes(ext)) {
+        const isTextFile = ['.md', '.markdown', '.json', '.yaml', '.yml'].includes(ext) || isAllowedSpecialBasename;
+        if (isTextFile) {
+            const buf = fs.readFileSync(file);
             if (buf.length >= 2 && buf[0] === 0x23 && buf[1] === 0x21) {
                 violations.push(`Text file starts with shebang (#!): ${rel}`);
             }
@@ -117,6 +118,12 @@ function validateLiteDirectory(pluginDir) {
                     violations.push(`Null byte found in text file: ${rel}`);
                     break;
                 }
+            }
+            try {
+                const decoder = new TextDecoder('utf-8', { fatal: true });
+                decoder.decode(buf);
+            } catch (err) {
+                violations.push(`Malformed UTF-8 encoding in text file: ${rel} (${err.message})`);
             }
         }
     }
@@ -180,6 +187,7 @@ test('claude-plugin-lite satisfies all directory compliance rules', () => {
         assert.match(content, new RegExp(`^---\\nname: ${skill}\\ndescription: .+\\n---\\n`));
         assert.match(content, /delimit-cli|delimit/i);
         assert.match(content, /npm install -g delimit-cli/);
+        assert.match(content, /explicit/i, `Skill ${skill} must specify explicit user invocation`);
     }
 
     // Verify README and icon
@@ -220,6 +228,11 @@ test('validateLiteDirectory catches non-allowed files, hooks, mcpServers, lockfi
         fs.writeFileSync(path.join(tmp, 'null.md'), Buffer.from([0x61, 0x00, 0x62]));
         assert.ok(validateLiteDirectory(tmp).some((v) => v.includes('Null byte found')));
         fs.unlinkSync(path.join(tmp, 'null.md'));
+
+        // 5. Malformed UTF-8 in text file
+        fs.writeFileSync(path.join(tmp, 'invalid-utf8.md'), Buffer.from([0xff, 0xfe]));
+        assert.ok(validateLiteDirectory(tmp).some((v) => v.includes('Malformed UTF-8') && v.includes('invalid-utf8.md')));
+        fs.unlinkSync(path.join(tmp, 'invalid-utf8.md'));
 
         // 5. Hooks folder / file
         fs.mkdirSync(path.join(tmp, 'hooks'));
@@ -268,6 +281,38 @@ test('validateLiteDirectory catches non-allowed files, hooks, mcpServers, lockfi
             mcpServers: {},
         }));
         assert.ok(validateLiteDirectory(tmp).some((v) => v.includes('plugin.json declares mcpServers')));
+    } finally {
+        fs.rmSync(tmp, { recursive: true, force: true });
+    }
+});
+
+test('validateLiteDirectory rejects invalid UTF-8 byte sequences in text files', () => {
+    const tmp = fs.mkdtempSync(path.join(ROOT, 'tmp-lite-utf8-'));
+    try {
+        fs.mkdirSync(path.join(tmp, '.claude-plugin'), { recursive: true });
+        fs.writeFileSync(path.join(tmp, '.claude-plugin', 'plugin.json'), JSON.stringify({
+            name: 'delimit-lite',
+            version: '1.0.0',
+            description: 'test',
+        }));
+
+        // Truncated / invalid multi-byte sequence in Markdown
+        fs.writeFileSync(path.join(tmp, 'bad.md'), Buffer.from([0xc3, 0x28]));
+        let violations = validateLiteDirectory(tmp);
+        assert.ok(
+            violations.some((v) => v.includes('Malformed UTF-8') && v.includes('bad.md')),
+            'Should flag malformed UTF-8 in Markdown file'
+        );
+        fs.unlinkSync(path.join(tmp, 'bad.md'));
+
+        // Invalid byte sequence in allowed special basename (e.g. LICENSE)
+        fs.writeFileSync(path.join(tmp, 'LICENSE'), Buffer.from([0xff, 0xfe]));
+        violations = validateLiteDirectory(tmp);
+        assert.ok(
+            violations.some((v) => v.includes('Malformed UTF-8') && v.includes('LICENSE')),
+            'Should flag malformed UTF-8 in special basename text file'
+        );
+        fs.unlinkSync(path.join(tmp, 'LICENSE'));
     } finally {
         fs.rmSync(tmp, { recursive: true, force: true });
     }

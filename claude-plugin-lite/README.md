@@ -26,9 +26,9 @@ Alternatively, commands can be run on-demand via `npx delimit-cli@4.23.0`.
 
 ## Included Skills
 
-- **resume**: Inspect open work, active branch context, and recent decisions at session start or after switching assistants.
-- **record**: Record explicitly stated decisions and tasks into the Delimit ledger with tags and owner attribution.
-- **handoff**: Generate structured, verified session handoffs capturing completed work, test results, blockers, and next steps.
+- **resume**: Inspect open work, active branch context, and recent decisions when explicitly requested by the user (e.g. "resume", "what was I doing").
+- **record**: Record explicitly stated decisions and tasks into the Delimit ledger with tags and owner attribution when explicitly requested (e.g. "record this").
+- **handoff**: Generate structured, verified session handoffs capturing completed work, test results, blockers, and next steps when explicitly requested by the user.
 
 ## Directory Compliance
 
