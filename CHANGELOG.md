@@ -1,3 +1,16 @@
+## [4.23.0] - 2026-11-07
+
+### Added
+- Claude plugin: ships readable source for a bundled Node MCP server (`claude-plugin/server.cjs`), eliminating external `npx` launcher fetching and execution at runtime.
+- Claude plugin storage compatibility: the bundled plugin uses storage compatible with the CLI and gateway (canonical JSON serialization, ledger records, handoffs, and session continuity).
+- Storage and permission hardening: newly created state directories use mode `0700` and newly created state and receipt files use mode `0600` without modifying permissions on pre-existing files or directories.
+- Managed instruction template: added Git safety rules (forbids direct pushes to default branch, moving or deleting published tags, `--no-verify` hook bypasses, secret file permission widening beyond `0600`, and duplicate comments on third-party repositories).
+
+### Changed
+- Claude plugin release guard: accepts plugins that run a bundled server without requiring a package pin when `delimit-cli` is not referenced.
+- Claude plugin cleanup: removed unused resume helper script and empty package manifests while preserving hooks and runtime configurations.
+- Documentation: updated README quick start with terminal demonstration recording.
+
 ## [4.22.0] - 2026-10-11
 
 ### Added
