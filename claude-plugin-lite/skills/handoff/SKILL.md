@@ -1,6 +1,6 @@
 ---
 name: handoff
-description: Use only when the user explicitly asks for a handoff or to save session progress (e.g. "handoff", "wrap up").
+description: Use only when the user explicitly asks for a handoff or to save session progress (e.g. "handoff", "wrap up"). Explicit invocation only.
 ---
 
 When the user explicitly asks for a handoff or to record progress at a stopping point:

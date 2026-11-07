@@ -1,6 +1,6 @@
 ---
 name: record
-description: Use only when the user explicitly asks to record a stated decision or task in the Delimit ledger (e.g. "record this").
+description: Use only when the user explicitly asks to record a stated decision or task in the Delimit ledger (e.g. "record this"). Explicit invocation only.
 ---
 
 When the user explicitly asks to record a stated decision or task (e.g. "record this"):
