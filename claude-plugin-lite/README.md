@@ -27,10 +27,11 @@ Alternatively, commands can run on-demand via `npx delimit-cli@4.23.0`.
 Install directly from the Delimit repository marketplace:
 
 ```sh
-/plugin install delimit-lite --marketplace delimit-ai/delimit-mcp-server
+claude plugin marketplace add delimit-ai/delimit-mcp-server
+claude plugin install delimit-lite@delimit
 ```
 
-Or install from the Anthropic Claude Plugin Directory when available.
+Or install from the Claude plugin directory when available.
 
 ## Included Slash Commands and Skills
 
@@ -47,7 +48,7 @@ npm install -g delimit-cli
 delimit setup
 ```
 
-Installing the Delimit command line and running its setup adds automatic resume to Claude Code: when a session starts, Claude gets your last working context, open tasks and last handoff without you asking (this is the SessionStart hook installed by `delimit setup`, implemented in `lib/cross-model-hooks.js` of `delimit-cli` 4.23.0).
+Installing the Delimit command line and running its setup adds automatic resume to Claude Code: when a session starts, Claude gets your last working context, open tasks and last handoff without you asking.
 
 The full plugin is also available from our own marketplace:
 
@@ -55,11 +56,3 @@ The full plugin is also available from our own marketplace:
 claude plugin marketplace add delimit-ai/delimit-mcp-server
 claude plugin install delimit@delimit
 ```
-
-## Directory Compliance
-
-This lite plugin is specifically designed to meet all Claude Plugin Directory policies:
-- No background or local MCP server processes (`.mcp.json` omitted).
-- No command or event hooks (`hooks/` omitted).
-- No executable scripts or package manifests.
-- Static Markdown slash commands, skills, and UTF-8 documentation only, with a square PNG icon.
