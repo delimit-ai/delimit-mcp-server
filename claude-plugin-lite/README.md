@@ -40,6 +40,22 @@ Or install from the Anthropic Claude Plugin Directory when available.
 
 All commands and skills run only upon explicit user invocation.
 
+## Want automatic resume?
+
+```sh
+npm install -g delimit-cli
+delimit setup
+```
+
+Installing the Delimit command line and running its setup adds automatic resume to Claude Code: when a session starts, Claude gets your last working context, open tasks and last handoff without you asking (this is the SessionStart hook installed by `delimit setup`, implemented in `lib/cross-model-hooks.js` of `delimit-cli` 4.23.0).
+
+The full plugin is also available from our own marketplace:
+
+```sh
+claude plugin marketplace add delimit-ai/delimit-mcp-server
+claude plugin install delimit@delimit
+```
+
 ## Directory Compliance
 
 This lite plugin is specifically designed to meet all Claude Plugin Directory policies:
