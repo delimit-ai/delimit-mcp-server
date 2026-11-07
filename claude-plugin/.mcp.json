@@ -1,13 +1,9 @@
 {
   "mcpServers": {
     "delimit": {
-      "command": "npx",
+      "command": "node",
       "args": [
-        "-y",
-        "delimit-cli@4.21.0",
-        "mcp",
-        "--toolset",
-        "records"
+        "${CLAUDE_PLUGIN_ROOT}/server.cjs"
       ]
     }
   }
