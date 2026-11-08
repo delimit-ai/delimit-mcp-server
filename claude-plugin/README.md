@@ -2,19 +2,6 @@
 
 Keep the state. Change the model.
 
-## Using the Delimit Claude plugin?
-
-The plugin needs Claude Code or Cowork (it does not run on claude.ai on the web).
-
-The first thing to try, as a plain prompt in Claude Code:
-- `"resume my last session"`
-
-And the next two:
-- `"record this decision: ..."`
-- `"hand off this session"`
-
-Want it automatic? Run `npm install -g delimit-cli` then `delimit setup`: when a Claude Code session starts, Claude gets your last working context, open tasks and last handoff without you asking.
-
 This plugin adds three skills for recording stated decisions and tasks, creating handoffs, and reading open work when you resume. At the start of every session it automatically surfaces your open tasks and any handoff from your last session. Its MCP server uses the records toolset. Records are plain local files that other tools can read.
 
 ## Requirements
