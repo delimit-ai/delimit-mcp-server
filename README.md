@@ -11,6 +11,19 @@ Delimit keeps your decisions, tasks, and handoffs on your machine, so the next A
 
 Glama directory grades: License A · Quality A · Maintenance A. Observed September 15, 2026, for this public repository. [View the listing](https://glama.ai/mcp/servers/delimit-ai/delimit-mcp-server).
 
+## Using the Delimit Claude plugin?
+
+The plugin needs Claude Code or Cowork (it does not run on claude.ai on the web).
+
+The first thing to try, as a plain prompt in Claude Code:
+- `"resume my last session"`
+
+And the next two:
+- `"record this decision: ..."`
+- `"hand off this session"`
+
+Want it automatic? Run `npm install -g delimit-cli` then `delimit setup`: when a Claude Code session starts, Claude gets your last working context, open tasks and last handoff without you asking.
+
 ## The problem
 
 - Your agent forgets what you decided last session, then asks again or quietly decides differently.
