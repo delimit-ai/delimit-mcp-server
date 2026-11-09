@@ -555,6 +555,49 @@ describe('LED-4057 delimit chat project-bound continuity', () => {
         assert.strictEqual(repl.codexLaunchEndedAt, null);
     });
 
+    test('LED-6521: a tagged launch binds only the rollout carrying its originator tag', () => {
+        const codexDir = path.join(backendRoot, 'codex_sessions_originator', '2026', '11', '09');
+        fs.mkdirSync(codexDir, { recursive: true });
+        const write = (name, sid, originator) => {
+            const f = path.join(codexDir, name);
+            fs.writeFileSync(f, JSON.stringify({
+                type: 'session_meta',
+                payload: { session_id: sid, cwd: '/test/cwd/path', timestamp: '2026-11-09T10:30:00Z', originator },
+            }) + '\n');
+            fs.utimesSync(f, new Date('2026-11-09T10:30:05Z'), new Date('2026-11-09T10:30:05Z'));
+        };
+        const { repl } = replReturning({ status: 'not_found' }, {
+            codexSessionsDir: path.join(backendRoot, 'codex_sessions_originator'),
+            launchDir: '/test/cwd/path',
+        });
+        repl.sessionStartedAt = '2026-11-09T10:00:00Z';
+        repl.beginCodexLaunch(new Date('2026-11-09T10:29:00Z'));
+        assert.match(repl.codexLaunchOriginator, /^delimit_chat_[0-9a-f]{12}$/);
+        repl.codexLaunchEndedAt = '2026-11-09T10:40:00Z';
+
+        // Our child wrote no rollout; a concurrent sibling in the same folder is the
+        // lone candidate. Without our tag it is never ours (review r4, codex + muse).
+        write('rollout-2026-11-09T10-30-00-sibling.jsonl', 'sibling-untagged', 'codex_cli_rs');
+        assert.strictEqual(repl.findCodexRollout(), null);
+        assert.strictEqual(repl.discoverCodexNativeSession([]).transcriptPath, null);
+
+        // Our own tagged rollout is bound even with the sibling present.
+        write('rollout-2026-11-09T10-30-01-ours.jsonl', 'ours-tagged', repl.codexLaunchOriginator);
+        const found = repl.findCodexRollout();
+        assert.ok(found);
+        assert.strictEqual(found.sessionId, 'ours-tagged');
+
+        // An explicitly named session (resume <id>) keeps its original tag and still binds.
+        const named = '0199aaaa-bbbb-4ccc-8ddd-eeeeffff0000';
+        write('rollout-2026-11-09T10-30-02-named.jsonl', named, 'codex_cli_rs');
+        assert.strictEqual(repl.findCodexRollout(null, named).sessionId, named);
+
+        // Each launch gets a fresh tag.
+        const first = repl.codexLaunchOriginator;
+        repl.beginCodexLaunch(new Date('2026-11-09T11:00:00Z'));
+        assert.notStrictEqual(repl.codexLaunchOriginator, first);
+    });
+
     test('LED-6521: preferred id miss with one other candidate -> no binding', () => {
         const codexDir = path.join(backendRoot, 'codex_sessions_preferred_miss', '2026', '11', '09');
         fs.mkdirSync(codexDir, { recursive: true });
@@ -667,7 +710,9 @@ describe('LED-4057 delimit chat project-bound continuity', () => {
         assert.strictEqual(repl.printedCodexSessionId, null);
         const fresh = path.join(codexDir, 'rollout-2026-11-09T10-00-00-fresh.jsonl');
         fs.writeFileSync(fresh, JSON.stringify({ type: 'session_meta', payload: {
-            session_id: 'fresh-session-id', cwd: '/test/resume/fresh', timestamp: new Date().toISOString() } }) + '\n');
+            session_id: 'fresh-session-id', cwd: '/test/resume/fresh', timestamp: new Date().toISOString(),
+            // A real fresh launch records this launch's originator tag.
+            originator: repl.codexLaunchOriginator } }) + '\n');
         const d2 = repl.discoverCodexNativeSession([]);
         assert.notStrictEqual(d2.transcriptPath, resumed);
         assert.notStrictEqual(repl.nativeCodexSessionId, 'aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa');
