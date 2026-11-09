@@ -572,6 +572,30 @@ describe('LED-4057 delimit chat project-bound continuity', () => {
         assert.strictEqual(replLast.codexTranscriptPath, null);
     });
 
+    test('LED-6521: a guessed id is never reused as preferred; second fresh launch refuses to guess', () => {
+        const codexDir = path.join(backendRoot, 'codex_sessions_two_launches', '2026', '11', '09');
+        fs.mkdirSync(codexDir, { recursive: true });
+        const first = path.join(codexDir, 'rollout-2026-11-09T10-30-00-first-launch.jsonl');
+        fs.writeFileSync(first, JSON.stringify({ type: 'session_meta', payload: {
+            session_id: 'first-launch-id', cwd: '/test/two/launches', timestamp: '2026-11-09T10:30:00Z' } }) + '\n');
+        const { repl } = replReturning({ status: 'not_found' }, {
+            codexSessionsDir: path.join(backendRoot, 'codex_sessions_two_launches'),
+            launchDir: '/test/two/launches',
+        });
+        repl.sessionStartedAt = '2026-11-09T10:00:00Z';
+        // First fresh launch: one candidate, discovered by cwd/time (a guess).
+        const d1 = repl.discoverCodexNativeSession([]);
+        assert.strictEqual(d1.transcriptPath, first);
+        // Second fresh launch in the same chat writes another rollout.
+        const second = path.join(codexDir, 'rollout-2026-11-09T10-40-00-second-launch.jsonl');
+        fs.writeFileSync(second, JSON.stringify({ type: 'session_meta', payload: {
+            session_id: 'second-launch-id', cwd: '/test/two/launches', timestamp: '2026-11-09T10:40:00Z' } }) + '\n');
+        const d2 = repl.discoverCodexNativeSession([]);
+        // Two candidates and no explicit id: must not bind the first launch's rollout.
+        assert.notStrictEqual(d2.transcriptPath, first);
+        assert.notStrictEqual(repl.codexTranscriptPath, first);
+    });
+
     test('LED-6521: receipt-found and portfolio fallback exit message formatting', () => {
         const { repl } = replReturning({});
 
