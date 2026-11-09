@@ -410,7 +410,14 @@ describe('LED-4057 delimit chat project-bound continuity', () => {
         });
         repl.sessionStartedAt = new Date(Date.now() - 60000).toISOString();
 
-        // 1. Discover from rollout file
+        // 0. Without a launch tag nothing is guessed (review r5): fail closed.
+        assert.strictEqual(repl.discoverCodexNativeSession().transcriptPath, null);
+
+        // 1. Discover this launch's tagged rollout
+        repl.beginCodexLaunch(new Date(Date.now() - 60000));
+        fs.writeFileSync(rolloutPath, JSON.stringify({ type: 'session_meta', payload: {
+            session_id: '01a1bbc9-cae2-7561-8760-7f4ac2122dd0', cwd: '/root',
+            timestamp: new Date().toISOString(), originator: repl.codexLaunchOriginator } }) + '\n{"type":"event_msg"}\n');
         const discovered = repl.discoverCodexNativeSession();
         assert.strictEqual(discovered.sessionId, '01a1bbc9-cae2-7561-8760-7f4ac2122dd0');
         assert.strictEqual(discovered.transcriptPath, rolloutPath);
@@ -523,7 +530,8 @@ describe('LED-4057 delimit chat project-bound continuity', () => {
         fs.mkdirSync(codexDir, { recursive: true });
         fs.writeFileSync(path.join(codexDir, 'rollout-2026-11-09T10-30-00-sibling.jsonl'), JSON.stringify({
             type: 'session_meta',
-            payload: { session_id: 'sibling-after-exit', cwd: '/test/cwd/path', timestamp: '2026-11-09T10:30:00Z' },
+            payload: { session_id: 'sibling-after-exit', cwd: '/test/cwd/path', timestamp: '2026-11-09T10:30:00Z',
+                originator: 'delimit_chat_aaaaaaaaaaaa' },
         }) + '\n');
         // The sibling was last written at its own start time (10:30).
         fs.utimesSync(path.join(codexDir, 'rollout-2026-11-09T10-30-00-sibling.jsonl'),
@@ -533,10 +541,12 @@ describe('LED-4057 delimit chat project-bound continuity', () => {
             launchDir: '/test/cwd/path',
         });
         repl.sessionStartedAt = '2026-11-09T10:00:00Z';
+        // The time bounds apply even to a rollout carrying our tag.
+        repl.codexLaunchOriginator = 'delimit_chat_aaaaaaaaaaaa';
         // Our child exited at 10:20; the sibling session started at 10:30 (review r2, codex).
         repl.codexLaunchEndedAt = '2026-11-09T10:20:00Z';
         assert.strictEqual(repl.findCodexRollout(), null);
-        // Had our child still been running at 10:30, the lone candidate is accepted as before.
+        // Had our child still been running at 10:30, the tagged rollout is accepted.
         repl.codexLaunchEndedAt = '2026-11-09T10:45:00Z';
         const found = repl.findCodexRollout();
         assert.ok(found);
@@ -619,10 +629,8 @@ describe('LED-4057 delimit chat project-bound continuity', () => {
         });
         repl.sessionStartedAt = '2026-11-09T10:00:00Z';
 
-        // 1. Without preferred id, the lone candidate would match
-        const lone = repl.findCodexRollout();
-        assert.ok(lone);
-        assert.strictEqual(lone.sessionId, 'lone-candidate-id');
+        // 1. Without a preferred id or a launch tag, the lone candidate is NOT guessed (review r5)
+        assert.strictEqual(repl.findCodexRollout(), null);
 
         // 2. With an explicit preferred id that misses, must NOT substitute lone candidate -> returns null
         const missed = repl.findCodexRollout(null, '99999999-9999-4999-8999-999999999999');
@@ -671,25 +679,30 @@ describe('LED-4057 delimit chat project-bound continuity', () => {
     test('LED-6521: a guessed id is never reused as preferred; second fresh launch refuses to guess', () => {
         const codexDir = path.join(backendRoot, 'codex_sessions_two_launches', '2026', '11', '09');
         fs.mkdirSync(codexDir, { recursive: true });
-        const first = path.join(codexDir, 'rollout-2026-11-09T10-30-00-first-launch.jsonl');
-        fs.writeFileSync(first, JSON.stringify({ type: 'session_meta', payload: {
-            session_id: 'first-launch-id', cwd: '/test/two/launches', timestamp: '2026-11-09T10:30:00Z' } }) + '\n');
         const { repl } = replReturning({ status: 'not_found' }, {
             codexSessionsDir: path.join(backendRoot, 'codex_sessions_two_launches'),
             launchDir: '/test/two/launches',
         });
         repl.sessionStartedAt = '2026-11-09T10:00:00Z';
-        // First fresh launch: one candidate, discovered by cwd/time (a guess).
+        // First fresh launch writes a rollout carrying its own tag.
+        repl.beginCodexLaunch(new Date('2026-11-09T10:29:00Z'));
+        const first = path.join(codexDir, 'rollout-2026-11-09T10-30-00-first-launch.jsonl');
+        fs.writeFileSync(first, JSON.stringify({ type: 'session_meta', payload: {
+            session_id: 'first-launch-id', cwd: '/test/two/launches', timestamp: '2026-11-09T10:30:00Z',
+            originator: repl.codexLaunchOriginator } }) + '\n');
         const d1 = repl.discoverCodexNativeSession([]);
         assert.strictEqual(d1.transcriptPath, first);
-        // Second fresh launch in the same chat writes another rollout.
+        // Second fresh launch in the same chat gets a new tag and writes another rollout.
+        repl.beginCodexLaunch(new Date('2026-11-09T10:39:00Z'));
         const second = path.join(codexDir, 'rollout-2026-11-09T10-40-00-second-launch.jsonl');
         fs.writeFileSync(second, JSON.stringify({ type: 'session_meta', payload: {
-            session_id: 'second-launch-id', cwd: '/test/two/launches', timestamp: '2026-11-09T10:40:00Z' } }) + '\n');
+            session_id: 'second-launch-id', cwd: '/test/two/launches', timestamp: '2026-11-09T10:40:00Z',
+            originator: repl.codexLaunchOriginator } }) + '\n');
         const d2 = repl.discoverCodexNativeSession([]);
-        // Two candidates and no explicit id: must not bind the first launch's rollout.
+        // The first launch's id is never reused, and its rollout is never bound again.
         assert.notStrictEqual(d2.transcriptPath, first);
         assert.notStrictEqual(repl.codexTranscriptPath, first);
+        assert.strictEqual(d2.transcriptPath, second);
     });
 
     test('LED-6521: resume id from an earlier launch never carries into a later fresh launch', () => {
