@@ -570,6 +570,22 @@ describe('LED-4057 delimit chat project-bound continuity', () => {
         // 5. finalizeSession on preferred id miss produces no transcript
         replLast.finalizeSession('codex');
         assert.strictEqual(replLast.codexTranscriptPath, null);
+
+        // 6. 'resume --last <uuid>': the UUID is the PROMPT, never the session id
+        // (PR #296 review r1, Muse), so it is neither bound nor kept for a receipt.
+        const replPrompt = new DelimitChatREPL({
+            sessionPhoenixRoot: backendRoot,
+            continuityHome: backendRoot,
+            codexSessionsDir: path.join(backendRoot, 'codex_sessions_preferred_miss'),
+            launchDir: '/test/cwd/path',
+        });
+        replPrompt.sessionStartedAt = '2026-11-09T10:00:00Z';
+        const promptUuid = '12345678-1234-4234-8234-123456789abc';
+        const discoveredPrompt = replPrompt.discoverCodexNativeSession(['resume', '--last', promptUuid]);
+        assert.strictEqual(discoveredPrompt.transcriptPath, null);
+        assert.strictEqual(replPrompt.printedCodexSessionId == null || replPrompt.printedCodexSessionId === '', true);
+        assert.notStrictEqual(replPrompt.nativeCodexSessionId, promptUuid);
+        assert.strictEqual(replPrompt.codexResumeWithoutId, true);
     });
 
     test('LED-6521: a guessed id is never reused as preferred; second fresh launch refuses to guess', () => {
