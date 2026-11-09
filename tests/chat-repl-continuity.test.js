@@ -399,7 +399,7 @@ describe('LED-4057 delimit chat project-bound continuity', () => {
             payload: {
                 session_id: '01a1bbc9-cae2-7561-8760-7f4ac2122dd0',
                 cwd: '/root',
-                timestamp: '2026-11-09T10:32:06Z',
+                timestamp: new Date().toISOString(),
             },
         });
         fs.writeFileSync(rolloutPath, metaLine + '\n{"type":"event_msg"}\n');
