@@ -389,4 +389,76 @@ describe('LED-4057 delimit chat project-bound continuity', () => {
         assert.strictEqual(repl.finalizeSession('codex').saved, true);
         assert.strictEqual(fs.existsSync(path.join(backendRoot, 'sessions')), false);
     });
+
+    test('LED-6521: Codex native session ID discovery from rollout file and resume args', () => {
+        const codexDir = path.join(backendRoot, 'codex_sessions', '2026', '11', '09');
+        fs.mkdirSync(codexDir, { recursive: true });
+        const rolloutPath = path.join(codexDir, 'rollout-2026-11-09T10-32-06-01a1bbc9-cae2-7561-8760-7f4ac2122dd0.jsonl');
+        const metaLine = JSON.stringify({
+            type: 'session_meta',
+            payload: {
+                session_id: '01a1bbc9-cae2-7561-8760-7f4ac2122dd0',
+                cwd: '/root',
+                timestamp: '2026-11-09T10:32:06Z',
+            },
+        });
+        fs.writeFileSync(rolloutPath, metaLine + '\n{"type":"event_msg"}\n');
+
+        const { repl } = replReturning({ status: 'captured', soul_id: 's1' }, {
+            codexSessionsDir: path.join(backendRoot, 'codex_sessions'),
+        });
+        repl.sessionStartedAt = new Date(Date.now() - 60000).toISOString();
+
+        // 1. Discover from rollout file
+        const discovered = repl.discoverCodexNativeSession();
+        assert.strictEqual(discovered.sessionId, '01a1bbc9-cae2-7561-8760-7f4ac2122dd0');
+        assert.strictEqual(discovered.transcriptPath, rolloutPath);
+        assert.strictEqual(repl.nativeCodexSessionId, '01a1bbc9-cae2-7561-8760-7f4ac2122dd0');
+        assert.strictEqual(repl.codexTranscriptPath, rolloutPath);
+
+        // 2. Parse from resume args
+        const repl2 = new DelimitChatREPL({
+            chatRunId: 'run-resume',
+            sessionPhoenixRoot: backendRoot,
+            continuityHome: backendRoot,
+        });
+        repl2.discoverCodexNativeSession(['resume', '12345678-1234-4234-8234-123456789abc']);
+        assert.strictEqual(repl2.nativeCodexSessionId, '12345678-1234-4234-8234-123456789abc');
+    });
+
+    test('LED-6521: receipt-found and portfolio fallback exit message formatting', () => {
+        const { repl } = replReturning({});
+
+        // 1. Receipt already saved
+        const receiptMsg = repl.formatSessionExit({
+            saved: true,
+            status: 'already_saved',
+            handoff_id: '25a1899b',
+            project: 'wr-scores-mobile-ux',
+        });
+        assert.strictEqual(receiptMsg, '\n  Session exited. Handoff 25a1899b (wr-scores-mobile-ux) already saved.');
+
+        // 2. Portfolio fallback saved
+        const portfolioMsg = repl.formatSessionExit({
+            saved: true,
+            status: 'captured',
+            scope: 'portfolio',
+            portfolio_captured: true,
+            project: '/root',
+        });
+        assert.strictEqual(portfolioMsg, '\n  Session exited. Portfolio context saved (/root).');
+
+        // 3. Normal saved
+        const normalMsg = repl.formatSessionExit({ saved: true, status: 'captured' });
+        assert.strictEqual(normalMsg, '\n  Session saved. Exiting Delimit.');
+
+        // 4. Recovery receipt written includes codex native_session_id
+        repl.nativeCodexSessionId = '01a1bbc9-cae2-7561-8760-7f4ac2122dd0';
+        const receiptResult = repl.writeRecoveryReceipt('codex', { reason: 'no_project_evidence' });
+        assert.strictEqual(receiptResult.saved, false);
+        const writtenData = JSON.parse(fs.readFileSync(receiptResult.receipt, 'utf8'));
+        assert.strictEqual(writtenData.harness, 'codex');
+        assert.strictEqual(writtenData.native_session_id, '01a1bbc9-cae2-7561-8760-7f4ac2122dd0');
+        assert.strictEqual(writtenData.context_captured, false);
+    });
 });
