@@ -406,6 +406,7 @@ describe('LED-4057 delimit chat project-bound continuity', () => {
 
         const { repl } = replReturning({ status: 'captured', soul_id: 's1' }, {
             codexSessionsDir: path.join(backendRoot, 'codex_sessions'),
+            launchDir: '/root',
         });
         repl.sessionStartedAt = new Date(Date.now() - 60000).toISOString();
 
@@ -421,9 +422,100 @@ describe('LED-4057 delimit chat project-bound continuity', () => {
             chatRunId: 'run-resume',
             sessionPhoenixRoot: backendRoot,
             continuityHome: backendRoot,
+            launchDir: '/root',
         });
         repl2.discoverCodexNativeSession(['resume', '12345678-1234-4234-8234-123456789abc']);
         assert.strictEqual(repl2.nativeCodexSessionId, '12345678-1234-4234-8234-123456789abc');
+    });
+
+    test('LED-6521: does not match candidate with different cwd or started before chat start', () => {
+        const codexDir = path.join(backendRoot, 'codex_sessions_filter', '2026', '11', '09');
+        fs.mkdirSync(codexDir, { recursive: true });
+
+        // Candidate 1: wrong cwd
+        const wrongCwdPath = path.join(codexDir, 'rollout-2026-11-09T12-00-00-wrong-cwd.jsonl');
+        fs.writeFileSync(wrongCwdPath, JSON.stringify({
+            type: 'session_meta',
+            payload: {
+                session_id: 'wrong-cwd-id',
+                cwd: '/some/other/project',
+                timestamp: '2026-11-09T12:00:00Z',
+            },
+        }) + '\n');
+
+        // Candidate 2: started before chat start
+        const oldPath = path.join(codexDir, 'rollout-2026-11-09T08-00-00-old.jsonl');
+        fs.writeFileSync(oldPath, JSON.stringify({
+            type: 'session_meta',
+            payload: {
+                session_id: 'old-id',
+                cwd: '/my/launch/dir',
+                timestamp: '2026-11-09T08:00:00Z',
+            },
+        }) + '\n');
+
+        const { repl } = replReturning({ status: 'not_found' }, {
+            codexSessionsDir: path.join(backendRoot, 'codex_sessions_filter'),
+            launchDir: '/my/launch/dir',
+        });
+        repl.sessionStartedAt = '2026-11-09T10:00:00Z';
+
+        const found = repl.findCodexRollout();
+        assert.strictEqual(found, null);
+    });
+
+    test('LED-6521: multiple matching candidates without preferred id do not guess; preferred id disambiguates', () => {
+        const codexDir = path.join(backendRoot, 'codex_sessions_multi', '2026', '11', '09');
+        fs.mkdirSync(codexDir, { recursive: true });
+
+        const roll1 = path.join(codexDir, 'rollout-2026-11-09T10-30-00-cand-1.jsonl');
+        fs.writeFileSync(roll1, JSON.stringify({
+            type: 'session_meta',
+            payload: {
+                session_id: 'cand-1-id',
+                cwd: '/target/dir',
+                timestamp: '2026-11-09T10:30:00Z',
+            },
+        }) + '\n');
+
+        const roll2 = path.join(codexDir, 'rollout-2026-11-09T10-31-00-cand-2.jsonl');
+        fs.writeFileSync(roll2, JSON.stringify({
+            type: 'session_meta',
+            payload: {
+                session_id: 'cand-2-id',
+                cwd: '/target/dir',
+                timestamp: '2026-11-09T10:31:00Z',
+            },
+        }) + '\n');
+
+        const { repl } = replReturning({}, {
+            codexSessionsDir: path.join(backendRoot, 'codex_sessions_multi'),
+            launchDir: '/target/dir',
+        });
+        repl.sessionStartedAt = '2026-11-09T10:00:00Z';
+
+        // 1. More than one candidate matches -> do not guess (returns null)
+        const ambiguous = repl.findCodexRollout();
+        assert.strictEqual(ambiguous, null);
+        repl.discoverCodexNativeSession();
+        assert.strictEqual(repl.codexTranscriptPath, null);
+
+        // 2. Preferred ID (e.g. printed in codex output) disambiguates
+        repl.discoverCodexNativeSession('session ID: cand-2-id');
+        assert.strictEqual(repl.nativeCodexSessionId, 'cand-2-id');
+        assert.strictEqual(repl.codexTranscriptPath, roll2);
+
+        // 3. finalizeSession re-checks rather than latching a stale pick
+        // If a third candidate appears and preferred ID was not printed, finalizeSession does not latch a guess
+        const replNoId = new DelimitChatREPL({
+            sessionPhoenixRoot: backendRoot,
+            continuityHome: backendRoot,
+            codexSessionsDir: path.join(backendRoot, 'codex_sessions_multi'),
+            launchDir: '/target/dir',
+        });
+        replNoId.sessionStartedAt = '2026-11-09T10:00:00Z';
+        replNoId.finalizeSession('codex');
+        assert.strictEqual(replNoId.codexTranscriptPath, null);
     });
 
     test('LED-6521: receipt-found and portfolio fallback exit message formatting', () => {
