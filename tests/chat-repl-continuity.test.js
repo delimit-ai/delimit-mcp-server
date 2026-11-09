@@ -596,6 +596,36 @@ describe('LED-4057 delimit chat project-bound continuity', () => {
         assert.notStrictEqual(repl.codexTranscriptPath, first);
     });
 
+    test('LED-6521: resume id from an earlier launch never carries into a later fresh launch', () => {
+        const root = path.join(backendRoot, 'codex_sessions_resume_then_fresh');
+        const codexDir = path.join(root, '2026', '11', '09');
+        fs.mkdirSync(codexDir, { recursive: true });
+        const resumed = path.join(codexDir, 'rollout-2026-11-09T09-00-00-resumed.jsonl');
+        fs.writeFileSync(resumed, JSON.stringify({ type: 'session_meta', payload: {
+            session_id: 'resumed-session-id', cwd: '/test/resume/fresh', timestamp: '2026-11-09T09:00:00Z' } }) + '\n');
+        const { repl } = replReturning({ status: 'not_found' }, { codexSessionsDir: root, launchDir: '/test/resume/fresh' });
+        repl.sessionStartedAt = '2026-11-09T08:00:00Z';
+        // Launch 1: resume <id> (explicit id binds the resumed rollout)
+        repl.beginCodexLaunch(new Date('2026-11-09T08:30:00Z'));
+        const d1 = repl.discoverCodexNativeSession(['resume', 'resumed-session-id']);
+        assert.strictEqual(d1.transcriptPath, resumed);
+        // Launch 2: fresh launch later in the same chat writes its own rollout
+        repl.beginCodexLaunch(new Date(Date.now() - 1000));
+        assert.strictEqual(repl.printedCodexSessionId, null);
+        const fresh = path.join(codexDir, 'rollout-2026-11-09T10-00-00-fresh.jsonl');
+        fs.writeFileSync(fresh, JSON.stringify({ type: 'session_meta', payload: {
+            session_id: 'fresh-session-id', cwd: '/test/resume/fresh', timestamp: new Date().toISOString() } }) + '\n');
+        const d2 = repl.discoverCodexNativeSession([]);
+        assert.notStrictEqual(d2.transcriptPath, resumed);
+        assert.notStrictEqual(repl.nativeCodexSessionId, 'resumed-session-id');
+        assert.strictEqual(d2.transcriptPath, fresh);
+        // Launch 3: resume --last then fresh: the '--last' marker never sticks either
+        repl.beginCodexLaunch(new Date(Date.now() - 1000));
+        repl.discoverCodexNativeSession(['resume', '--last']);
+        repl.beginCodexLaunch(new Date(Date.now() - 1000));
+        assert.strictEqual(repl.printedCodexSessionId, null);
+    });
+
     test('LED-6521: receipt-found and portfolio fallback exit message formatting', () => {
         const { repl } = replReturning({});
 
