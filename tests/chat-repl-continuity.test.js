@@ -389,4 +389,433 @@ describe('LED-4057 delimit chat project-bound continuity', () => {
         assert.strictEqual(repl.finalizeSession('codex').saved, true);
         assert.strictEqual(fs.existsSync(path.join(backendRoot, 'sessions')), false);
     });
+
+    test('LED-6521: Codex native session ID discovery from rollout file and resume args', () => {
+        const codexDir = path.join(backendRoot, 'codex_sessions', '2026', '11', '09');
+        fs.mkdirSync(codexDir, { recursive: true });
+        const rolloutPath = path.join(codexDir, 'rollout-2026-11-09T10-32-06-01a1bbc9-cae2-7561-8760-7f4ac2122dd0.jsonl');
+        const metaLine = JSON.stringify({
+            type: 'session_meta',
+            payload: {
+                session_id: '01a1bbc9-cae2-7561-8760-7f4ac2122dd0',
+                cwd: '/root',
+                timestamp: new Date().toISOString(),
+            },
+        });
+        fs.writeFileSync(rolloutPath, metaLine + '\n{"type":"event_msg"}\n');
+
+        const { repl } = replReturning({ status: 'captured', soul_id: 's1' }, {
+            codexSessionsDir: path.join(backendRoot, 'codex_sessions'),
+            launchDir: '/root',
+        });
+        repl.sessionStartedAt = new Date(Date.now() - 60000).toISOString();
+
+        // 0. Without a launch tag nothing is guessed (review r5): fail closed.
+        assert.strictEqual(repl.discoverCodexNativeSession().transcriptPath, null);
+
+        // 1. Discover this launch's tagged rollout
+        repl.beginCodexLaunch(new Date(Date.now() - 60000));
+        fs.writeFileSync(rolloutPath, JSON.stringify({ type: 'session_meta', payload: {
+            session_id: '01a1bbc9-cae2-7561-8760-7f4ac2122dd0', cwd: '/root',
+            timestamp: new Date().toISOString(), originator: repl.codexLaunchOriginator } }) + '\n{"type":"event_msg"}\n');
+        const discovered = repl.discoverCodexNativeSession();
+        assert.strictEqual(discovered.sessionId, '01a1bbc9-cae2-7561-8760-7f4ac2122dd0');
+        assert.strictEqual(discovered.transcriptPath, rolloutPath);
+        assert.strictEqual(repl.nativeCodexSessionId, '01a1bbc9-cae2-7561-8760-7f4ac2122dd0');
+        assert.strictEqual(repl.codexTranscriptPath, rolloutPath);
+
+        // 2. Parse from resume args
+        const repl2 = new DelimitChatREPL({
+            chatRunId: 'run-resume',
+            sessionPhoenixRoot: backendRoot,
+            continuityHome: backendRoot,
+            launchDir: '/root',
+        });
+        repl2.discoverCodexNativeSession(['resume', '12345678-1234-4234-8234-123456789abc']);
+        assert.strictEqual(repl2.nativeCodexSessionId, '12345678-1234-4234-8234-123456789abc');
+    });
+
+    test('LED-6521: does not match candidate with different cwd or started before chat start', () => {
+        const codexDir = path.join(backendRoot, 'codex_sessions_filter', '2026', '11', '09');
+        fs.mkdirSync(codexDir, { recursive: true });
+
+        // Candidate 1: wrong cwd
+        const wrongCwdPath = path.join(codexDir, 'rollout-2026-11-09T12-00-00-wrong-cwd.jsonl');
+        fs.writeFileSync(wrongCwdPath, JSON.stringify({
+            type: 'session_meta',
+            payload: {
+                session_id: 'wrong-cwd-id',
+                cwd: '/some/other/project',
+                timestamp: '2026-11-09T12:00:00Z',
+            },
+        }) + '\n');
+
+        // Candidate 2: started before chat start
+        const oldPath = path.join(codexDir, 'rollout-2026-11-09T08-00-00-old.jsonl');
+        fs.writeFileSync(oldPath, JSON.stringify({
+            type: 'session_meta',
+            payload: {
+                session_id: 'old-id',
+                cwd: '/my/launch/dir',
+                timestamp: '2026-11-09T08:00:00Z',
+            },
+        }) + '\n');
+
+        const { repl } = replReturning({ status: 'not_found' }, {
+            codexSessionsDir: path.join(backendRoot, 'codex_sessions_filter'),
+            launchDir: '/my/launch/dir',
+        });
+        repl.sessionStartedAt = '2026-11-09T10:00:00Z';
+
+        const found = repl.findCodexRollout();
+        assert.strictEqual(found, null);
+    });
+
+    test('LED-6521: multiple matching candidates without preferred id do not guess; preferred id disambiguates', () => {
+        const codexDir = path.join(backendRoot, 'codex_sessions_multi', '2026', '11', '09');
+        fs.mkdirSync(codexDir, { recursive: true });
+
+        const roll1 = path.join(codexDir, 'rollout-2026-11-09T10-30-00-cand-1.jsonl');
+        fs.writeFileSync(roll1, JSON.stringify({
+            type: 'session_meta',
+            payload: {
+                session_id: 'cand-1-id',
+                cwd: '/target/dir',
+                timestamp: '2026-11-09T10:30:00Z',
+            },
+        }) + '\n');
+
+        const roll2 = path.join(codexDir, 'rollout-2026-11-09T10-31-00-cand-2.jsonl');
+        fs.writeFileSync(roll2, JSON.stringify({
+            type: 'session_meta',
+            payload: {
+                session_id: 'cand-2-id',
+                cwd: '/target/dir',
+                timestamp: '2026-11-09T10:31:00Z',
+            },
+        }) + '\n');
+
+        const { repl } = replReturning({}, {
+            codexSessionsDir: path.join(backendRoot, 'codex_sessions_multi'),
+            launchDir: '/target/dir',
+        });
+        repl.sessionStartedAt = '2026-11-09T10:00:00Z';
+
+        // 1. More than one candidate matches -> do not guess (returns null)
+        const ambiguous = repl.findCodexRollout();
+        assert.strictEqual(ambiguous, null);
+        repl.discoverCodexNativeSession();
+        assert.strictEqual(repl.codexTranscriptPath, null);
+
+        // 2. Preferred ID (e.g. printed in codex output) disambiguates
+        repl.discoverCodexNativeSession('session ID: cand-2-id');
+        assert.strictEqual(repl.nativeCodexSessionId, 'cand-2-id');
+        assert.strictEqual(repl.codexTranscriptPath, roll2);
+
+        // 3. finalizeSession re-checks rather than latching a stale pick
+        // If a third candidate appears and preferred ID was not printed, finalizeSession does not latch a guess
+        const replNoId = new DelimitChatREPL({
+            sessionPhoenixRoot: backendRoot,
+            continuityHome: backendRoot,
+            codexSessionsDir: path.join(backendRoot, 'codex_sessions_multi'),
+            launchDir: '/target/dir',
+        });
+        replNoId.sessionStartedAt = '2026-11-09T10:00:00Z';
+        replNoId.finalizeSession('codex');
+        assert.strictEqual(replNoId.codexTranscriptPath, null);
+    });
+
+    test('LED-6521: a lone rollout that started after our Codex child exited is never ours', () => {
+        const codexDir = path.join(backendRoot, 'codex_sessions_after_exit', '2026', '11', '09');
+        fs.mkdirSync(codexDir, { recursive: true });
+        fs.writeFileSync(path.join(codexDir, 'rollout-2026-11-09T10-30-00-sibling.jsonl'), JSON.stringify({
+            type: 'session_meta',
+            payload: { session_id: 'sibling-after-exit', cwd: '/test/cwd/path', timestamp: '2026-11-09T10:30:00Z',
+                originator: 'delimit_chat_aaaaaaaaaaaa' },
+        }) + '\n');
+        // The sibling was last written at its own start time (10:30).
+        fs.utimesSync(path.join(codexDir, 'rollout-2026-11-09T10-30-00-sibling.jsonl'),
+            new Date('2026-11-09T10:30:05Z'), new Date('2026-11-09T10:30:05Z'));
+        const { repl } = replReturning({ status: 'not_found' }, {
+            codexSessionsDir: path.join(backendRoot, 'codex_sessions_after_exit'),
+            launchDir: '/test/cwd/path',
+        });
+        repl.sessionStartedAt = '2026-11-09T10:00:00Z';
+        // The time bounds apply even to a rollout carrying our tag.
+        repl.codexLaunchOriginator = 'delimit_chat_aaaaaaaaaaaa';
+        // Our child exited at 10:20; the sibling session started at 10:30 (review r2, codex).
+        repl.codexLaunchEndedAt = '2026-11-09T10:20:00Z';
+        assert.strictEqual(repl.findCodexRollout(), null);
+        // Had our child still been running at 10:30, the tagged rollout is accepted.
+        repl.codexLaunchEndedAt = '2026-11-09T10:45:00Z';
+        const found = repl.findCodexRollout();
+        assert.ok(found);
+        assert.strictEqual(found.sessionId, 'sibling-after-exit');
+        // A sibling that started during our run but is still being written well after
+        // our child exited is another live session, not ours (review r3, codex).
+        const sib = path.join(codexDir, 'rollout-2026-11-09T10-30-00-sibling.jsonl');
+        const exitMs = new Date('2026-11-09T10:45:00Z').getTime();
+        fs.utimesSync(sib, new Date(exitMs + 60000), new Date(exitMs + 60000));
+        assert.strictEqual(repl.findCodexRollout(), null);
+        // Written within the 10 s flush grace after exit: still accepted.
+        fs.utimesSync(sib, new Date(exitMs + 5000), new Date(exitMs + 5000));
+        assert.ok(repl.findCodexRollout());
+        // A new launch clears the previous exit bound.
+        repl.beginCodexLaunch(new Date('2026-11-09T11:00:00Z'));
+        assert.strictEqual(repl.codexLaunchEndedAt, null);
+    });
+
+    test('LED-6521: a tagged launch binds only the rollout carrying its originator tag', () => {
+        const codexDir = path.join(backendRoot, 'codex_sessions_originator', '2026', '11', '09');
+        fs.mkdirSync(codexDir, { recursive: true });
+        const write = (name, sid, originator) => {
+            const f = path.join(codexDir, name);
+            fs.writeFileSync(f, JSON.stringify({
+                type: 'session_meta',
+                payload: { session_id: sid, cwd: '/test/cwd/path', timestamp: '2026-11-09T10:30:00Z', originator },
+            }) + '\n');
+            fs.utimesSync(f, new Date('2026-11-09T10:30:05Z'), new Date('2026-11-09T10:30:05Z'));
+        };
+        const { repl } = replReturning({ status: 'not_found' }, {
+            codexSessionsDir: path.join(backendRoot, 'codex_sessions_originator'),
+            launchDir: '/test/cwd/path',
+        });
+        repl.sessionStartedAt = '2026-11-09T10:00:00Z';
+        repl.beginCodexLaunch(new Date('2026-11-09T10:29:00Z'));
+        assert.match(repl.codexLaunchOriginator, /^delimit_chat_[0-9a-f]{12}$/);
+        repl.codexLaunchEndedAt = '2026-11-09T10:40:00Z';
+
+        // Our child wrote no rollout; a concurrent sibling in the same folder is the
+        // lone candidate. Without our tag it is never ours (review r4, codex + muse).
+        write('rollout-2026-11-09T10-30-00-sibling.jsonl', 'sibling-untagged', 'codex_cli_rs');
+        assert.strictEqual(repl.findCodexRollout(), null);
+        assert.strictEqual(repl.discoverCodexNativeSession([]).transcriptPath, null);
+
+        // Our own tagged rollout is bound even with the sibling present.
+        write('rollout-2026-11-09T10-30-01-ours.jsonl', 'ours-tagged', repl.codexLaunchOriginator);
+        const found = repl.findCodexRollout();
+        assert.ok(found);
+        assert.strictEqual(found.sessionId, 'ours-tagged');
+
+        // An explicitly named session (resume <id>) keeps its original tag and still binds.
+        const named = '0199aaaa-bbbb-4ccc-8ddd-eeeeffff0000';
+        write('rollout-2026-11-09T10-30-02-named.jsonl', named, 'codex_cli_rs');
+        assert.strictEqual(repl.findCodexRollout(null, named).sessionId, named);
+
+        // Each launch gets a fresh tag.
+        const first = repl.codexLaunchOriginator;
+        repl.beginCodexLaunch(new Date('2026-11-09T11:00:00Z'));
+        assert.notStrictEqual(repl.codexLaunchOriginator, first);
+    });
+
+    test('LED-6521: preferred id miss with one other candidate -> no binding', () => {
+        const codexDir = path.join(backendRoot, 'codex_sessions_preferred_miss', '2026', '11', '09');
+        fs.mkdirSync(codexDir, { recursive: true });
+
+        // Exactly ONE matching candidate in cwd and time
+        const roll1 = path.join(codexDir, 'rollout-2026-11-09T10-30-00-lone-candidate.jsonl');
+        fs.writeFileSync(roll1, JSON.stringify({
+            type: 'session_meta',
+            payload: {
+                session_id: 'lone-candidate-id',
+                cwd: '/test/cwd/path',
+                timestamp: '2026-11-09T10:30:00Z',
+            },
+        }) + '\n');
+
+        const { repl } = replReturning({ status: 'not_found' }, {
+            codexSessionsDir: path.join(backendRoot, 'codex_sessions_preferred_miss'),
+            launchDir: '/test/cwd/path',
+        });
+        repl.sessionStartedAt = '2026-11-09T10:00:00Z';
+
+        // 1. Without a preferred id or a launch tag, the lone candidate is NOT guessed (review r5)
+        assert.strictEqual(repl.findCodexRollout(), null);
+
+        // 2. With an explicit preferred id that misses, must NOT substitute lone candidate -> returns null
+        const missed = repl.findCodexRollout(null, '99999999-9999-4999-8999-999999999999');
+        assert.strictEqual(missed, null);
+
+        // 3. discoverCodexNativeSession with missing preferred id -> no binding
+        const discovered = repl.discoverCodexNativeSession(['resume', '99999999-9999-4999-8999-999999999999']);
+        assert.strictEqual(discovered.transcriptPath, null);
+        assert.strictEqual(repl.codexTranscriptPath, null);
+        assert.notStrictEqual(repl.nativeCodexSessionId, 'lone-candidate-id');
+
+        // 4. '--last' path that matches no candidate rollout -> no binding (must not substitute lone candidate)
+        const replLast = new DelimitChatREPL({
+            sessionPhoenixRoot: backendRoot,
+            continuityHome: backendRoot,
+            codexSessionsDir: path.join(backendRoot, 'codex_sessions_preferred_miss'),
+            launchDir: '/test/cwd/path',
+        });
+        replLast.sessionStartedAt = '2026-11-09T10:00:00Z';
+        const discoveredLast = replLast.discoverCodexNativeSession(['resume', '--last']);
+        assert.strictEqual(discoveredLast.transcriptPath, null);
+        assert.strictEqual(replLast.codexTranscriptPath, null);
+        assert.notStrictEqual(replLast.nativeCodexSessionId, 'lone-candidate-id');
+
+        // 5. finalizeSession on preferred id miss produces no transcript
+        replLast.finalizeSession('codex');
+        assert.strictEqual(replLast.codexTranscriptPath, null);
+
+        // 6. 'resume --last <uuid>': the UUID is the PROMPT, never the session id
+        // (PR #296 review r1, Muse), so it is neither bound nor kept for a receipt.
+        const replPrompt = new DelimitChatREPL({
+            sessionPhoenixRoot: backendRoot,
+            continuityHome: backendRoot,
+            codexSessionsDir: path.join(backendRoot, 'codex_sessions_preferred_miss'),
+            launchDir: '/test/cwd/path',
+        });
+        replPrompt.sessionStartedAt = '2026-11-09T10:00:00Z';
+        const promptUuid = '12345678-1234-4234-8234-123456789abc';
+        const discoveredPrompt = replPrompt.discoverCodexNativeSession(['resume', '--last', promptUuid]);
+        assert.strictEqual(discoveredPrompt.transcriptPath, null);
+        assert.strictEqual(replPrompt.printedCodexSessionId == null || replPrompt.printedCodexSessionId === '', true);
+        assert.notStrictEqual(replPrompt.nativeCodexSessionId, promptUuid);
+        assert.strictEqual(replPrompt.codexResumeWithoutId, true);
+    });
+
+    test('LED-6521: a guessed id is never reused as preferred; second fresh launch refuses to guess', () => {
+        const codexDir = path.join(backendRoot, 'codex_sessions_two_launches', '2026', '11', '09');
+        fs.mkdirSync(codexDir, { recursive: true });
+        const { repl } = replReturning({ status: 'not_found' }, {
+            codexSessionsDir: path.join(backendRoot, 'codex_sessions_two_launches'),
+            launchDir: '/test/two/launches',
+        });
+        repl.sessionStartedAt = '2026-11-09T10:00:00Z';
+        // First fresh launch writes a rollout carrying its own tag.
+        repl.beginCodexLaunch(new Date('2026-11-09T10:29:00Z'));
+        const first = path.join(codexDir, 'rollout-2026-11-09T10-30-00-first-launch.jsonl');
+        fs.writeFileSync(first, JSON.stringify({ type: 'session_meta', payload: {
+            session_id: 'first-launch-id', cwd: '/test/two/launches', timestamp: '2026-11-09T10:30:00Z',
+            originator: repl.codexLaunchOriginator } }) + '\n');
+        const d1 = repl.discoverCodexNativeSession([]);
+        assert.strictEqual(d1.transcriptPath, first);
+        // Second fresh launch in the same chat gets a new tag and writes another rollout.
+        repl.beginCodexLaunch(new Date('2026-11-09T10:39:00Z'));
+        const second = path.join(codexDir, 'rollout-2026-11-09T10-40-00-second-launch.jsonl');
+        fs.writeFileSync(second, JSON.stringify({ type: 'session_meta', payload: {
+            session_id: 'second-launch-id', cwd: '/test/two/launches', timestamp: '2026-11-09T10:40:00Z',
+            originator: repl.codexLaunchOriginator } }) + '\n');
+        const d2 = repl.discoverCodexNativeSession([]);
+        // The first launch's id is never reused, and its rollout is never bound again.
+        assert.notStrictEqual(d2.transcriptPath, first);
+        assert.notStrictEqual(repl.codexTranscriptPath, first);
+        assert.strictEqual(d2.transcriptPath, second);
+    });
+
+    test('LED-6521: resume id from an earlier launch never carries into a later fresh launch', () => {
+        const root = path.join(backendRoot, 'codex_sessions_resume_then_fresh');
+        const codexDir = path.join(root, '2026', '11', '09');
+        fs.mkdirSync(codexDir, { recursive: true });
+        const resumed = path.join(codexDir, 'rollout-2026-11-09T09-00-00-resumed.jsonl');
+        fs.writeFileSync(resumed, JSON.stringify({ type: 'session_meta', payload: {
+            session_id: 'aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa', cwd: '/test/resume/fresh', timestamp: '2026-11-09T09:00:00Z' } }) + '\n');
+        const { repl } = replReturning({ status: 'not_found' }, { codexSessionsDir: root, launchDir: '/test/resume/fresh' });
+        repl.sessionStartedAt = '2026-11-09T08:00:00Z';
+        // Launch 1: resume <id> (explicit id binds the resumed rollout)
+        repl.beginCodexLaunch(new Date('2026-11-09T08:30:00Z'));
+        const d1 = repl.discoverCodexNativeSession(['resume', 'aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa']);
+        assert.strictEqual(d1.transcriptPath, resumed);
+        // Launch 2: fresh launch later in the same chat writes its own rollout
+        repl.beginCodexLaunch(new Date(Date.now() - 1000));
+        assert.strictEqual(repl.printedCodexSessionId, null);
+        const fresh = path.join(codexDir, 'rollout-2026-11-09T10-00-00-fresh.jsonl');
+        fs.writeFileSync(fresh, JSON.stringify({ type: 'session_meta', payload: {
+            session_id: 'fresh-session-id', cwd: '/test/resume/fresh', timestamp: new Date().toISOString(),
+            // A real fresh launch records this launch's originator tag.
+            originator: repl.codexLaunchOriginator } }) + '\n');
+        const d2 = repl.discoverCodexNativeSession([]);
+        assert.notStrictEqual(d2.transcriptPath, resumed);
+        assert.notStrictEqual(repl.nativeCodexSessionId, 'aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa');
+        assert.strictEqual(d2.transcriptPath, fresh);
+        // Launch 3: resume --last then fresh: the '--last' marker never sticks either
+        repl.beginCodexLaunch(new Date(Date.now() - 1000));
+        repl.discoverCodexNativeSession(['resume', '--last']);
+        repl.beginCodexLaunch(new Date(Date.now() - 1000));
+        assert.strictEqual(repl.printedCodexSessionId, null);
+    });
+
+    test('LED-6521: resumed session binds its older rollout when it was written during this launch', () => {
+        const root = path.join(backendRoot, 'codex_sessions_resumed_old');
+        const codexDir = path.join(root, '2026', '11', '01');
+        fs.mkdirSync(codexDir, { recursive: true });
+        const old = path.join(codexDir, 'rollout-2026-11-01T09-00-00-old-resumed.jsonl');
+        fs.writeFileSync(old, JSON.stringify({ type: 'session_meta', payload: {
+            session_id: 'bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb', cwd: '/test/resumed/old', timestamp: '2026-11-01T09:00:00Z' } }) + '\n');
+        const { repl } = replReturning({ status: 'not_found' }, { codexSessionsDir: root, launchDir: '/test/resumed/old' });
+        repl.sessionStartedAt = new Date(Date.now() - 60000).toISOString();
+        repl.beginCodexLaunch(new Date(Date.now() - 30000));
+        // The resumed session appends to its original rollout during this launch (fresh mtime).
+        fs.appendFileSync(old, '{"type":"event_msg"}\n');
+        const d = repl.discoverCodexNativeSession(['resume', 'bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb']);
+        assert.strictEqual(d.transcriptPath, old);
+        // Without the explicit id, the same old-timestamp rollout is not guessed.
+        repl.beginCodexLaunch(new Date(Date.now() - 30000));
+        const d2 = repl.discoverCodexNativeSession([]);
+        assert.notStrictEqual(d2.transcriptPath, old);
+    });
+
+    test('LED-6521: resume option flags and values are never taken as the session id', () => {
+        const root = path.join(backendRoot, 'codex_sessions_resume_flags');
+        const codexDir = path.join(root, '2026', '11', '09');
+        fs.mkdirSync(codexDir, { recursive: true });
+        const fresh = path.join(codexDir, 'rollout-2026-11-09T10-00-00-c-fresh-same-cwd.jsonl');
+        fs.writeFileSync(fresh, JSON.stringify({ type: 'session_meta', payload: {
+            session_id: 'cccccccc-3333-4333-8333-cccccccccccc', cwd: '/test/resume/flags', timestamp: new Date().toISOString() } }) + '\n');
+        const { repl } = replReturning({ status: 'not_found' }, { codexSessionsDir: root, launchDir: '/test/resume/flags' });
+        repl.sessionStartedAt = new Date(Date.now() - 60000).toISOString();
+        repl.beginCodexLaunch(new Date(Date.now() - 30000));
+        const target = 'dddddddd-4444-4444-8444-dddddddddddd';
+        repl.discoverCodexNativeSession(['resume', '-c', 'model=x', target]);
+        assert.strictEqual(repl.printedCodexSessionId, target);
+        // The explicit id has no rollout here, so nothing is bound (no substitution of the fresh file).
+        assert.notStrictEqual(repl.codexTranscriptPath, fresh);
+    });
+
+    test('LED-6521: session ids quoted in prompt text are never authoritative', () => {
+        const { repl } = replReturning({ status: 'not_found' }, {
+            codexSessionsDir: path.join(backendRoot, 'codex_sessions_prompt_text'), launchDir: '/test/prompt/text' });
+        repl.beginCodexLaunch(new Date());
+        repl.discoverCodexNativeSession(['please run codex resume eeeeeeee-5555-4555-8555-eeeeeeeeeeee for me',
+                                         'session id: ffffffff-6666-4666-8666-ffffffffffff']);
+        assert.strictEqual(repl.printedCodexSessionId, null);
+    });
+
+    test('LED-6521: receipt-found and portfolio fallback exit message formatting', () => {
+        const { repl } = replReturning({});
+
+        // 1. Receipt already saved
+        const receiptMsg = repl.formatSessionExit({
+            saved: true,
+            status: 'already_saved',
+            handoff_id: '25a1899b',
+            project: 'wr-scores-mobile-ux',
+        });
+        assert.strictEqual(receiptMsg, '\n  Session exited. Handoff 25a1899b (wr-scores-mobile-ux) already saved.');
+
+        // 2. Portfolio fallback saved
+        const portfolioMsg = repl.formatSessionExit({
+            saved: true,
+            status: 'captured',
+            scope: 'portfolio',
+            portfolio_captured: true,
+            project: '/root',
+        });
+        assert.strictEqual(portfolioMsg, '\n  Session exited. Portfolio context saved (/root).');
+
+        // 3. Normal saved
+        const normalMsg = repl.formatSessionExit({ saved: true, status: 'captured' });
+        assert.strictEqual(normalMsg, '\n  Session saved. Exiting Delimit.');
+
+        // 4. Recovery receipt written includes codex native_session_id
+        repl.nativeCodexSessionId = '01a1bbc9-cae2-7561-8760-7f4ac2122dd0';
+        const receiptResult = repl.writeRecoveryReceipt('codex', { reason: 'no_project_evidence' });
+        assert.strictEqual(receiptResult.saved, false);
+        const writtenData = JSON.parse(fs.readFileSync(receiptResult.receipt, 'utf8'));
+        assert.strictEqual(writtenData.harness, 'codex');
+        assert.strictEqual(writtenData.native_session_id, '01a1bbc9-cae2-7561-8760-7f4ac2122dd0');
+        assert.strictEqual(writtenData.context_captured, false);
+    });
 });
