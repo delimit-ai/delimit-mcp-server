@@ -663,6 +663,15 @@ describe('LED-4057 delimit chat project-bound continuity', () => {
         assert.notStrictEqual(repl.codexTranscriptPath, fresh);
     });
 
+    test('LED-6521: session ids quoted in prompt text are never authoritative', () => {
+        const { repl } = replReturning({ status: 'not_found' }, {
+            codexSessionsDir: path.join(backendRoot, 'codex_sessions_prompt_text'), launchDir: '/test/prompt/text' });
+        repl.beginCodexLaunch(new Date());
+        repl.discoverCodexNativeSession(['please run codex resume eeeeeeee-5555-4555-8555-eeeeeeeeeeee for me',
+                                         'session id: ffffffff-6666-4666-8666-ffffffffffff']);
+        assert.strictEqual(repl.printedCodexSessionId, null);
+    });
+
     test('LED-6521: receipt-found and portfolio fallback exit message formatting', () => {
         const { repl } = replReturning({});
 
