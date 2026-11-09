@@ -525,6 +525,9 @@ describe('LED-4057 delimit chat project-bound continuity', () => {
             type: 'session_meta',
             payload: { session_id: 'sibling-after-exit', cwd: '/test/cwd/path', timestamp: '2026-11-09T10:30:00Z' },
         }) + '\n');
+        // The sibling was last written at its own start time (10:30).
+        fs.utimesSync(path.join(codexDir, 'rollout-2026-11-09T10-30-00-sibling.jsonl'),
+            new Date('2026-11-09T10:30:05Z'), new Date('2026-11-09T10:30:05Z'));
         const { repl } = replReturning({ status: 'not_found' }, {
             codexSessionsDir: path.join(backendRoot, 'codex_sessions_after_exit'),
             launchDir: '/test/cwd/path',
@@ -538,6 +541,15 @@ describe('LED-4057 delimit chat project-bound continuity', () => {
         const found = repl.findCodexRollout();
         assert.ok(found);
         assert.strictEqual(found.sessionId, 'sibling-after-exit');
+        // A sibling that started during our run but is still being written well after
+        // our child exited is another live session, not ours (review r3, codex).
+        const sib = path.join(codexDir, 'rollout-2026-11-09T10-30-00-sibling.jsonl');
+        const exitMs = new Date('2026-11-09T10:45:00Z').getTime();
+        fs.utimesSync(sib, new Date(exitMs + 60000), new Date(exitMs + 60000));
+        assert.strictEqual(repl.findCodexRollout(), null);
+        // Written within the 10 s flush grace after exit: still accepted.
+        fs.utimesSync(sib, new Date(exitMs + 5000), new Date(exitMs + 5000));
+        assert.ok(repl.findCodexRollout());
         // A new launch clears the previous exit bound.
         repl.beginCodexLaunch(new Date('2026-11-09T11:00:00Z'));
         assert.strictEqual(repl.codexLaunchEndedAt, null);
