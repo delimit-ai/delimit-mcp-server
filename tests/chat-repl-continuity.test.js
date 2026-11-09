@@ -518,6 +518,31 @@ describe('LED-4057 delimit chat project-bound continuity', () => {
         assert.strictEqual(replNoId.codexTranscriptPath, null);
     });
 
+    test('LED-6521: a lone rollout that started after our Codex child exited is never ours', () => {
+        const codexDir = path.join(backendRoot, 'codex_sessions_after_exit', '2026', '11', '09');
+        fs.mkdirSync(codexDir, { recursive: true });
+        fs.writeFileSync(path.join(codexDir, 'rollout-2026-11-09T10-30-00-sibling.jsonl'), JSON.stringify({
+            type: 'session_meta',
+            payload: { session_id: 'sibling-after-exit', cwd: '/test/cwd/path', timestamp: '2026-11-09T10:30:00Z' },
+        }) + '\n');
+        const { repl } = replReturning({ status: 'not_found' }, {
+            codexSessionsDir: path.join(backendRoot, 'codex_sessions_after_exit'),
+            launchDir: '/test/cwd/path',
+        });
+        repl.sessionStartedAt = '2026-11-09T10:00:00Z';
+        // Our child exited at 10:20; the sibling session started at 10:30 (review r2, codex).
+        repl.codexLaunchEndedAt = '2026-11-09T10:20:00Z';
+        assert.strictEqual(repl.findCodexRollout(), null);
+        // Had our child still been running at 10:30, the lone candidate is accepted as before.
+        repl.codexLaunchEndedAt = '2026-11-09T10:45:00Z';
+        const found = repl.findCodexRollout();
+        assert.ok(found);
+        assert.strictEqual(found.sessionId, 'sibling-after-exit');
+        // A new launch clears the previous exit bound.
+        repl.beginCodexLaunch(new Date('2026-11-09T11:00:00Z'));
+        assert.strictEqual(repl.codexLaunchEndedAt, null);
+    });
+
     test('LED-6521: preferred id miss with one other candidate -> no binding', () => {
         const codexDir = path.join(backendRoot, 'codex_sessions_preferred_miss', '2026', '11', '09');
         fs.mkdirSync(codexDir, { recursive: true });
