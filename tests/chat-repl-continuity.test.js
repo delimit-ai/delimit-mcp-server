@@ -545,11 +545,11 @@ describe('LED-4057 delimit chat project-bound continuity', () => {
         assert.strictEqual(lone.sessionId, 'lone-candidate-id');
 
         // 2. With an explicit preferred id that misses, must NOT substitute lone candidate -> returns null
-        const missed = repl.findCodexRollout(null, 'non-existent-session-id');
+        const missed = repl.findCodexRollout(null, '99999999-9999-4999-8999-999999999999');
         assert.strictEqual(missed, null);
 
         // 3. discoverCodexNativeSession with missing preferred id -> no binding
-        const discovered = repl.discoverCodexNativeSession(['resume', 'non-existent-session-id']);
+        const discovered = repl.discoverCodexNativeSession(['resume', '99999999-9999-4999-8999-999999999999']);
         assert.strictEqual(discovered.transcriptPath, null);
         assert.strictEqual(repl.codexTranscriptPath, null);
         assert.notStrictEqual(repl.nativeCodexSessionId, 'lone-candidate-id');
@@ -602,12 +602,12 @@ describe('LED-4057 delimit chat project-bound continuity', () => {
         fs.mkdirSync(codexDir, { recursive: true });
         const resumed = path.join(codexDir, 'rollout-2026-11-09T09-00-00-resumed.jsonl');
         fs.writeFileSync(resumed, JSON.stringify({ type: 'session_meta', payload: {
-            session_id: 'resumed-session-id', cwd: '/test/resume/fresh', timestamp: '2026-11-09T09:00:00Z' } }) + '\n');
+            session_id: 'aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa', cwd: '/test/resume/fresh', timestamp: '2026-11-09T09:00:00Z' } }) + '\n');
         const { repl } = replReturning({ status: 'not_found' }, { codexSessionsDir: root, launchDir: '/test/resume/fresh' });
         repl.sessionStartedAt = '2026-11-09T08:00:00Z';
         // Launch 1: resume <id> (explicit id binds the resumed rollout)
         repl.beginCodexLaunch(new Date('2026-11-09T08:30:00Z'));
-        const d1 = repl.discoverCodexNativeSession(['resume', 'resumed-session-id']);
+        const d1 = repl.discoverCodexNativeSession(['resume', 'aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa']);
         assert.strictEqual(d1.transcriptPath, resumed);
         // Launch 2: fresh launch later in the same chat writes its own rollout
         repl.beginCodexLaunch(new Date(Date.now() - 1000));
@@ -617,7 +617,7 @@ describe('LED-4057 delimit chat project-bound continuity', () => {
             session_id: 'fresh-session-id', cwd: '/test/resume/fresh', timestamp: new Date().toISOString() } }) + '\n');
         const d2 = repl.discoverCodexNativeSession([]);
         assert.notStrictEqual(d2.transcriptPath, resumed);
-        assert.notStrictEqual(repl.nativeCodexSessionId, 'resumed-session-id');
+        assert.notStrictEqual(repl.nativeCodexSessionId, 'aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa');
         assert.strictEqual(d2.transcriptPath, fresh);
         // Launch 3: resume --last then fresh: the '--last' marker never sticks either
         repl.beginCodexLaunch(new Date(Date.now() - 1000));
@@ -632,18 +632,35 @@ describe('LED-4057 delimit chat project-bound continuity', () => {
         fs.mkdirSync(codexDir, { recursive: true });
         const old = path.join(codexDir, 'rollout-2026-11-01T09-00-00-old-resumed.jsonl');
         fs.writeFileSync(old, JSON.stringify({ type: 'session_meta', payload: {
-            session_id: 'old-resumed-id', cwd: '/test/resumed/old', timestamp: '2026-11-01T09:00:00Z' } }) + '\n');
+            session_id: 'bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb', cwd: '/test/resumed/old', timestamp: '2026-11-01T09:00:00Z' } }) + '\n');
         const { repl } = replReturning({ status: 'not_found' }, { codexSessionsDir: root, launchDir: '/test/resumed/old' });
         repl.sessionStartedAt = new Date(Date.now() - 60000).toISOString();
         repl.beginCodexLaunch(new Date(Date.now() - 30000));
         // The resumed session appends to its original rollout during this launch (fresh mtime).
         fs.appendFileSync(old, '{"type":"event_msg"}\n');
-        const d = repl.discoverCodexNativeSession(['resume', 'old-resumed-id']);
+        const d = repl.discoverCodexNativeSession(['resume', 'bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb']);
         assert.strictEqual(d.transcriptPath, old);
         // Without the explicit id, the same old-timestamp rollout is not guessed.
         repl.beginCodexLaunch(new Date(Date.now() - 30000));
         const d2 = repl.discoverCodexNativeSession([]);
         assert.notStrictEqual(d2.transcriptPath, old);
+    });
+
+    test('LED-6521: resume option flags and values are never taken as the session id', () => {
+        const root = path.join(backendRoot, 'codex_sessions_resume_flags');
+        const codexDir = path.join(root, '2026', '11', '09');
+        fs.mkdirSync(codexDir, { recursive: true });
+        const fresh = path.join(codexDir, 'rollout-2026-11-09T10-00-00-c-fresh-same-cwd.jsonl');
+        fs.writeFileSync(fresh, JSON.stringify({ type: 'session_meta', payload: {
+            session_id: 'cccccccc-3333-4333-8333-cccccccccccc', cwd: '/test/resume/flags', timestamp: new Date().toISOString() } }) + '\n');
+        const { repl } = replReturning({ status: 'not_found' }, { codexSessionsDir: root, launchDir: '/test/resume/flags' });
+        repl.sessionStartedAt = new Date(Date.now() - 60000).toISOString();
+        repl.beginCodexLaunch(new Date(Date.now() - 30000));
+        const target = 'dddddddd-4444-4444-8444-dddddddddddd';
+        repl.discoverCodexNativeSession(['resume', '-c', 'model=x', target]);
+        assert.strictEqual(repl.printedCodexSessionId, target);
+        // The explicit id has no rollout here, so nothing is bound (no substitution of the fresh file).
+        assert.notStrictEqual(repl.codexTranscriptPath, fresh);
     });
 
     test('LED-6521: receipt-found and portfolio fallback exit message formatting', () => {
