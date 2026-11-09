@@ -626,6 +626,26 @@ describe('LED-4057 delimit chat project-bound continuity', () => {
         assert.strictEqual(repl.printedCodexSessionId, null);
     });
 
+    test('LED-6521: resumed session binds its older rollout when it was written during this launch', () => {
+        const root = path.join(backendRoot, 'codex_sessions_resumed_old');
+        const codexDir = path.join(root, '2026', '11', '01');
+        fs.mkdirSync(codexDir, { recursive: true });
+        const old = path.join(codexDir, 'rollout-2026-11-01T09-00-00-old-resumed.jsonl');
+        fs.writeFileSync(old, JSON.stringify({ type: 'session_meta', payload: {
+            session_id: 'old-resumed-id', cwd: '/test/resumed/old', timestamp: '2026-11-01T09:00:00Z' } }) + '\n');
+        const { repl } = replReturning({ status: 'not_found' }, { codexSessionsDir: root, launchDir: '/test/resumed/old' });
+        repl.sessionStartedAt = new Date(Date.now() - 60000).toISOString();
+        repl.beginCodexLaunch(new Date(Date.now() - 30000));
+        // The resumed session appends to its original rollout during this launch (fresh mtime).
+        fs.appendFileSync(old, '{"type":"event_msg"}\n');
+        const d = repl.discoverCodexNativeSession(['resume', 'old-resumed-id']);
+        assert.strictEqual(d.transcriptPath, old);
+        // Without the explicit id, the same old-timestamp rollout is not guessed.
+        repl.beginCodexLaunch(new Date(Date.now() - 30000));
+        const d2 = repl.discoverCodexNativeSession([]);
+        assert.notStrictEqual(d2.transcriptPath, old);
+    });
+
     test('LED-6521: receipt-found and portfolio fallback exit message formatting', () => {
         const { repl } = replReturning({});
 
