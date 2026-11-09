@@ -518,6 +518,60 @@ describe('LED-4057 delimit chat project-bound continuity', () => {
         assert.strictEqual(replNoId.codexTranscriptPath, null);
     });
 
+    test('LED-6521: preferred id miss with one other candidate -> no binding', () => {
+        const codexDir = path.join(backendRoot, 'codex_sessions_preferred_miss', '2026', '11', '09');
+        fs.mkdirSync(codexDir, { recursive: true });
+
+        // Exactly ONE matching candidate in cwd and time
+        const roll1 = path.join(codexDir, 'rollout-2026-11-09T10-30-00-lone-candidate.jsonl');
+        fs.writeFileSync(roll1, JSON.stringify({
+            type: 'session_meta',
+            payload: {
+                session_id: 'lone-candidate-id',
+                cwd: '/test/cwd/path',
+                timestamp: '2026-11-09T10:30:00Z',
+            },
+        }) + '\n');
+
+        const { repl } = replReturning({ status: 'not_found' }, {
+            codexSessionsDir: path.join(backendRoot, 'codex_sessions_preferred_miss'),
+            launchDir: '/test/cwd/path',
+        });
+        repl.sessionStartedAt = '2026-11-09T10:00:00Z';
+
+        // 1. Without preferred id, the lone candidate would match
+        const lone = repl.findCodexRollout();
+        assert.ok(lone);
+        assert.strictEqual(lone.sessionId, 'lone-candidate-id');
+
+        // 2. With an explicit preferred id that misses, must NOT substitute lone candidate -> returns null
+        const missed = repl.findCodexRollout(null, 'non-existent-session-id');
+        assert.strictEqual(missed, null);
+
+        // 3. discoverCodexNativeSession with missing preferred id -> no binding
+        const discovered = repl.discoverCodexNativeSession(['resume', 'non-existent-session-id']);
+        assert.strictEqual(discovered.transcriptPath, null);
+        assert.strictEqual(repl.codexTranscriptPath, null);
+        assert.notStrictEqual(repl.nativeCodexSessionId, 'lone-candidate-id');
+
+        // 4. '--last' path that matches no candidate rollout -> no binding (must not substitute lone candidate)
+        const replLast = new DelimitChatREPL({
+            sessionPhoenixRoot: backendRoot,
+            continuityHome: backendRoot,
+            codexSessionsDir: path.join(backendRoot, 'codex_sessions_preferred_miss'),
+            launchDir: '/test/cwd/path',
+        });
+        replLast.sessionStartedAt = '2026-11-09T10:00:00Z';
+        const discoveredLast = replLast.discoverCodexNativeSession(['resume', '--last']);
+        assert.strictEqual(discoveredLast.transcriptPath, null);
+        assert.strictEqual(replLast.codexTranscriptPath, null);
+        assert.notStrictEqual(replLast.nativeCodexSessionId, 'lone-candidate-id');
+
+        // 5. finalizeSession on preferred id miss produces no transcript
+        replLast.finalizeSession('codex');
+        assert.strictEqual(replLast.codexTranscriptPath, null);
+    });
+
     test('LED-6521: receipt-found and portfolio fallback exit message formatting', () => {
         const { repl } = replReturning({});
 
