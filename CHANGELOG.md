@@ -1,3 +1,15 @@
+## [4.24.0] - 2026-11-09
+
+### Added
+- Context capture on exit for Codex: Codex sessions launched from `delimit chat` now automatically save session context on exit without requiring a manual handoff.
+- Precise rollout binding: Each Codex launch carries an originator tag so discovery binds only the rollout transcript matching that specific launch; transcripts from other sessions are never bound, and rollouts started after child process exit are rejected.
+- Antigravity CLI quota group partitioning: Separates `gemini` and `claude_gpt` quota groups for model routing and holds so limits on one model family do not hold the other.
+- Deliberation panelist profile: Adds a read-only `panelist` toolset profile providing inspection tools (memory, ledger, handoff, context reads) without mutation tools.
+
+### Changed
+- Handoff receipts record optional `chat_run_id`, `launcher_run_id`, and `native_session_id` metadata outside the integrity digest; existing receipts continue to verify without error.
+- Server startup: The bundled MCP server begins serving only after all module-level tool registrations complete.
+
 ## [4.23.0] - 2026-11-07
 
 ### Added

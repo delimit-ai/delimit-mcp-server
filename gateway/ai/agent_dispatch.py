@@ -16,6 +16,7 @@ except ImportError:  # Windows has no fcntl; store locking degrades to in-proces
     fcntl = None  # type: ignore[assignment]
 import functools
 import inspect
+import logging
 import tempfile
 import threading
 import os
@@ -29,11 +30,18 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+logger = logging.getLogger("delimit.ai.agent_dispatch")
+
 # LED-3759: reuse the shared ephemeral-path guard (single source; do not fork).
 try:
     from ai.registry_guards import is_ephemeral_path
 except ImportError:  # pragma: no cover - flat import layout
     from registry_guards import is_ephemeral_path
+
+try:
+    from ai.quota_groups import is_antigravity_runtime
+except ImportError:  # pragma: no cover - flat import layout
+    from quota_groups import is_antigravity_runtime
 
 AGENTS_DIR = Path.home() / ".delimit" / "agents"
 TASKS_FILE = AGENTS_DIR / "tasks.json"
@@ -71,7 +79,7 @@ def _effective_agents_dir(venture: str = "") -> Path:
     return AGENTS_DIR
 
 VALID_PRIORITIES = {"P0", "P1", "P2"}
-VALID_ASSIGNEES = {"claude", "codex", "gemini", "copilot", "muse", "any", "auto"}
+VALID_ASSIGNEES = {"claude", "codex", "gemini", "copilot", "muse", "antigravity", "agy", "any", "auto"}
 VALID_STATUSES = {"dispatched", "in_progress", "done", "handed_off", "failed",
                   "running", "completed", "cancelled", "uncertain",
                   "launch_refused", "launch_unsupported", "exhausted"}
@@ -85,7 +93,7 @@ VALID_STATUSES = {"dispatched", "in_progress", "done", "handed_off", "failed",
 # claude/codex/gemini and records launch_unsupported when launch= is given,
 # even for codex — backward compatibility for a customer-facing parameter);
 # "auto" is the NEW policy-order rotating value.
-_LAUNCH_RUNTIMES = frozenset({"muse", "copilot", "codex", "antigravity"})
+_LAUNCH_RUNTIMES = frozenset({"muse", "copilot", "codex", "antigravity", "agy"})
 VALID_LAUNCH_NETWORKS = frozenset({"proxy-only", "restricted", "enabled"})
 _LAUNCH_DEFAULT_MAX_STEPS = 220
 _LAUNCH_DEFAULT_NETWORK = "proxy-only"
@@ -98,7 +106,7 @@ _AUTO_POLICY_ORDER = ("muse", "copilot", "antigravity", "codex")
 
 # LED-5314: CLI binary a runtime needs on PATH to be attempted.
 _RUNTIME_CLI = {"muse": "muse", "copilot": "copilot",
-                "antigravity": "agy", "codex": "codex"}
+                "antigravity": "agy", "agy": "agy", "codex": "codex"}
 
 # LED-5321 M5: statuses owned by the tracked-launch lifecycle. complete_task
 # gates on this set: launched tasks may only close from completed/uncertain
@@ -350,6 +358,7 @@ _LAUNCHER_ENV_BY_RUNTIME = {
     "codex": "DELIMIT_WORKER_LAUNCHER_CODEX",
     "copilot": "DELIMIT_WORKER_LAUNCHER_COPILOT",
     "antigravity": "DELIMIT_WORKER_LAUNCHER_ANTIGRAVITY",
+    "agy": "DELIMIT_WORKER_LAUNCHER_ANTIGRAVITY",
 }
 
 
@@ -363,7 +372,7 @@ def _resolve_launcher(runtime: str = "muse") -> Path:
         return LAUNCHER_SCRIPT_CODEX
     if runtime == "copilot":
         return LAUNCHER_SCRIPT_COPILOT
-    if runtime == "antigravity":
+    if runtime in ("antigravity", "agy"):
         return LAUNCHER_SCRIPT_ANTIGRAVITY
     return LAUNCHER_SCRIPT
 
@@ -451,6 +460,7 @@ _LAUNCHER_FORBIDDEN_FLAGS = {
     "muse": frozenset({"--yolo"}),
     "codex": frozenset({"--yolo", "--dangerously-bypass-approvals-and-sandbox"}),
     "antigravity": frozenset({"--yolo", "--dangerously-skip-permissions"}),
+    "agy": frozenset({"--yolo", "--dangerously-skip-permissions"}),
     "copilot": frozenset({"--yolo", "--allow-all", "--allow-all-paths"}),
 }
 
@@ -680,23 +690,25 @@ _AUTO_QUOTA_SIGNAL_RE = re.compile(
 
 def _dispatch_hold_path(agents_dir: Optional[Path] = None) -> Path:
     """Path of the shared quota-hold file (or the agents-dir fallback)."""
+    if agents_dir is not None:
+        return agents_dir / _DISPATCH_HOLDS_FALLBACK_FILE
     try:
         from ai.social import _social_cli_hold_path
     except Exception:
         try:
             from social import _social_cli_hold_path
         except Exception:
-            base = agents_dir or _effective_agents_dir()
-            return base / _DISPATCH_HOLDS_FALLBACK_FILE
+            return _effective_agents_dir() / _DISPATCH_HOLDS_FALLBACK_FILE
     try:
         return _social_cli_hold_path()
     except Exception:
-        base = agents_dir or _effective_agents_dir()
-        return base / _DISPATCH_HOLDS_FALLBACK_FILE
+        return _effective_agents_dir() / _DISPATCH_HOLDS_FALLBACK_FILE
 
 
-def _dispatch_holds_active() -> bool:
+def _dispatch_holds_active(agents_dir: Optional[Path] = None) -> bool:
     """Mirror social's holds gate (inactive under tests without an override)."""
+    if agents_dir is not None:
+        return True
     try:
         from ai.social import _social_cli_holds_active
     except Exception:
@@ -710,33 +722,204 @@ def _dispatch_holds_active() -> bool:
         return False
 
 
+class _CorruptHoldsDict(dict):
+    """Fallback mapping when holds file is corrupted or unreadable: treats every runtime as indefinitely held."""
+
+    def __init__(self, err: str, runtimes=None):
+        super().__init__()
+        self._err = str(err)
+        for r in (runtimes or ()):
+            self[r] = {"reason": f"corrupted holds file: {self._err}", "until": float("inf")}
+
+    def __contains__(self, key: Any) -> bool:
+        return True
+
+    def __missing__(self, key: Any) -> Dict[str, Any]:
+        return {"reason": f"corrupted holds file: {self._err}", "until": float("inf")}
+
+    def get(self, key: Any, default: Any = None) -> Any:
+        if key in self:
+            return dict.__getitem__(self, key)
+        return {"reason": f"corrupted holds file: {self._err}", "until": float("inf")}
+
+
 def _dispatch_read_holds(agents_dir: Optional[Path] = None) -> Dict[str, Any]:
-    """Best-effort read of the shared holds file (same schema as social)."""
+    """Read the shared holds file (same schema as social).
+
+    Fail-closed: a corrupted or unreadable holds file treats all runtimes as
+    indefinitely held.
+    """
+    path = None
     try:
-        state = json.loads(_dispatch_hold_path(agents_dir).read_text())
-    except (OSError, ValueError):
-        return {}
-    return dict(state) if isinstance(state, dict) else {}
+        path = _dispatch_hold_path(agents_dir)
+        if not path.exists():
+            return {}
+        content = path.read_text()
+        state = json.loads(content)
+        if not isinstance(state, dict):
+            raise ValueError("holds file must contain a JSON object")
+        return dict(state)
+    except (OSError, ValueError) as exc:
+        logger.warning(
+            "Corrupted or unreadable holds file %s: %s; failing closed with indefinite holds",
+            path or agents_dir or "unknown", exc,
+        )
+        runtimes = set(_AUTO_POLICY_ORDER) | set(_RUNTIME_CLI.keys())
+        return _CorruptHoldsDict(str(exc), runtimes)
+    except Exception as exc:
+        logger.warning(
+            "Unexpected error reading holds file %s: %s; failing closed with indefinite holds",
+            path or agents_dir or "unknown", exc, exc_info=True,
+        )
+        runtimes = set(_AUTO_POLICY_ORDER) | set(_RUNTIME_CLI.keys())
+        return _CorruptHoldsDict(str(exc), runtimes)
 
 
-def _dispatch_runtime_hold(runtime: str) -> Optional[Dict[str, Any]]:
+def _dispatch_runtime_hold(
+    runtime: str,
+    agents_dir: Optional[Path] = None,
+    *,
+    model: Optional[str] = None,
+    group: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
     """Active unavailability hold for a dispatch runtime, or None.
 
-    Best-effort and fail-safe: any error (or an inactive gate) means "no
-    hold" so dispatch is never blocked by bookkeeping.
+    Fail-closed: any exception while checking or reading hold state (including
+    path.exists or permission errors) treats the runtime as held indefinitely.
     """
-    if not _dispatch_holds_active():
-        return None
     try:
-        entry = _dispatch_read_holds().get(runtime)
+        if not _dispatch_holds_active(agents_dir):
+            return None
+        holds = _dispatch_read_holds(agents_dir)
         now = time.time()
-        if (isinstance(entry, dict)
-                and isinstance(entry.get("until"), (int, float))
-                and entry["until"] > now):
-            return entry
-    except Exception:
-        pass
-    return None
+
+        def _is_active(entry: Any) -> Optional[Dict[str, Any]]:
+            if isinstance(entry, dict):
+                until = entry.get("until")
+                if isinstance(until, (int, float)):
+                    if until > now:
+                        return entry
+                elif until not in (None, ""):
+                    try:
+                        if float(until) > now:
+                            return entry
+                    except (ValueError, TypeError):
+                        return dict(entry, until=float("inf"))
+            elif entry is not None:
+                return {"reason": "malformed hold entry", "until": float("inf")}
+            return None
+
+        rt_str = str(runtime or "").strip().lower()
+        if is_antigravity_runtime(rt_str):
+            from ai.quota_groups import (
+                normalize_quota_group, antigravity_quota_group,
+                dispatch_hold_candidate_keys, GROUP_GEMINI, GROUP_CLAUDE_GPT
+            )
+            # Only a missing group with a known model may be derived from the model.
+            # Explicit group parameters or runtime suffixes must never default to Gemini.
+            if group is not None:
+                req_group = normalize_quota_group(group)
+            elif ":" in rt_str:
+                req_group = normalize_quota_group(rt_str.split(":", 1)[1])
+            elif rt_str.startswith(("antigravity_", "agy_")) and "_" in rt_str:
+                req_group = normalize_quota_group(rt_str.split("_", 1)[1])
+            elif model is not None:
+                req_group = antigravity_quota_group(model)
+            else:
+                req_group = None
+
+            # 1. Check parent entry on 'antigravity' or 'agy' (either grouped or legacy unpartitioned)
+            for leg_k in ("antigravity", "agy"):
+                if leg_k in holds:
+                    raw_parent = holds.get(leg_k)
+                    if not isinstance(raw_parent, dict):
+                        return {"reason": f"malformed hold entry for {leg_k}", "until": float("inf")}
+                    if "groups" in raw_parent:
+                        if isinstance(raw_parent["groups"], dict):
+                            if req_group is not None:
+                                g_ent = raw_parent["groups"].get(req_group)
+                                if g_ent is None and req_group == GROUP_CLAUDE_GPT:
+                                    g_ent = raw_parent["groups"].get("claude-gpt")
+                                if g_ent is not None:
+                                    if not isinstance(g_ent, dict):
+                                        return {"reason": f"malformed hold entry for {leg_k}.groups.{req_group}", "until": float("inf")}
+                                    act = _is_active(g_ent)
+                                    if act:
+                                        return act
+                                else:
+                                    # 'groups' exists and requested group is missing:
+                                    # never fall back to parent flat entry!
+                                    pass
+                            else:
+                                for g_name, g_entry in raw_parent["groups"].items():
+                                    if not isinstance(g_entry, dict):
+                                        return {"reason": f"malformed hold entry for {leg_k}.groups.{g_name}", "until": float("inf")}
+                                    act = _is_active(g_entry)
+                                    if act:
+                                        return act
+                        else:
+                            return {"reason": f"malformed groups dict for {leg_k}", "until": float("inf")}
+                        continue
+                    else:
+                        leg_entry = _is_active(raw_parent)
+                        if leg_entry:
+                            leg_grp = normalize_quota_group(leg_entry.get("group"))
+                            if leg_grp is None:
+                                # Legacy unpartitioned hold: blocks all groups while unexpired!
+                                return leg_entry
+                            if req_group is None or leg_grp == req_group:
+                                return leg_entry
+
+            # 2. Check candidate keys (delegates to dispatch_hold_candidate_keys;
+            # for an unknown group, ANY active hold on either Antigravity group holds the request)
+            for cand in dispatch_hold_candidate_keys("antigravity", req_group):
+                if cand in ("antigravity", "agy"):
+                    continue
+                if cand in holds:
+                    c_ent = holds.get(cand)
+                    if not isinstance(c_ent, dict):
+                        return {"reason": f"malformed hold entry for {cand}", "until": float("inf")}
+                    act = _is_active(c_ent)
+                    if act:
+                        return act
+            return None
+
+        # Standard non-antigravity runtime
+        if runtime in holds:
+            raw = holds.get(runtime)
+            if not isinstance(raw, dict):
+                return {"reason": f"malformed hold entry for {runtime}", "until": float("inf")}
+            if "groups" in raw:
+                if not isinstance(raw["groups"], dict):
+                    return {"reason": f"malformed groups dict for {runtime}", "until": float("inf")}
+                req_grp = normalize_quota_group(group) if group is not None else (antigravity_quota_group(model) if model else None)
+                if req_grp:
+                    g_ent = raw["groups"].get(req_grp)
+                    if g_ent is None and req_grp == "claude_gpt":
+                        g_ent = raw["groups"].get("claude-gpt")
+                    if g_ent is not None:
+                        if not isinstance(g_ent, dict):
+                            return {"reason": f"malformed hold entry for {runtime}.groups.{req_grp}", "until": float("inf")}
+                        return _is_active(g_ent)
+                    return None
+                for g_name, g_entry in raw["groups"].items():
+                    if not isinstance(g_entry, dict):
+                        return {"reason": f"malformed hold entry for {runtime}.groups.{g_name}", "until": float("inf")}
+                    act = _is_active(g_entry)
+                    if act:
+                        return act
+                return None
+            return _is_active(raw)
+        return None
+    except Exception as exc:
+        logger.warning(
+            "Failed checking hold state for runtime %s: %s; failing closed with indefinite hold",
+            runtime, exc, exc_info=True,
+        )
+        return {
+            "reason": f"error checking hold state: {exc}",
+            "until": float("inf"),
+        }
 
 
 def _dispatch_hold_window_seconds() -> int:
@@ -750,13 +933,16 @@ def _dispatch_hold_window_seconds() -> int:
 
 def _dispatch_write_hold(mid: str, reason: str, until: float,
                          *, monthly: bool = False,
-                         agents_dir: Optional[Path] = None) -> float:
+                         agents_dir: Optional[Path] = None,
+                         model: Optional[str] = None,
+                         group: Optional[str] = None,
+                         evidence: str = "") -> float:
     """Write a hold entry to the shared file (best-effort, same schema).
 
     Returns the hold-until epoch, or 0.0 when the gate is inactive or the
     write failed. Never raises into dispatch.
     """
-    if not _dispatch_holds_active():
+    if not _dispatch_holds_active(agents_dir):
         return 0.0
     now = time.time()
     try:
@@ -767,9 +953,35 @@ def _dispatch_write_hold(mid: str, reason: str, until: float,
     try:
         path = _dispatch_hold_path(agents_dir)
         path.parent.mkdir(parents=True, exist_ok=True)
-        holds = _dispatch_read_holds(agents_dir)
-        holds[mid] = {"reason": reason, "until": until,
-                      "monthly": bool(monthly), "set_at": set_at}
+        raw_holds = _dispatch_read_holds(agents_dir)
+        holds = {k: v for k, v in raw_holds.items() if isinstance(v, dict) and v.get("until") != float("inf")}
+
+        mid_str = str(mid or "").strip().lower()
+        grp = None
+        if is_antigravity_runtime(mid_str):
+            from ai.quota_groups import normalize_quota_group, antigravity_quota_group
+            grp = normalize_quota_group(group) or (antigravity_quota_group(model, evidence=evidence) if model else None)
+            if not grp and evidence:
+                grp = antigravity_quota_group(evidence=evidence)
+            if not grp:
+                grp = antigravity_quota_group(mid_str)
+            if not grp and ":" in mid_str:
+                grp = normalize_quota_group(mid_str.split(":", 1)[1])
+            if not grp and "_" in mid_str:
+                grp = normalize_quota_group(mid_str.split("_", 1)[1])
+            if grp:
+                mid = f"antigravity:{grp}"
+
+        entry: Dict[str, Any] = {
+            "reason": reason,
+            "until": until,
+            "monthly": bool(monthly),
+            "set_at": set_at,
+        }
+        if grp:
+            entry["group"] = grp
+            entry["runtime"] = "antigravity"
+        holds[mid] = entry
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps(holds))
         os.replace(tmp, path)
@@ -778,12 +990,31 @@ def _dispatch_write_hold(mid: str, reason: str, until: float,
         return 0.0
 
 
-def _dispatch_mark_quota(runtime: str, evidence: str = "") -> float:
+def _dispatch_mark_quota(runtime: str, evidence: str = "",
+                         *, model: Optional[str] = None,
+                         group: Optional[str] = None) -> float:
     """Hold a quota-failed runtime via social's setter (monthly-aware).
 
     Falls back to a local bounded-window write when ai.social is
     unimportable. Returns the hold-until epoch, or 0.0 when no hold applies.
     """
+    rt_str = str(runtime or "").strip().lower()
+    target = runtime
+    grp = None
+    if is_antigravity_runtime(rt_str):
+        from ai.quota_groups import normalize_quota_group, antigravity_quota_group
+        grp = normalize_quota_group(group) or (antigravity_quota_group(model, evidence=evidence) if model else None)
+        if not grp and evidence:
+            grp = antigravity_quota_group(evidence=evidence)
+        if not grp:
+            grp = antigravity_quota_group(rt_str)
+        if not grp and ":" in rt_str:
+            grp = normalize_quota_group(rt_str.split(":", 1)[1])
+        if not grp and "_" in rt_str:
+            grp = normalize_quota_group(rt_str.split("_", 1)[1])
+        if grp:
+            target = f"antigravity:{grp}"
+
     try:
         from ai.social import _social_cli_set_hold
     except Exception:
@@ -798,9 +1029,9 @@ def _dispatch_mark_quota(runtime: str, evidence: str = "") -> float:
                 until = float(calendar.timegm((y, m, 1, 0, 0, 0)))
             else:
                 until = time.time() + _dispatch_hold_window_seconds()
-            return _dispatch_write_hold(runtime, "quota", until, monthly=monthly)
+            return _dispatch_write_hold(target, "quota", until, monthly=monthly, model=model, group=grp, evidence=evidence)
     try:
-        return _social_cli_set_hold(runtime, "quota", evidence or "")
+        return _social_cli_set_hold(target, "quota", evidence or "", group=grp)
     except Exception:
         return 0.0
 
@@ -818,20 +1049,48 @@ def _dispatch_mark_refused(runtime: str) -> float:
     return 0.0
 
 
-def _auto_skip_reason(runtime: str) -> Optional[str]:
-    """None if the runtime is eligible now, else a skip reason (no side effects)."""
-    cli = _RUNTIME_CLI.get(runtime, "")
-    if cli and shutil.which(cli) is None:
-        return f"{cli} not installed"
-    hold = _dispatch_runtime_hold(runtime)
-    if hold:
+def _auto_skip_reason(runtime: str, *, model: Optional[str] = None,
+                      group: Optional[str] = None) -> Optional[str]:
+    """None if the runtime is eligible now, else a skip reason (no side effects).
+
+    Fails closed: any unexpected exception skips the runtime with a logged reason.
+    """
+    try:
+        from ai.provider_usage import is_runtime_disabled
         try:
-            when = time.strftime("%Y-%m-%dT%H:%M:%SZ",
-                                 time.gmtime(float(hold.get("until", 0))))
-        except (TypeError, ValueError, OverflowError):
-            when = "unknown time"
-        return f"on {hold.get('reason', 'quota')} hold until {when}"
-    return None
+            if model or group:
+                disabled, disabled_reason = is_runtime_disabled(runtime, model=model, group=group)
+            else:
+                disabled, disabled_reason = is_runtime_disabled(runtime)
+        except TypeError:
+            disabled, disabled_reason = is_runtime_disabled(runtime)
+        if disabled:
+            return disabled_reason
+        cli = _RUNTIME_CLI.get(runtime, "")
+        if cli and shutil.which(cli) is None:
+            return f"{cli} not installed"
+        try:
+            if model or group:
+                hold = _dispatch_runtime_hold(runtime, model=model, group=group)
+            else:
+                hold = _dispatch_runtime_hold(runtime)
+        except TypeError:
+            hold = _dispatch_runtime_hold(runtime)
+        if hold:
+            try:
+                until_val = float(hold.get("until", 0))
+                if until_val == float("inf"):
+                    when = "indefinite"
+                else:
+                    when = time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                         time.gmtime(until_val))
+            except (TypeError, ValueError, OverflowError):
+                when = "indefinite"
+            return f"on {hold.get('reason', 'quota')} hold until {when}"
+        return None
+    except Exception as exc:
+        logger.warning("_auto_skip_reason failed for runtime %r: %s", runtime, exc, exc_info=True)
+        return f"skip check error: {exc}"
 
 
 def _auto_attempt_entry(runtime: str, outcome: str, reason: str) -> Dict[str, Any]:
@@ -889,7 +1148,11 @@ def _dispatch_auto_launch(
         task["attempts"] = attempts
         return
     from ai.provider_usage import choose_runtime
-    selection = choose_runtime(task["priority"], task.get("task_type", ""))
+    model_param = task.get("model") or task.get("model_id")
+    if model_param:
+        selection = choose_runtime(task["priority"], task.get("task_type", ""), advance=True, model=model_param)
+    else:
+        selection = choose_runtime(task["priority"], task.get("task_type", ""), advance=True)
     recorded_skips = set()
     def record_skips_through(runtime: str) -> bool:
         if runtime not in _AUTO_POLICY_ORDER:
@@ -903,7 +1166,7 @@ def _dispatch_auto_launch(
     for runtime in selection["ranked"]:
         if not record_skips_through(runtime):
             continue
-        skip = _auto_skip_reason(runtime)
+        skip = _auto_skip_reason(runtime, model=model_param) if model_param else _auto_skip_reason(runtime)
         if skip is not None:
             attempts.append(_auto_attempt_entry(runtime, "skipped", skip))
             continue
@@ -1164,6 +1427,8 @@ def dispatch_task(
         }
 
     assignee = assignee.lower().strip() if assignee else "any"
+    if assignee == "agy":
+        assignee = "antigravity"
     if assignee not in VALID_ASSIGNEES:
         return {"error": f"assignee must be one of: {', '.join(sorted(VALID_ASSIGNEES))}"}
 
@@ -1402,7 +1667,7 @@ def dispatch_task(
             else:
                 task["launch_error"] = (
                     f"runtime '{assignee}' has no headless launch contract; "
-                    "launchable runtimes are 'muse', 'codex' and 'copilot' "
+                    "launchable runtimes are 'muse', 'codex', 'antigravity' and 'copilot' "
                     "(or assignee 'auto' for policy-order rotation)"
                 )
         task["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -2168,7 +2433,7 @@ def _runtime_terminal_kind(event: Dict[str, Any], runtime: str) -> str:
             if val in (CODEX_TURN_FAILED, CODEX_ERROR):
                 return "failed"
         return ""
-    if runtime == "antigravity":
+    if runtime in ("antigravity", "agy"):
         for key in ("event", "type", "name", "kind"):
             if event.get(key) == AGY_RESULT_EVENT:
                 return "completed" if _agy_result_ok(event) else "failed"
@@ -2252,7 +2517,7 @@ def _runtime_final_text(runtime: str, terminal_event: Dict[str, Any],
     """Structured final text for a completed non-muse worker."""
     if runtime == "codex":
         return _codex_final_text(prefix, jsonl_path)
-    if runtime == "antigravity":
+    if runtime in ("antigravity", "agy"):
         return _agy_final_text(terminal_event)
     if runtime == "copilot":
         return _copilot_final_text(jsonl_path, terminal_event)
@@ -2279,7 +2544,7 @@ def _runtime_failure_reason(runtime: str, terminal_event: Dict[str, Any],
         if isinstance(message, str) and message.strip():
             return message.strip()
         return f"codex {terminal_event.get('type', 'terminal')} event (rc={rc})"
-    if runtime == "antigravity":
+    if runtime in ("antigravity", "agy"):
         candidates = [terminal_event]
         result = terminal_event.get("result")
         if isinstance(result, dict):
@@ -2369,8 +2634,9 @@ def _poll_rotate_next(task: Dict[str, Any], tasks: Dict[str, Any],
     from ai.agent_session_slots import admission, reserve
     task_id = task["id"]
     attempts = task.get("attempts", [])
+    model_param = task.get("model") or task.get("model_id")
     if record_failure:
-        _dispatch_mark_quota(from_runtime, _auto_failure_evidence(task, reason))
+        _dispatch_mark_quota(from_runtime, _auto_failure_evidence(task, reason), model=model_param)
         for entry in attempts:
             if entry.get("runtime") == from_runtime and entry.get("outcome") == "launched":
                 entry["outcome"] = "quota_failed"
@@ -2386,7 +2652,10 @@ def _poll_rotate_next(task: Dict[str, Any], tasks: Dict[str, Any],
     tried.add(task.get("runtime"))
     base_prefix = task.get("run_base_prefix") or task.get("output_prefix") or ""
     from ai.provider_usage import choose_runtime
-    selection = choose_runtime(task.get("priority", "P1"), task.get("task_type", ""), exclude=tried)
+    if model_param:
+        selection = choose_runtime(task.get("priority", "P1"), task.get("task_type", ""), exclude=tried, advance=True, model=model_param)
+    else:
+        selection = choose_runtime(task.get("priority", "P1"), task.get("task_type", ""), exclude=tried, advance=True)
     recorded_skips = set()
     def record_skips_through(runtime: str) -> bool:
         if runtime not in _AUTO_POLICY_ORDER:
@@ -2402,7 +2671,7 @@ def _poll_rotate_next(task: Dict[str, Any], tasks: Dict[str, Any],
             continue
         if cand in tried:
             continue
-        skip = _auto_skip_reason(cand)
+        skip = _auto_skip_reason(cand, model=model_param) if model_param else _auto_skip_reason(cand)
         if skip is not None:
             attempts.append(_auto_attempt_entry(cand, "skipped", skip))
             tried.add(cand)
@@ -2855,6 +3124,8 @@ def handoff_task(
 
     task_id = task_id.strip().upper()
     to_model = to_model.lower().strip()
+    if to_model == "agy":
+        to_model = "antigravity"
 
     if to_model not in VALID_ASSIGNEES - {"any", "auto"}:
         return {"error": f"to_model must be one of: {', '.join(sorted(VALID_ASSIGNEES - {'any', 'auto'}))}"}

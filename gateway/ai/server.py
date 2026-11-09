@@ -475,11 +475,14 @@ def _check_policy_gate(tool_name: str, kwargs: dict) -> Optional[Dict]:
     """
     mode_file = Path.home() / ".delimit" / "enforcement_mode"
     mode = "guarded"  # Default: block critical, warn high-risk
-    if mode_file.exists():
-        try:
-            mode = mode_file.read_text().strip()
-        except Exception:
-            pass
+    try:
+        if mode_file.exists():
+            try:
+                mode = mode_file.read_text().strip()
+            except Exception:
+                pass
+    except (PermissionError, OSError):
+        pass
 
     if mode == "advisory":
         return None  # Never block in advisory mode
@@ -567,31 +570,36 @@ def _check_policy_gate(tool_name: str, kwargs: dict) -> Optional[Dict]:
 def _check_approval(tool_name: str) -> bool:
     """Check if there's an active approval for this tool."""
     approvals_dir = Path.home() / ".delimit" / "approvals"
-    if not approvals_dir.exists():
+    try:
+        if not approvals_dir.exists():
+            return False
+        for f in approvals_dir.glob("*.json"):
+            try:
+                a = json.loads(f.read_text())
+                if a.get('tool') == tool_name and a.get('status') == 'approved':
+                    expires = datetime.fromisoformat(a.get('expires_at', ''))
+                    if expires > datetime.now(timezone.utc):
+                        return True
+            except Exception:
+                pass
+    except (PermissionError, OSError):
         return False
-    for f in approvals_dir.glob("*.json"):
-        try:
-            a = json.loads(f.read_text())
-            if a.get('tool') == tool_name and a.get('status') == 'approved':
-                expires = datetime.fromisoformat(a.get('expires_at', ''))
-                if expires > datetime.now(timezone.utc):
-                    return True
-        except Exception:
-            pass
     return False
 
 
 def _load_venture_policies(venture: str) -> list:
     """Load policies for a venture from ~/.delimit/policies.yml."""
     policies_file = Path.home() / ".delimit" / "policies.yml"
-    if not policies_file.exists():
-        return []
     try:
+        if not policies_file.exists():
+            return []
         import yaml
         data = yaml.safe_load(policies_file.read_text())
         if not isinstance(data, dict):
             return []
         return data.get('rules', [])
+    except (PermissionError, OSError):
+        return []
     except Exception:
         return []
 
@@ -640,7 +648,7 @@ def _emit_policy_event(tool_name: str, status: str, reason: str) -> None:
 #      gateway/ai/server.py ← ../../package.json)
 #   3. the pinned fallback below (last resort so the delimit_version return
 #      schema never changes shape — never-break-installs).
-_VERSION_FALLBACK = "4.23.0"
+_VERSION_FALLBACK = "4.24.0"
 
 
 def _resolve_version(start_path: Optional[str] = None) -> str:
@@ -966,11 +974,11 @@ if ACTIVE_TOOLSET == "lead":
         ACTIVE_TOOLSET = "assistant"
 # Reduced profiles that promise no background side effects (no inbox-daemon
 # autostart, no dashboard events). Includes the fail-closed profile (LED-5835).
-_SIDE_EFFECT_FREE_PROFILES = frozenset({"records", "governance", "panel", "none", "assistant", "lead", "frontend", "worker"})
+_SIDE_EFFECT_FREE_PROFILES = frozenset({"records", "governance", "panel", "panelist", "none", "assistant", "lead", "frontend", "worker"})
 
 # These plugin profiles promise local operation even when the surrounding
 # installation has opted into Supabase mirroring.
-if ACTIVE_TOOLSET in {"records", "governance", "none", "assistant", "lead", "frontend", "worker"}:
+if ACTIVE_TOOLSET in {"records", "governance", "panelist", "none", "assistant", "lead", "frontend", "worker"}:
     os.environ["DELIMIT_DISABLE_CLOUD_SYNC"] = "1"
 
 if ACTIVE_TOOLSET != "full":
@@ -2078,16 +2086,20 @@ def _detect_environment() -> Dict[str, Any]:
     # also omitted: only the aggregate count may leave this profile.
     frontend_profile = ACTIVE_TOOLSET in {"assistant", "frontend", "worker", "none", "lead"}
     secrets_dir = Path.home() / ".delimit" / "secrets"
-    if not frontend_profile and secrets_dir.exists():
-        for secret_file in secrets_dir.glob("*.json"):
-            name = secret_file.stem
-            if name not in detected_keys:
-                try:
-                    data = json.loads(secret_file.read_text())
-                    if any(data.get(f) for f in ("value", "api_key", "token", "key")):
-                        detected_keys[name] = {"source": "secrets_broker"}
-                except Exception:
-                    pass
+    if not frontend_profile:
+        try:
+            if secrets_dir.exists():
+                for secret_file in secrets_dir.glob("*.json"):
+                    name = secret_file.stem
+                    if name not in detected_keys:
+                        try:
+                            data = json.loads(secret_file.read_text())
+                            if any(data.get(f) for f in ("value", "api_key", "token", "key")):
+                                detected_keys[name] = {"source": "secrets_broker"}
+                        except Exception:
+                            pass
+        except (PermissionError, OSError):
+            pass
 
     # Check AI CLIs
     cli_checks = {
@@ -9719,6 +9731,7 @@ def delimit_ledger_update(
         review_transcript=review_transcript or None,
         review_diff_path=review_diff_path or None,
         review_diff_text=review_diff_text or None,
+        venture=venture or None,
     )
     return _with_next_steps("ledger_update", result)
 
@@ -9783,9 +9796,10 @@ def delimit_ledger_done(
         review_transcript=review_transcript or None,
         review_diff_path=review_diff_path or None,
         review_diff_text=review_diff_text or None,
+        venture=venture or None,
     )
     from ai.ledger_manager import _detect_venture
-    scoped_venture = venture or _detect_venture(project)["name"]
+    scoped_venture = result.get("venture") or venture or _detect_venture(project)["name"]
     return _continue_venture_loop(_with_next_steps("ledger_done", result), scoped_venture)
 
 
@@ -16501,11 +16515,6 @@ async def run_mcp_server(server, server_name="delimit"):
     await server.run_stdio_async()
 
 
-if __name__ == "__main__":
-    import asyncio
-    asyncio.run(run_mcp_server(mcp))
-
-
 def main():
     """Entry point for `delimit-mcp` console script."""
     import asyncio
@@ -16846,3 +16855,9 @@ def delimit_build(
 if ACTIVE_TOOLSET in {"frontend", "worker"}:
     from ai.frontend.registration import register as _register_frontend_module
     _register_frontend_module(mcp, ACTIVE_TOOLSET)
+
+
+# Serve only after every module-level tool registration has completed.
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(run_mcp_server(mcp))

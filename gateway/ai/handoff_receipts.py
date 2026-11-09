@@ -73,6 +73,9 @@ class HandoffReceipt:
     logical_session_id: str = ""
     soul_id: str = ""
     handoff_id: str = ""
+    chat_run_id: str = ""
+    launcher_run_id: str = ""
+    native_session_id: str = ""
     # LED-5321 M4: integrity + origin (all optional, backward compatible).
     # content_digest is sha256 over the canonical JSON of the receipt body
     # (ack fields excluded); origin records who created it. integrity/stale/
@@ -415,6 +418,10 @@ def create_receipt(
     # LED-5321 M4: all optional, backward compatible.
     created_by_model: str = "",
     created_by_session: str = "",
+    chat_run_id: str = "",
+    launcher_run_id: str = "",
+    native_session_id: str = "",
+    logical_session_id: str = "",
 ) -> HandoffReceipt:
     """Create a handoff receipt and persist it to disk.
 
@@ -427,6 +434,28 @@ def create_receipt(
 
     if files_modified is None:
         files_modified = _auto_detect_files(project_path)
+
+    c_run_id = (
+        chat_run_id
+        or os.environ.get("DELIMIT_CHAT_RUN_ID", "")
+        or os.environ.get("DELIMIT_LAUNCHER_RUN_ID", "")
+    )
+    l_run_id = (
+        launcher_run_id
+        or os.environ.get("DELIMIT_LAUNCHER_RUN_ID", "")
+        or c_run_id
+    )
+    n_session_id = (
+        native_session_id
+        or os.environ.get("DELIMIT_NATIVE_SESSION_ID", "")
+        or os.environ.get("CODEX_SESSION_ID", "")
+    )
+    log_id = (
+        logical_session_id
+        or os.environ.get("DELIMIT_LOGICAL_SESSION_ID", "")
+        or created_by_session
+        or n_session_id
+    )
 
     receipt = HandoffReceipt(
         receipt_id=str(uuid.uuid4())[:8],
@@ -448,6 +477,10 @@ def create_receipt(
         created_by_session=created_by_session
         or os.environ.get("DELIMIT_SESSION_ID", "")
         or os.environ.get("DELIMIT_SESSION", ""),
+        chat_run_id=c_run_id,
+        launcher_run_id=l_run_id,
+        native_session_id=n_session_id,
+        logical_session_id=log_id,
     )
     receipt.content_digest = _compute_content_digest(_receipt_body_dict(receipt))
     receipt.integrity = "ok"
