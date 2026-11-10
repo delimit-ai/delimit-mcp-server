@@ -298,9 +298,17 @@ import json, re
 ns = {'__name__': 'fixture'}
 exec(${JSON.stringify(selectCode)}, ns)
 
+SHA = '2047cff5c194e0ac369245f98f9a104603ee0d57'
 def mock_read(path):
-    if '/commits/v4.24.0' in path:
-        return {'sha': '2047cff5c194e0ac369245f98f9a104603ee0d57'}
+    if path.endswith('/git/ref/tags/v4.24.0'):
+        return {'ref': 'refs/tags/v4.24.0', 'object': {'type': 'commit', 'sha': SHA}}
+    if path.endswith('/git/ref/tags/v4.25.0'):
+        return {'ref': 'refs/tags/v4.25.0', 'object': {'type': 'tag', 'sha': 'a' * 40}}
+    if path.endswith('/git/tags/' + 'a' * 40):
+        return {'object': {'type': 'commit', 'sha': SHA}}
+    if '/commits/' in path:
+        # A same-named BRANCH resolves here; select_tag must never use this endpoint.
+        return {'sha': SHA}
     if '/actions/artifacts?name=npm-release-2047cff5c194e0ac369245f98f9a104603ee0d57-1' in path:
         return {'artifacts': [{'id': 12345, 'name': 'npm-release-2047cff5c194e0ac369245f98f9a104603ee0d57-1', 'expired': False, 'workflow_run': {'id': 99999}}]}
     raise RuntimeError('not found: ' + path)
@@ -313,10 +321,26 @@ for bad_tag in ('4.24.0', 'v4.24', 'v4.24.0-rc1', 'latest', 'vX.Y.Z'):
     except RuntimeError: pass
     else: raise AssertionError('accepted invalid tag: ' + bad_tag)
 
+# Annotated tags are dereferenced to their commit.
+assert ns['select_tag']('v4.25.0', read=mock_read)[3] == SHA
+
+# v9.9.9 exists only as a branch (resolvable through /commits/): refuse.
+try: ns['select_tag']('v9.9.9', read=mock_read)
+except RuntimeError: pass
+else: raise AssertionError('accepted a branch named like a tag')
+
 try: ns['select_tag']('v1.0.0', read=mock_read)
 except RuntimeError: pass
 else: raise AssertionError('accepted non-existent tag')
 `;
     const result = spawnSync('python3', ['-c', py], { encoding: 'utf8', timeout: 10000 });
     assert.equal(result.status, 0, result.stdout + result.stderr);
+});
+
+test('registry-only repair never runs the Fin receipt and requires the delimit-cli package',()=>{
+    const steps=doc.jobs.publish.steps;
+    const receipt=steps.find(s=>s.name==='Complete verified Fin publication receipt');
+    assert.match(receipt.if,/registry_only_tag == ''/);
+    const verify=steps.find(s=>s.name==='Verify existing npm release for registry repair');
+    assert.match(verify.run,/identifier'\) != 'delimit-cli'/);
 });

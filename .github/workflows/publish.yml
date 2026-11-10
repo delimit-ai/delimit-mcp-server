@@ -464,8 +464,15 @@ jobs:
               require(len(raw)<=1048576,'GitHub bound');return decode(raw)
           def select_tag(tag,*,read):
               require(isinstance(tag,str) and re.fullmatch(r'v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)',tag),'tag format vX.Y.Z')
-              commit=read('/repos/delimit-ai/delimit-mcp-server/commits/'+tag)
-              head_sha=commit.get('sha')
+              # Resolve through the tags namespace only: /commits/{ref} would also
+              # accept a branch named like the tag. Dereference annotated tags.
+              ref=read('/repos/delimit-ai/delimit-mcp-server/git/ref/tags/'+tag)
+              require(ref.get('ref')=='refs/tags/'+tag,'tag ref exists')
+              obj=ref.get('object') or {}
+              if obj.get('type')=='tag':
+                  obj=(read('/repos/delimit-ai/delimit-mcp-server/git/tags/'+obj.get('sha','')).get('object') or {})
+              require(obj.get('type')=='commit','tag points at a commit')
+              head_sha=obj.get('sha')
               require(head_sha and re.fullmatch(r'[0-9a-f]{40}',head_sha),'tag commit SHA')
               data=read('/repos/delimit-ai/delimit-mcp-server/actions/artifacts?name=npm-release-'+head_sha+'-1')
               artifacts=[a for a in data.get('artifacts',[]) if a.get('name')=='npm-release-'+head_sha+'-1' and not a.get('expired')]
@@ -810,7 +817,7 @@ jobs:
           fi
 
       - name: Complete verified Fin publication receipt
-        if: github.event.inputs.fin_order_id != ''
+        if: github.event.inputs.fin_order_id != '' && (github.event.inputs.registry_only_tag == '' || github.event.inputs.registry_only_tag == null)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -846,7 +853,11 @@ jobs:
           tag_version = tag[1:] if tag.startswith('v') else tag
           srv = json.loads(open('server.json').read())
           srv_ver = srv.get('version')
-          pkg_ver = srv.get('packages', [{}])[0].get('version')
+          pkg = (srv.get('packages') or [{}])[0]
+          pkg_ver = pkg.get('version')
+          if pkg.get('identifier') != 'delimit-cli':
+              print(f"::error::server.json package identifier is {pkg.get('identifier')!r}, expected 'delimit-cli'", file=sys.stderr)
+              sys.exit(1)
           if srv_ver != tag_version or pkg_ver != tag_version:
               print(f"::error::server.json version ({srv_ver}/{pkg_ver}) does not match tag version ({tag_version})", file=sys.stderr)
               sys.exit(1)
