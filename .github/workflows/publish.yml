@@ -557,6 +557,15 @@ jobs:
 
   publish:
     needs: select_artifact
+    # A skipped upstream job (validate/build_release are skipped in
+    # registry-only mode) makes the default success() condition skip this job.
+    # Run after a successful selection whenever no Fin input is present (tag
+    # push and dry-run/normal dispatches: unchanged; registry-only repair: now
+    # reachable). Fin dispatches keep their existing behaviour (skipped).
+    if: >-
+      !cancelled() && needs.select_artifact.result == 'success' &&
+      github.event.inputs.fin_order_id == '' && github.event.inputs.fin_release == '' &&
+      github.event.inputs.fin_execution == ''
     runs-on: ubuntu-22.04
     name: Publish accepted bytes
     timeout-minutes: 25
