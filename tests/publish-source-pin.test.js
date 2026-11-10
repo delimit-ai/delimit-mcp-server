@@ -348,7 +348,9 @@ test('registry-only repair never runs the Fin receipt and requires the delimit-c
 test('publish job runs in registry-only repair despite skipped upstream jobs, and not for Fin dispatches',()=>{
     const cond=doc.jobs.publish.if;
     assert(cond, 'publish job needs an explicit condition (skipped upstream jobs skip it by default)');
-    assert.match(cond,/always\(\)/);
+    // !cancelled(), not always(): a run cancelled after select_artifact must not publish.
+    assert.match(cond,/!cancelled\(\)/);
+    assert.doesNotMatch(cond,/always\(\)/);
     assert.match(cond,/needs\.select_artifact\.result == 'success'/);
     // Same Fin exclusion as validate: Fin dispatches stay skipped as before.
     for (const k of ['fin_order_id','fin_release','fin_execution'])

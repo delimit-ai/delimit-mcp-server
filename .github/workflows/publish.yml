@@ -563,7 +563,7 @@ jobs:
     # push and dry-run/normal dispatches: unchanged; registry-only repair: now
     # reachable). Fin dispatches keep their existing behaviour (skipped).
     if: >-
-      always() && needs.select_artifact.result == 'success' &&
+      !cancelled() && needs.select_artifact.result == 'success' &&
       github.event.inputs.fin_order_id == '' && github.event.inputs.fin_release == '' &&
       github.event.inputs.fin_execution == ''
     runs-on: ubuntu-22.04
