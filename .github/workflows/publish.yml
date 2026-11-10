@@ -36,6 +36,11 @@ on:
         required: false
         default: ''
         type: string
+      registry_only_tag:
+        description: 'Existing vX.Y.Z tag whose accepted artifact to publish ONLY to MCP Registry (repair path)'
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: read
@@ -52,7 +57,7 @@ env:
 
 jobs:
   validate:
-    if: github.event.inputs.fin_order_id == '' && github.event.inputs.fin_release == '' && github.event.inputs.fin_execution == ''
+    if: github.event.inputs.fin_order_id == '' && github.event.inputs.fin_release == '' && github.event.inputs.fin_execution == '' && (github.event.inputs.registry_only_tag == '' || github.event.inputs.registry_only_tag == null)
     # license_core.so supports Ubuntu 22.04 (glibc 2.35). A floating runner
     # produced v4.18.7 with a GLIBC_2.38 requirement that older hosts reject.
     runs-on: ubuntu-22.04
@@ -409,7 +414,7 @@ jobs:
 
   select_artifact:
     needs: [validate, build_release]
-    if: always() && (needs.build_release.result == 'success' || github.event.inputs.fin_order_id != '' || github.event.inputs.fin_release != '' || github.event.inputs.fin_execution != '')
+    if: always() && (needs.build_release.result == 'success' || github.event.inputs.fin_order_id != '' || github.event.inputs.fin_release != '' || github.event.inputs.fin_execution != '' || (github.event.inputs.registry_only_tag != '' && github.event.inputs.registry_only_tag != null))
     runs-on: ubuntu-22.04
     timeout-minutes: 3
     permissions:
@@ -419,6 +424,7 @@ jobs:
       artifact_id: ${{ steps.select.outputs.artifact_id }}
       run_id: ${{ steps.select.outputs.run_id }}
       run_attempt: ${{ steps.select.outputs.run_attempt }}
+      source_sha: ${{ steps.select.outputs.source_sha }}
     steps:
       - name: Select existing accepted artifact
         id: select
@@ -428,6 +434,7 @@ jobs:
           FIN_RELEASE: ${{ github.event.inputs.fin_release }}
           FIN_EXECUTION: ${{ github.event.inputs.fin_execution }}
           DRY_RUN: ${{ github.event.inputs.dry_run }}
+          REGISTRY_ONLY_TAG: ${{ github.event.inputs.registry_only_tag }}
           EXPECTED_SOURCE: ${{ github.sha }}
           EXPECTED_REPOSITORY_ID: ${{ github.repository_id }}
           LOCAL_ARTIFACT: ${{ needs.build_release.outputs.artifact_id }}
@@ -455,6 +462,30 @@ jobs:
               with opener.open(request,timeout=20) as response:
                   require(response.status==200,'GitHub read');raw=response.read(1048577)
               require(len(raw)<=1048576,'GitHub bound');return decode(raw)
+          def select_tag(tag,*,read):
+              require(isinstance(tag,str) and re.fullmatch(r'v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)',tag),'tag format vX.Y.Z')
+              # Resolve through the tags namespace only: /commits/{ref} would also
+              # accept a branch named like the tag. Dereference annotated tags.
+              ref=read('/repos/delimit-ai/delimit-mcp-server/git/ref/tags/'+tag)
+              require(ref.get('ref')=='refs/tags/'+tag,'tag ref exists')
+              obj=ref.get('object') or {}
+              if obj.get('type')=='tag':
+                  obj=(read('/repos/delimit-ai/delimit-mcp-server/git/tags/'+obj.get('sha','')).get('object') or {})
+              require(obj.get('type')=='commit','tag points at a commit')
+              head_sha=obj.get('sha')
+              require(head_sha and re.fullmatch(r'[0-9a-f]{40}',head_sha),'tag commit SHA')
+              data=read('/repos/delimit-ai/delimit-mcp-server/actions/artifacts?name=npm-release-'+head_sha+'-1')
+              artifacts=[a for a in data.get('artifacts',[]) if a.get('name')=='npm-release-'+head_sha+'-1' and not a.get('expired')]
+              if not artifacts:
+                  all_data=read('/repos/delimit-ai/delimit-mcp-server/actions/artifacts')
+                  artifacts=[a for a in all_data.get('artifacts',[]) if a.get('name','').startswith('npm-release-'+head_sha+'-') and not a.get('expired')]
+              require(len(artifacts)>=1,'accepted release artifact found for tag')
+              chosen=artifacts[0]
+              art_id=chosen.get('id')
+              run_id=chosen.get('workflow_run',{}).get('id')
+              attempt=int(chosen.get('name').split('-')[-1])
+              require(art_id and run_id and attempt,'valid artifact provenance')
+              return art_id,run_id,attempt,head_sha
           def select(value,execution,order,*,source,repository_id,read,now):
               keys={'format','package','repo','repository_id','workflow_id','main_sha','gateway_sha',
                   'build_run_id','build_run_attempt','artifact_id','artifact_zip_sha256','artifact_expires_at',
@@ -495,13 +526,21 @@ jobs:
               require(expiry.tzinfo and now<expiry,'Fin artifact expired')
               return value['artifact_id'],value['build_run_id'],value['build_run_attempt']
           def trusted_event(event,order,raw,execution,*,actor_id,repository_id):
+              inputs=dict(event.get('inputs',{}))
+              reg_tag=inputs.pop('registry_only_tag','')
               require(str(actor_id)=='266558014' and event.get('sender',{}).get('id')==266558014
                   and event.get('repository',{}).get('id')==repository_id
-                  and event.get('inputs')=={'dry_run':'false','expected_source':'','fin_order_id':order,'fin_release':raw,'fin_execution':execution},
+                  and reg_tag==''
+                  and inputs=={'dry_run':'false','expected_source':'','fin_order_id':order,'fin_release':raw,'fin_execution':execution},
                   'authenticated Fin dispatch event')
           if __name__=='__main__':
               order=os.environ.get('FIN_ORDER','');raw=os.environ.get('FIN_RELEASE','');execution=os.environ.get('FIN_EXECUTION','')
-              if order or raw or execution:
+              reg_tag=os.environ.get('REGISTRY_ONLY_TAG','')
+              source_sha=''
+              if reg_tag:
+                  art_id,run_id,attempt,source_sha=select_tag(reg_tag,read=api)
+                  ids=(art_id,run_id,attempt)
+              elif order or raw or execution:
                   event=decode(open(os.environ['GITHUB_EVENT_PATH']).read())
                   trusted_event(event,order,raw,execution,actor_id=os.environ['GITHUB_ACTOR_ID'],repository_id=int(os.environ['EXPECTED_REPOSITORY_ID']))
                   require(os.environ['GITHUB_ACTOR']==event['sender'].get('login') and os.environ['GITHUB_EVENT_NAME']=='workflow_dispatch' and os.environ['GITHUB_REF']=='refs/heads/main'
@@ -513,13 +552,14 @@ jobs:
                   require(all(re.fullmatch(r'[1-9][0-9]*',str(v)) for v in ids),'local artifact identity')
               with open(os.environ['GITHUB_OUTPUT'],'a') as out:
                   for key,value in zip(('artifact_id','run_id','run_attempt'),ids):out.write(key+'='+str(value)+'\n')
+                  if source_sha:out.write('source_sha='+source_sha+'\n')
           PYSELECT
 
   publish:
     needs: select_artifact
     runs-on: ubuntu-22.04
     name: Publish accepted bytes
-    timeout-minutes: 15
+    timeout-minutes: 25
     # No package checkout, dependency installation, build, or package code
     # executes in this job. Only this publisher can request an npm OIDC token.
     permissions:
@@ -550,7 +590,7 @@ jobs:
 
       - name: Verify immutable publication inputs
         env:
-          EXPECTED_SOURCE: ${{ github.sha }}
+          EXPECTED_SOURCE: ${{ needs.select_artifact.outputs.source_sha || github.sha }}
           EXPECTED_REPOSITORY: ${{ github.repository }}
           EXPECTED_RUN_ID: ${{ needs.select_artifact.outputs.run_id }}
           EXPECTED_RUN_ATTEMPT: ${{ needs.select_artifact.outputs.run_attempt }}
@@ -635,14 +675,14 @@ jobs:
           PYVERIFY
 
       - name: Publish (dry run)
-        if: github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run == 'true'
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run == 'true' && (github.event.inputs.registry_only_tag == '' || github.event.inputs.registry_only_tag == null)
         working-directory: ${{ runner.temp }}/delimit-publish
         run: |
           set -euo pipefail
           npm publish "$RELEASE_TARBALL" --ignore-scripts --registry=https://registry.npmjs.org --tag latest --dry-run
 
       - name: Enforce publication window and one-use Fin claim
-        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run == 'false')
+        if: (startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run == 'false')) && (github.event.inputs.registry_only_tag == '' || github.event.inputs.registry_only_tag == null)
         env:
           GH_TOKEN: ${{ github.token }}
           FIN_ORDER: ${{ github.event.inputs.fin_order_id }}
@@ -737,7 +777,7 @@ jobs:
           PYGATE
 
       - name: Publish to npm
-        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run == 'false')
+        if: (startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run == 'false')) && (github.event.inputs.registry_only_tag == '' || github.event.inputs.registry_only_tag == null)
         working-directory: ${{ runner.temp }}/delimit-publish
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
@@ -746,29 +786,38 @@ jobs:
           npm publish "$RELEASE_TARBALL" --ignore-scripts --registry=https://registry.npmjs.org --tag latest --access public
 
       - name: Verify published version
-        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run == 'false')
+        if: (startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run == 'false')) && (github.event.inputs.registry_only_tag == '' || github.event.inputs.registry_only_tag == null)
         working-directory: ${{ runner.temp }}/delimit-publish
         run: |
           set -euo pipefail
           PKG_VERSION="$RELEASE_VERSION"
-          # Registry propagation can take 30-90s after publish. Retry with
-          # bounded backoff instead of racing a fixed 10s sleep (v4.3.4 hit
-          # E404 on the 10s path even though the publish had succeeded).
-          for attempt in 1 2 3 4 5 6; do
-            if npm view "delimit-cli@$PKG_VERSION" dist --json > "$RUNNER_TEMP/published-dist.json"; then
+          # Registry propagation can take several minutes after publish.
+          # Retry with bounded backoff up to ~15 minutes total.
+          # Keep fail-closed: fails if the version never appears or dist-tag latest does not match.
+          VERIFIED=0
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            if npm view "delimit-cli@$PKG_VERSION" dist --json > "$RUNNER_TEMP/published-dist.json" 2>/dev/null; then
               node -e 'const fs=require("fs"); const d=JSON.parse(fs.readFileSync(process.argv[1])); const a=JSON.parse(fs.readFileSync(process.argv[2])); if(d.shasum!==a.sha1 || d.integrity!==a.integrity) throw Error("Published artifact differs from accepted tarball")' "$RUNNER_TEMP/published-dist.json" "$RUNNER_TEMP/delimit-publish/accepted.json"
-              test "$(npm view delimit-cli dist-tags.latest)" = "$PKG_VERSION"
-              echo "accepted bytes and latest verified on attempt $attempt"
-              exit 0
+              LATEST="$(npm view delimit-cli dist-tags.latest 2>/dev/null || true)"
+              if [ "$LATEST" = "$PKG_VERSION" ]; then
+                echo "accepted bytes and latest verified on attempt $attempt"
+                VERIFIED=1
+                break
+              fi
+              echo "attempt $attempt: version visible but dist-tags.latest is '$LATEST', want '$PKG_VERSION'"
+            else
+              echo "attempt $attempt: delimit-cli@$PKG_VERSION not visible yet"
             fi
-            echo "attempt $attempt: not visible yet, sleeping $((attempt * 15))s"
+            echo "attempt $attempt: sleeping $((attempt * 15))s before retry"
             sleep $((attempt * 15))
           done
-          echo "::error::delimit-cli@$PKG_VERSION not visible in registry after 6 attempts (~5min)"
-          exit 1
+          if [ "$VERIFIED" -ne 1 ]; then
+            echo "::error::delimit-cli@$PKG_VERSION not visible or latest dist-tag mismatch in registry after 10 attempts (~15min)"
+            exit 1
+          fi
 
       - name: Complete verified Fin publication receipt
-        if: github.event.inputs.fin_order_id != ''
+        if: github.event.inputs.fin_order_id != '' && (github.event.inputs.registry_only_tag == '' || github.event.inputs.registry_only_tag == null)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -780,7 +829,7 @@ jobs:
           receipt=dict(claim,format='shipping-npm-publication/1',publication_verified=True,
               published=json.loads((root/'accepted.json').read_text()))
           raw=json.dumps({'status':'completed','conclusion':'success','output':{
-              'title':'Exact Fin package and latest verified','summary':json.dumps(receipt,sort_keys=True,separators=(',',':'))}}).encode()
+               'title':'Exact Fin package and latest verified','summary':json.dumps(receipt,sort_keys=True,separators=(',',':'))}}).encode()
           request=urllib.request.Request('https://api.github.com/repos/delimit-ai/delimit-mcp-server/check-runs/'+str(saved['id']),
               data=raw,method='PATCH',headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],
               'Accept':'application/vnd.github+json','Content-Type':'application/json','X-GitHub-Api-Version':'2022-11-28'})
@@ -791,6 +840,46 @@ jobs:
               if response.status!=200:raise RuntimeError('Fin receipt unavailable')
           PYRECEIPT
 
+      - name: Verify existing npm release for registry repair
+        if: github.event.inputs.registry_only_tag != '' && github.event.inputs.registry_only_tag != null
+        working-directory: ${{ runner.temp }}/delimit-publish
+        env:
+          REGISTRY_ONLY_TAG: ${{ github.event.inputs.registry_only_tag }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PYREGVERIFY'
+          import json, os, subprocess, sys
+          tag = os.environ['REGISTRY_ONLY_TAG']
+          tag_version = tag[1:] if tag.startswith('v') else tag
+          srv = json.loads(open('server.json').read())
+          srv_ver = srv.get('version')
+          pkg = (srv.get('packages') or [{}])[0]
+          pkg_ver = pkg.get('version')
+          if pkg.get('identifier') != 'delimit-cli':
+              print(f"::error::server.json package identifier is {pkg.get('identifier')!r}, expected 'delimit-cli'", file=sys.stderr)
+              sys.exit(1)
+          if srv_ver != tag_version or pkg_ver != tag_version:
+              print(f"::error::server.json version ({srv_ver}/{pkg_ver}) does not match tag version ({tag_version})", file=sys.stderr)
+              sys.exit(1)
+          accepted = json.loads(open('accepted.json').read())
+          if accepted.get('version') != tag_version:
+              print(f"::error::accepted artifact version ({accepted.get('version')}) does not match tag version ({tag_version})", file=sys.stderr)
+              sys.exit(1)
+          try:
+              res = subprocess.run(['npm', 'view', f'delimit-cli@{tag_version}', 'dist', '--json'], capture_output=True, text=True, check=True)
+              dist = json.loads(res.stdout)
+          except Exception as e:
+              print(f"::error::delimit-cli@{tag_version} is not on npm: {e}", file=sys.stderr)
+              sys.exit(1)
+          if not dist.get('shasum') or not dist.get('integrity'):
+              print(f"::error::delimit-cli@{tag_version} npm dist metadata missing shasum/integrity", file=sys.stderr)
+              sys.exit(1)
+          if dist['shasum'] != accepted['sha1'] or dist['integrity'] != accepted['integrity']:
+              print(f"::error::Published npm artifact dist integrity does not match accepted artifact", file=sys.stderr)
+              sys.exit(1)
+          print(f"Verified delimit-cli@{tag_version} is live on npm with matching integrity")
+          PYREGVERIFY
+
       # Publish the MCP Registry record. Without this the registry entry only
       # ever changes when someone runs mcp-publisher by hand: the record sat at
       # v4.1.38 from 2026-04 while npm reached 4.17.0, so registry consumers saw
@@ -800,7 +889,7 @@ jobs:
       # release, so this reports and continues.
       - name: Publish to MCP Registry
         id: mcp_registry
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event.inputs.registry_only_tag != '' && github.event.inputs.registry_only_tag != null)
         continue-on-error: true
         working-directory: ${{ runner.temp }}/delimit-publish
         env:
@@ -826,18 +915,23 @@ jobs:
       # stale for five months. Make it loud: a workflow warning AND a job
       # summary line, so drift can never silently resume.
       - name: Registry publish failed (visible)
-        if: startsWith(github.ref, 'refs/tags/v') && steps.mcp_registry.outcome == 'failure'
+        if: (startsWith(github.ref, 'refs/tags/v') || (github.event.inputs.registry_only_tag != '' && github.event.inputs.registry_only_tag != null)) && steps.mcp_registry.outcome == 'failure'
         run: |
-          echo "::warning title=MCP Registry publish FAILED::The npm release succeeded but the MCP Registry record was NOT updated for ${{ github.ref_name }}. Run mcp-publisher publish manually. See job log."
+          TAG_NAME="${{ github.event.inputs.registry_only_tag || github.ref_name }}"
+          echo "::warning title=MCP Registry publish FAILED::The npm release succeeded but the MCP Registry record was NOT updated for ${TAG_NAME}. Run mcp-publisher publish manually. See job log."
           {
             echo "## :warning: MCP Registry publish FAILED"
             echo ""
-            echo "npm published **${{ github.ref_name }}** but the registry record was not updated. The record will show a stale version until published manually."
+            echo "npm published **${TAG_NAME}** but the registry record was not updated. The record will show a stale version until published manually."
           } >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "${{ github.event.inputs.registry_only_tag }}" ]; then
+            echo "::error::Registry-only repair dispatch failed to publish to MCP Registry"
+            exit 1
+          fi
 
   release:
     needs: publish
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') && (github.event.inputs.registry_only_tag == '' || github.event.inputs.registry_only_tag == null)
     runs-on: ubuntu-latest
     name: GitHub Release
     timeout-minutes: 10
@@ -849,7 +943,20 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Check existing release
+        id: check_release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "${{ github.ref_name }}" >/dev/null 2>&1; then
+            echo "Release ${{ github.ref_name }} already exists; skipping create"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Create GitHub Release
+        if: steps.check_release.outputs.exists != 'true'
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true

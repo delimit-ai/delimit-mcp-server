@@ -243,3 +243,104 @@ for field in ('mode','hosted_used','hosted_remaining','hosted_limit','oauth_requ
  except RuntimeError: pass
  else: raise AssertionError('missing field accepted: '+field)
 `));
+
+test('registry-only repair path validates inputs, skips npm publish/release, and GitHub Release is idempotent',()=>{
+    const inputs=doc.on.workflow_dispatch.inputs;
+    assert('registry_only_tag' in inputs);
+    assert.equal(inputs.registry_only_tag.default,'');
+    assert.equal(inputs.registry_only_tag.required,false);
+
+    // Validate and build_release are skipped on registry_only_tag
+    assert.match(doc.jobs.validate.if,/registry_only_tag/);
+    assert.match(doc.jobs.select_artifact.if,/registry_only_tag/);
+
+    // Verify publish permissions are unchanged (id-token: write, contents: read, actions: read, checks: write)
+    assert.deepEqual(doc.jobs.publish.permissions,{contents:'read',actions:'read',checks:'write','id-token':'write'});
+
+    // Verify publish steps gating
+    const steps=doc.jobs.publish.steps;
+    const pubDry=steps.find(s=>s.name==='Publish (dry run)');
+    assert.match(pubDry.if,/registry_only_tag/);
+    const pubNpm=steps.find(s=>s.name==='Publish to npm');
+    assert.match(pubNpm.if,/registry_only_tag/);
+    const verifyPub=steps.find(s=>s.name==='Verify published version');
+    assert.match(verifyPub.if,/registry_only_tag/);
+    assert.match(verifyPub.run,/attempt in 1 2 3 4 5 6 7 8 9 10/);
+    assert.match(verifyPub.run,/sleeping \$?\(\(attempt \* 15\)\)s/);
+
+    // Verify registry repair verification step exists and checks server.json + npm integrity
+    const regVerify=steps.find(s=>s.name==='Verify existing npm release for registry repair');
+    assert(regVerify);
+    assert.match(regVerify.if,/registry_only_tag/);
+    assert.match(regVerify.run,/server\.json/);
+    assert.match(regVerify.run,/dist\['integrity'\] != accepted\['integrity'\]/);
+
+    // Verify MCP registry step runs on registry_only_tag and uses pinned publisher
+    const mcpStep=steps.find(s=>s.name==='Publish to MCP Registry');
+    assert.match(mcpStep.if,/registry_only_tag/);
+    assert.match(mcpStep.env.MCP_PUBLISHER_VERSION,/^1\.8\.1$/);
+
+    // Release job is skipped on registry_only_tag and idempotent on existing release
+    assert.match(doc.jobs.release.if,/registry_only_tag/);
+    const relSteps=doc.jobs.release.steps;
+    const checkRel=relSteps.find(s=>s.name==='Check existing release');
+    assert(checkRel);
+    assert.match(checkRel.run,/gh release view/);
+    const createRel=relSteps.find(s=>s.name==='Create GitHub Release');
+    assert.match(createRel.if,/check_release\.outputs\.exists != 'true'/);
+});
+
+test('select_tag enforces tag format and resolves commit SHA and unexpired artifact',()=>{
+    const selectStep=doc.jobs.select_artifact.steps.find(s=>s.name==='Select existing accepted artifact');
+    const selectCode=selectStep.run.match(/python3 - <<'PYSELECT'\n([\s\S]+)\nPYSELECT/)[1];
+    const py = `
+import json, re
+ns = {'__name__': 'fixture'}
+exec(${JSON.stringify(selectCode)}, ns)
+
+SHA = '2047cff5c194e0ac369245f98f9a104603ee0d57'
+def mock_read(path):
+    if path.endswith('/git/ref/tags/v4.24.0'):
+        return {'ref': 'refs/tags/v4.24.0', 'object': {'type': 'commit', 'sha': SHA}}
+    if path.endswith('/git/ref/tags/v4.25.0'):
+        return {'ref': 'refs/tags/v4.25.0', 'object': {'type': 'tag', 'sha': 'a' * 40}}
+    if path.endswith('/git/tags/' + 'a' * 40):
+        return {'object': {'type': 'commit', 'sha': SHA}}
+    if '/commits/' in path:
+        # A same-named BRANCH resolves here; select_tag must never use this endpoint.
+        return {'sha': SHA}
+    if '/actions/artifacts?name=npm-release-2047cff5c194e0ac369245f98f9a104603ee0d57-1' in path:
+        return {'artifacts': [{'id': 12345, 'name': 'npm-release-2047cff5c194e0ac369245f98f9a104603ee0d57-1', 'expired': False, 'workflow_run': {'id': 99999}}]}
+    raise RuntimeError('not found: ' + path)
+
+art_id, run_id, attempt, head_sha = ns['select_tag']('v4.24.0', read=mock_read)
+assert art_id == 12345 and run_id == 99999 and attempt == 1 and head_sha == '2047cff5c194e0ac369245f98f9a104603ee0d57'
+
+for bad_tag in ('4.24.0', 'v4.24', 'v4.24.0-rc1', 'latest', 'vX.Y.Z'):
+    try: ns['select_tag'](bad_tag, read=mock_read)
+    except RuntimeError: pass
+    else: raise AssertionError('accepted invalid tag: ' + bad_tag)
+
+# Annotated tags are dereferenced to their commit.
+assert ns['select_tag']('v4.25.0', read=mock_read)[3] == SHA
+
+# v9.9.9 exists only as a branch (resolvable through /commits/): refuse.
+try: ns['select_tag']('v9.9.9', read=mock_read)
+except RuntimeError: pass
+else: raise AssertionError('accepted a branch named like a tag')
+
+try: ns['select_tag']('v1.0.0', read=mock_read)
+except RuntimeError: pass
+else: raise AssertionError('accepted non-existent tag')
+`;
+    const result = spawnSync('python3', ['-c', py], { encoding: 'utf8', timeout: 10000 });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+});
+
+test('registry-only repair never runs the Fin receipt and requires the delimit-cli package',()=>{
+    const steps=doc.jobs.publish.steps;
+    const receipt=steps.find(s=>s.name==='Complete verified Fin publication receipt');
+    assert.match(receipt.if,/registry_only_tag == ''/);
+    const verify=steps.find(s=>s.name==='Verify existing npm release for registry repair');
+    assert.match(verify.run,/identifier'\) != 'delimit-cli'/);
+});
