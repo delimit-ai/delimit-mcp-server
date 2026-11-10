@@ -6364,8 +6364,19 @@ def deliberate(
     _policy = executor_review.policy if executor_review is not None else _load_policy()
     _scope = scope.strip().lower() if scope else _classify_scope(question, context, _policy)
 
-    from ai import panel_roles as _panel_roles
-    _roles_active = _panel_roles.enabled(_policy, session_options, _scope)
+    # panel_roles is internal (not shipped in the npm bundle): without it, role
+    # panels are simply off and the deliberation runs as before.
+    try:
+        # "import ai.panel_roles" (not "from ai import panel_roles"): a missing
+        # submodule then raises ModuleNotFoundError naming it (review r2).
+        import ai.panel_roles as _panel_roles
+    except ModuleNotFoundError as _exc:
+        # Only the module itself being absent (the npm bundle) turns roles off;
+        # an ImportError raised inside an installed panel_roles still surfaces.
+        if _exc.name != "ai.panel_roles":
+            raise
+        _panel_roles = None
+    _roles_active = bool(_panel_roles) and _panel_roles.enabled(_policy, session_options, _scope)
 
     # Session mode (opt-in). Never for the front-end executor path or any
     # no_path_access caller: those seats must not read the filesystem.
@@ -6546,7 +6557,16 @@ def deliberate(
 
     # API tools only replace file context at the transport boundary. The
     # transcript retains its historical inline context and evidence binding.
-    from ai.deliberation_file_tools import attach as _attach_api_file_tools
+    # deliberation_file_tools is internal (not shipped in the npm bundle):
+    # without it, seats keep their inline context and no file tools attach.
+    try:
+        from ai.deliberation_file_tools import attach as _attach_api_file_tools
+    except ModuleNotFoundError as _exc:
+        if _exc.name != "ai.deliberation_file_tools":
+            raise
+
+        def _attach_api_file_tools(seats, *_args, **_kwargs):
+            return seats, {}
     try:
         enabled_models, _api_file_usage = _attach_api_file_tools(
             enabled_models, _policy, _context_file_evidence, _files_block,
