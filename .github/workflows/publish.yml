@@ -48,7 +48,7 @@ concurrency:
 env:
   # Reviewed source for this package release. Never resolve a moving branch
   # independently in validation and publication; update with the reviewed bundle.
-  GATEWAY_SOURCE_SHA: '078a070eee986f1928d9d73918411f47ec67f913'
+  GATEWAY_SOURCE_SHA: 'e0f8ea1f09832bc97414ccf029ecb091b2fa705d'
 
 jobs:
   validate:

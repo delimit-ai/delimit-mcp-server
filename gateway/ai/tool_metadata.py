@@ -276,6 +276,11 @@ TOOL_TIERS.update({name: "internal" for name in FOUNDER_TOOLS})
 #    governance              → local API spec checks (URL lint inputs opt in to
 #                              fetching the supplied URL).
 #    panel                   → opt-in multi-model deliberation and model setup.
+#    panelist                → READ-ONLY allowlist served to deliberation
+#                              panelists' own agent sessions (session mode,
+#                              ai/deliberation_sessions.py): memory / ledger /
+#                              handoff / context READS, health and status.
+#                              No store/add/update/notify/social/deploy tool.
 #
 #  This reuses the existing TOOL_TIERS classification and CORE_TOOLS set;
 #  it does NOT introduce a parallel taxonomy. Where CORE_TOOLS was too
@@ -284,7 +289,7 @@ TOOL_TIERS.update({name: "internal" for name in FOUNDER_TOOLS})
 #  the "5 workflows" documentation stays accurate.
 # ─────────────────────────────────────────────────────────────────────
 
-VALID_TOOLSETS = ("core", "standard", "full", "records", "governance", "panel", "assistant", "lead", "frontend", "worker")
+VALID_TOOLSETS = ("core", "standard", "full", "records", "governance", "panel", "panelist", "assistant", "lead", "frontend", "worker")
 DEFAULT_TOOLSET = "full"
 # Assistant-profile caps (unchanged). The armed lead profile uses LEAD_LIMITS;
 # fin_lead.limits() selects between them at call time.
@@ -334,6 +339,18 @@ GOVERNANCE_TOOLS = frozenset({
 
 PANEL_TOOLS = frozenset({
     "delimit_deliberate", "delimit_deliberation_status", "delimit_models",
+    "delimit_version", "delimit_help",
+})
+
+# Read-only surface for deliberation PANELISTS (session mode). Every tool here
+# only reads local state; a panelist must never be able to write files, post,
+# merge, deploy, notify or mutate memory / ledger records. Audited 2026-10-23
+# (no write_text / add_item / store / send_notification in any body).
+PANELIST_TOOLS = frozenset({
+    "delimit_memory_search", "delimit_memory_recent",
+    "delimit_ledger_list", "delimit_ledger_query", "delimit_ledger_context",
+    "delimit_handoff_list", "delimit_context_read",
+    "delimit_gov_health", "delimit_obs_status", "delimit_deliberation_status",
     "delimit_version", "delimit_help",
 })
 
@@ -398,6 +415,8 @@ def tool_in_toolset(tool_name: str, toolset: str) -> bool:
         return tool_name in GOVERNANCE_TOOLS
     if toolset == "panel":
         return tool_name in PANEL_TOOLS
+    if toolset == "panelist":
+        return tool_name in PANELIST_TOOLS
     if toolset == FAIL_CLOSED_TOOLSET:
         return tool_name in FAIL_CLOSED_TOOLS
     if toolset == "standard":

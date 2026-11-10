@@ -567,12 +567,143 @@ def _cap_utf8_tail(text: str, max_bytes: int) -> str:
     return data[-max_bytes:].decode("utf-8", errors="ignore")
 
 
+def _is_codex_transcript(transcript_path: str) -> bool:
+    if not transcript_path:
+        return False
+    base = os.path.basename(transcript_path)
+    if base.startswith("rollout-") and base.endswith(".jsonl"):
+        return True
+    if ".codex" in Path(transcript_path).parts:
+        return True
+    try:
+        p = Path(transcript_path)
+        if p.is_file() and not p.is_symlink():
+            with open(p, "rb") as fh:
+                first = fh.read(4096)
+            return b'"session_meta"' in first
+    except Exception:
+        pass
+    return False
+
+
+def _parse_codex_transcript_context(transcript_path: str) -> Dict[str, Any]:
+    res: Dict[str, Any] = {
+        "final_assistant_text": "",
+        "latest_user_text": "",
+        "tool_calls": [],
+        "turns": 0,
+        "records": [],
+        "logical_session_id": "",
+        "chat_session_id": "",
+        "transcript_id": Path(transcript_path).stem if transcript_path else "",
+        "references": [],
+        "background_tasks": [],
+        "started_at": "",
+        "cwd": "",
+    }
+    try:
+        p = Path(transcript_path)
+        if not p.is_file() or p.is_symlink():
+            return res
+        # Read session_meta from leading lines
+        with open(p, "r", encoding="utf-8", errors="replace") as fh:
+            for _ in range(25):
+                line = fh.readline()
+                if not line:
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                if '"session_meta"' in line:
+                    try:
+                        meta = json.loads(line)
+                        payload = meta.get("payload", {}) if isinstance(meta, dict) else {}
+                        if isinstance(payload, dict):
+                            sid = str(payload.get("session_id") or payload.get("id") or "")
+                            if sid:
+                                res["logical_session_id"] = sid
+                                res["chat_session_id"] = sid
+                            res["started_at"] = str(
+                                payload.get("timestamp") or meta.get("timestamp") or ""
+                            )
+                            res["cwd"] = str(payload.get("cwd") or "")
+                    except Exception:
+                        pass
+                    break
+
+        tail_records = _read_jsonl_tail_records(
+            transcript_path, byte_cap=2 * 1024 * 1024, record_cap=200
+        )
+        res["records"] = tail_records
+        tool_calls: List[str] = []
+        visible_assistant: List[str] = []
+        user_texts: List[str] = []
+        turns = 0
+
+        for obj in tail_records:
+            t = obj.get("type")
+            payload = obj.get("payload", {}) if isinstance(obj.get("payload"), dict) else {}
+            ptype = payload.get("type") if isinstance(payload, dict) else None
+
+            if t == "event_msg" and ptype == "task_started":
+                turns += 1
+
+            if ptype in ("custom_tool_call", "function_call", "tool_call"):
+                tool_name = str(payload.get("name") or "")
+                if tool_name:
+                    tool_calls.append(tool_name)
+
+            if ptype == "message":
+                role = payload.get("role")
+                content = payload.get("content") or payload.get("text")
+                if role == "assistant":
+                    text = ""
+                    if isinstance(content, str):
+                        text = content
+                    elif isinstance(content, list):
+                        text = "\n".join(
+                            b.get("text", "")
+                            for b in content
+                            if isinstance(b, dict) and b.get("text")
+                        )
+                    if text:
+                        visible_assistant.append(text)
+                elif role == "user":
+                    text = ""
+                    if isinstance(content, str):
+                        text = content
+                    elif isinstance(content, list):
+                        text = "\n".join(
+                            b.get("text", "")
+                            for b in content
+                            if isinstance(b, dict) and b.get("text")
+                        )
+                    if text:
+                        user_texts.append(text)
+
+        res["tool_calls"] = tool_calls
+        res["turns"] = turns or len(visible_assistant) or 1
+        if visible_assistant:
+            for text in visible_assistant:
+                if _is_substantive_visible_text(text):
+                    res["final_assistant_text"] = text.strip()
+            if not res["final_assistant_text"]:
+                res["final_assistant_text"] = visible_assistant[-1].strip()
+        if user_texts:
+            res["latest_user_text"] = user_texts[-1].strip()
+    except Exception:
+        pass
+    return res
+
+
 def parse_transcript_context(transcript_path: str) -> Dict[str, Any]:
-    """Parse event-bound, public continuity facts from a Claude JSONL tail.
+    """Parse event-bound, public continuity facts from a Claude or Codex JSONL tail.
 
     The result is intentionally evidence-shaped.  It retains structured tool
     inputs/results for project resolution but never copies assistant thinking.
     """
+    if _is_codex_transcript(transcript_path):
+        return _parse_codex_transcript_context(transcript_path)
     empty: Dict[str, Any] = {
         "final_assistant_text": "",
         "tool_calls": [],

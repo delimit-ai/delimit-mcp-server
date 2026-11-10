@@ -20,6 +20,7 @@ Usage:
 """
 
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -143,12 +144,16 @@ def _load_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
         tiers: {free: int, pro: int, deliberation: int}
     """
     if config_path is None:
-        config_path = Path.home() / ".delimit" / "rate_limits.yml"
-
-    if not config_path.exists():
-        return {}
+        try:
+            from ai.frontend import state_root
+            config_path = state_root.get_rate_limits_path()
+        except Exception:
+            config_path = Path.home() / ".delimit" / "rate_limits.yml"
 
     try:
+        if not config_path.exists():
+            return {}
+
         # Use PyYAML if available; fall back to a simple parser
         try:
             import yaml
@@ -157,6 +162,9 @@ def _load_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
             return data if isinstance(data, dict) else {}
         except ImportError:
             return _parse_simple_yaml(config_path)
+    except (PermissionError, OSError) as exc:
+        logger.warning("Failed to access rate_limits.yml: %s", exc)
+        return {}
     except Exception as exc:
         logger.warning("Failed to load rate_limits.yml: %s", exc)
         return {}

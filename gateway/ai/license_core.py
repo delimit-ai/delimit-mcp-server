@@ -13,6 +13,26 @@ LICENSE_FILE = Path.home() / ".delimit" / "license.json"
 USAGE_FILE = Path.home() / ".delimit" / "usage.json"
 LS_VALIDATE_URL = "https://api.lemonsqueezy.com/v1/licenses/validate"
 
+
+def _license_file() -> Path:
+    if LICENSE_FILE != Path.home() / ".delimit" / "license.json":
+        return LICENSE_FILE
+    try:
+        from ai.frontend import state_root
+        return state_root.get_license_file()
+    except Exception:
+        return LICENSE_FILE
+
+
+def _usage_file() -> Path:
+    if USAGE_FILE != Path.home() / ".delimit" / "usage.json":
+        return USAGE_FILE
+    try:
+        from ai.frontend import state_root
+        return state_root.get_usage_file()
+    except Exception:
+        return USAGE_FILE
+
 REVALIDATION_INTERVAL = 30 * 86400  # 30 days
 GRACE_PERIOD = 7 * 86400
 HARD_BLOCK = 14 * 86400
@@ -209,8 +229,9 @@ def is_license_valid(data: dict) -> bool:
 def _write_license(data: dict) -> None:
     """Persist license data to disk."""
     try:
-        LICENSE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        LICENSE_FILE.write_text(json.dumps(data, indent=2))
+        lic_file = _license_file()
+        lic_file.parent.mkdir(parents=True, exist_ok=True)
+        lic_file.write_text(json.dumps(data, indent=2))
     except Exception:
         pass  # Non-blocking — don't crash on disk errors
 
@@ -301,10 +322,11 @@ def load_license() -> dict:
     a 7-day grace period followed by a 7-day warning period. After 44 days
     without successful re-validation, Pro tools are blocked.
     """
-    if not LICENSE_FILE.exists():
-        return {"tier": "free", "valid": True}
     try:
-        data = json.loads(LICENSE_FILE.read_text())
+        lic_file = _license_file()
+        if not lic_file.exists():
+            return {"tier": "free", "valid": True}
+        data = json.loads(lic_file.read_text())
         if data.get("expires_at") and data["expires_at"] < time.time():
             return {"tier": "free", "valid": True, "expired": True}
 
@@ -344,8 +366,18 @@ def gate_tool(tool_name: str) -> dict | None:
     if limit is not None:
         used = _get_monthly_usage(tool_name)
         if used < limit:
-            _increment_usage(tool_name)
-            return None
+            try:
+                _increment_usage(tool_name)
+                return None
+            except Exception:
+                return {
+                    "error": f"Free trial limit reached ({limit}/month). Upgrade to Pro for unlimited.",
+                    "status": "trial_exhausted",
+                    "tool": tool_name,
+                    "used": limit,
+                    "limit": limit,
+                    "upgrade_url": "https://delimit.ai/pricing",
+                }
         return {
             "error": f"Free trial limit reached ({limit}/month). Upgrade to Pro for unlimited.",
             "status": "trial_exhausted",
@@ -446,10 +478,11 @@ def _revalidate(data: dict) -> dict:
 
 
 def _get_monthly_usage(tool_name: str) -> int:
-    if not USAGE_FILE.exists():
-        return 0
     try:
-        data = json.loads(USAGE_FILE.read_text())
+        usage_file = _usage_file()
+        if not usage_file.exists():
+            return 0
+        data = json.loads(usage_file.read_text())
         return data.get(time.strftime("%Y-%m"), {}).get(tool_name, 0)
     except Exception:
         return 0
@@ -458,15 +491,19 @@ def _get_monthly_usage(tool_name: str) -> int:
 def _increment_usage(tool_name: str) -> int:
     month_key = time.strftime("%Y-%m")
     data = {}
-    if USAGE_FILE.exists():
-        try:
-            data = json.loads(USAGE_FILE.read_text())
-        except Exception:
-            pass
+    usage_file = _usage_file()
+    try:
+        if usage_file.exists():
+            try:
+                data = json.loads(usage_file.read_text())
+            except Exception:
+                pass
+    except Exception:
+        pass
     if month_key not in data:
         data[month_key] = {}
     data[month_key][tool_name] = data[month_key].get(tool_name, 0) + 1
     count = data[month_key][tool_name]
-    USAGE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    USAGE_FILE.write_text(json.dumps(data, indent=2))
+    usage_file.parent.mkdir(parents=True, exist_ok=True)
+    usage_file.write_text(json.dumps(data, indent=2))
     return count

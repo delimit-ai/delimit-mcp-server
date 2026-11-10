@@ -778,6 +778,10 @@ def _read_ledger(path: Path) -> List[Dict]:
 def _seal_entry(entry: Dict, items: List[Dict]) -> Dict:
     """Chain ``entry`` to the last parsed record and stamp ``created_at``."""
     prev_hash = items[-1].get("hash", "genesis") if items else "genesis"
+    # list_items() annotates replayed items with the reader-side
+    # ``_origin_store`` (the file an item was read from, used by the D8
+    # origin refusal). It is never ledger data: never persist it.
+    entry.pop("_origin_store", None)
     entry["hash"] = hashlib.sha256(f"{prev_hash}{json.dumps(entry, sort_keys=True)}".encode()).hexdigest()[:16]
     entry["created_at"] = _utc_timestamp()
     return entry
@@ -1333,40 +1337,169 @@ def _find_item_in_ledger_dir(item_id: str, ledger_dir: Path) -> Optional[Dict[st
     return None
 
 
-def _find_item_across_registered_ventures(
-    item_id: str, exclude_dir: Optional[Path]
-) -> Optional[Dict[str, Any]]:
-    """LED-5658 review v2: READ-ONLY scan of every registered venture's
-    ledger for item_id, skipping exclude_dir. Never writes. Returns the
-    _find_item_in_ledger_dir result plus the venture name, or None.
+def _find_item_across_all_venture_ledgers(
+    item_id: str, exclude_dir: Optional[Path] = None
+) -> List[Dict[str, Any]]:
+    """Search all venture ledgers for item_id across ledger-v2 and registered stores.
 
-    Two distinct uses:
-      1. update_item's auto-detect fallback (exclude_dir = the already-
-         searched default dir) — the pre-existing cross-venture search,
-         unchanged in behavior, just extracted so it can also power (2).
-      2. update_item's explicit-unknown-venture REJECT path
-         (exclude_dir=None, nothing searched yet) — read-only diagnostic
-         only, to populate item_found_in in the rejection error. This
-         call NEVER leads to a write; the caller has already been told no.
+    Searches:
+      1. ledger-v2/<venture>/operations.jsonl and strategy.jsonl
+      2. registered ventures in ventures.json
+      3. central ledger directory if present
+    Skips exclude_dir (the already-searched current venture dir).
+    Returns a list of match dicts: [{"ledger_name": ..., "path": ..., "venture": ..., "ledger_dir": ...}]
     """
+    matches: List[Dict[str, Any]] = []
+    seen_paths: set = set()
+    searched_dirs: set = set()
+
+    exclude_resolved: Optional[Path] = None
+    if exclude_dir is not None:
+        try:
+            exclude_resolved = Path(exclude_dir).resolve()
+            searched_dirs.add(str(exclude_resolved))
+        except Exception:
+            searched_dirs.add(str(exclude_dir))
+
+    def _is_valid_match(found_item: Optional[Dict[str, Any]], expected_dir: Path) -> bool:
+        if not found_item or "path" not in found_item:
+            return False
+        try:
+            p = Path(found_item["path"]).resolve()
+            if exclude_resolved is not None and (p == exclude_resolved or exclude_resolved in p.parents):
+                return False
+            exp = expected_dir.resolve()
+            if p != exp and exp not in p.parents:
+                return False
+        except Exception:
+            pass
+        return True
+
+    # 1. Search ledger-v2/<venture>/
+    v2_dir = _ledger_v2_dir()
+    if v2_dir.is_dir():
+        for entry in sorted(v2_dir.iterdir()):
+            if not entry.is_dir() or entry.name.startswith((".", "_")):
+                continue
+            try:
+                resolved_dir = str(entry.resolve())
+            except Exception:
+                resolved_dir = str(entry)
+            if resolved_dir in searched_dirs:
+                continue
+            searched_dirs.add(resolved_dir)
+
+            found = _find_item_in_ledger_dir(item_id, entry)
+            if _is_valid_match(found, entry):
+                p_str = str(found["path"].resolve()) if hasattr(found["path"], "resolve") else str(found["path"])
+                if p_str not in seen_paths:
+                    seen_paths.add(p_str)
+                    matches.append({
+                        **found,
+                        "venture": entry.name,
+                        "ledger_dir": entry,
+                    })
+
+    # 2. Search registered ventures in ventures.json
     try:
         _vfile = _ventures_file()
         ventures = json.loads(_vfile.read_text()) if _vfile.exists() else {}
     except Exception:
         ventures = {}
-    searched = {str(exclude_dir)} if exclude_dir is not None else set()
+
     for name, info in ventures.items():
         vpath = info.get("path", "")
         if not vpath:
             continue
         candidate_dir = Path(vpath) / ".delimit" / "ledger"
-        if str(candidate_dir) in searched:
+        try:
+            resolved_dir = str(candidate_dir.resolve())
+        except Exception:
+            resolved_dir = str(candidate_dir)
+        if resolved_dir in searched_dirs:
             continue
-        searched.add(str(candidate_dir))
-        found = _find_item_in_ledger_dir(item_id, candidate_dir)
-        if found:
-            return {**found, "venture": name}
-    return None
+        searched_dirs.add(resolved_dir)
+
+        if candidate_dir.is_dir():
+            found = _find_item_in_ledger_dir(item_id, candidate_dir)
+            if _is_valid_match(found, candidate_dir):
+                p_str = str(found["path"].resolve()) if hasattr(found["path"], "resolve") else str(found["path"])
+                if p_str not in seen_paths:
+                    seen_paths.add(p_str)
+                    matches.append({
+                        **found,
+                        "venture": name,
+                        "ledger_dir": candidate_dir,
+                    })
+
+    # 3. Search central ledger directory if distinct
+    central = _central_ledger_dir()
+    try:
+        resolved_central = str(central.resolve())
+    except Exception:
+        resolved_central = str(central)
+    if resolved_central not in searched_dirs and central.is_dir():
+        searched_dirs.add(resolved_central)
+        found = _find_item_in_ledger_dir(item_id, central)
+        if _is_valid_match(found, central):
+            p_str = str(found["path"].resolve()) if hasattr(found["path"], "resolve") else str(found["path"])
+            if p_str not in seen_paths:
+                seen_paths.add(p_str)
+                matches.append({
+                    **found,
+                    "venture": "delimit",
+                    "ledger_dir": central,
+                })
+
+    return matches
+
+
+def _venture_name_for_dir(ledger_dir: Path, project_path: str = ".") -> str:
+    try:
+        v2 = _ledger_v2_dir()
+        if ledger_dir.parent.resolve() == v2.resolve():
+            return ledger_dir.name
+    except Exception:
+        pass
+    try:
+        if ledger_dir.parent.name == "ledger-v2":
+            return ledger_dir.name
+    except Exception:
+        pass
+    try:
+        _vfile = _ventures_file()
+        if _vfile.exists():
+            ventures = json.loads(_vfile.read_text())
+            for name, info in ventures.items():
+                vpath = info.get("path", "")
+                if vpath:
+                    cand = Path(vpath) / ".delimit" / "ledger"
+                    try:
+                        if cand.resolve() == ledger_dir.resolve():
+                            return name
+                    except Exception:
+                        if str(cand) == str(ledger_dir):
+                            return name
+    except Exception:
+        pass
+    try:
+        detected = _detect_venture(project_path).get("name")
+        if detected:
+            return detected
+    except Exception:
+        pass
+    return "delimit"
+
+
+def _find_item_across_registered_ventures(
+    item_id: str, exclude_dir: Optional[Path]
+) -> Optional[Dict[str, Any]]:
+    """LED-5658 review v2: READ-ONLY scan of every venture's
+    ledger for item_id, skipping exclude_dir. Never writes. Returns the
+    _find_item_in_ledger_dir result plus the venture name, or None.
+    """
+    matches = _find_item_across_all_venture_ledgers(item_id, exclude_dir=exclude_dir)
+    return matches[0] if matches else None
 
 
 def update_item(
@@ -1392,6 +1525,7 @@ def update_item(
     review_diff_text: Optional[str] = None,
     origin_tags: Optional[Dict[str, str]] = None,
     strict_io: bool = False,
+    venture: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Update an existing ledger item's fields.
 
@@ -1483,6 +1617,9 @@ def update_item(
             _err["item_found_in"] = _elsewhere["venture"]
         return _err
 
+    if venture and project_path in ("", "."):
+        project_path = venture
+
     if strict_io:
         _ensure(project_path, strict=True)
     else:
@@ -1492,15 +1629,40 @@ def update_item(
     # First, search the specified project's ledger
     found = _find_item_in_ledger_dir(item_id, ledger_dir)
 
+    has_explicit_venture = bool(
+        (venture and str(venture).strip())
+        or (_canonical_venture_slug(project_path) is not None)
+    )
+
+    if found:
+        local_vname = _venture_name_for_dir(ledger_dir, project_path)
+        other_matches = _find_item_across_all_venture_ledgers(item_id, exclude_dir=ledger_dir)
+        other_ventures = sorted(set(
+            m["venture"] for m in other_matches
+            if m.get("venture") and m.get("venture") != local_vname
+        ))
+        if other_ventures and not has_explicit_venture:
+            all_ventures = sorted(set([local_vname] + other_ventures))
+            return {
+                "error": f"Item {item_id} is ambiguous: found in multiple ventures ({', '.join(all_ventures)})",
+                "ambiguous_ventures": all_ventures,
+            }
+
     # Cross-venture fallback: unchanged from pre-LED-5658 behavior for
     # both auto-detect AND an explicit-but-recognized venture. Only a
     # genuinely UNKNOWN venture (rejected above, before reaching here)
     # loses it.
     _used_venture_fallback = False
     if not found:
-        _elsewhere = _find_item_across_registered_ventures(item_id, exclude_dir=ledger_dir)
-        if _elsewhere is not None:
-            found = _elsewhere
+        matches = _find_item_across_all_venture_ledgers(item_id, exclude_dir=ledger_dir)
+        if len(matches) > 1:
+            matching_ventures = sorted(set(m["venture"] for m in matches))
+            return {
+                "error": f"Item {item_id} is ambiguous: found in multiple ventures ({', '.join(matching_ventures)})",
+                "ambiguous_ventures": matching_ventures,
+            }
+        elif len(matches) == 1:
+            found = matches[0]
             _used_venture_fallback = True
 
     if found:
@@ -1669,6 +1831,9 @@ def update_item(
             # default-resolved venture did NOT hold the item; some OTHER
             # registered venture did.
             result["venture_fallback"] = True
+            result["venture"] = found.get("venture")
+        else:
+            result["venture"] = found.get("venture") or _venture_name_for_dir(ledger_dir, project_path)
         return result
 
     # Note: an EXPLICIT unknown venture never reaches here — it was
@@ -1952,6 +2117,18 @@ def list_items(
                     if "tags" in item and item["tags"] is not None:
                         # Tag updates replace the existing tag set when present
                         state[item_id]["tags"] = item["tags"]
+                    # Bundles without the front-end modules have no front-end
+                    # writers, so there is nothing to taint (never an import error).
+                    try:
+                        from ai.untrusted_records import frontend_tainted
+                    except ImportError:
+                        frontend_tainted = lambda _item: False  # noqa: E731
+                    if frontend_tainted(item):
+                        state[item_id].pop("promoted", None)
+                        state[item_id]["origin"] = "worker:derived"
+                        state[item_id]["trigger"] = "owner_request"
+                    elif item.get("trigger") == "owner_request":
+                        state[item_id]["trigger"] = "owner_request"
                     # LED-5321 M4: replay truth fields (latest wins).
                     if "evidence" in item and isinstance(item["evidence"], dict):
                         state[item_id]["evidence"] = item["evidence"]
@@ -1966,7 +2143,7 @@ def list_items(
                         state[item_id]["ship_proof"] = item["ship_proof"]
                     state[item_id]["updated_at"] = item.get("updated_at")
             else:
-                state[item_id] = {**item}
+                state[item_id] = {**item, "_origin_store": str(path)}
 
         # LED-5321 M4: truth labels (never fabricated; legacy stays unclassified).
         for _sid, _st in state.items():
@@ -2185,12 +2362,57 @@ def list_ventures() -> Dict[str, Any]:
 # ═══════════════════════════════════════════════════════════════════════
 
 def query_ledger(query: str, project_path: str = ".") -> Dict[str, Any]:
-    """Answer natural language questions about the ledger.
+    """Answer natural language questions or look up an item by id in the ledger.
 
-    Supports: "what shipped this week?", "what's blocked?", "show P0s",
-    "how many items completed?", "what's next?", etc.
+    Supports: item lookup by id across ventures, "what shipped this week?", "what's blocked?",
+    "show P0s", "how many items completed?", "what's next?", etc.
     """
-    q = query.lower().strip()
+    target_id = ""
+    cleaned = (query or "").strip()
+    if re.match(r"^(?:LED|STR)-\d+$", cleaned, re.I):
+        target_id = cleaned.upper()
+
+    if target_id:
+        ledger_dir = _project_ledger_dir(project_path)
+        current_state = _replay_current_state(target_id, ledger_dir)
+        if current_state is not None:
+            local_venture = current_state.get("venture") or _venture_name_for_dir(ledger_dir, project_path)
+            other_matches = _find_item_across_all_venture_ledgers(target_id, exclude_dir=ledger_dir)
+            other_ventures = sorted(set(
+                m["venture"] for m in other_matches
+                if m.get("venture") and m.get("venture") != local_venture
+            ))
+            res: Dict[str, Any] = {
+                "query": query,
+                "intent": "item_lookup",
+                "item": current_state,
+                "venture": local_venture,
+                "status": current_state.get("status"),
+            }
+            if other_ventures:
+                res["other_ventures"] = other_ventures
+            return res
+        matches = _find_item_across_all_venture_ledgers(target_id, exclude_dir=ledger_dir)
+        if len(matches) > 1:
+            matching_ventures = sorted(set(m["venture"] for m in matches))
+            return {
+                "error": f"Item {target_id} is ambiguous: found in multiple ventures ({', '.join(matching_ventures)})",
+                "ambiguous_ventures": matching_ventures,
+            }
+        elif len(matches) == 1:
+            found = matches[0]
+            replayed = _replay_current_state(target_id, found["ledger_dir"])
+            return {
+                "query": query,
+                "intent": "item_lookup",
+                "item": replayed or found,
+                "venture": found["venture"],
+                "venture_fallback": True,
+                "status": (replayed or {}).get("status"),
+            }
+        return {"error": f"Item {target_id} not found in project ledger"}
+
+    q = (query or "").lower().strip()
 
     # Route to appropriate data based on query intent
     if any(w in q for w in ["shipped", "completed", "done", "finished", "closed"]):
@@ -3402,6 +3624,15 @@ def _canonical_close(
         receipt_status = "failed"
         receipt_error = ""
         receipt_record: Optional[Dict[str, Any]] = None
+        chat_run = (
+            os.environ.get("DELIMIT_CHAT_RUN_ID", "")
+            or os.environ.get("DELIMIT_LAUNCHER_RUN_ID", "")
+        )
+        launcher_run = os.environ.get("DELIMIT_LAUNCHER_RUN_ID", "") or chat_run
+        native_sess = (
+            os.environ.get("DELIMIT_NATIVE_SESSION_ID", "")
+            or os.environ.get("CODEX_SESSION_ID", "")
+        )
         receipt_updates = {
             "task_description": (task_description or "").strip() or summary,
             "completed": list(completed) if completed is not None else list(items_completed or []),
@@ -3416,6 +3647,9 @@ def _canonical_close(
             "logical_session_id": logical_id,
             "soul_id": soul_id,
             "handoff_id": handoff_id,
+            "chat_run_id": chat_run,
+            "launcher_run_id": launcher_run,
+            "native_session_id": native_sess,
         }
         if files_changed is not None:
             receipt_updates["files_modified"] = [
@@ -3472,6 +3706,10 @@ def _canonical_close(
                     from_model=str(receipt_updates["from_model"]),
                     to_model=str(receipt_updates["to_model"]),
                     project_path=resolved,
+                    chat_run_id=chat_run,
+                    launcher_run_id=launcher_run,
+                    native_session_id=native_sess,
+                    logical_session_id=logical_id,
                 )
                 receipt_id = new_receipt.receipt_id
                 try:
@@ -3485,6 +3723,9 @@ def _canonical_close(
                             "logical_session_id": logical_id,
                             "soul_id": soul_id,
                             "handoff_id": handoff_id,
+                            "chat_run_id": chat_run,
+                            "launcher_run_id": launcher_run,
+                            "native_session_id": native_sess,
                         },
                         project_path=resolved,
                     )
@@ -3537,6 +3778,9 @@ def _canonical_close(
                             "logical_session_id": logical_id,
                             "soul_id": soul_id,
                             "handoff_id": handoff_id,
+                            "chat_run_id": chat_run,
+                            "launcher_run_id": launcher_run,
+                            "native_session_id": native_sess,
                         }
                     )
                 receipt_status = "created"
@@ -3577,6 +3821,9 @@ def _canonical_close(
                     "source_model": effective_model,
                     "updated_at": incoming_ts,
                     "close_verified": False,
+                    "chat_run_id": chat_run,
+                    "launcher_run_id": launcher_run,
+                    "native_session_id": native_sess,
                 }
             )
             handoff["id"] = handoff_id
@@ -3606,6 +3853,9 @@ def _canonical_close(
                 # this record, in the same domain as the soul/receipt.
                 "updated_at": incoming_ts,
                 "close_verified": False,
+                "chat_run_id": chat_run,
+                "launcher_run_id": launcher_run,
+                "native_session_id": native_sess,
             }
             try:
                 _write_handoff_file(handoff_file, handoff)
@@ -4021,6 +4271,18 @@ def _replay_current_state(item_id: str, ledger_dir: Path) -> Optional[Dict[str, 
                         state["last_note"] = item["note"]
                     if "worked_by" in item:
                         state["last_worked_by"] = item["worked_by"]
+                    # Bundles without the front-end modules have no front-end
+                    # writers, so there is nothing to taint (never an import error).
+                    try:
+                        from ai.untrusted_records import frontend_tainted
+                    except ImportError:
+                        frontend_tainted = lambda _item: False  # noqa: E731
+                    if frontend_tainted(item):
+                        state.pop("promoted", None)
+                        state["origin"] = "worker:derived"
+                        state["trigger"] = "owner_request"
+                    elif item.get("trigger") == "owner_request":
+                        state["trigger"] = "owner_request"
                     # LED-5321 M4: replay truth fields (latest wins).
                     if "evidence" in item and isinstance(item["evidence"], dict):
                         state["evidence"] = item["evidence"]
@@ -4036,7 +4298,7 @@ def _replay_current_state(item_id: str, ledger_dir: Path) -> Optional[Dict[str, 
                     if "updated_at" in item:
                         state["updated_at"] = item["updated_at"]
             else:
-                state = {**item}
+                state = {**item, "_origin_store": str(path)}
         if state is not None:
             if "verified_states" not in state:
                 state["verified_states"] = []

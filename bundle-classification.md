@@ -437,3 +437,8 @@ enumerates `ai/` only).
 - `gateway/ai/social_capability/explain_delimit_claims.yaml` -> INTERNAL —
   claim sheet read only by the INTERNAL `ai/social.py` (gateway #610), same
   classification as the rest of `ai/social_capability/`.
+
+## Classified 2026-11-09 (release 4.24.0 prep, gateway `cd85c817`)
+
+- `gateway/ai/quota_groups.py` -> PUBLIC — Antigravity CLI quota group partitioning ("gemini" vs "claude_gpt") and hold keys (gateway #806). Required by public `ai/agent_dispatch.py` and `ai/provider_usage.py`. Pure standard library, no proprietary logic.
+- 23 internal modules -> INTERNAL (listed in `bundle-internal-exclude.txt`): swarm build credentials/portfolio (`build_credential_guard.py`, `build_portfolio.py`, `swarm_status.py`), deliberation sessions/file tools/panel roles (`deliberation_file_tools.py`, `deliberation_sessions.py`, `panel_roles.py`), frontend ops/recipes/lanes (`frontend/executor_ops_write.py`, `frontend/ops_write_*.py`, `frontend/recipes/*.yaml`, `frontend/recipes/*.json`, `frontend/runner_inventory.py`, `frontend/state_root.py`, `frontend/x_lane*.py`, `frontend/x_tools.py`), outreach comment controls/reply producer (`outreach_comment_controls.py`, `outreach_reply_producer.py`), owner directives (`owner_directives.py`), and self repair unit diagnosis (`self_repair/systemd_units.py`).
