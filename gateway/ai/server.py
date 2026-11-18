@@ -273,6 +273,64 @@ def _detect_prompt_injection(args: dict, tool_name: str = "") -> Optional[str]:
     return None
 
 
+# delimit-mcp-server#300: text fields that the server renders itself (receipt
+# banners), keyed by tool name without the "delimit_" prefix. Their full-line
+# "=====" rules are presentation, not "delimiter manipulation", so output
+# scanning drops those rule lines before checking the field. Every other
+# pattern still applies to these fields, and every other field (including
+# third-party content relayed by sensor / fetch / inbox tools) is scanned in
+# full.
+_SERVER_RENDERED_OUTPUT_FIELDS: Dict[str, frozenset] = {
+    "handoff_create": frozenset({"formatted"}),  # format_receipt()
+    "handoff_list": frozenset({"display"}),      # format_receipt()
+    "revive": frozenset({"context"}),            # scoped revive: format_receipt()
+}
+_RENDERED_RULE_LINE = re.compile(r"(?m)^[ \t]*={5,}[ \t]*$")
+
+
+def _output_injection_view(tool_name: str, result: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the view of a tool result that output injection scanning reads."""
+    rendered = _SERVER_RENDERED_OUTPUT_FIELDS.get(tool_name.removeprefix("delimit_"))
+    if not rendered:
+        return result
+    view = dict(result)
+    for key in rendered:
+        value = view.get(key)
+        if isinstance(value, str):
+            view[key] = _RENDERED_RULE_LINE.sub("", value)
+    return view
+
+
+def _scan_tool_arguments(tool_name: str, fn, args: tuple, kwargs: dict) -> Optional[str]:
+    """LED-195 / delimit-mcp-server#300: scan a tool call's arguments.
+
+    Best-effort: a scanner failure never blocks the tool call.
+    """
+    try:
+        named = dict(kwargs)
+        if args:
+            try:
+                import inspect as _sig_inspect
+                bound = _sig_inspect.signature(fn).bind_partial(*args)
+                for key, value in bound.arguments.items():
+                    named.setdefault(key, value)
+            except (TypeError, ValueError):
+                pass
+        if not named:
+            return None
+        return _detect_prompt_injection(named, tool_name)
+    except Exception:
+        return None
+
+
+def _attach_input_warning(result, warning: Optional[str]):
+    """Add the input-scan warning to a dict result without replacing one already set."""
+    if warning and isinstance(result, dict) and "_security_warning" not in result:
+        result = dict(result)
+        result["_security_warning"] = warning
+    return result
+
+
 def _coerce_list_arg(
     value: Optional[Union[str, List[str]]],
     field_name: str,
@@ -648,7 +706,7 @@ def _emit_policy_event(tool_name: str, status: str, reason: str) -> None:
 #      gateway/ai/server.py ← ../../package.json)
 #   3. the pinned fallback below (last resort so the delimit_version return
 #      schema never changes shape — never-break-installs).
-_VERSION_FALLBACK = "4.24.0"
+_VERSION_FALLBACK = "4.25.0"
 
 
 def _resolve_version(start_path: Optional[str] = None) -> str:
@@ -1140,6 +1198,7 @@ if ACTIVE_TOOLSET != "full":
 #  packaging defect stays loud instead of silently absorbed.
 # ─────────────────────────────────────────────────────────────────────
 import functools as _functools
+from inspect import isawaitable as _isawaitable_result
 
 from ai.capability_guard import (  # noqa: E402
     guard_internal as _guard_internal,
@@ -1155,10 +1214,23 @@ def _capability_guarded_tool(*args, **kwargs):
         return not _tool_backend_absent(kwargs.get("name") or getattr(fn, "__name__", ""))
 
     def _wrap(fn):
+        tool_name = kwargs.get("name") or getattr(fn, "__name__", "")
+
         @_functools.wraps(fn)
         def _guarded(*a, **kw):
+            # LED-195 / delimit-mcp-server#300: scan the call's ARGUMENTS for
+            # prompt injection here, at dispatch; _with_next_steps only sees
+            # the result.
+            input_warning = _scan_tool_arguments(tool_name, fn, a, kw)
             try:
-                return fn(*a, **kw)
+                result = fn(*a, **kw)
+                if input_warning is None:
+                    return result
+                if _isawaitable_result(result):
+                    async def _annotated(awaitable=result):
+                        return _attach_input_warning(await awaitable, input_warning)
+                    return _annotated()
+                return _attach_input_warning(result, input_warning)
             except (ImportError, ModuleNotFoundError) as exc:
                 handled = _guard_internal(
                     getattr(fn, "__name__", ""), _missing_module_name(exc), exc
@@ -1791,6 +1863,10 @@ NEXT_STEPS_REGISTRY: Dict[str, List[Dict[str, Any]]] = {
     "design_validate_responsive": [
         {"tool": "delimit_story_visual_test", "reason": "Take screenshots at different viewports", "suggested_args": {}, "is_premium": True},
     ],
+    "design_audit_render": [
+        {"tool": "delimit_story_accessibility", "reason": "Also scan source for WCAG issues", "suggested_args": {}, "is_premium": True},
+        {"tool": "delimit_ledger_add", "reason": "Track rendered design defects in the ledger", "suggested_args": {}, "is_premium": False},
+    ],
     "design_component_library": [
         {"tool": "delimit_story_generate", "reason": "Generate stories for cataloged components", "suggested_args": {}, "is_premium": True},
         {"tool": "delimit_story_accessibility", "reason": "Run accessibility audit on all components", "suggested_args": {}, "is_premium": True},
@@ -2326,9 +2402,13 @@ def _with_next_steps(tool_name: str, result: Dict[str, Any]) -> Dict[str, Any]:
         }
         return _cap_response(policy_gate)
 
-    # LED-195: Prompt injection detection on tool inputs
+    # LED-195: prompt injection detection on tool OUTPUTS (relayed third-party
+    # content). Arguments are scanned at dispatch in _capability_guarded_tool.
+    # Server-rendered banner rule lines are excluded (delimit-mcp-server#300).
     if isinstance(result, dict):
-        injection = _detect_prompt_injection(result, tool_name)
+        injection = _detect_prompt_injection(
+            _output_injection_view(tool_name, result), tool_name
+        )
         if injection:
             result["_security_warning"] = injection
 
@@ -6240,6 +6320,23 @@ def delimit_security_audit(
 
     stub_title = f"Security: {critical_count} critical finding(s) in {target}"
 
+    # LED-6392 scope: an operator may list disposable trees (agent worktrees,
+    # release snapshots, scratch checkouts) in <DELIMIT_HOME>/security_audit.json
+    # ledger_exclude_paths. The findings above are still returned in full and
+    # deploy_plan still blocks on them; only the P0 stub, governance task and
+    # notification are skipped, so one codebase does not file one P0 per copy.
+    # No config file means no exclusions (unchanged default behaviour).
+    try:
+        from ai.security_ledger_scope import ledger_exclusion_reason
+        _scope_skip = ledger_exclusion_reason(target)
+    except Exception:  # noqa: BLE001 — fail toward filing
+        _scope_skip = None
+    if _scope_skip:
+        chain["steps"].append({"step": "ledger_scope", "ok": True, "skipped": _scope_skip})
+        chain["status"] = "critical_findings_not_filed_excluded_scope"
+        audit_result["chain"] = chain
+        return _with_next_steps("security_audit", audit_result)
+
     # LED-1753 dedup: a recurring scan of the same target emits the SAME title
     # every run. Without this guard each run piled up a duplicate open P0 — the
     # source of the LED-3179..3213 noise (20+ identical "critical finding(s)"
@@ -6248,7 +6345,11 @@ def delimit_security_audit(
     # tracked: skip the gov-task + ledger + notify and return early.
     try:
         from ai.ledger_manager import list_items as _list_items
-        _existing = _list_items(ledger="ops", status="open", text=stub_title)
+        # LED-6392: match on the count-independent suffix. The finding count
+        # moves between re-scans of the same tree (15 -> 16), which changed the
+        # title and let LED-6387/6388 open as two P0s for one path.
+        _dedup_suffix = f" critical finding(s) in {target}"
+        _existing = _list_items(ledger="ops", status="open", text=_dedup_suffix.strip())
         _ex_items = _existing.get("items") if isinstance(_existing, dict) else _existing
         # ai.ledger_manager.list_items returns items as a dict KEYED BY LEDGER —
         # {"ops": [...], "strategy": [...]} — not a flat list. The original
@@ -6265,7 +6366,9 @@ def delimit_security_audit(
         else:
             _flat = []
         _dupe = any(
-            isinstance(it, dict) and it.get("title") == stub_title
+            isinstance(it, dict)
+            and str(it.get("title") or "").startswith("Security: ")
+            and str(it.get("title") or "").endswith(_dedup_suffix)
             for it in _flat
         )
     except Exception:  # noqa: BLE001 — dedup is best-effort; never block the audit
@@ -7648,6 +7751,63 @@ def delimit_design_validate_responsive(
         return _with_next_steps("design_validate_responsive", {"error": str(e)})
     from backends.ui_bridge import design_validate_responsive
     return _with_next_steps("design_validate_responsive", _safe_call(design_validate_responsive, project_path=project_path, check_types=check_types, url=url))
+
+
+@mcp.tool()
+def delimit_design_audit_render(
+    urls: Annotated[Union[str, List[str]], Field(description="Page URLs to audit (http/https or a local HTML file), as a list or comma string. Required.")],
+    viewports: Annotated[Optional[Union[str, List[str]]], Field(description="Viewport sizes as \"WIDTHxHEIGHT\" list or comma string. None = 390x844, 768x1024, 1366x768, 1440x900, 1920x1032.")] = None,
+    color_schemes: Annotated[Optional[Union[str, List[str]]], Field(description="prefers-color-scheme values to render: \"light\", \"dark\", \"no-preference\". None = light and dark.")] = None,
+    selectors: Annotated[Optional[Dict[str, str]], Field(description="Optional CSS selectors, e.g. {\"item\": \".article-card\"} names the list item counted in the first screen.")] = None,
+    thresholds: Annotated[Optional[Dict[str, Any]], Field(description="Optional threshold overrides (e.g. {\"dominant_font_min_px\": 14, \"downgrade\": [\"contrast\"]}).")] = None,
+    output_dir: Annotated[Optional[str], Field(description="Directory for screenshots and summary.json. None = ~/.delimit/design_audits/<timestamp>.")] = None,
+    full_page: Annotated[bool, Field(description="Screenshot the whole page instead of the first screen.")] = False,
+) -> Dict[str, Any]:
+    """Audit rendered pages in a real browser the way a person sees them.
+
+    When to use: after building or changing a website, before deploy,
+    to catch overflow, one-item desktop screens, empty placeholders,
+    tiny text, low contrast and visible error states.
+    When NOT to use: to lint CSS source without a running site (use
+    delimit_design_validate_responsive).
+
+    Sibling contrast: delimit_design_validate_responsive reads source
+    files; this renders each page in headless Chromium per viewport and
+    colour scheme and measures the result.
+
+    Side effects: fetches the URLs (network), writes PNG screenshots and
+    summary.json to output_dir via backends.tools_design_render.audit in
+    a subprocess. Returns status "unavailable" with install steps when
+    Playwright or Chromium is missing; never raises.
+
+    Args:
+        urls: URLs or local HTML file paths, list or comma string.
+        viewports: "WIDTHxHEIGHT" sizes. None = 390x844 .. 1920x1032.
+        color_schemes: "light", "dark", "no-preference". None = both.
+        selectors: Optional {"item": css} counted in the first screen.
+        thresholds: Optional limit overrides; "downgrade" lists checks
+            whose errors become warnings.
+        output_dir: Output directory. None = ~/.delimit/design_audits/.
+        full_page: Full-page screenshots instead of the first screen.
+
+    Returns:
+        Dict with verdict (errors fail), per-check status, findings,
+        screenshot paths, summary_path, next_steps.
+    """
+    try:
+        url_list = _coerce_list_arg(urls, "urls")
+        viewport_list = _coerce_list_arg(viewports, "viewports")
+        scheme_list = _coerce_list_arg(color_schemes, "color_schemes")
+    except ValueError as e:
+        return _with_next_steps("design_audit_render", {"error": str(e)})
+    from backends.tools_design_render import audit, compact
+
+    def _run(**kwargs):
+        return compact(audit(in_process=False, **kwargs))
+
+    return _with_next_steps("design_audit_render", _safe_call(
+        _run, urls=url_list, viewports=viewport_list, color_schemes=scheme_list,
+        selectors=selectors, thresholds=thresholds, output_dir=output_dir, full_page=full_page))
 
 
 @mcp.tool()
@@ -11132,6 +11292,8 @@ def delimit_deliberate(
     save_path: Annotated[str, Field(description="Optional file path to save the full transcript.")] = "",
     scope: Annotated[str, Field(description="Optional scope override — \"strategic\", \"social\", or \"operational\". Empty = engine classifies from keywords.")] = "",
     context_files: Annotated[Optional[List[str]], Field(description="Optional list of file paths whose contents are read server-side, redacted (secrets/PII), size-capped, and injected as a \"Referenced Files\" block so the panel can reason over real source (panelists have no filesystem access). Fails closed per file.")] = None,
+    media_files: Annotated[Optional[List[str]], Field(description="Optional list of video (mp4/mov/webm), audio (mp3/wav/m4a/flac/ogg) or image (png/jpg/webp) paths the panel should watch/listen to. Max 5 files, 200 MB each; a breach refuses the call. Media-capable CLI seats open the files, codex seats get contact sheets/spectrograms/images, other seats get metadata only. Transcript records sha256/bytes/mime and per-seat modalities. Empty = no media.")] = None,
+    media_controls: Annotated[bool, Field(description="When true (and media_files has audio), add a hidden copy with injected noise at a known time; a media seat that misses it is voided. Default false.")] = False,
 ) -> Dict[str, Any]:
     """Run multi-model consensus via AI-to-AI deliberation (Pro).
 
@@ -11167,6 +11329,12 @@ def delimit_deliberate(
             panel has no filesystem access, so this is the only way it sees
             real file content. Fails closed (an unreadable/oversize file is
             annotated, never aborts the deliberation).
+        media_files: Optional list of video/audio/image paths for the panel
+            to watch and listen to (max 5, 200 MB each). Media-capable CLI
+            seats open the files; codex seats receive images; other seats get
+            metadata only and are told they did not see the media.
+        media_controls: Optional hidden noise control for media seats; a
+            seat that misses it is voided. Default False.
 
     Returns:
         Dict with the consensus result, per-round transcripts, and
@@ -11193,11 +11361,15 @@ def delimit_deliberate(
         save_path=save_path or "",
         scope=scope or "",
         context_files=context_files,
+        # Media kwargs are passed only when used, so the call shape for every
+        # existing (media-free) caller is unchanged.
+        **({"media_files": media_files} if media_files else {}),
+        **({"media_controls": True} if media_files and media_controls else {}),
     )
 
     # LED-978: a blocked deliberation returns an error dict; pass it straight
     # through so callers can act on it (widen scope, add models, etc).
-    if result.get("error") and result.get("scope"):
+    if result.get("error") and (result.get("scope") or media_files):
         return result
 
     # Add summary for Claude to review
@@ -11214,6 +11386,14 @@ def delimit_deliberate(
     }
     if result.get("tiebreaker"):
         summary["tiebreaker"] = result["tiebreaker"]
+    if result.get("media_evidence"):
+        _me = result["media_evidence"]
+        summary["media"] = {
+            "files": [{k: f.get(k) for k in ("index", "kind", "mime", "status", "bytes", "sha256")}
+                      for f in _me.get("files", [])],
+            "seats": _me.get("seats", {}),
+            "controls": _me.get("controls", {}).get("results", {}),
+        }
 
     # Include last round responses for immediate review. Only surface a
     # per-model field when the model actually spoke — otherwise we'd emit

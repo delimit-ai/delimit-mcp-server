@@ -69,6 +69,8 @@ DEFAULT_STALENESS_THRESHOLDS: Dict[str, int] = {
     # STALE by delimit_heartbeat_check, catching the "never runs" failure the
     # in-run consecutive-error counter cannot see.
     "delimit-reply-watch": 5400,
+    # Outreach reply tracker (LED-6580): 30-min systemd timer. >90 min = stale.
+    "delimit-outreach-reply-tracker": 5400,
 }
 
 # Fallback for services not in the threshold map.

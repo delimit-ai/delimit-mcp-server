@@ -552,13 +552,41 @@ def send_telegram(
     bot_token: str = "",
     chat_id: str = "",
     buttons: Optional[List[List[Dict[str, Any]]]] = None,
+    *,
+    hq_bypass: bool = False,
+    record_event_type: str = "",
 ) -> Dict[str, Any]:
     """Send a Telegram message via bot API.
 
     ``buttons`` is an optional list-of-rows of InlineKeyboardButton dicts
     (``text`` + ``url`` or ``callback_data``). When provided the payload
     includes ``reply_markup: {inline_keyboard: buttons}``.
+
+    Delimit HQ (owner 2026-11-14): while ``ai.notify_hq`` is enabled every
+    unsolicited message goes through the HQ funnel instead (one bot, venture
+    tag, immediate / digest / drop).  ``delivered`` is True when HQ pushed it
+    or durably spooled it for the next digest (``routed`` says which).  Turn
+    the funnel off with ``"enabled": false`` in ``~/.delimit/hq/config.json``.
     """
+    hq_fallback = False
+    if not hq_bypass:
+        try:
+            from ai import notify_hq
+            if notify_hq.enabled():
+                hq_fallback = True  # cleared only by the successful return below
+                routed = notify_hq.route(message, event_type=event_type, buttons=buttons,
+                                         source="ai.notify.send_telegram")
+                if routed.get("accepted"):
+                    return {
+                        "channel": "telegram",
+                        "delivered": True,
+                        "routed": "hq_" + routed.get("class", ""),
+                        "venture": routed.get("venture"),
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "error": None,
+                    }
+        except Exception as exc:  # the funnel must never swallow a message
+            logger.warning("HQ routing failed, sending directly: %s", type(exc).__name__)
     bot_config = _load_json_file(
         Path.home() / ".delimit" / "secrets" / "telegram-delimitai-bot.json"
     )
@@ -588,13 +616,24 @@ def send_telegram(
         payload["reply_markup"] = {"inline_keyboard": buttons}
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     result = _post_json(url, payload)
-    _record_notification({
+    record = {
         "channel": "telegram",
-        "event_type": event_type,
+        "event_type": record_event_type or event_type,
         "message": message,
         "timestamp": timestamp,
         "success": result.get("success", False),
-    })
+    }
+    if hq_bypass or hq_fallback:
+        # With HQ on, the local log keeps metadata only, also when HQ failed
+        # and this direct send is the fallback. The exact "Link: <url>" lines
+        # are kept: they are the fresh-X transport receipts and carry no text.
+        record["hq"] = True
+        record["hq_fallback"] = hq_fallback
+        record["message"] = "\n".join(
+            line for line in (message or "").splitlines()
+            if _re.fullmatch(r"Link: https?://\S+", line))
+        record["chars"] = len(message or "")
+    _record_notification(record)
     return {
         "channel": "telegram",
         "delivered": result.get("success", False),
@@ -1071,6 +1110,66 @@ def _render_html_email(subject: str, body: str, event_type: str) -> str:
 </html>"""
 
 
+# Owner emails that stay emails even after the HQ push: the reply-to-approve
+# loop (inbox daemon) reads replies to these, so the email itself is the
+# control surface.
+_HQ_KEEP_EMAIL_EVENTS = frozenset({
+    "owner_action", "outreach_draft_approval", "approval_request", "social_draft",
+    "draft_post_manual_required", "founder_directive",
+})
+
+
+def _route_owner_email_via_hq(to, subject, body, event_type, attachments):
+    """Delimit HQ (owner 2026-11-14): owner-bound notification email -> Telegram.
+
+    Returns a send_email-shaped result when HQ took the item, or None to let
+    the normal email path run (HQ off, not an owner address, a commercial
+    outbound send, or an HQ failure: nothing is ever lost).
+
+    Immediate items are pushed to the HQ bot; the email is still sent when
+    it carries an attachment, is longer than the Telegram push, belongs to
+    the reply-to-approve loop (any class), or was held by the 5/hour cap.
+    Digest items are spooled (no email unless they carry an attachment or are
+    a long document).  Drop items (owner config only) are recorded only.
+    """
+    try:
+        from ai import notify_hq
+        cfg = notify_hq.load_config()
+        if not notify_hq.enabled(cfg):
+            return None
+        if event_type in DIRECT_COMMERCIAL_OUTBOUND_EMAIL_EVENT_TYPES:
+            return None
+        recipient = (to or "").strip().lower()
+        owners = notify_hq.owner_emails(cfg) | {str(FORWARD_TO).strip().lower()}
+        if recipient and recipient not in owners:
+            return None
+        is_long = len(body or "") > notify_hq.TELEGRAM_MAX * notify_hq.IMMEDIATE_MAX_CHUNKS
+        routed = notify_hq.route(body or "", event_type=event_type, subject=subject or "",
+                                 source="ai.notify.send_email", full_text_ok=True)
+        if not routed.get("accepted"):
+            return None
+        stamp = datetime.now(timezone.utc).isoformat()
+        if event_type in _HQ_KEEP_EMAIL_EVENTS or routed.get("rate_held"):
+            # The reply-to-approve loop needs the email whatever the class, and
+            # an urgent item held by the 5/hour cap must not wait for a digest.
+            return None
+        if routed.get("class") == notify_hq.IMMEDIATE:
+            keep_email = bool(attachments) or is_long or routed.get("truncated")
+            if keep_email:
+                return None
+            return {"channel": "telegram", "delivered": True, "routed": "hq_immediate",
+                    "timestamp": stamp, "error": None}
+        if routed.get("class") == notify_hq.DIGEST and (
+                attachments or len(body or "") > notify_hq.LONG_DOCUMENT_CHARS):
+            return None  # attachments and long documents still travel by email
+        return {"channel": "email", "delivered": routed.get("class") == notify_hq.DIGEST,
+                "queued": True, "routed": "hq_" + str(routed.get("class")),
+                "timestamp": stamp, "error": None}
+    except Exception as exc:
+        logger.warning("HQ email routing failed, emailing directly: %s", type(exc).__name__)
+        return None
+
+
 def send_email(
     to: str = "",
     subject: str = "",
@@ -1125,6 +1224,11 @@ def send_email(
 
     # body takes precedence, fall back to message for backward compat
     email_body = body or message
+
+    hq_result = None if protected_confirmation else _route_owner_email_via_hq(
+        to, subject, email_body, event_type, attachments)
+    if hq_result is not None:
+        return hq_result
 
     timestamp = datetime.now(timezone.utc).isoformat()
     event_key = (event_type or "").lower()
@@ -2000,25 +2104,90 @@ def classify_email(sender: str, subject: str, from_header: str = "") -> str:
     return "non-owner"
 
 
+def html_to_text(markup: str) -> str:
+    """Readable text from an HTML email body (stdlib only).
+
+    Drops script/style/head, turns block tags and <br> into line breaks,
+    unescapes entities and collapses runs of blank lines.
+    """
+    from html.parser import HTMLParser
+
+    class _Text(HTMLParser):
+        BLOCK = {"p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6",
+                 "blockquote", "table", "ul", "ol", "hr"}
+        SKIP = {"script", "style", "head", "title"}
+
+        def __init__(self):
+            super().__init__(convert_charrefs=True)
+            self.out: List[str] = []
+            self.skip = 0
+
+        def handle_starttag(self, tag, attrs):
+            if tag in self.SKIP:
+                self.skip += 1
+            elif tag in self.BLOCK:
+                self.out.append("\n")
+
+        def handle_endtag(self, tag):
+            if tag in self.SKIP:
+                self.skip = max(0, self.skip - 1)
+            elif tag in self.BLOCK:
+                self.out.append("\n")
+
+        def handle_data(self, data):
+            if not self.skip:
+                self.out.append(data)
+
+    parser = _Text()
+    try:
+        parser.feed(markup or "")
+        parser.close()
+    except Exception:
+        return _re.sub(r"<[^>]+>", " ", markup or "").strip()
+    lines = [" ".join(line.split()) for line in "".join(parser.out).splitlines()]
+    text = "\n".join(lines)
+    return _re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+def message_text(msg: email.message.Message, first_plain_only: bool = False) -> str:
+    """Plain-text body of an email; falls back to the HTML part as text.
+
+    HTML-only mail (common from phones and webmail) used to come back empty
+    and alerted as "(no text content)" (prospect reply, 2026-11-09).
+    """
+    plain: List[str] = []
+    html: List[str] = []
+    parts = msg.walk() if msg.is_multipart() else [msg]
+    for part in parts:
+        if part.is_multipart():
+            continue
+        if str(part.get("Content-Disposition") or "").lower().startswith("attachment"):
+            continue
+        ctype = part.get_content_type()
+        if ctype not in ("text/plain", "text/html"):
+            continue
+        payload = part.get_payload(decode=True)
+        if not payload:
+            continue
+        charset = part.get_content_charset() or "utf-8"
+        try:
+            text = payload.decode(charset, errors="replace")
+        except LookupError:
+            text = payload.decode("utf-8", errors="replace")
+        (plain if ctype == "text/plain" else html).append(text)
+    if plain:
+        return plain[0] if first_plain_only else "\n".join(plain)
+    if html:
+        return html_to_text("\n".join(html))
+    return ""
+
+
 def _forward_email(original_msg: email.message.Message, smtp_pass: str) -> bool:
-    """Forward an email to the owner via SMTP."""
+    """Forward an email to the owner via SMTP (and push it to Delimit HQ)."""
     subject = _decode_header(original_msg.get("Subject", ""))
     from_header = original_msg.get("From", "")
 
-    # Build forwarded message
-    body_parts = []
-    if original_msg.is_multipart():
-        for part in original_msg.walk():
-            if part.get_content_type() == "text/plain":
-                payload = part.get_payload(decode=True)
-                if payload:
-                    body_parts.append(payload.decode("utf-8", errors="replace"))
-    else:
-        payload = original_msg.get_payload(decode=True)
-        if payload:
-            body_parts.append(payload.decode("utf-8", errors="replace"))
-
-    body = "\n".join(body_parts) if body_parts else "(no text content)"
+    body = message_text(original_msg) or "(no text content)"
 
     fwd_text = (
         f"--- Forwarded from pro@delimit.ai ---\n"
@@ -2039,10 +2208,32 @@ def _forward_email(original_msg: email.message.Message, smtp_pass: str) -> bool:
             server.starttls()
             server.login(IMAP_USER, smtp_pass)
             server.sendmail(IMAP_USER, [FORWARD_TO], fwd_msg.as_string())
-        return True
     except Exception as e:
         logger.error("Failed to forward email: %s", e)
         return False
+    _push_inbound_to_hq(from_header, subject, body)
+    return True
+
+
+def _push_inbound_to_hq(from_header: str, subject: str, body: str) -> None:
+    """Delimit HQ: a human reply forwarded from pro@delimit.ai is pushed with
+    full text; mail from known vendor domains goes to the digest instead."""
+    try:
+        from ai import notify_hq
+        if notify_hq.enabled():
+            sender = _extract_sender_email(from_header).lower()
+            vendor = (_extract_sender_domain(sender) in OWNER_ACTION_DOMAINS
+                      or any(sender.startswith(p) for p in NON_OWNER_SENDERS))
+            notify_hq.route(
+                f"From: {from_header}\nSubject: {subject}\n---\n\n{body}",
+                event_type="vendor_mail" if vendor else "inbound_reply",
+                subject=f"Reply at pro@delimit.ai: {subject}",
+                venture="DELIMIT",
+                source="ai.notify._forward_email",
+                full_text_ok=True,
+            )
+    except Exception as exc:  # the email forward already went out
+        logger.warning("HQ push of inbound mail failed: %s", type(exc).__name__)
 
 
 def poll_inbox(

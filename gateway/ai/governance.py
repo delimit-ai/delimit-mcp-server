@@ -256,16 +256,19 @@ def _ledger_list_items(project_path: str = ".") -> Dict[str, Any]:
     return _lm.list_items(project_path=project_path)
 
 
-def _ledger_add_item(*, title: str, type: str, priority: str, source: str, project_path: str = ".") -> Dict[str, Any]:
+def _ledger_add_item(*, title: str, type: str, priority: str, source: str, project_path: str = ".", description: str = "") -> Dict[str, Any]:
     """Indirection layer so tests can patch governance-local ledger hooks."""
     import ai.ledger_manager as _lm
-    return _lm.add_item(
+    kwargs = dict(
         title=title,
         type=type,
         priority=priority,
         source=source,
         project_path=project_path,
     )
+    if description:
+        kwargs["description"] = description
+    return _lm.add_item(**kwargs)
 
 
 def _ledger_update_item(item_id: str, *, status: str, project_path: str = ".") -> Dict[str, Any]:
@@ -288,6 +291,38 @@ def _audit_append_event(kind: str, payload: Dict[str, Any], *, source: str = "",
     except Exception as e:  # noqa: BLE001
         logger.warning("Governance audit-stream append failed: %s", e)
         return {"ok": False, "error": str(e)}
+
+
+# Rules whose result carries a scanned "target" and a vulnerability list.
+_SECURITY_RULES = ("security_audit", "security_scan")
+
+
+def _security_rule_description(result: Dict[str, Any], rule: Dict[str, Any]) -> str:
+    """Target plus a short package/id list for a vulnerable-dependency item."""
+    lines = []
+    target = result.get("target") if isinstance(result, dict) else None
+    if target:
+        lines.append(f"Target: {target}")
+    items = _deep_get(result, rule.get("trigger_key", "")) or []
+    shown = []
+    for v in items[:10] if isinstance(items, list) else []:
+        if not isinstance(v, dict):
+            continue
+        name = v.get("package") or v.get("name") or v.get("file") or "?"
+        ident = v.get("id") or v.get("pattern") or ""
+        sev = v.get("severity") or ""
+        fix = v.get("fix_versions") or v.get("fixAvailable") or ""
+        part = f"{name} {v.get('installed') or ''}".strip()
+        extra = ", ".join(str(x) for x in (ident, sev, f"fix {fix}" if fix else "") if x)
+        shown.append(f"- {part}" + (f" ({extra})" if extra else ""))
+    if shown:
+        lines.append("Findings:")
+        lines.extend(shown)
+        if isinstance(items, list) and len(items) > len(shown):
+            lines.append(f"- ... {len(items) - len(shown)} more")
+    if target:
+        lines.append(f"Run `delimit_security_audit target={target}` to reproduce.")
+    return "\n".join(lines)
 
 
 # Governance rules — what triggers auto-ledger-creation
@@ -479,6 +514,10 @@ NEXT_STEPS = {
     "design_validate_responsive": [
         {"tool": "delimit_story_accessibility", "reason": "Also check accessibility", "premium": False},
         {"tool": "delimit_story_visual_test", "reason": "Take visual baseline screenshot", "premium": False},
+    ],
+    "design_audit_render": [
+        {"tool": "delimit_story_accessibility", "reason": "Also scan source for WCAG issues", "premium": False},
+        {"tool": "delimit_ledger_add", "reason": "Track rendered design defects", "premium": False},
     ],
     "design_generate_component": [
         {"tool": "delimit_story_generate", "reason": "Generate stories for the new component", "premium": False},
@@ -770,16 +809,42 @@ def govern(tool_name: str, result: Dict[str, Any], project_path: str = ".") -> D
             if value:
                 triggered = True
 
+        description = ""
+        if triggered and clean_name in _SECURITY_RULES:
+            # LED-6392: a vulnerable-dependency item used to carry no target and
+            # no package list, so triage had to reverse-engineer it from
+            # evidence timestamps. Record both. Disposable trees listed in
+            # <DELIMIT_HOME>/security_audit.json are not filed at all (the
+            # findings stay in the returned result).
+            target = result.get("target") if isinstance(result, dict) else None
+            try:
+                from ai.security_ledger_scope import ledger_exclusion_reason
+                skip = ledger_exclusion_reason(str(target)) if target else None
+            except Exception:  # noqa: BLE001 - fail toward filing
+                skip = None
+            if skip:
+                triggered = False
+                governed_result["governance_scope"] = {
+                    "action": "ledger_skipped_excluded_scope",
+                    "target": str(target),
+                    "reason": skip,
+                }
+            else:
+                description = _security_rule_description(result, rule)
+
         if triggered:
             title = rule["ledger_title"].format(**context) if context else rule["ledger_title"]
-            auto_items.append({
+            auto_item = {
                 "title": title,
                 "type": rule.get("ledger_type", "task"),
                 "priority": rule.get("ledger_priority", "P1"),
                 "source": f"governance:{clean_name}",
                 "evidence_stream": bool(rule.get("evidence_stream")),
                 "audit_kind": rule.get("audit_kind", ""),
-            })
+            }
+            if description:
+                auto_item["description"] = description
+            auto_items.append(auto_item)
 
     # 1b. Check milestone rules (auto-create DONE items for achievements)
     milestone = MILESTONES.get(clean_name)
@@ -914,13 +979,16 @@ def govern(tool_name: str, result: Dict[str, Any], project_path: str = ".") -> D
                     logger.debug("Test mode: skipping ledger write for %s", item["title"])
                     created.append(f"TEST-{item['title'][:40]}")
                     continue
-                entry = _ledger_add_item(
+                add_kwargs = dict(
                     title=item["title"],
                     type=item["type"],
                     priority=item["priority"],
                     source=item["source"],
                     project_path=project_path,
                 )
+                if item.get("description"):
+                    add_kwargs["description"] = item["description"]
+                entry = _ledger_add_item(**add_kwargs)
                 item_id = entry.get("added", {}).get("id", "")
                 created.append(item_id)
                 # Auto-close milestone items

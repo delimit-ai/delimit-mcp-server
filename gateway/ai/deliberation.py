@@ -3296,6 +3296,7 @@ def _call_cli_with_retry(
     backoff_base: float = 2.0,
     model: str = "",
     no_path_access: bool = False,
+    images: Optional[List[str]] = None,
 ) -> str:
     """Wrap _call_cli with retry-on-transient state machine.
 
@@ -3310,12 +3311,14 @@ def _call_cli_with_retry(
     """
     if os.environ.get("DELIMIT_DELIBERATE_RETRY_DISABLED") == "1":
         return _call_cli(prompt, system_prompt, cli_path=cli_path, cli_command=cli_command, model=model,
-                         **({"no_path_access": True} if no_path_access else {}))
+                         **({"no_path_access": True} if no_path_access else {}),
+                         **({"images": images} if images else {}))
 
     last_response = ""
     for attempt in range(1, max_attempts + 1):
         last_response = _call_cli(prompt, system_prompt, cli_path=cli_path, cli_command=cli_command, model=model,
-                                  **({"no_path_access": True} if no_path_access else {}))
+                                  **({"no_path_access": True} if no_path_access else {}),
+                                  **({"images": images} if images else {}))
         state, reason = _classify_call_result(last_response)
         _log_retry_attempt({
             "cli_command": cli_command,
@@ -3513,8 +3516,12 @@ def has_path_line(*texts: str) -> bool:
     return False
 
 
-def _call_cli(prompt: str, system_prompt: str = "", cli_path: str = "", cli_command: str = "codex", model: str = "", no_path_access: bool = False) -> str:
+def _call_cli(prompt: str, system_prompt: str = "", cli_path: str = "", cli_command: str = "codex", model: str = "", no_path_access: bool = False, images: Optional[List[str]] = None) -> str:
     """Call an AI CLI tool (codex or claude) via subprocess. Uses existing subscription — no API cost.
+
+    ``images`` (media deliberations only): image files attached to a codex
+    seat with ``codex exec -i``. Ignored for the claude CLI and refused under
+    ``no_path_access``.
 
     When ``model`` is set and the CLI is codex, the model is passed through as
     ``-m <model>`` on the ``exec`` command (candidate-fallback selection,
@@ -3590,6 +3597,14 @@ def _call_cli(prompt: str, system_prompt: str = "", cli_path: str = "", cli_comm
         else:
             cmd = [cli_path, "exec", "--sandbox", "read-only",
                    "--ephemeral", "--ignore-user-config", "-"]
+        if images and "codex" in cli_command and not no_path_access:
+            # Media deliberations: attach images to the initial prompt. -i is
+            # variadic, so the pairs go before --sandbox (a flag ends the list)
+            # and never directly before the trailing "-" stdin marker.
+            at = cmd.index("--sandbox")
+            for image in images:
+                cmd[at:at] = ["-i", str(image)]
+                at += 2
 
     # LED-973: Codex CLI requires a trusted git directory. Use the dedicated
     # sandbox at ~/.delimit/codex-sandbox/ so the trust check passes without
@@ -4351,6 +4366,79 @@ def _file_capable_panelist(config: Dict[str, Any]) -> bool:
             config.get("format") in {"codex_cli", "gemini_cli", "muse_cli", "copilot_cli"})
 
 
+# ── Media deliberations (media_files, owner-directed 2026-11-13) ──────────
+# A media seat's config carries a private "_media" entry (primitives only):
+# {"modalities": [...], "delivery": "file_tools"|"codex_image_flag",
+#  "dir": <media dir>, "images": [...], "seat_block": <prompt text>}.
+# Seats without it behave exactly as before. See ai/deliberation_media.py.
+
+
+def _seat_media(config: Dict[str, Any]) -> Dict[str, Any]:
+    media = config.get("_media") if isinstance(config, dict) else None
+    if not isinstance(media, dict) or config.get("no_path_access"):
+        return {}
+    return media
+
+
+def _seat_media_dir(config: Dict[str, Any]) -> Optional[str]:
+    media = _seat_media(config)
+    if media.get("delivery") == "file_tools" and media.get("dir"):
+        return str(media["dir"])
+    return None
+
+
+def _seat_media_images(config: Dict[str, Any]) -> List[str]:
+    media = _seat_media(config)
+    if media.get("delivery") != "codex_image_flag":
+        return []
+    return [str(p) for p in media.get("images") or []]
+
+
+def _agy_media_settings(media_dir: str) -> Dict[str, Any]:
+    """Session-only agy settings for a media seat: read inside the media dir,
+    nothing else (no writes, no commands, no MCP, no non-workspace access).
+    ``agentMode: ""`` selects agy's Default mode (Auto could run commands)."""
+    return {
+        "agentMode": "",
+        "allowNonWorkspaceAccess": False,
+        "permissions": {
+            "allow": [f"read_file({media_dir}/**)"],
+            "deny": ["write_file(*)", "command(*)", "mcp(*)"],
+        },
+    }
+
+
+def _seat_media_prompt(prompt: str, config: Dict[str, Any]) -> str:
+    """Append the per-seat media instructions for a media-capable seat."""
+    block = _seat_media(config).get("seat_block")
+    return f"{prompt}\n\n{block}" if block else prompt
+
+
+def _attach_media_to_seats(enabled: Dict[str, Any], pack: Any, media_mod: Any
+                           ) -> Tuple[Dict[str, Any], Dict[str, List[str]]]:
+    """Route media to each seat. Returns (seats, {seat: modalities})."""
+    seats: Dict[str, Any] = {}
+    routing: Dict[str, List[str]] = {}
+    for mid, cfg in enabled.items():
+        modalities = media_mod.seat_media_modalities(cfg) if pack.included else []
+        delivery = media_mod.seat_delivery(cfg) if modalities else "none"
+        block = media_mod.seat_block(pack, modalities, delivery) if modalities else ""
+        if not block:
+            modalities, delivery = [], "none"
+        routing[mid] = modalities
+        if not modalities:
+            seats[mid] = cfg
+            continue
+        seats[mid] = {**cfg, "_media": {
+            "modalities": list(modalities),
+            "delivery": delivery,
+            "dir": pack.media_dir,
+            "images": list(pack.image_files),
+            "seat_block": block,
+        }}
+    return seats, routing
+
+
 def _seat_context_prompt(prompt: str, block: str, evidence: Dict[str, Any],
                          config: Dict[str, Any]) -> str:
     """Replace the inline block only for read-capable CLI seats; reject missing files."""
@@ -4796,9 +4884,11 @@ def _call_model_single(model_id: str, config: Dict, prompt: str, system_prompt: 
         # exponential backoff (kill-switch via DELIMIT_DELIBERATE_RETRY_DISABLED=1).
         # LED-1877: pass the effective candidate model through so codex exec
         # targets the requested model (-m). Empty for claude (self-selects).
+        _media_images = _seat_media_images(config)
         return _call_cli_with_retry(prompt, system_prompt, cli_path=cli_path, cli_command=cli_command,
                                     model=effective_model,
-                                    **({"no_path_access": True} if no_path_access else {}))
+                                    **({"no_path_access": True} if no_path_access else {}),
+                                    **({"images": _media_images} if _media_images else {}))
 
     if fmt in ("muse_cli", "copilot_cli") and not direct_api:
         from ai import social
@@ -4862,7 +4952,22 @@ def _call_model_single(model_id: str, config: Dict, prompt: str, system_prompt: 
             if isolation_error:
                 return isolation_error
         cli_timeout = DELIBERATE_CLI_TIMEOUT_SECONDS
-        if is_antigravity:
+        # Media deliberations only: the seat's media dir (None otherwise).
+        media_dir = None if no_path_access else _seat_media_dir(config)
+        run_kwargs: Dict[str, Any] = {"cwd": media_dir} if media_dir else {}
+        if is_antigravity and media_dir:
+            # Media seat: agy must READ the media files. Plan mode needs
+            # write_file for its plan artefact and is auto-denied headless, so
+            # it cannot be used here. Instead run agy's default mode with a
+            # session-only settings overlay that allows read_file inside the
+            # media dir and explicitly denies writes, commands and MCP tools
+            # (verified 2026-11-13: writes/commands/MCP denied, image + audio
+            # read). No --dangerously-skip-permissions. cwd = the media dir.
+            cmd = [cli_path, "--model", model, "--sandbox",
+                   "--settings", json.dumps(_agy_media_settings(media_dir), separators=(",", ":"))]
+            cli_timeout = _agy_artifact_review_timeout(cli_timeout)
+            cmd.extend(["--print-timeout", f"{max(1, cli_timeout - 5)}s"])
+        elif is_antigravity:
             # Antigravity/agy automatically uses finite piped stdin as its
             # non-interactive prompt.  Its ``-p``/``--print`` flag consumes a
             # prompt value, so putting ``--model`` after a bare ``-p`` is
@@ -4890,8 +4995,10 @@ def _call_model_single(model_id: str, config: Dict, prompt: str, system_prompt: 
             if not allow_mcp:
                 cmd.extend(["--allowed-mcp-server-names", "__none__"])
         if not no_path_access:
-            for directory in sorted({str(Path(p).parent) for p in
-                                     re.findall(r"(?m)^/[^\n]+$", prompt)}):
+            _dirs = {str(Path(p).parent) for p in re.findall(r"(?m)^/[^\n]+$", prompt)}
+            if media_dir:
+                _dirs.add(media_dir)
+            for directory in sorted(_dirs):
                 cmd.extend(["--add-dir" if is_antigravity else "--include-directories",
                             directory])
         # Strip GCP env vars so gemini CLI uses its own oauth-personal login from
@@ -4911,7 +5018,7 @@ def _call_model_single(model_id: str, config: Dict, prompt: str, system_prompt: 
             # cannot exceed Linux's per-argv-element ceiling.
             result = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=cli_timeout,
-                env=clean_env, input=full_prompt,
+                env=clean_env, input=full_prompt, **run_kwargs,
             )
             if result.returncode != 0:
                 # Never accept partial stdout containing a plausible vote
@@ -5432,6 +5539,7 @@ def _single_model_deliberate(
     max_rounds: int = 3,
     save_path: Optional[str] = None,
     context_file_evidence: Optional[Dict[str, Any]] = None,
+    media_evidence: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Single-model self-reflection deliberation (STR-118).
 
@@ -5456,6 +5564,8 @@ def _single_model_deliberate(
         transcript["api_file_tool_usage"] = {model_id: model_config["_api_file_usage"]}
     if context_file_evidence:
         transcript["context_file_evidence"] = context_file_evidence
+    if media_evidence:
+        transcript["media_evidence"] = media_evidence
 
     prompts = [
         (
@@ -6290,6 +6400,8 @@ def deliberate(
     models: Optional[List[str]] = None,
     session_options: Optional[Dict[str, Any]] = None,
     exclude_seats: Optional[List[str]] = None,
+    media_files: Optional[List[str]] = None,
+    media_controls: bool = False,
 ) -> Dict[str, Any]:
     """
     Run a multi-round deliberation across all configured AI models.
@@ -6326,8 +6438,78 @@ def deliberate(
             deliberations where models need live ledger/memory context. Default False
             for fast deploy-gate deliberations.
 
+    Media (additive, 2026-11-13, owner-directed):
+        media_files: optional list of video (mp4/mov/webm), audio
+            (mp3/wav/m4a/flac/ogg) or image (png/jpg/webp) paths, max 5 files
+            and 200 MB each (a breach refuses the deliberation). Files are
+            hashed and copied into one per-deliberation world-readable media
+            dir (removed afterwards); files in the private space are withheld
+            like context_files. Seats that can open media (Antigravity/Gemini
+            CLI with a Gemini model) watch and listen; codex seats get images
+            (contact sheet, spectrogram, image files) via ``-i``; every other
+            seat gets metadata only and is told it did not see the media.
+            seat_flags[seat]["media"] records each seat's modalities and
+            media_evidence records sha256/bytes/mime (no content). None or
+            empty = exactly the previous behaviour.
+        media_controls: when True and a video/audio file has an audio stream,
+            a hidden copy with injected noise at a known time is added for the
+            media seats; a media seat that misses it is voided (a sentinel,
+            never a respondent). Default False.
+
     Returns the full deliberation transcript + final verdict.
     """
+    kwargs = dict(
+        question=question, context=context, max_rounds=max_rounds, mode=mode,
+        require_unanimous=require_unanimous, save_path=save_path, allow_mcp=allow_mcp,
+        scope=scope, context_files=context_files, no_path_access=no_path_access,
+        session_mode=session_mode, models=models, session_options=session_options,
+        exclude_seats=exclude_seats,
+    )
+    if not media_files:
+        return _deliberate_impl(**kwargs)
+    # Media never reaches front-end / executor-review / no_path_access panels:
+    # those seats must not read the filesystem at all.
+    if no_path_access or _EXECUTOR_REVIEW.get() is not None:
+        return {"error": "media files refused", "quorum": {"met": False}}
+    try:
+        import ai.deliberation_media as _media_mod
+    except ModuleNotFoundError as _exc:
+        if _exc.name != "ai.deliberation_media":
+            raise
+        return {"error": "media_files is not supported by this install", "quorum": {"met": False}}
+    try:
+        pack = _media_mod.prepare_media(
+            media_files, private_roots=_private_space_roots(),
+            stage_root=_panel_stage_root(), controls=bool(media_controls))
+    except _media_mod.MediaRefused as exc:
+        return {"error": f"media files refused: {exc}", "media_refused": True,
+                "quorum": {"met": False}}
+    try:
+        return _deliberate_impl(**kwargs, _media=pack, _media_mod=_media_mod)
+    finally:
+        pack.cleanup()
+
+
+def _deliberate_impl(
+    question: str,
+    context: str = "",
+    max_rounds: int = 3,
+    mode: str = "dialogue",
+    require_unanimous: bool = True,
+    save_path: Optional[str] = None,
+    allow_mcp: bool = False,
+    scope: str = "",
+    context_files: Optional[Any] = None,
+    no_path_access: bool = False,
+    session_mode: Optional[bool] = None,
+    models: Optional[List[str]] = None,
+    session_options: Optional[Dict[str, Any]] = None,
+    exclude_seats: Optional[List[str]] = None,
+    _media: Optional[Any] = None,
+    _media_mod: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """Engine body of :func:`deliberate` (see its docstring). ``_media`` is the
+    prepared media pack for a media deliberation, else None."""
     executor_review = _EXECUTOR_REVIEW.get()
     if executor_review is not None:
         executor_review.prepare(question, context, context_files, save_path,
@@ -6381,7 +6563,9 @@ def deliberate(
     # Session mode (opt-in). Never for the front-end executor path or any
     # no_path_access caller: those seats must not read the filesystem.
     _session_active = False
-    if executor_review is None and not no_path_access and not _roles_active:
+    # Media deliberations always use the one-shot engine: session seats have
+    # no media routing.
+    if executor_review is None and not no_path_access and not _roles_active and _media is None:
         try:
             from ai import deliberation_sessions as _sessions
             _session_active = _sessions.resolve_session_mode(session_mode, _policy)
@@ -6578,6 +6762,15 @@ def deliberate(
         seats, _policy, _context_file_evidence, _files_block,
         _read_context_source, _private_space_roots())
 
+    # Media deliberations: route media per seat and add the shared metadata
+    # block (no paths, no hidden-control names) to the context every seat sees.
+    _media_seats: Dict[str, List[str]] = {}
+    if _media is not None:
+        enabled_models, _media_seats = _attach_media_to_seats(enabled_models, _media, _media_mod)
+        _media.evidence["seats"] = dict(_media_seats)
+        _media_block = _media_mod.shared_block(_media, _media_seats)
+        context = f"{context}\n\n{_media_block}" if context else _media_block
+
     # STR-118: Single-model self-reflection mode
     # When only 1 model is available, run a structured self-debate:
     # Round 1: argue FOR, Round 2: argue AGAINST, Round 3: synthesize
@@ -6587,6 +6780,10 @@ def deliberate(
         # several embedders replace this helper with a narrow callback.
         if _context_file_evidence.get("requested_count"):
             _single_kwargs["context_file_evidence"] = _context_file_evidence
+        if _media is not None:
+            if _media.controls:
+                _media.evidence["controls"]["status"] = "not_evaluated_single_model"
+            _single_kwargs["media_evidence"] = _media.evidence
         _single_config = list(enabled_models.values())[0]
         try:
             _single_context, _single_stage = _seat_context_prompt_staged(
@@ -6594,6 +6791,7 @@ def deliberate(
         except (ValueError, OSError):
             return {"error": "referenced file unavailable for read-only CLI seat",
                     "quorum": {"met": False}}
+        _single_context = _seat_media_prompt(_single_context, _single_config)
         try:
             return _single_model_deliberate(
                 question=question,
@@ -6906,6 +7104,12 @@ def deliberate(
                 "skipped_excluded": m in _skipped_excluded}
             for m in list(model_ids) + list(_deferred_api_models) + list(_skipped_excluded)
         }
+    if _media is not None:
+        # sha256/bytes/mime per file + per-seat modalities; never content.
+        transcript["media_evidence"] = _media.evidence
+        _flags = transcript.setdefault("seat_flags", {})
+        for _m in list(model_ids) + list(_deferred_api_models) + list(_skipped_excluded):
+            _flags.setdefault(_m, {})["media"] = list(_media_seats.get(_m, []))
 
     # LED-069: Tool instruction appended to system prompt
     tool_instruction = (
@@ -7036,6 +7240,29 @@ def deliberate(
                 return _sentinel(f"{mid} unavailable: backfill_cap")
         return _call_model_bounded(mid, cfg, *args, **kwargs)
 
+    def _apply_media_control(mid, resp):
+        """media_controls: a seat that received audio and did not report the
+        hidden control's noise is voided (sentinel, never a respondent)."""
+        if (_media is None or not _media.controls or _is_error_sentinel(resp)
+                or "audio" not in _seat_media(enabled_models[mid]).get("modalities", [])):
+            return resp
+        check = _media_mod.evaluate_controls(_media, resp)
+        _media.evidence["controls"]["results"][mid] = {
+            "passed": check["passed"], "void": not check["passed"],
+            "controls": check["controls"],
+        }
+        if not check["passed"]:
+            try:
+                from ai import pii_redact as _pii
+                _excerpt = _pii.redact(str(resp)[:400]).get("redacted")
+                if isinstance(_excerpt, str):
+                    _media.evidence["controls"]["results"][mid]["voided_response_excerpt"] = _excerpt
+            except Exception:
+                pass
+        if check["passed"]:
+            return resp
+        return _sentinel("media control missed — review void")
+
     def _call_r1(mid):
         t0 = time.time()
         stage_dir = None
@@ -7045,6 +7272,7 @@ def deliberate(
         except (ValueError, OSError):
             resp = _sentinel("referenced file unavailable for read-only CLI seat")
         else:
+            seat_prompt = _seat_media_prompt(seat_prompt, enabled_models[mid])
             try:
                 resp = _review_call(mid, enabled_models[mid], seat_prompt,
                                            _role_system(mid), allow_mcp=False)
@@ -7052,6 +7280,7 @@ def deliberate(
                 _cleanup_panel_stage(stage_dir)
             if _file_capable_panelist(enabled_models[mid]) and _seat_read_failure(resp):
                 resp = _sentinel("referenced file read failed in CLI seat")
+            resp = _apply_media_control(mid, resp)
             resp = _redact_file_seat_response(resp, enabled_models[mid],
                                               _context_file_evidence)
         ms = int((time.time() - t0) * 1000)
@@ -7362,6 +7591,7 @@ def deliberate(
                     prompt, _files_block, _context_file_evidence, enabled_models[mid])
             except (ValueError, OSError):
                 return mid, _sentinel("referenced file unavailable for read-only CLI seat"), 0
+            prompt = _seat_media_prompt(prompt, enabled_models[mid])
             try:
                 return _call_cross_round_seat(mid, prompt)
             finally:

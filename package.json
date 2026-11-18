@@ -1,7 +1,7 @@
 {
   "name": "delimit-cli",
   "mcpName": "io.github.delimit-ai/delimit-mcp-server",
-  "version": "4.24.0",
+  "version": "4.25.0",
   "description": "Keep the state. Change the model. Shared context and a multi-model panel across Claude Code, Codex, Cursor, Antigravity, GitHub Copilot, and Muse.",
   "main": "index.js",
   "files": [
@@ -33,6 +33,7 @@
     "gateway/ai/backends/repo_bridge.py",
     "gateway/ai/backends/tools_data.py",
     "gateway/ai/backends/tools_design.py",
+    "gateway/ai/backends/tools_design_render.py",
     "gateway/ai/backends/tools_infra.py",
     "gateway/ai/backends/tools_real.py",
     "gateway/ai/backends/ui_bridge.py",
@@ -98,6 +99,7 @@
     "gateway/ai/seal/seal_pubkeys.json",
     "gateway/ai/seal/verifier.py",
     "gateway/ai/secrets_broker.py",
+    "gateway/ai/security_ledger_scope.py",
     "gateway/ai/server.py",
     "gateway/ai/tdqs_lint.py",
     "gateway/ai/tenant_auth.py",

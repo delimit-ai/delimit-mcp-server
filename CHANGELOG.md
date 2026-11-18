@@ -1,3 +1,16 @@
+## [4.25.0] - 2026-11-17
+
+### Added
+- `delimit_design_audit_render`: audits rendered pages in headless Chromium at several viewports and colour schemes (overflow, first-screen content, empty boxes, text size, contrast, visible error states) and saves screenshots plus `summary.json`. Returns `status: "unavailable"` with install steps when Playwright or Chromium is missing.
+- `delimit_external_pr_check` additionally reports `declined_prs` and `previously_declined` when earlier PRs to the target repository were closed without merging. Existing fields are unchanged.
+
+### Changed
+- `delimit_deliberate` has two new optional parameters, `media_files` and `media_controls`. This package does not include media support, so a call that passes `media_files` returns an error. Calls without them are unchanged.
+
+### Fixed
+- Prompt-injection checks now scan tool arguments as the tool is called. Server-rendered receipt banners (`delimit_handoff_create`, `delimit_handoff_list`, scoped `delimit_revive`) no longer get a `_security_warning` for their own `=====` rule lines. Relayed third-party content is still scanned in full. Reported in delimit-ai/delimit-mcp-server#300.
+- `delimit_security_audit` and governance security items: an optional `ledger_exclude_paths` list in `~/.delimit/security_audit.json` stops disposable copies (worktrees, release snapshots) from filing a P0 ledger item per copy. Findings are still returned in full and `delimit_deploy_plan` still blocks on them. Without the file nothing changes. Secret snippets in findings are redacted, and repeated scans of the same target no longer file duplicate P0 items.
+
 ## [4.24.0] - 2026-11-09
 
 ### Added

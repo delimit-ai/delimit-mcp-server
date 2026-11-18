@@ -21,7 +21,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 try:
     import fcntl  # type: ignore[import-not-found]
@@ -1502,6 +1502,16 @@ def _find_item_across_registered_ventures(
     return matches[0] if matches else None
 
 
+def _admission_write_authorized() -> bool:
+    """The admission field carries the signed swarm-intake scope and is written only
+    by the root-only swarm_intake tool (owner-host). Reject it from unprivileged
+    callers as defense-in-depth; the authoritative control remains signature
+    verification at selection (review #819). On non-POSIX hosts geteuid is absent
+    and there is no multi-user boundary to enforce."""
+    geteuid = getattr(os, "geteuid", None)
+    return True if geteuid is None else (geteuid() == 0)
+
+
 def update_item(
     item_id: str,
     status: Optional[str] = None,
@@ -1526,6 +1536,8 @@ def update_item(
     origin_tags: Optional[Dict[str, str]] = None,
     strict_io: bool = False,
     venture: Optional[str] = None,
+    admission: Optional[Dict[str, Any]] = None,
+    acceptance_criteria: Optional[Union[str, List[str]]] = None,
 ) -> Dict[str, Any]:
     """Update an existing ledger item's fields.
 
@@ -1682,10 +1694,46 @@ def update_item(
             update["note"] = note
         if priority:
             update["priority"] = priority
-        if title:
+        if title is not None:
             update["title"] = title
-        if description:
+        if description is not None:
             update["description"] = description
+        if acceptance_criteria is not None:
+            update["acceptance_criteria"] = acceptance_criteria
+        if admission is not None:
+            if not isinstance(admission, dict):
+                return {"error": "admission must be a dictionary"}
+            if not _admission_write_authorized():
+                return {"error": "admission may only be set by a root (owner-host) caller"}
+            # A hollow admission must be REJECTED, not stamped (review #819):
+            # the mandatory fields carry the signed scope, so an empty or
+            # partial admission is never a valid signed admission.
+            repo_val = str(admission.get("repo") or "").strip()
+            sig_val = str(admission.get("signature") or "").strip()
+            scope_val = admission.get("scope_paths")
+            if not repo_val:
+                return {"error": "admission requires a non-empty repo"}
+            if not isinstance(scope_val, (list, tuple)) or not scope_val:
+                return {"error": "admission requires a non-empty scope_paths list"}
+            scope_list = [str(p).strip() for p in scope_val]
+            if any(not p for p in scope_list):
+                return {"error": "admission scope_paths entries must be non-empty"}
+            if any(".." in p.split("/") for p in scope_list):
+                return {"error": "admission scope_paths must not contain path traversal"}
+            # signature is OPTIONAL at the ledger-write layer: non-standing mode
+            # sets scope via admission without one; the signature requirement is a
+            # STANDING-mode eligibility check, enforced where eligibility is computed.
+            adm_record = dict(admission)
+            adm_record["repo"] = repo_val
+            adm_record["scope_paths"] = scope_list
+            if adm_record.get("revoked"):
+                adm_record["revoked"] = True
+                adm_record.pop("signature", None)
+            elif sig_val:
+                adm_record["signature"] = sig_val
+            if "signed_at" not in adm_record or not adm_record["signed_at"]:
+                adm_record["signed_at"] = _utc_timestamp()
+            update["admission"] = adm_record
         if assignee:
             update["assignee"] = assignee
         if due_date:
@@ -1857,6 +1905,8 @@ _VALID_FIELDS = SLIM_FIELDS + (
     # LED-5321 M4: evidence-classed truth fields (all optional, additive).
     "evidence", "evidence_class", "verified_states", "truth_label",
     "review_binding", "ship_proof",
+    # Swarm admission fields
+    "admission", "signature", "repo", "scope_paths",
 )
 _VALID_SORT = ("updated_at", "created_at", "priority")
 _VALID_ORDER = ("asc", "desc")
@@ -2112,11 +2162,34 @@ def list_items(
                         state[item_id]["last_note"] = item["note"]
                     if "priority" in item:
                         state[item_id]["priority"] = item["priority"]
+                    if "title" in item and item["title"] is not None:
+                        state[item_id]["title"] = item["title"]
+                    if "description" in item and item["description"] is not None:
+                        state[item_id]["description"] = item["description"]
+                    if "acceptance_criteria" in item and item["acceptance_criteria"] is not None:
+                        state[item_id]["acceptance_criteria"] = item["acceptance_criteria"]
                     if "worked_by" in item:
                         state[item_id]["last_worked_by"] = item["worked_by"]
                     if "tags" in item and item["tags"] is not None:
                         # Tag updates replace the existing tag set when present
                         state[item_id]["tags"] = item["tags"]
+                    if "admission" in item and isinstance(item["admission"], dict):
+                        adm = item["admission"]
+                        if "repo" in adm and adm["repo"] is not None:
+                            state[item_id]["repo"] = adm["repo"]
+                        if "scope_paths" in adm and adm["scope_paths"] is not None:
+                            state[item_id]["scope_paths"] = adm["scope_paths"]
+                        if "acceptance_criteria" in adm and adm["acceptance_criteria"] is not None:
+                            state[item_id]["acceptance_criteria"] = adm["acceptance_criteria"]
+                        if "signature" in adm and adm["signature"] is not None:
+                            state[item_id]["signature"] = adm["signature"]
+                        # Signed task envelope (network requirement), bound by the
+                        # admission signature; owner 2026-11-12 (STR-10555).
+                        if isinstance(adm.get("envelope"), dict):
+                            state[item_id]["envelope"] = adm["envelope"]
+                        if adm.get("revoked"):
+                            state[item_id].pop("signature", None)
+                        state[item_id]["admission"] = adm
                     # Bundles without the front-end modules have no front-end
                     # writers, so there is nothing to taint (never an import error).
                     try:
@@ -4265,12 +4338,35 @@ def _replay_current_state(item_id: str, ledger_dir: Path) -> Optional[Dict[str, 
                         state["status"] = item["status"]
                     if "priority" in item:
                         state["priority"] = item["priority"]
+                    if "title" in item and item["title"] is not None:
+                        state["title"] = item["title"]
+                    if "description" in item and item["description"] is not None:
+                        state["description"] = item["description"]
+                    if "acceptance_criteria" in item and item["acceptance_criteria"] is not None:
+                        state["acceptance_criteria"] = item["acceptance_criteria"]
                     if "tags" in item and item["tags"] is not None:
                         state["tags"] = item["tags"]
                     if "note" in item:
                         state["last_note"] = item["note"]
                     if "worked_by" in item:
                         state["last_worked_by"] = item["worked_by"]
+                    if "admission" in item and isinstance(item["admission"], dict):
+                        adm = item["admission"]
+                        if "repo" in adm and adm["repo"] is not None:
+                            state["repo"] = adm["repo"]
+                        if "scope_paths" in adm and adm["scope_paths"] is not None:
+                            state["scope_paths"] = adm["scope_paths"]
+                        if "acceptance_criteria" in adm and adm["acceptance_criteria"] is not None:
+                            state["acceptance_criteria"] = adm["acceptance_criteria"]
+                        if "signature" in adm and adm["signature"] is not None:
+                            state["signature"] = adm["signature"]
+                        # Signed task envelope (network requirement), bound by the
+                        # admission signature; owner 2026-11-12 (STR-10555).
+                        if isinstance(adm.get("envelope"), dict):
+                            state["envelope"] = adm["envelope"]
+                        if adm.get("revoked"):
+                            state.pop("signature", None)
+                        state["admission"] = adm
                     # Bundles without the front-end modules have no front-end
                     # writers, so there is nothing to taint (never an import error).
                     try:
