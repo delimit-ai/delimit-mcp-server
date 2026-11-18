@@ -205,6 +205,7 @@ TOOL_TIERS: Dict[str, Tier] = {
     "delimit_social_approve": "ops_pack",
     "delimit_notify": "ops_pack",
     "delimit_design_validate_responsive": "ops_pack",
+    "delimit_design_audit_render": "ops_pack",
     "delimit_screenshot": "ops_pack",
     "delimit_screen_record": "ops_pack",
     "delimit_docs_generate": "ops_pack",

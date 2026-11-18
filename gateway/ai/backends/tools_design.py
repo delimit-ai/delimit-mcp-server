@@ -1028,6 +1028,16 @@ def design_validate_responsive(
     }
     if tw_stats:
         result["tailwind_stats"] = tw_stats
+    if url:
+        # Additive hint (2026-11-12): this tool is static analysis and cannot
+        # see rendered defects (one card per desktop screen, tiny text,
+        # low-contrast chips, visible error states). Point to the rendered audit.
+        result["rendered_audit_available"] = {
+            "tool": "delimit_design_audit_render",
+            "suggested_args": {"urls": [url]},
+            "reason": "Static analysis cannot see rendered layout, text size, contrast or "
+                      "error states; delimit_design_audit_render checks them in headless Chromium.",
+        }
     return result
 
 

@@ -415,3 +415,13 @@ gateway/ai/owner_directives.py
 gateway/ai/panel_roles.py
 gateway/ai/self_repair/systemd_units.py
 gateway/ai/swarm_status.py
+gateway/ai/admission_principal.py
+gateway/ai/class_executor.py
+gateway/ai/deliberation_media.py
+gateway/ai/notify_hq.py
+gateway/ai/outreach_autoroll.py
+gateway/ai/outreach_lane_envelopes.json
+gateway/ai/outreach_reply_tracker.py
+gateway/ai/outreach_yield_report.py
+gateway/ai/venture_recovery.py
+gateway/ai/venture_slices.py

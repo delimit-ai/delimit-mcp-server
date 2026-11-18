@@ -50,6 +50,7 @@ gateway/ai/backends/playwright_sandbox.py
 gateway/ai/backends/repo_bridge.py
 gateway/ai/backends/tools_data.py
 gateway/ai/backends/tools_design.py
+gateway/ai/backends/tools_design_render.py
 gateway/ai/backends/tools_infra.py
 gateway/ai/backends/tools_real.py
 gateway/ai/backends/ui_bridge.py
@@ -116,6 +117,7 @@ gateway/ai/seal/seal_pubkey.ed25519
 gateway/ai/seal/seal_pubkeys.json
 gateway/ai/seal/verifier.py
 gateway/ai/secrets_broker.py
+gateway/ai/security_ledger_scope.py
 gateway/ai/server.py
 gateway/ai/session_continuity.py
 gateway/ai/tdqs_lint.py

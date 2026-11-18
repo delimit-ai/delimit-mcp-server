@@ -267,6 +267,16 @@ def _generic_secret_value_is_literal(matched_text: str) -> bool:
     return classes >= 2 or len(val) >= 16
 
 
+# LED-6392: secret snippets are returned to callers, written to evidence and
+# echoed into model transcripts. Keep the surrounding key name for triage but
+# reduce every long token-shaped run to its first 4 characters.
+_SNIPPET_TOKEN_RUN = re.compile(r"[A-Za-z0-9_\-+/=.~]{16,}")
+
+
+def _redact_secret_snippet(snippet: str) -> str:
+    return _SNIPPET_TOKEN_RUN.sub(lambda m: m.group(0)[:4] + "…[redacted]", snippet)
+
+
 def _looks_like_known_dummy(secret_name: str, matched_text: str) -> Optional[str]:
     """Return a label if matched_text is a known-dummy/fixture value, else None.
 
@@ -641,7 +651,10 @@ def security_audit(target: str = ".", include_tests: bool = False) -> Dict[str, 
                     )
                     continue
                 # Redact actual secret values in snippet output
-                snippet_raw = content[max(0, match.start() - 10):match.end() + 10].strip()[:80]
+                # Redact before truncating so a cut token cannot leave a tail.
+                snippet_raw = _redact_secret_snippet(
+                    content[max(0, match.start() - 10):match.end() + 10].strip()
+                )[:80]
                 secrets_found.append({
                     "file": rel,
                     "line": line_num,

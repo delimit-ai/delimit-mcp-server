@@ -429,7 +429,13 @@ def external_pr_check(
         state: "open" | "closed" | "merged" | "all". Default "all" (broad).
 
     Returns dict with:
-        verdict: "no_duplicate" | "duplicate" | "gh_unavailable" | "error"
+        verdict: "no_duplicate" | "duplicate" | "gh_unavailable" | "error" (unchanged)
+        declined_prs: Closed, unmerged PRs (number, url, closed_at, title).
+            Additive (LED-6582). Never changes the verdict: replying on a thread
+            stays allowed, but callers must review this history and never
+            re-pitch the same change. State filters and the 50-PR limit bound
+            the history checked; use state="all" before drafting.
+        previously_declined: True when declined_prs is non-empty.
         prs: List of matching PR records (number, state, reviewDecision, url, mergedAt)
         guidance: Human-readable next-step hint.
     """
@@ -441,7 +447,7 @@ def external_pr_check(
         }
 
     cmd = ["gh", "pr", "list", "--repo", repo, "--state", state, "--limit", "50",
-           "--json", "number,title,state,reviewDecision,createdAt,mergedAt,url,author"]
+           "--json", "number,title,state,reviewDecision,createdAt,mergedAt,closedAt,url,author"]
     if author:
         cmd.extend(["--author", author])
 
@@ -487,9 +493,17 @@ def external_pr_check(
     cutoff = datetime.now(timezone.utc) - timedelta(days=30)
 
     duplicates = []
+    declined_prs = []
     for pr in prs:
         is_open = pr.get("state") == "OPEN"
         merged_at = pr.get("mergedAt")
+        if pr.get("state") == "CLOSED" and not merged_at:
+            declined_prs.append({
+                "number": pr.get("number"),
+                "url": pr.get("url"),
+                "closed_at": pr.get("closedAt"),
+                "title": pr.get("title"),
+            })
         recently_merged = False
         if merged_at:
             try:
@@ -517,17 +531,28 @@ def external_pr_check(
             "repo": repo,
             "author": author,
             "prs": duplicates,
+            "declined_prs": declined_prs,
+            "previously_declined": bool(declined_prs),
             "guidance": (
                 f"Found {len(duplicates)} existing PR(s) — DO NOT draft a duplicate. "
                 "Review the existing PR(s) and decide: monitor, comment, or update."
             ),
         }
 
+    guidance = "Safe to proceed with drafting. Run delimit_deliberate before submitting."
+    if declined_prs:
+        guidance = (
+            f"WARNING: {len(declined_prs)} closed, unmerged PR(s) by this author in "
+            "this repo (declined_prs). Do NOT re-pitch the same issue or change; "
+            "confirm any new work is unrelated to the declined work. "
+        ) + guidance
     return {
         "tool": "gov.external_pr_check",
         "verdict": "no_duplicate",
         "repo": repo,
         "author": author,
         "checked_count": len(prs),
-        "guidance": "Safe to proceed with drafting. Run delimit_deliberate before submitting.",
+        "declined_prs": declined_prs,
+        "previously_declined": bool(declined_prs),
+        "guidance": guidance,
     }
