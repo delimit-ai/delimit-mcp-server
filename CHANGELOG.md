@@ -6,6 +6,7 @@
 
 ### Changed
 - `delimit_deliberate` has two new optional parameters, `media_files` and `media_controls`. This package does not include media support, so a call that passes `media_files` returns an error. Calls without them are unchanged.
+- Ledger: update events can carry two new optional fields, `acceptance_criteria` and `admission`. `admission` can only be written by a root caller. Title and description changes from update events now show in listed items. Existing ledgers read the same way as before, and `delimit_ledger_update` still treats an empty title or description as "no change".
 
 ### Fixed
 - Prompt-injection checks now scan tool arguments as the tool is called. Server-rendered receipt banners (`delimit_handoff_create`, `delimit_handoff_list`, scoped `delimit_revive`) no longer get a `_security_warning` for their own `=====` rule lines. Relayed third-party content is still scanned in full. Reported in delimit-ai/delimit-mcp-server#300.
